@@ -18,7 +18,8 @@ Run one test with `nix build .#checks.x86_64-linux.boot-headless -L`. Run all of
 CI prints the real values as `METRIC {...}` lines. Once we have a few runs of data we will tighten
 the budgets to the measured value plus some headroom.
 
-- `idleRamMB` is `MemTotal - MemAvailable`, read after a 30 s settle.
+- `idleRamMB` is what `free` reports as used, plus shmem/tmpfs (`MemTotal - MemFree - Buffers - (Cached - Shmem) - SReclaimable`), read after a 30 s settle.
+  `memTotalMinusAvailableMB` is also reported. It is not budgeted, because it also counts the kernel's free-page watermark reserve (about 80 MB on a 1 GB VM).
 - `closureMB` is the NAR size of the test VM's system closure, the same number `nix path-info -S` gives.
   It is computed on the host, because the VM does not register its own closure in its Nix database.
   This closure includes the test-driver instrumentation. CI also prints the real ISO size.
