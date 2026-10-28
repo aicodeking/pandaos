@@ -472,6 +472,7 @@ in
       environment.systemPackages = [
         panda-install
         pkgs.mkpasswd
+        pkgs.btrfs-progs # inspecting the result; panda-install brings its own
       ];
       nix.settings.substituters = lib.mkForce [ ];
     };
