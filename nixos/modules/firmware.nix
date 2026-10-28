@@ -66,10 +66,13 @@ let
     cd "$src"
     shopt -s failglob
     cp -a --parents ${lib.concatStringsSep " " paths} "$dst"/
+    # cp -a keeps the store's read-only modes; the trimming below edits these dirs.
+    chmod -R u+w "$dst"
     # Real files, not dedup links between versions, so trimming below can't
     # leave a kept version pointing at a removed one.
     rm -r "$dst/intel/iwlwifi"
     cp -rL intel/iwlwifi "$dst/intel/"
+    chmod -R u+w "$dst/intel/iwlwifi"
     cd "$dst"
 
     # iwlwifi keeps every firmware API version (about 300 MB). Keep the 3

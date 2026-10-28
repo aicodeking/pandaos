@@ -123,6 +123,8 @@ let
           relayUrl = lib.mkForce "http://relay:8787";
           # Plain http to the single-label test host; production relays are https.
           allowInsecure = true;
+          # The default 1 GiB test disk has ~890 MiB free; keep the guard on, just lower.
+          minFreeMb = 128;
         };
         # Slow network: hold agentd back until netem is in place, so pairing
         # itself runs over the bad link.

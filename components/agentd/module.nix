@@ -25,6 +25,11 @@ in
       default = "200%";
       description = "systemd CPUQuota= for each job unit (100% = one CPU).";
     };
+    minFreeMb = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 1024;
+      description = "Refuse new jobs when the state dir has less free space than this (MiB); 0 disables.";
+    };
     jobReadWritePaths = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = lib.optional mem.enable mem.dir;
@@ -87,6 +92,7 @@ in
             "-relay" cfg.relayUrl
             "-slots" (toString cfg.slots)
             "-cpu-quota" cfg.cpuQuota
+            "-min-free-mb" (toString cfg.minFreeMb)
             "-state-dir" "/var/lib/panda-agentd"
             "-run-dir" "/run/panda-agentd"
             # Written by `panda-install --relay URL`; overrides -relay without a rebuild.
