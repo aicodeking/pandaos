@@ -198,6 +198,7 @@ partition() {
   log "Formatting"
   mkfs.fat -F 32 -n PANDABOOT "$boot" >/dev/null
   mkfs.btrfs -f -L PANDAOS "$root" >/dev/null
+  mkdir -p "$MNT" # not on every system (e.g. the bare iso-image.nix ISO)
   mount "$root" "$MNT"
   for sv in "${SUBVOLS[@]}"; do btrfs subvolume create "$MNT/${sv%%:*}" >/dev/null; done
   umount "$MNT"
