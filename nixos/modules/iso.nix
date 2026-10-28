@@ -46,7 +46,11 @@ in
     hardware.enableAllHardware = true;
     hardware.enableRedistributableFirmware = lib.mkForce false;
 
-    environment.systemPackages = [ panda-install ];
+    # mkpasswd: for scripted installs (`--password-hash "$(mkpasswd -m yescrypt)"`).
+    environment.systemPackages = [
+      panda-install
+      pkgs.mkpasswd
+    ];
 
     # Live session: log straight in as panda, root via sudo with no password.
     services.getty.autologinUser = "panda";
