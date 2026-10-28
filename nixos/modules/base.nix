@@ -1,11 +1,13 @@
 # PandaOS base: lean defaults shared by every profile.
-{ lib, pkgs, ... }:
+{ config, lib, pkgs, ... }:
 {
   imports = [
     ./security.nix
     ./updates.nix
     ./firstboot.nix
     ./snapshots.nix
+    ./boot.nix
+    ./cache.nix
   ];
 
   system.stateVersion = "26.05";
@@ -28,10 +30,17 @@
   services.journald.extraConfig = ''
     SystemMaxUse=50M
   '';
+  # No systemd-nspawn/nixos-container tooling (Perl script + units); agentd
+  # uses plain systemd-run units.
+  boot.enableContainers = false;
 
   nix = {
     settings = {
       auto-optimise-store = true;
+      # Disk-full guard: when free space drops below 1 GiB during a build or
+      # download, Nix garbage-collects until 3 GiB are free.
+      min-free = 1024 * 1024 * 1024;
+      max-free = 3 * 1024 * 1024 * 1024;
       experimental-features = [
         "nix-command"
         "flakes"
@@ -48,6 +57,9 @@
   networking = {
     hostName = lib.mkDefault "pandaos";
     networkmanager.enable = true;
+    # NetworkManager turns ModemManager on by default (a daemon plus
+    # libmbim/libqmi). PandaOS boxes don't use cellular modems.
+    modemmanager.enable = false;
     firewall.enable = true;
   };
   services.openssh = {
@@ -65,13 +77,12 @@
   # Repair kit.
   environment.systemPackages = with pkgs; [
     btrfs-progs
-    git
+    gitMinimal
     curl
     rsync
     htop
     ncdu
     tmux
-    vim
     nano
     parted
     gptfdisk
@@ -101,5 +112,9 @@
     # PandaConnect isn't defined yet; placeholder relay.
     relayUrl = lib.mkDefault "https://connect.pandacode.invalid";
   };
-  services.panda-mem.enable = lib.mkDefault true;
+  services.panda-mem = {
+    enable = lib.mkDefault true;
+    # Users allowed on the panda-mem socket.
+    clients = [ "panda" ] ++ lib.optional config.services.panda-agentd.enable "panda-agent";
+  };
 }

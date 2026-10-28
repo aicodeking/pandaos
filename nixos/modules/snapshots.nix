@@ -1,10 +1,10 @@
 # Hourly btrfs snapshots of /mem and /home into /.snapshots (24 hourly +
 # 7 daily kept), plus `panda-rollback-mem <snapshot>` to restore /mem.
 #
-# btrbk over snapper: btrbk is a oneshot run from a timer (0 idle RAM), its
-# Perl runtime is already in the closure via git, and it writes snapshots to
-# any dir on the same filesystem. snapper wants a .snapshots inside each
-# subvolume and a D-Bus daemon.
+# btrbk over snapper: btrbk is a oneshot run from a timer (0 idle RAM) and
+# writes snapshots to any dir on the same filesystem. Its cost is Perl
+# (~55 MB closure; nothing else in the base system needs it now).
+# snapper wants a .snapshots inside each subvolume and a D-Bus daemon.
 #
 # Only runs when /.snapshots is a mountpoint, i.e. on installs whose disk
 # layout has a snapshots subvolume (same btrfs filesystem as /mem and /home).
