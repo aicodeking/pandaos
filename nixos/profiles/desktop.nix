@@ -3,6 +3,12 @@
 {
   programs.labwc.enable = true;
   services.xserver.enable = false;
+  # labwc's module turns on graphical-desktop, which brings these in by default.
+  # No X server means no Xwayland either; speechd (TTS engines + python) is
+  # dead weight without a screen reader; dejavu below is the only font we ship.
+  programs.xwayland.enable = false;
+  services.speechd.enable = false;
+  fonts.enableDefaultPackages = false;
   hardware.graphics.enable = true;
 
   services.greetd = {

@@ -34,15 +34,41 @@ let
 
 
     def idle_ram_mb(m):
+        """Return (used, total_minus_available) in MB after 30s of idle.
+
+        `used` is what `free` reports as used, plus tmpfs/shmem: anon memory,
+        unreclaimable slab, kernel stacks, etc. MemTotal - MemAvailable is
+        also returned for reference, but it counts the kernel's free-page
+        watermark reserve (tens of MB, scaling with VM RAM) as used, so the
+        budget is checked against `used`.
+        """
         time.sleep(30)
         # Breakdown in the log so a budget miss can be diagnosed from CI alone.
-        print(m.succeed(
-            "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Shmem|Slab|SReclaimable|SUnreclaim|KernelStack|PageTables|AnonPages):' /proc/meminfo;"
-            " ps -eo rss=,comm= --sort=-rss | head -n 15"
-        ))
-        return int(m.succeed(
-            "awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print int((t-a)/1024)}' /proc/meminfo"
-        ).strip())
+        print(m.succeed("ps -eo rss=,comm= --sort=-rss | head -n 15"))
+        mi = {}
+        for line in m.succeed("cat /proc/meminfo").splitlines():
+            k, v = line.split(":", 1)
+            mi[k] = int(v.split()[0])
+        print({k: mi[k] for k in ("MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached",
+                                  "Shmem", "SReclaimable", "SUnreclaim", "AnonPages")})
+        used = mi["MemTotal"] - mi["MemFree"] - mi["Buffers"] - (mi["Cached"] - mi["Shmem"]) - mi["SReclaimable"]
+        return used // 1024, (mi["MemTotal"] - mi["MemAvailable"]) // 1024
+
+
+    def top_paths(registration, n=25):
+        """Print the n largest store paths from a closureInfo registration file."""
+        # Format per path: path, narHash, narSize, deriver, nRefs, refs...
+        lines = open(registration).read().split("\n")
+        sizes = []
+        i = 0
+        try:
+            while i + 4 < len(lines) and lines[i]:
+                sizes.append((int(lines[i + 2]), lines[i]))
+                i += 5 + int(lines[i + 4])
+        except ValueError as e:
+            print(f"top_paths: unexpected registration format near line {i}: {e}")
+        for size, path in sorted(sizes, reverse=True)[:n]:
+            print(f"{size // (1024 * 1024):6d} MB  {path}")
   '';
 
   # Closure size is computed host-side: closureInfo's total-nar-size is the same
@@ -76,10 +102,12 @@ let
         + ''
           machine.wait_for_unit("multi-user.target")
           ${unitChecks}
-          ram = idle_ram_mb(machine)
+          ram, ram_minus_avail = idle_ram_mb(machine)
           with open("${closure}/total-nar-size") as f:
               closure_mb = int(f.read()) // (1024 * 1024)
-          emit({"test": "${name}", "profile": "${profile}", "idleRamMB": ram, "closureMB": closure_mb})
+          top_paths("${closure}/registration")
+          emit({"test": "${name}", "profile": "${profile}", "idleRamMB": ram,
+                "memTotalMinusAvailableMB": ram_minus_avail, "closureMB": closure_mb})
           assert ram <= ${toString budget.idleRamMB}, f"idle RAM {ram} MB > budget ${toString budget.idleRamMB} MB"
           assert closure_mb <= ${toString budget.closureMB}, f"closure {closure_mb} MB > budget ${toString budget.closureMB} MB"
         '';
