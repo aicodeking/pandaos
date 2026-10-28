@@ -55,20 +55,25 @@ let
         return used // 1024, (mi["MemTotal"] - mi["MemAvailable"]) // 1024
 
 
-    def top_paths(registration, n=25):
+    def top_paths(registration, n=40):
         """Print the n largest store paths from a closureInfo registration file."""
         # Format per path: path, narHash, narSize, deriver, nRefs, refs...
         lines = open(registration).read().split("\n")
         sizes = []
+        referrers = {}
         i = 0
         try:
             while i + 4 < len(lines) and lines[i]:
                 sizes.append((int(lines[i + 2]), lines[i]))
-                i += 5 + int(lines[i + 4])
+                refs = lines[i + 5 : i + 5 + int(lines[i + 4])]
+                for r in refs:
+                    if r != lines[i]:
+                        referrers.setdefault(r, []).append(lines[i][44:])
+                i += 5 + len(refs)
         except ValueError as e:
             print(f"top_paths: unexpected registration format near line {i}: {e}")
         for size, path in sorted(sizes, reverse=True)[:n]:
-            print(f"{size // (1024 * 1024):6d} MB  {path}")
+            print(f"{size // (1024 * 1024):6d} MB  {path[44:]}  <- {', '.join(referrers.get(path, [])[:4])}")
   '';
 
   # Closure size is computed host-side: closureInfo's total-nar-size is the same
@@ -168,8 +173,10 @@ let
           box.wait_for_unit("multi-user.target")
           start = time.monotonic()
           ${startAgent}
-          box.wait_for_file("/run/panda-agentd/pairing-code", timeout=120)
+          # agentd deletes pairing-code once paired, which can happen before we
+          # look; the token plus the logged code prove the pairing flow ran.
           box.wait_for_file("/var/lib/panda-agentd/token", timeout=120)
+          box.succeed("journalctl -u panda-agentd.service | grep -q 'pairing code:'")
           job = json.dumps({"id": "echo-hi", "argv": ["echo", "hi"], "timeoutSec": 30, "memoryMaxMB": 64})
           relay.succeed(f"curl -sf -X POST -H 'Content-Type: application/json' -d '{job}' http://localhost:8787/admin/jobs")
           result = json.loads(relay.wait_until_succeeds("curl -sf http://localhost:8787/admin/results/echo-hi", timeout=120))
