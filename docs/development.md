@@ -10,8 +10,10 @@ tests need KVM. On macOS, use a Linux builder or let CI run them.
 | `packages.x86_64-linux.iso-headless` | Headless installer ISO |
 | `packages.x86_64-linux.iso-desktop` | Desktop installer ISO |
 | `packages.x86_64-linux.vm-headless` | QEMU VM of the headless system |
-| `nixosConfigurations.headless`, `.desktop` | Full systems on a generic disk layout |
-| `nixosModules.default` | Base module plus `panda-agentd` and `panda-mem` |
+| `packages.x86_64-linux.panda-install` | The installer, with both prebuilt systems |
+| `nixosConfigurations.headless`, `.desktop` | The prebuilt systems the ISOs install, on the btrfs layout |
+| `lib.mkPandaSystem { profile; modules; }` | Builds a PandaOS system (used by the installed `/etc/pandaos` flake) |
+| `nixosModules.default` | Base module (security, updates, first boot, snapshots) plus `panda-agentd`, `panda-mem` and `panda-browser` (off) |
 | `nixosModules.headless`, `.desktop` | The two profiles |
 | `checks.x86_64-linux.*` | NixOS VM tests, see below |
 | `formatter.x86_64-linux` | `nixfmt` (run `nix fmt`) |
@@ -29,10 +31,13 @@ nix build .#vm-headless && ./result/bin/run-pandaos-vm
 | Check | What it checks |
 |---|---|
 | `boot-headless` | boots, `panda-agentd` and `panda-mem-init` come up, idle RAM and closure within budget |
-| `boot-desktop` | boots, `greetd` is active, idle RAM and closure within budget (2 GB VM) |
-| `agentd-roundtrip` | `box` pairs with a `fake-relay` node and runs `echo hi` |
+| `boot-desktop` | boots, `greetd` is active, `panda-agents-status` gives the right output for fixture status files, waybar/labwc config is in place, idle RAM and closure within budget (2 GB VM) |
+| `agentd-roundtrip` | `box` pairs with a `fake-relay` node (`status.json` says paired), runs `echo hi`, then a job cancelled through the relay is stopped and reported as cancelled |
 | `slow-network` | the same round trip at 300 ms, 2% loss, 1 Mbit/s, within 120 s |
-| `mem` | `panda-mem write`/`search` work, writes commit to git, `/etc/panda/mcp.json` is valid |
+| `mem` | `panda-mem write`/`search` work, writes commit to git, `/etc/panda/mcp.json` is valid; btrbk skips cleanly without a `/.snapshots` mount |
+| `security` | `panda` has no usable password and `panda-firstboot` prompts; sshd refuses passwords (also tried from a second node); only port 22 is reachable from the network; the hardening sysctls are set |
+| `browser` | `panda-browser` serves CDP on 127.0.0.1 only, not reachable from a second node, fresh profile after a restart |
+| `install` | `panda-install --yes` onto an empty 10 GiB disk (subvolumes, labels, `/etc/pandaos`), then boots that disk with OVMF: hostname, password hash, time zone, btrfs mounts, services, and a btrbk snapshot run |
 
 ```sh
 nix flake check -L --keep-going                     # all of them
@@ -40,7 +45,6 @@ nix build .#checks.x86_64-linux.boot-headless -L    # one
 ```
 
 Budgets are in `tests/budgets.json`; how metrics are measured is in [benchmarks.md](benchmarks.md).
-More tests (installer, security, browser, desktop) are being added with the Unreleased features.
 
 ## Go components
 
@@ -56,7 +60,8 @@ by hand (`fake-relay -listen :8787`) and point a local `panda-agentd -relay http
 
 | Workflow | When | What |
 |---|---|---|
-| `ci.yml` | every push and PR | `nix flake check` with KVM, `go vet`/`go test` for both components, `bench/test_collect.py`; on `main` also builds `iso-headless` and reports its size |
+| `ci.yml` | every push and PR | fails without `flake.lock`; `nix flake check` with KVM, `go vet`/`go test` for both components, `bench/test_collect.py`; on `main` also builds both ISOs and reports their size |
+| `lock.yml` | by hand | runs `nix flake lock` (or `nix flake update`) and uploads `flake.lock` as the `flake-lock` artifact, for contributors without Nix |
 | `nightly.yml` | daily, or by hand | runs each check separately and uploads metrics as an artifact |
 | `release.yml` | tag `v*` | `nix flake check`, builds both ISOs, writes `SHA256SUMS`, attests build provenance, publishes a GitHub release |
 

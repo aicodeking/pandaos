@@ -29,8 +29,8 @@ resolvectl query github.com || getent hosts github.com   # DNS
 The daily update rolls back by itself when its health check fails. To see what happened:
 
 ```sh
-systemctl list-timers
-journalctl -b --since yesterday | grep -i -e nixos-rebuild -e upgrade -e rollback
+systemctl list-timers nixos-upgrade.timer
+journalctl -u nixos-upgrade.service --since yesterday   # includes the panda-update health check
 ```
 
 To retry by hand and see the error:
@@ -66,11 +66,12 @@ sudo nix-collect-garbage --delete-older-than 7d   # removes old generations: you
 sudo nix-store --optimise
 ```
 
-Snapshots keep deleted data alive. List them and delete old ones you no longer need:
+Snapshots keep deleted data alive. btrbk already keeps only 24 hourly and 7 daily ones. To free
+more, list them and delete old ones you no longer need:
 
 ```sh
-sudo btrfs subvolume list -s /
-sudo btrfs subvolume delete <path-to-old-snapshot>
+ls /.snapshots
+sudo btrfs subvolume delete /.snapshots/<old-snapshot>
 ```
 
 On btrfs, `df` can show free space while writes still fail because metadata is full. A balance can help:
@@ -88,7 +89,7 @@ journalctl -u panda-agentd -f | grep 'pairing code:'
 ```
 
 Enter the new code on the relay side. To change the relay, set `services.panda-agentd.relayUrl` in
-`/etc/pandaos` and rebuild first.
+`/etc/pandaos/local.nix` and rebuild first.
 
 ## Recover /mem from a snapshot
 
@@ -99,24 +100,21 @@ git -C /mem log --oneline
 git -C /mem checkout <commit> -- <file>
 ```
 
-If the files or the repo itself are gone or damaged, use the hourly btrfs snapshots. Mount the top
-level of the btrfs filesystem to see every subvolume, including `@snapshots`:
+If the files or the repo itself are gone or damaged, use the hourly btrfs snapshots in
+`/.snapshots` (`mem.<time>` and `home.<time>`, read-only):
 
 ```sh
-dev=$(findmnt -no SOURCE /mem | sed 's/\[.*//')
-sudo mkdir -p /mnt/btrfs
-sudo mount -o subvolid=5 "$dev" /mnt/btrfs
-ls /mnt/btrfs/@snapshots
+ls /.snapshots
+sudo panda-rollback-mem mem.20261028T1400     # restore all of /mem; the current state is saved first
 ```
 
-Then copy back what you need, keeping the group ownership `/mem` uses:
+To copy back single files instead, keeping the group ownership `/mem` uses:
 
 ```sh
-sudo rsync -a /mnt/btrfs/@snapshots/<snapshot-of-mem>/ /mem/
+sudo rsync -a /.snapshots/mem.20261028T1400/<file> /mem/<file>
 sudo chgrp -R panda-mem /mem
 git -C /mem status
-sudo umount /mnt/btrfs
 ```
 
-The same works for `/home`. Copy files back rather than replacing the subvolume, so the running
-system does not lose its mount.
+The same works for `/home` (`/.snapshots/home.<time>`). Copy files back rather than replacing the
+subvolume, so the running system does not lose its mount.

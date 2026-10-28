@@ -23,7 +23,7 @@ What we do not defend against:
 
 | Direction | What |
 |---|---|
-| Inbound | Firewall on. Only ssh is open. ssh: keys only, no passwords, no root login. |
+| Inbound | nftables firewall on. Only ssh (22) is open. ssh: keys only, no passwords, no root login, `MaxAuthTries 3`, and `sshguard` blocks repeat offenders. |
 | Outbound | `panda-agentd` dials out to the relay. Nothing has to be opened or forwarded for agents. |
 | Local only | `panda-browser`, if enabled, serves CDP on `127.0.0.1:9222` only. |
 
@@ -35,7 +35,12 @@ it pairs, sends heartbeats, long-polls for the next job and posts results. The r
 to the box. The relay protocol is a **placeholder** until PandaConnect is defined, and the default
 relay URL is a placeholder (`https://connect.pandacode.invalid`). Use an `https://` relay URL in production.
 
-The pairing token is stored in `/var/lib/panda-agentd/token`, in a directory only root can read.
+The relay URL must be `https://`. `allowInsecure` permits plain http only to loopback, private,
+`.local` or single-label hosts, for tests and LAN development.
+
+The pairing token is stored in `/var/lib/panda-agentd/token`, mode 0600 (root only). The directory
+is 0711 so the job user can reach its own `jobs/<id>` work directory, but it cannot list the
+directory or read the token.
 If the relay rejects the token, the daemon throws it away and pairs again.
 
 ## What jobs can and cannot touch
@@ -47,22 +52,30 @@ Each job runs in its **own transient systemd unit** as the unprivileged system u
 
 | Jobs can | Jobs cannot |
 |---|---|
-| run programs installed on the system | run as root or as your login user |
+| run programs installed on the system | run as root or as your login user, or gain privileges (`NoNewPrivileges`) |
 | use the network (outbound) | read the agent's pairing token |
-| use memory and time up to their limits | go past their `MemoryMax` (if the job sets one) or `RuntimeMaxSec` (job timeout, default 1 hour) |
-| write where the `panda-agent` user has Unix permission | write to other users' files, `/etc` or the Nix store |
+| write their own work directory `/var/lib/panda-agentd/jobs/<id>` and `/mem` | write anywhere else: the system is read-only to them (`ProtectSystem=strict`), `/home` is read-only (`ProtectHome=read-only`), and `/tmp` is private |
+| use memory, CPU, tasks and time up to their limits | go past `MemoryMax` (default 80% of RAM), `CPUQuota` (default 200%), `TasksMax=512` or `RuntimeMaxSec` (default 1 hour) |
 
 Output kept per job is capped at 64 KiB for stdout and for stderr.
 
-`/mem` is owned by the `panda-mem` group. Your login user is a member; `panda-agent` is not, so jobs
-cannot change shared memory directly.
+`/mem` is owned by the `panda-mem` group. Your login user and the job user `panda-agent` are members,
+so **jobs can change shared memory**. Every change is a git commit, and `/mem` is snapshotted hourly.
 
-> **New in Unreleased:** jobs run sandboxed. Treat the table above as the v0.1.0 baseline; the
-> sandbox restricts jobs further.
+## System hardening
+
+- No default password. The installer sets yours. A system without one (for example, built
+  directly from this flake) prompts for one on tty8 at boot (`panda-firstboot.service`).
+- `sudo` only for `wheel`, always with a password (the live ISO is the exception: no password).
+- Kernel sysctls: `kptr_restrict=2`, `dmesg_restrict=1`, no unprivileged eBPF, BPF JIT hardening,
+  strict reverse-path filtering, no ICMP redirects or source routing, protected links, FIFOs and
+  regular files in sticky directories.
+- AppArmor is off. It ships no profiles for PandaOS's services, and it would add about 100 MB.
 
 ## Hardening checklist for owners
 
 - Install with `--ssh-key`, or add a key to `~/.ssh/authorized_keys` on first login.
+- Leave `panda-browser` off unless every local user is trusted (its CDP port has no authentication).
 - Use an `https://` relay you control.
 - Keep auto-updates on: security fixes only reach boxes through updates.
 - Report vulnerabilities privately: [SECURITY.md](../SECURITY.md).

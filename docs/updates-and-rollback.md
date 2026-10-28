@@ -9,17 +9,23 @@ older than 14 days).
 
 ## The daily update
 
-Once a day the box:
+Once a day (`nixos-upgrade.timer`, with up to 1 h of random delay) the box:
 
-1. updates `/etc/pandaos` to the latest `github:AICodeKing/pandaos`,
-2. builds and switches to the new generation,
-3. runs a health check,
-4. if the health check fails, **rolls back automatically** to the previous generation.
+1. bumps the `pandaos` input of `/etc/pandaos` to the latest `github:AICodeKing/pandaos`,
+2. builds and switches to the new generation. It only downloads from the binary cache: if a download
+   fails, the update fails instead of compiling on the box,
+3. runs a health check: within 90 s, `panda-agentd` and `panda-mem-init` must be active and there
+   must be a default route,
+4. if the health check fails, **rolls back automatically** with `nixos-rebuild switch --rollback`.
 
-To see when it runs next, look at the timers:
+It never reboots. The units only run on installed systems (those with `/etc/pandaos/flake.nix`).
+To turn it off, set `pandaos.updates.enable = false` in `/etc/pandaos/local.nix` and rebuild.
+
+To see when it runs next and what the last run did:
 
 ```sh
-systemctl list-timers
+systemctl list-timers nixos-upgrade.timer
+journalctl -u nixos-upgrade.service
 ```
 
 ## Updating by hand
@@ -53,10 +59,15 @@ On the desktop, the `panda-menu` repair menu also offers recovery actions.
 
 ## Snapshots of `/mem` and `/home`
 
-Every hour, btrfs snapshots of `/mem` and `/home` are taken into the `@snapshots` subvolume.
-Snapshots are copy-on-write, so they cost disk only for data that changed.
+Every hour, `btrbk` (`btrbk-panda.timer`) takes read-only btrfs snapshots of `/mem` and `/home` into
+`/.snapshots` (the `@snapshots` subvolume), named like `mem.20261028T1400`. It keeps 24 hourly and
+7 daily snapshots. Snapshots are copy-on-write, so they cost disk only for data that changed.
+They only run when `/.snapshots` is a mountpoint, that is, on the installer's disk layout.
 
 System rollback (generations) and data snapshots are separate: rolling back a generation never
 changes `/mem` or `/home`, and restoring a snapshot never changes the system.
 
-To restore files, see [troubleshooting.md](troubleshooting.md#recover-mem-from-a-snapshot).
+To restore `/mem` as a whole, run `sudo panda-rollback-mem` to list the snapshots, then
+`sudo panda-rollback-mem mem.20261028T1400`. It first snapshots the current `/mem` as
+`/.snapshots/mem-pre-rollback.<time>`, so the restore can be undone. To restore single files, see
+[troubleshooting.md](troubleshooting.md#recover-mem-from-a-snapshot).

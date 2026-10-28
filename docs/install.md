@@ -5,6 +5,7 @@
 ## What you need
 
 - An x86_64 machine that boots in UEFI mode. The installer sets up systemd-boot, which is UEFI only.
+- A target disk of at least 8 GiB.
 - A USB stick at least as big as the ISO.
 - A target disk you are happy to **erase completely**.
 - No network: the installer works offline from the ISO.
@@ -42,8 +43,9 @@ Boot the machine from the stick, then run:
 sudo panda-install
 ```
 
-The interactive installer asks for the target disk, the profile, a hostname, a user, a password and
-an optional ssh public key.
+The interactive installer asks for the target disk, the profile, a hostname, a user, a password, an
+optional ssh public key and a time zone. Before it erases anything, it asks you to type the disk's
+name. The live ISO logs you in as `panda`, and `sudo` needs no password there.
 
 To script it, pass everything and `--yes`:
 
@@ -53,20 +55,26 @@ sudo panda-install \
   --profile headless \
   --hostname shed-box \
   --user alice \
-  --password-hash "$(mkpasswd -m sha-512)" \
+  --password-hash "$(mkpasswd -m yescrypt)" \
   --ssh-key "ssh-ed25519 AAAA... alice@laptop" \
+  --timezone Europe/Berlin \
   --yes
 ```
 
-| Flag | Meaning |
-|---|---|
-| `--disk` | Target disk. **All of it is erased.** |
-| `--profile` | `headless` or `desktop` |
-| `--hostname` | Machine name |
-| `--user` | Your login user |
-| `--password-hash` | A crypt(3) hash, not the plain password |
-| `--ssh-key` | Optional. An authorized ssh public key for the user |
-| `--yes` | Do not ask for confirmation |
+| Flag | Default | Meaning |
+|---|---|---|
+| `--disk DEV` | (required with `--yes`) | Whole target disk, e.g. `/dev/sda`, `/dev/nvme0n1`. **All of it is erased.** |
+| `--profile NAME` | `headless` | `headless`, or `desktop` (desktop ISO only) |
+| `--hostname NAME` | `pandaos` | `a-z`, `0-9` and `-`, at most 63 characters |
+| `--user NAME` | `panda` | Your login user, in `wheel`, `networkmanager` and `panda-mem`. Any other name gets created, and `panda` is then locked |
+| `--password-hash H` | (required with `--yes`) | A crypt(3) hash, not the plain password |
+| `--ssh-key K` | none | One authorized ssh public key line for the user |
+| `--timezone TZ` | `UTC` | A zone under `/etc/zoneinfo`, e.g. `Europe/Berlin` |
+| `--yes` | | No questions and no typed disk confirmation |
+
+The installer refuses a disk that is a partition, is smaller than 8 GiB, or has anything mounted or
+used as swap. Errors are printed as `panda-install: error: ...`. Full details are in
+[nixos/installer/README.md](../nixos/installer/README.md).
 
 There is **no default password**. ssh accepts keys only, so without `--ssh-key` you log in on the
 console and add a key later (see [security.md](security.md)).
@@ -81,8 +89,11 @@ console and add a key later (see [security.md](security.md)).
 | `@nix` | `/nix`, the Nix store |
 | `@home` | `/home` |
 | `@mem` | `/mem`, shared agent memory |
-| `@log` | logs |
-| `@snapshots` | btrfs snapshots of `/mem` and `/home` |
+| `@log` | `/var/log` |
+| `@snapshots` | `/.snapshots`: btrfs snapshots of `/mem` and `/home` |
+
+The disk is GPT: a 512 MB EFI partition labelled `PANDABOOT`, then the btrfs partition labelled
+`PANDAOS`. The subvolumes are mounted with `compress=zstd:1,noatime`.
 
 Keeping `/mem` and `/home` in their own subvolumes is what lets them be snapshotted hourly and
 restored without touching the rest of the system.
@@ -90,9 +101,15 @@ restored without touching the rest of the system.
 **Bootloader.** systemd-boot. Each NixOS generation gets a boot entry, so you can boot an older one
 (see [updates-and-rollback.md](updates-and-rollback.md)).
 
-**Local flake.** `/etc/pandaos` holds a flake with `nixosConfigurations.pandaos`. It tracks
-`github:AICodeKing/pandaos` and holds your machine settings. The daily update and any manual rebuild
-use it:
+**Offline install.** The ISO carries the prebuilt system, so the installer only copies it from the
+ISO's Nix store to the disk. Nothing is built or downloaded. The installed system has the storage
+drivers for most machines, but no `linux-firmware`. That firmware arrives with the first online
+rebuild, so wifi chips that need it only work after that.
+
+**Local flake.** `/etc/pandaos` holds `flake.nix`, `hardware-configuration.nix` and `local.nix`
+(your hostname, time zone, user, password hash and ssh key). `flake.nix` defines
+`nixosConfigurations.pandaos`, which tracks `github:AICodeKing/pandaos`. The daily update and any
+manual rebuild use it. The first rebuild needs the network and creates `/etc/pandaos/flake.lock`:
 
 ```sh
 sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
