@@ -1,4 +1,4 @@
-{ lib, buildGoModule, git, makeWrapper }:
+{ lib, buildGoModule, gitMinimal, makeWrapper }:
 
 buildGoModule {
   pname = "panda-mem";
@@ -7,9 +7,9 @@ buildGoModule {
   vendorHash = null;
   ldflags = [ "-s" "-w" ];
   nativeBuildInputs = [ makeWrapper ];
-  nativeCheckInputs = [ git ];
+  nativeCheckInputs = [ gitMinimal ];
   postInstall = ''
-    wrapProgram $out/bin/panda-mem --prefix PATH : ${lib.makeBinPath [ git ]}
+    wrapProgram $out/bin/panda-mem --prefix PATH : ${lib.makeBinPath [ gitMinimal ]}
   '';
   meta = {
     description = "Shared git-backed agent memory over MCP stdio";

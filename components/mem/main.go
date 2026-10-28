@@ -12,14 +12,16 @@ import (
 
 const version = "0.1.0"
 
-const usage = `usage: panda-mem <command> [-dir /mem] [flags]
-  mcp                                     serve MCP over stdio
+const usage = `usage: panda-mem <command> [-dir /mem | -socket /run/panda-mem/sock] [flags]
+  serve  -dir D -socket S                 single-writer daemon (owns the repo)
+  mcp                                     serve MCP over stdio (proxies to -socket if set)
   init                                    create the git repo
   write -kind K -title T [-tags a,b] [-body B | stdin]
   search [-kind K] [-limit N] QUERY
   read PATH
   list [-kind K] [-limit N]
   history [-limit N] [PATH]
+With neither -dir nor -socket, the client commands use ` + defaultSocket + ` if it exists.
 `
 
 func main() {
@@ -35,7 +37,8 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 	cmd, args := args[0], args[1:]
 	fl := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	dir := fl.String("dir", "/mem", "memory repo directory")
+	dir := fl.String("dir", "/mem", "memory repo directory (direct mode)")
+	sock := fl.String("socket", "", "panda-mem serve socket (client mode)")
 	kind := fl.String("kind", "", "episodic|semantic|procedural")
 	title := fl.String("title", "", "memory title")
 	body := fl.String("body", "", "memory body (default: read stdin)")
@@ -44,42 +47,66 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
+	explicit := map[string]bool{}
+	fl.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	if !explicit["dir"] && !explicit["socket"] && cmd != "serve" && cmd != "init" {
+		if _, err := os.Stat(defaultSocket); err == nil {
+			*sock = defaultSocket
+		}
+	}
 	s := &Store{Dir: *dir}
 	arg := strings.Join(fl.Args(), " ")
-	var out string
-	var err error
+
+	var name string
+	a := toolArgs{Kind: *kind, Limit: *limit}
 	switch cmd {
+	case "serve":
+		if *sock == "" {
+			*sock = defaultSocket
+		}
+		return s.Serve(*sock)
 	case "mcp":
+		if *sock != "" {
+			return proxy(*sock, stdin, stdout)
+		}
 		if err := s.Init(); err != nil {
+			return err
+		}
+		if err := s.checkRepo(); err != nil {
 			return err
 		}
 		return s.ServeMCP(stdin, stdout)
 	case "init":
 		return s.Init()
 	case "write":
-		b := *body
-		if b == "" {
-			data, rerr := io.ReadAll(io.LimitReader(stdin, maxBody+1))
-			if rerr != nil {
-				return rerr
+		name, a.Title, a.Body = "mem_write", *title, *body
+		if a.Body == "" {
+			data, err := io.ReadAll(io.LimitReader(stdin, maxBody+1))
+			if err != nil {
+				return err
 			}
-			b = string(data)
+			a.Body = string(data)
 		}
-		var tl []string
 		if *tags != "" {
-			tl = strings.Split(*tags, ",")
+			a.Tags = strings.Split(*tags, ",")
 		}
-		out, err = s.Write(*kind, *title, b, tl)
 	case "search":
-		out, err = jsonText(s.Search(arg, *kind, orDefault(*limit, 10)))
+		name, a.Query = "mem_search", arg
 	case "read":
-		out, err = s.Read(arg)
+		name, a.Path = "mem_read", arg
 	case "list":
-		out, err = jsonText(s.List(*kind, orDefault(*limit, 50)))
+		name = "mem_list"
 	case "history":
-		out, err = s.History(arg, orDefault(*limit, 20))
+		name, a.Path = "mem_history", arg
 	default:
 		return fmt.Errorf("unknown command %q\n%s", cmd, usage)
+	}
+	var out string
+	var err error
+	if *sock != "" {
+		out, err = remoteTool(*sock, name, a)
+	} else {
+		out, err = s.runTool(name, a)
 	}
 	if err != nil {
 		return err

@@ -28,7 +28,7 @@ type rpcResp struct {
 
 const toolsJSON = `[
 {"name":"mem_write","description":"Write (or update, by title) a memory. Returns its path.","inputSchema":{"type":"object","required":["kind","title","body"],"properties":{"kind":{"type":"string","enum":["episodic","semantic","procedural"]},"title":{"type":"string"},"body":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}}}}},
-{"name":"mem_search","description":"Case-insensitive substring search over memories, ranked by match count.","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer","default":10},"kind":{"type":"string","enum":["episodic","semantic","procedural"]}}}},
+{"name":"mem_search","description":"Case-insensitive search; the query is split into terms, ranked by distinct terms matched, then total hits.","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer","default":10},"kind":{"type":"string","enum":["episodic","semantic","procedural"]}}}},
 {"name":"mem_read","description":"Read a memory file by path (e.g. semantic/foo-1a2b3c4d.md).","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}},
 {"name":"mem_list","description":"List memories, newest first.","inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["episodic","semantic","procedural"]},"limit":{"type":"integer","default":50}}}},
 {"name":"mem_history","description":"Git log of the memory store, optionally for one path.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"integer","default":20}}}}
@@ -37,13 +37,13 @@ const toolsJSON = `[
 var tools = json.RawMessage(toolsJSON)
 
 type toolArgs struct {
-	Kind  string   `json:"kind"`
-	Title string   `json:"title"`
-	Body  string   `json:"body"`
-	Tags  []string `json:"tags"`
-	Query string   `json:"query"`
-	Path  string   `json:"path"`
-	Limit int      `json:"limit"`
+	Kind  string   `json:"kind,omitempty"`
+	Title string   `json:"title,omitempty"`
+	Body  string   `json:"body,omitempty"`
+	Tags  []string `json:"tags,omitempty"`
+	Query string   `json:"query,omitempty"`
+	Path  string   `json:"path,omitempty"`
+	Limit int      `json:"limit,omitempty"`
 }
 
 func textResult(text string, isErr bool) map[string]any {
@@ -79,26 +79,27 @@ func (s *Store) callTool(params json.RawMessage) map[string]any {
 			return textResult("bad arguments: "+err.Error(), true)
 		}
 	}
-	var out string
-	var err error
-	switch p.Name {
-	case "mem_write":
-		out, err = s.Write(a.Kind, a.Title, a.Body, a.Tags)
-	case "mem_search":
-		out, err = jsonText(s.Search(a.Query, a.Kind, orDefault(a.Limit, 10)))
-	case "mem_read":
-		out, err = s.Read(a.Path)
-	case "mem_list":
-		out, err = jsonText(s.List(a.Kind, orDefault(a.Limit, 50)))
-	case "mem_history":
-		out, err = s.History(a.Path, orDefault(a.Limit, 20))
-	default:
-		err = fmt.Errorf("unknown tool %q", p.Name)
-	}
+	out, err := s.runTool(p.Name, a)
 	if err != nil {
 		return textResult(err.Error(), true)
 	}
 	return textResult(out, false)
+}
+
+func (s *Store) runTool(name string, a toolArgs) (string, error) {
+	switch name {
+	case "mem_write":
+		return s.Write(a.Kind, a.Title, a.Body, a.Tags)
+	case "mem_search":
+		return jsonText(s.Search(a.Query, a.Kind, orDefault(a.Limit, 10)))
+	case "mem_read":
+		return s.Read(a.Path)
+	case "mem_list":
+		return jsonText(s.List(a.Kind, orDefault(a.Limit, 50)))
+	case "mem_history":
+		return s.History(a.Path, orDefault(a.Limit, 20))
+	}
+	return "", fmt.Errorf("unknown tool %q", name)
 }
 
 func (s *Store) handle(req rpcReq) *rpcResp {

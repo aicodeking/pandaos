@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -25,7 +24,6 @@ var kinds = []string{"episodic", "semantic", "procedural"}
 // Store is a git repo of markdown memories.
 type Store struct {
 	Dir string
-	mu  sync.Mutex // ponytail: in-process lock only; concurrent processes rely on git's index.lock
 }
 
 type Entry struct {
@@ -41,7 +39,8 @@ type Hit struct {
 	Path    string `json:"path"`
 	Title   string `json:"title"`
 	Snippet string `json:"snippet"`
-	Matches int    `json:"matches"`
+	Terms   int    `json:"terms"`   // distinct query terms matched
+	Matches int    `json:"matches"` // total term occurrences
 }
 
 func validKind(k string) error {
@@ -53,9 +52,34 @@ func validKind(k string) error {
 	return fmt.Errorf("invalid kind %q (want episodic|semantic|procedural)", k)
 }
 
-func (s *Store) git(args ...string) (string, error) {
-	// safe.directory: the shared repo is root-owned; group members must still be allowed in.
-	cmd := exec.Command("git", append([]string{"-c", "safe.directory=" + s.Dir, "-C", s.Dir}, args...)...)
+// gitHarden neuters every repo-controlled way to make git run code: hooks,
+// fsmonitor, pagers, editors, attribute files, external diff and transports.
+// System/global config is ignored via env; local config is allow-listed by checkRepo.
+var gitHarden = []string{
+	"--no-pager",
+	"-c", "core.hooksPath=/dev/null",
+	"-c", "core.fsmonitor=false",
+	"-c", "core.pager=cat",
+	"-c", "core.editor=true",
+	"-c", "core.attributesFile=/dev/null",
+	"-c", "diff.external=",
+	"-c", "protocol.allow=never",
+}
+
+func gitEnv() []string {
+	env := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0"}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+func (s *Store) rawGit(args []string) (string, error) {
+	argv := append(append([]string{"-C", s.Dir}, gitHarden...), args...)
+	cmd := exec.Command("git", argv...)
+	cmd.Env = gitEnv()
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
@@ -64,12 +88,35 @@ func (s *Store) git(args ...string) (string, error) {
 	return out.String(), nil
 }
 
+// driverOverrides blanks every repo-local filter/diff driver (names are
+// repo-chosen, so they must be read first); an empty command disables it.
+func (s *Store) driverOverrides() []string {
+	out, _ := s.rawGit([]string{"config", "--local", "--name-only", "--get-regexp", `^(filter|diff)\.`})
+	var o []string
+	for _, k := range strings.Fields(out) {
+		sect, rest, _ := strings.Cut(k, ".")
+		if i := strings.LastIndex(rest, "."); i > 0 {
+			k = sect + "." + rest[:i]
+		}
+		if sect == "filter" {
+			o = append(o, "-c", k+".clean=", "-c", k+".smudge=", "-c", k+".process=", "-c", k+".required=false")
+		} else {
+			o = append(o, "-c", k+".textconv=", "-c", k+".command=")
+		}
+	}
+	return o
+}
+
+func (s *Store) git(args ...string) (string, error) {
+	return s.rawGit(append(s.driverOverrides(), args...))
+}
+
 // Init creates dir and the git repo if missing. Idempotent.
 func (s *Store) Init() error {
-	if err := os.MkdirAll(s.Dir, 0o775); err != nil {
+	if err := os.MkdirAll(s.Dir, 0o755); err != nil {
 		return err
 	}
-	if _, err := os.Stat(filepath.Join(s.Dir, ".git")); err == nil {
+	if _, err := os.Lstat(filepath.Join(s.Dir, ".git")); err == nil {
 		return nil
 	}
 	for _, a := range [][]string{
@@ -79,6 +126,42 @@ func (s *Store) Init() error {
 	} {
 		if _, err := s.git(a...); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// allowedConfig is everything `git init` + Init write. Anything else in
+// .git/config (filter.*, diff.*, include.*, core.sshCommand, ...) means tampering.
+var allowedConfig = map[string]bool{
+	"core.repositoryformatversion": true, "core.filemode": true, "core.bare": true,
+	"core.logallrefupdates": true, "core.ignorecase": true, "core.precomposeunicode": true,
+	"core.symlinks": true, "extensions.objectformat": true, "extensions.refstorage": true,
+	"user.name": true, "user.email": true,
+}
+
+// checkRepo refuses to touch a repo with planted hooks or unexpected config.
+func (s *Store) checkRepo() error {
+	gitDir := filepath.Join(s.Dir, ".git")
+	if st, err := os.Lstat(gitDir); err != nil || !st.IsDir() {
+		return fmt.Errorf("%s is not a git directory", gitDir)
+	}
+	hooks, err := os.ReadDir(filepath.Join(gitDir, "hooks"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	for _, h := range hooks {
+		if !strings.HasSuffix(h.Name(), ".sample") {
+			return fmt.Errorf("refusing repo: unexpected hook %s", h.Name())
+		}
+	}
+	out, err := s.git("config", "--local", "--name-only", "--list")
+	if err != nil {
+		return err
+	}
+	for _, k := range strings.Fields(out) {
+		if !allowedConfig[strings.ToLower(k)] {
+			return fmt.Errorf("refusing repo: unexpected git config key %s", k)
 		}
 	}
 	return nil
@@ -103,42 +186,20 @@ func slug(title string) string {
 	return strings.Trim(b.String(), "-") + "-" + hex.EncodeToString(sum[:4])
 }
 
-// resolve maps a user-supplied relative path to an absolute one inside Dir,
-// rejecting traversal, absolute paths, symlink escapes and non-memory files.
-func (s *Store) resolve(p string) (string, error) {
+// resolve validates a user-supplied path lexically and splits it into
+// kind and file name. Symlinks are handled at open time by openIn.
+func resolve(p string) (kind, name string, err error) {
 	if p == "" || filepath.IsAbs(p) || strings.ContainsRune(p, 0) {
-		return "", fmt.Errorf("invalid path %q", p)
+		return "", "", fmt.Errorf("invalid path %q", p)
 	}
-	clean := filepath.Clean(filepath.FromSlash(p))
-	parts := strings.Split(clean, string(filepath.Separator))
-	if len(parts) != 2 || validKind(parts[0]) != nil || !strings.HasSuffix(clean, ".md") {
-		return "", fmt.Errorf("invalid path %q (want <kind>/<file>.md)", p)
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(p)), "/")
+	if len(parts) != 2 || validKind(parts[0]) != nil || !strings.HasSuffix(parts[1], ".md") || strings.HasPrefix(parts[1], ".") {
+		return "", "", fmt.Errorf("invalid path %q (want <kind>/<file>.md)", p)
 	}
-	root, err := filepath.EvalSymlinks(s.Dir)
-	if err != nil {
-		return "", err
-	}
-	full := filepath.Join(root, clean)
-	real, err := filepath.EvalSymlinks(full)
-	if errors.Is(err, fs.ErrNotExist) {
-		// New file: its parent must still resolve inside root.
-		dir, derr := filepath.EvalSymlinks(filepath.Dir(full))
-		if derr != nil && !errors.Is(derr, fs.ErrNotExist) {
-			return "", derr
-		}
-		if derr == nil && dir != filepath.Join(root, parts[0]) {
-			return "", fmt.Errorf("path %q escapes store", p)
-		}
-		return full, nil
-	}
-	if err != nil {
-		return "", err
-	}
-	if real != full {
-		return "", fmt.Errorf("path %q escapes store", p)
-	}
-	return full, nil
+	return parts[0], parts[1], nil
 }
+
+func (s *Store) root() (string, error) { return filepath.EvalSymlinks(s.Dir) }
 
 func render(e Entry) []byte {
 	tags, _ := json.Marshal(e.Tags)
@@ -195,47 +256,60 @@ func (s *Store) Write(kind, title, body string, tags []string) (string, error) {
 			clean = append(clean, t)
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.Init(); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Join(s.Dir, kind), 0o775); err != nil {
+	if err := s.checkRepo(); err != nil {
 		return "", err
 	}
-	rel := kind + "/" + slug(title) + ".md"
-	full, err := s.resolve(rel)
+	unlock, err := lock(filepath.Join(s.Dir, ".git"))
 	if err != nil {
 		return "", err
 	}
+	defer unlock()
+	root, err := s.root()
+	if err != nil {
+		return "", err
+	}
+	if err := os.Mkdir(filepath.Join(root, kind), 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+		return "", err
+	}
+	name := slug(title) + ".md"
+	rel := kind + "/" + name
 	created := time.Now().UTC().Format(time.RFC3339)
-	if old, err := os.ReadFile(full); err == nil {
+	if old, err := readIn(root, kind, name); err == nil {
 		if c := parse(rel, old).Created; c != "" {
 			created = c
 		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
 	}
 	e := Entry{Title: title, Kind: kind, Created: created, Tags: clean, Body: body}
-	if err := os.WriteFile(full, render(e), 0o664); err != nil {
+	if err := writeIn(root, kind, name, render(e)); err != nil {
 		return "", err
 	}
 	if _, err := s.git("add", "--", rel); err != nil {
 		return "", err
 	}
-	if _, err := s.git("diff", "--cached", "--quiet", "--", rel); err == nil {
+	if _, err := s.git("diff", "--cached", "--quiet", "--no-ext-diff", "--no-textconv", "--", rel); err == nil {
 		return rel, nil // unchanged
 	}
-	if _, err := s.git("commit", "-q", "-m", "mem: "+rel, "--", rel); err != nil {
+	if _, err := s.git("commit", "-q", "--no-verify", "-m", "mem: "+rel, "--", rel); err != nil {
 		return "", err
 	}
 	return rel, nil
 }
 
 func (s *Store) Read(p string) (string, error) {
-	full, err := s.resolve(p)
+	kind, name, err := resolve(p)
 	if err != nil {
 		return "", err
 	}
-	b, err := os.ReadFile(full)
+	root, err := s.root()
+	if err != nil {
+		return "", err
+	}
+	b, err := readIn(root, kind, name)
 	return string(b), err
 }
 
@@ -248,8 +322,12 @@ func (s *Store) walk(kind string, fn func(rel string, data []byte)) error {
 		}
 		ks = []string{kind}
 	}
+	root, err := s.root()
+	if err != nil {
+		return err
+	}
 	for _, k := range ks {
-		ents, err := os.ReadDir(filepath.Join(s.Dir, k))
+		ents, err := os.ReadDir(filepath.Join(root, k))
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -260,7 +338,7 @@ func (s *Store) walk(kind string, fn func(rel string, data []byte)) error {
 			if !d.Type().IsRegular() || !strings.HasSuffix(d.Name(), ".md") {
 				continue
 			}
-			b, err := os.ReadFile(filepath.Join(s.Dir, k, d.Name()))
+			b, err := readIn(root, k, d.Name())
 			if err != nil {
 				return err
 			}
@@ -272,40 +350,68 @@ func (s *Store) walk(kind string, fn func(rel string, data []byte)) error {
 
 // ponytail: grep search; add sqlite FTS when /mem > ~10k files
 func (s *Store) Search(query, kind string, limit int) ([]Hit, error) {
-	q := strings.ToLower(strings.TrimSpace(query))
-	if q == "" {
+	terms := []string{}
+	seen := map[string]bool{}
+	for _, t := range strings.Fields(strings.ToLower(query)) {
+		if !seen[t] {
+			seen[t] = true
+			terms = append(terms, t)
+		}
+	}
+	if len(terms) == 0 {
 		return nil, errors.New("empty query")
 	}
 	hits := []Hit{}
 	err := s.walk(kind, func(rel string, data []byte) {
 		lower := strings.ToLower(string(data))
-		n := strings.Count(lower, q)
-		if n == 0 {
-			return
-		}
-		e := parse(rel, data)
-		snip := ""
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.Contains(strings.ToLower(line), q) {
-				snip = strings.TrimSpace(line)
-				break
+		h := Hit{Path: rel}
+		for _, t := range terms {
+			if n := strings.Count(lower, t); n > 0 {
+				h.Terms++
+				h.Matches += n
 			}
 		}
-		if len(snip) > 200 {
-			snip = snip[:200]
+		if h.Terms == 0 {
+			return
 		}
-		hits = append(hits, Hit{Path: rel, Title: e.Title, Snippet: snip, Matches: n})
+		h.Title = parse(rel, data).Title
+		h.Snippet = snippet(string(data), terms)
+		hits = append(hits, h)
 	})
 	sort.SliceStable(hits, func(i, j int) bool {
-		if hits[i].Matches != hits[j].Matches {
-			return hits[i].Matches > hits[j].Matches
+		a, b := hits[i], hits[j]
+		if a.Terms != b.Terms {
+			return a.Terms > b.Terms
 		}
-		return hits[i].Path < hits[j].Path
+		if a.Matches != b.Matches {
+			return a.Matches > b.Matches
+		}
+		return a.Path < b.Path
 	})
 	if limit > 0 && len(hits) > limit {
 		hits = hits[:limit]
 	}
 	return hits, err
+}
+
+// snippet is the line matching the most distinct terms (first wins), capped at 200 bytes.
+func snippet(data string, terms []string) string {
+	best, bestN := "", 0
+	for _, line := range strings.Split(data, "\n") {
+		lower, n := strings.ToLower(line), 0
+		for _, t := range terms {
+			if strings.Contains(lower, t) {
+				n++
+			}
+		}
+		if n > bestN {
+			best, bestN = strings.TrimSpace(line), n
+		}
+	}
+	if len(best) > 200 {
+		best = best[:200]
+	}
+	return best
 }
 
 func (s *Store) List(kind string, limit int) ([]Entry, error) {
@@ -324,18 +430,22 @@ func (s *Store) List(kind string, limit int) ([]Entry, error) {
 }
 
 func (s *Store) History(p string, limit int) (string, error) {
-	if _, err := os.Stat(filepath.Join(s.Dir, ".git")); err != nil {
+	if _, err := os.Lstat(filepath.Join(s.Dir, ".git")); err != nil {
 		return "", nil
+	}
+	if err := s.checkRepo(); err != nil {
+		return "", err
 	}
 	if _, err := s.git("rev-parse", "-q", "--verify", "HEAD"); err != nil {
 		return "", nil // no commits yet
 	}
 	args := []string{"log", "-n", strconv.Itoa(limit), "--pretty=format:%h %cI %s"}
 	if p != "" {
-		if _, err := s.resolve(p); err != nil {
+		kind, name, err := resolve(p)
+		if err != nil {
 			return "", err
 		}
-		args = append(args, "--", filepath.ToSlash(filepath.Clean(p)))
+		args = append(args, "--", kind+"/"+name)
 	}
 	return s.git(args...)
 }
