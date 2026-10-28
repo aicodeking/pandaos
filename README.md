@@ -12,18 +12,17 @@ PandaOS's own numbers in a VM, not a comparison, and **not yet measured on real 
 
 | | headless | desktop |
 |---|---|---|
-| Idle RAM, `free` used + shmem | 128 MB | 138 MB at the login screen (greeter); logged-in labwc session: pending CI |
-| Idle RAM, `MemTotal - MemAvailable` | 247 MB | 279 MB at the greeter; logged-in session: pending CI |
-| Closure of the test VM system | 1.32 GB | 2.85 GB |
-| Closure of the installed system (`nixosConfigurations`) | pending CI | pending CI |
-| ISO size (the desktop ISO also carries the headless system) | 608 MB | 993 MB |
+| Idle RAM, `free` used + shmem | 126 MB | 178 MB in a logged-in labwc session (175 MB at the greeter) |
+| Idle RAM, `MemTotal - MemAvailable` | 245 MB | 333 MB in session (330 MB at the greeter) |
+| Closure of the installed system (`nixosConfigurations`, incl. curated firmware) | 1.64 GB | 2.11 GB |
+| ISO size (the desktop ISO also carries the headless system) | 803 MB | 929 MB |
 
 | Agent job round trip (pair, then run `echo hi`) | |
 |---|---|
-| Normal VM network | 3.7 s |
-| 1 Mbit/s, 300 ms delay, 2% loss (netem, box's outgoing traffic only) | 8.6 s |
-| The same, shaped in both directions | pending CI |
-| Offline install to an empty disk (`panda-install --yes`, VM) | 208 s |
+| Normal VM network | 4.5 s |
+| 1 Mbit/s, ~340 ms RTT, 1% loss each way (netem on both nodes) | 13.1 s |
+| Offline install to an empty disk (`panda-install --yes`, VM) | 285 s |
+| An agentd-only update (uncompressed bytes substituted) | 18 MB |
 
 A side-by-side comparison with Ubuntu and Debian on identical VMs is **planned, not built yet**. Until it
 exists, we make no claims about how PandaOS compares with other systems.
