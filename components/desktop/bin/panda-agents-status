@@ -1,20 +1,31 @@
 #!/bin/sh
 # Waybar custom module: one JSON line from panda-agentd's status file.
-f=${PANDA_AGENTD_STATUS:-/run/panda-agentd/status.json}
+# PANDA_AGENTD_RUN_DIR is only overridden by the fixture test.
+dir=${PANDA_AGENTD_RUN_DIR:-/run/panda-agentd}
+f=$dir/status.json
 
 if [ ! -r "$f" ]; then
-  printf '%s\n' '{"text":"Agents: off","tooltip":"panda-agentd status file not found","class":"off"}'
+  printf '%s\n' '{"text":"Agents: off","tooltip":"panda-agentd is not running (no status.json)","class":"off"}'
   exit 0
 fi
 
-if ! jq -c '
-  (.slots // 0) as $s | (.running // 0) as $r
-  | if (.paired | not) then
-      {text: "Pairing: \(.pairingCode // "-")", class: "pairing"}
+# The code lives in its own file (0640, group wheel), not in status.json.
+code=$(cat "$dir/pairing-code" 2>/dev/null || true)
+
+if ! jq -c --arg code "$code" '
+  (.slots // 0) as $s | (.running // 0) as $r | (.lastError // "") as $err
+  | "relay: \(.relay // "-")\ncompleted: \(.completed // 0)  failed: \(.failed // 0)\nversion: \(.version // "-")  since: \(.since // "-")" as $info
+  | if .pairing then
+      {text: "Pairing: \(if $code == "" then "(code unreadable)" else $code end)", class: "pairing",
+       tooltip: "Approve this code in PandaCode\n\($info)"}
+    elif $err != "" then
+      {text: "Relay unreachable", class: "failed",
+       tooltip: "\($err)\nat \(.lastErrorAt // "-")\n\($info)"}
+    elif (.paired | not) then
+      {text: "Agents: unpaired", class: "off", tooltip: $info}
     else
-      {text: "Agents \($r)/\($s)", class: (if (.failed // 0) > 0 then "failed" elif $r > 0 then "busy" else "idle" end)}
+      {text: "Agents \($r)/\($s)", class: (if $r > 0 then "busy" else "idle" end), tooltip: $info}
     end
-  + {tooltip: "relay: \(.relay // "-")\ncompleted: \(.completed // 0)  failed: \(.failed // 0)\nversion: \(.version // "-")  since: \(.since // "-")"}
 ' "$f" 2>/dev/null; then
-  printf '%s\n' '{"text":"Agents: ?","tooltip":"status file unreadable","class":"failed"}'
+  printf '%s\n' '{"text":"Agents: ?","tooltip":"status.json is unreadable","class":"failed"}'
 fi

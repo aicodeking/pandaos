@@ -1,10 +1,10 @@
 # Desktop: very light Wayland session (labwc), no GNOME/KDE, no X server.
-{ pkgs, ... }:
+# The Panda shell (labwc session, greetd, waybar, lock, menus) and the
+# pandaos.desktop.gpu option live in components/desktop.
+{ lib, pkgs, ... }:
 {
-  # Panda shell: theme, waybar top bar + dock, wallpaper, panda-menu.
   imports = [ ../../components/desktop ];
 
-  programs.labwc.enable = true;
   services.xserver.enable = false;
   # labwc's module turns on graphical-desktop, which brings these in by default.
   # No X server means no Xwayland either; speechd (TTS engines + python) is
@@ -12,15 +12,12 @@
   programs.xwayland.enable = false;
   services.speechd.enable = false;
   fonts.enableDefaultPackages = false;
-  hardware.graphics.enable = true;
 
-  services.greetd = {
-    enable = true;
-    settings.default_session = {
-      command = "${pkgs.tuigreet}/bin/tuigreet --time --remember --cmd labwc";
-      user = "greeter";
-    };
-  };
+  # labwc's module forces the wlr and gtk portals on; nothing here needs them
+  # (no Flatpak, no screen sharing), and the gtk one pulls ~200 MB of GNOME
+  # libraries. wayland-session.nix sets wlr.enable without mkDefault, hence mkForce.
+  xdg.portal.enable = lib.mkForce false;
+  xdg.portal.wlr.enable = lib.mkForce false;
 
   # Minimal audio.
   security.rtkit.enable = true;
@@ -35,9 +32,4 @@
   fonts.packages = [ pkgs.dejavu_fonts ];
   xdg.icons.enable = true;
   xdg.mime.enable = true;
-
-  environment.systemPackages = with pkgs; [
-    foot
-    fuzzel
-  ];
 }

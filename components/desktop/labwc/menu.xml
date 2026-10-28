@@ -5,6 +5,7 @@
     <item label="Files"><action name="Execute" command="foot lf" /></item>
     <item label="System monitor"><action name="Execute" command="foot btop" /></item>
     <item label="Agents"><action name="Execute" command="foot --hold panda-agentd status" /></item>
+    <item label="Lock screen"><action name="Execute" command="panda-lock" /></item>
     <item label="Repair..."><action name="Execute" command="panda-menu" /></item>
     <separator />
     <item label="Reload desktop"><action name="Reconfigure" /></item>

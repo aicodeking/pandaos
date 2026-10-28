@@ -1,5 +1,7 @@
 #!/bin/sh
 # Panda repair menu (fuzzel dmenu). Each action opens in foot so output stays visible.
+sudo=/run/wrappers/bin/sudo
+snapdir=/.snapshots
 
 # Run a command in a terminal that stays open after it exits.
 term() {
@@ -8,9 +10,51 @@ term() {
   foot --hold --title "Panda: $title" "$@" &
 }
 
+# pick PROMPT: choose one line of stdin with fuzzel; fails on Escape.
+pick() {
+  fuzzel --dmenu --prompt "$1 "
+}
+
 # Yes/no prompt through fuzzel; succeeds only on "Yes".
 confirm() {
-  [ "$(printf 'No\nYes\n' | fuzzel --dmenu --prompt "$1? ")" = "Yes" ]
+  [ "$(printf 'No\nYes\n' | pick "$1?")" = "Yes" ]
+}
+
+updates() {
+  case "$(printf '%s\n' Status "Run now" Hold Unhold | pick "updates>")" in
+    "Status") term updates panda-update status ;;
+    "Run now") confirm "Update the system now" && term updates "$sudo" panda-update run ;;
+    "Hold") term updates "$sudo" panda-update hold ;;
+    "Unhold") term updates "$sudo" panda-update unhold ;;
+  esac
+}
+
+# Titles in fuzzel, chosen entry in a pager. Lines are "title | path".
+memory() {
+  if ! list=$(panda-mem list -limit 500 2>&1); then
+    term memory echo "panda-mem list failed: $list"
+    return 0
+  fi
+  entry=$(printf '%s\n' "$list" |
+    jq -r '.[] | "\(.title // .path) | \(.path)"' | pick "memory>") || return 0
+  # shellcheck disable=SC2016 # $1 expands in the inner sh, not here
+  term memory sh -c 'panda-mem read "$1" | less' sh "${entry##* | }"
+}
+
+restore_mem() {
+  snaps=$(find "$snapdir" -maxdepth 1 -name 'mem.*' -printf '%f\n' 2>/dev/null | sort -r)
+  if [ -z "$snaps" ]; then
+    term restore echo "No /mem snapshots in $snapdir."
+    return 0
+  fi
+  snap=$(printf '%s\n' "$snaps" | pick "snapshot>") || return 0
+  confirm "Replace /mem with $snap (current /mem is saved first)" &&
+    term restore "$sudo" panda-rollback-mem "$snap"
+}
+
+pairing() {
+  code=$(cat /run/panda-agentd/pairing-code 2>/dev/null || true)
+  term pairing echo "${code:-No pairing in progress.}"
 }
 
 choice=$(printf '%s\n' \
@@ -19,10 +63,15 @@ choice=$(printf '%s\n' \
   "Disk usage" \
   "Logs" \
   "Failed services" \
+  "Agents status" \
+  "Pairing code" \
   "Memory browser" \
+  "Restore /mem from snapshot" \
+  "Updates" \
   "Roll back system" \
+  "Lock screen" \
   "Reboot" \
-  "Power off" | fuzzel --dmenu --prompt "panda> ") || exit 0
+  "Power off" | pick "panda>") || exit 0
 
 case "$choice" in
   "Network") foot --title "Panda: network" nmtui & ;;
@@ -30,10 +79,16 @@ case "$choice" in
   "Disk usage") foot --title "Panda: ncdu" ncdu -x / & ;;
   "Logs") foot --title "Panda: logs" journalctl -f -n 200 & ;;
   "Failed services") term services systemctl --failed ;;
-  "Memory browser") term memory panda-mem list ;;
+  "Agents status") term agents panda-agentd status ;;
+  "Pairing code") pairing ;;
+  "Memory browser") memory ;;
+  "Restore /mem from snapshot") restore_mem ;;
+  "Updates") updates ;;
   "Roll back system")
-    confirm "Roll back to previous generation" &&
-      term rollback sudo nixos-rebuild switch --rollback ;;
+    # Hold first, so the next daily update does not undo the rollback.
+    confirm "Roll back to the previous system and hold updates (Updates > Unhold to resume)" &&
+      term rollback "$sudo" sh -c 'panda-update hold && nixos-rebuild switch --rollback' ;;
+  "Lock screen") panda-lock ;;
   "Reboot") confirm "Reboot" && systemctl reboot ;;
   "Power off") confirm "Power off" && systemctl poweroff ;;
 esac
