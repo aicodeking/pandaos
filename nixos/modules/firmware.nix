@@ -65,14 +65,9 @@ let
     mkdir -p "$dst"
     cd "$src"
     shopt -s failglob
-    cp -a --parents ${lib.concatStringsSep " " paths} "$dst"/
-    # cp -a keeps the store's read-only modes; the trimming below edits these dirs.
-    chmod -R u+w "$dst"
-    # Real files, not dedup links between versions, so trimming below can't
-    # leave a kept version pointing at a removed one.
-    rm -r "$dst/intel/iwlwifi"
-    cp -rL intel/iwlwifi "$dst/intel/"
-    chmod -R u+w "$dst/intel/iwlwifi"
+    # Dereference everything: linux-firmware dedups with symlinks (some into
+    # directories), and copied store paths stay read-only otherwise.
+    cp -rL --no-preserve=mode --parents ${lib.concatStringsSep " " paths} "$dst"/
     cd "$dst"
 
     # iwlwifi keeps every firmware API version (about 300 MB). Keep the 3
@@ -82,16 +77,6 @@ let
         | sed 's|^|intel/iwlwifi/|' | xargs -r rm -f
     done
 
-    # linux-firmware dedups with symlinks, and some point outside the
-    # selection. Copy those targets, except the iwlwifi versions dropped above.
-    find . -xtype l -print0 | while IFS= read -r -d "" l; do
-      t=$(readlink -f "$src/$l" || true)
-      rm "$l"
-      case $t in
-        */intel/iwlwifi/*.ucode) ;;
-        *) if [ -e "$t" ]; then cp "$t" "$l"; fi ;;
-      esac
-    done
   '';
 in
 {

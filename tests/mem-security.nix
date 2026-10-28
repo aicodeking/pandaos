@@ -45,7 +45,7 @@ pkgs.testers.runNixOSTest {
 
       with subtest("panda-agent cannot write .git at all"):
           print(machine.succeed(f"stat -c '%a %U:%G %n' {d} {g} {g}/hooks {g}/config || true"))
-          rc_hook, out_hook = as_user("panda-agent", f"printf %s {shlex.quote(script('hook'))} > {g}/hooks/pre-commit")
+          rc_hook, out_hook = as_user("panda-agent", f"printf %b {shlex.quote(script('hook'))} > {g}/hooks/pre-commit")
           rc_cfg, out_cfg = as_user("panda-agent", f"git -c safe.directory='*' -C {d} config core.fsmonitor /tmp/x")
           print(f"plant hook: rc={rc_hook} {out_hook!r}; plant fsmonitor: rc={rc_cfg} {out_cfg!r}")
           assert rc_hook != 0 and rc_cfg != 0, "panda-agent could write into the shared repo's .git"
@@ -53,8 +53,8 @@ pkgs.testers.runNixOSTest {
           assert "fsmonitor" not in machine.succeed(f"cat {g}/config")
 
       with subtest("root plants a hook and core.fsmonitor; plain git fires them"):
-          machine.succeed(f"printf %s {shlex.quote(script('hook'))} > {g}/hooks/pre-commit")
-          machine.succeed(f"printf %s {shlex.quote(script('fsmonitor'))} > {g}/fsmon.sh")
+          machine.succeed(f"printf %b {shlex.quote(script('hook'))} > {g}/hooks/pre-commit")
+          machine.succeed(f"printf %b {shlex.quote(script('fsmonitor'))} > {g}/fsmon.sh")
           machine.succeed(f"chmod 755 {g}/hooks/pre-commit {g}/fsmon.sh")
           machine.succeed(f"git -c safe.directory='*' -C {d} config core.fsmonitor {g}/fsmon.sh")
           # Proves the plant is armed, so "no marker" below means something.
