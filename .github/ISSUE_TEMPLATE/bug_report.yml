@@ -1,0 +1,52 @@
+name: Bug report
+description: Something in PandaOS is broken
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems: do not file them here. Use a private report, see SECURITY.md.
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Profile
+      options: [headless, desktop, ISO / installer, VM (vm-headless)]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Release tag, or the revision from `/etc/pandaos/flake.lock`.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [panda-install, updates / rollback, snapshots, panda-agentd, panda-mem, panda-browser, desktop / dock / panda-menu, networking, other]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: For example `journalctl -b -u panda-agentd`, `panda-agentd status`. Remove tokens and pairing codes.
+      render: text
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: CPU, RAM, disk, network (wired / wifi).

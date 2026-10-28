@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest something PandaOS should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: Cost
+      description: Rough effect on idle RAM, closure size or attack surface, and whether it could be optional.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
