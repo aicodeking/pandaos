@@ -30,8 +30,10 @@ let
         exit 0
       fi
 
+      # An array, so a single unit doesn't trip shellcheck SC2043.
+      units=(${lib.escapeShellArgs units})
       healthy() {
-        for u in ${lib.escapeShellArgs units}; do
+        for u in "''${units[@]}"; do
           systemctl is-active --quiet "$u" || return 1
         done
         { ip -4 route show default; ip -6 route show default; } | grep -q .
