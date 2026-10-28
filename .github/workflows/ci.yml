@@ -32,7 +32,7 @@ jobs:
       - name: nix flake check
         run: |
           set -o pipefail
-          nix flake check -L 2>&1 | tee check.log
+          nix flake check -L --keep-going 2>&1 | tee check.log
 
       - name: Print metrics
         if: always()

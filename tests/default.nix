@@ -35,6 +35,11 @@ let
 
     def idle_ram_mb(m):
         time.sleep(30)
+        # Breakdown in the log so a budget miss can be diagnosed from CI alone.
+        print(m.succeed(
+            "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Shmem|Slab|SReclaimable|SUnreclaim|KernelStack|PageTables|AnonPages):' /proc/meminfo;"
+            " ps -eo rss=,comm= --sort=-rss | head -n 15"
+        ))
         return int(m.succeed(
             "awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print int((t-a)/1024)}' /proc/meminfo"
         ).strip())
