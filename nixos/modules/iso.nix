@@ -11,7 +11,13 @@
 let
   cfg = config.pandaos.installer;
   panda-install = pkgs.callPackage ../installer/package.nix {
-    inherit (cfg) systems flakeUrl;
+    inherit (cfg)
+      systems
+      flakeUrl
+      defaultProfile
+      flakeLock
+      revision
+      ;
     nix = config.nix.package;
   };
 in
@@ -25,8 +31,23 @@ in
     };
     flakeUrl = lib.mkOption {
       type = lib.types.str;
-      default = "github:AICodeKing/pandaos";
+      default = "github:AICodeKing/pandaos/release";
       description = "The pandaos flake that the installed /etc/pandaos flake tracks.";
+    };
+    defaultProfile = lib.mkOption {
+      type = lib.types.str;
+      default = "headless";
+      description = "Profile panda-install uses when --profile is not given.";
+    };
+    flakeLock = lib.mkOption {
+      type = lib.types.nullOr lib.types.attrs;
+      default = null;
+      description = "flake.lock (as an attrset) that pins the installed /etc/pandaos flake.";
+    };
+    revision = lib.mkOption {
+      type = lib.types.str;
+      default = "unknown";
+      description = "Source revision, written to /etc/pandaos/VERSION.";
     };
   };
 
@@ -42,7 +63,8 @@ in
       storeContents = lib.attrValues cfg.systems;
     };
 
-    # Boot on most machines, but without linux-firmware (hundreds of MB).
+    # Boot on most machines. Full linux-firmware (~1.9 GB) stays off;
+    # firmware.nix (added by flake.nix) ships the curated subset instead.
     hardware.enableAllHardware = true;
     hardware.enableRedistributableFirmware = lib.mkForce false;
 
@@ -56,6 +78,7 @@ in
     services.getty.autologinUser = "panda";
     services.getty.helpLine = lib.mkForce ''
       Install PandaOS to disk (no network needed):  sudo panda-install
+      UEFI only (no legacy BIOS boot); Secure Boot must be disabled.
     '';
     security.sudo.wheelNeedsPassword = lib.mkForce false;
     # Desktop ISO: greetd owns tty1, so start the session for panda directly.

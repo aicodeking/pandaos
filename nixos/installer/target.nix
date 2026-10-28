@@ -7,9 +7,8 @@
 {
   # The initrd storage/USB drivers from nixpkgs' all-hardware.nix...
   hardware.enableAllHardware = true;
-  # ...but not linux-firmware, which is hundreds of MB on the ISO. Wired
-  # network and VMs work without it. The local flake's hardware-configuration
-  # imports not-detected.nix, which turns firmware back on at the first rebuild.
+  # ...but not all of linux-firmware (~1.9 GB on the ISO): firmware.nix, which
+  # every installed system gets, ships the curated wifi/GPU/microcode subset.
   hardware.enableRedistributableFirmware = lib.mkForce false;
 
   # An empty hostName leaves /etc/hostname unmanaged, so panda-install can

@@ -4,6 +4,7 @@
 {
   lib,
   writeShellApplication,
+  writeText,
   linkFarm,
   btrfs-progs,
   coreutils,
@@ -16,6 +17,12 @@
   util-linux,
   systems,
   flakeUrl,
+  # Default for --profile (each ISO bakes its own).
+  defaultProfile ? "headless",
+  # flake.lock contents (an attrset, see flake.nix) written to /etc/pandaos, or null.
+  flakeLock ? null,
+  # Git revision of the source, written to /etc/pandaos/VERSION.
+  revision ? "unknown",
 }:
 writeShellApplication {
   name = "panda-install";
@@ -32,7 +39,10 @@ writeShellApplication {
   ];
   runtimeEnv = {
     PANDA_SYSTEMS = "${linkFarm "panda-install-systems" systems}";
+    PANDA_DEFAULT_PROFILE = defaultProfile;
     PANDA_FLAKE_URL = flakeUrl;
+    PANDA_FLAKE_LOCK = lib.optionalString (flakeLock != null) "${writeText "flake.lock" (builtins.toJSON flakeLock)}";
+    PANDA_REVISION = revision;
   };
   text = builtins.readFile ./panda-install.sh;
   meta = {

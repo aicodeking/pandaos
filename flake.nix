@@ -12,7 +12,40 @@
       systems = [ "x86_64-linux" ];
       forAllSystems = lib.genAttrs systems;
 
-      flakeUrl = "github:AICodeKing/pandaos";
+      # The input the installed /etc/pandaos flake uses (updates.nix follows it).
+      flakeUrl = "github:AICodeKing/pandaos/release";
+      revision = self.rev or self.dirtyRev or "unknown";
+      version = self.shortRev or self.dirtyShortRev or "dev";
+
+      # flake.lock (v7) that panda-install writes next to the local flake,
+      # pinning `pandaos` (and its nixpkgs) to exactly this source, offline.
+      # Only for a clean tree: a dirty revision does not exist on GitHub, so
+      # then the first online rebuild creates the lock instead.
+      github = owner: repo: { type = "github"; inherit owner repo; };
+      flakeLock =
+        if !(self ? rev) then
+          null
+        else
+          {
+            version = 7;
+            root = "root";
+            nodes = {
+              root.inputs.pandaos = "pandaos";
+              pandaos = {
+                inputs.nixpkgs = "nixpkgs";
+                locked = github "AICodeKing" "pandaos" // {
+                  inherit (self) rev narHash lastModified;
+                };
+                original = github "AICodeKing" "pandaos" // { ref = "release"; };
+              };
+              nixpkgs = {
+                locked = github "NixOS" "nixpkgs" // {
+                  inherit (self.inputs.nixpkgs) rev narHash lastModified;
+                };
+                original = github "NixOS" "nixpkgs" // { ref = "nixos-26.05"; };
+              };
+            };
+          };
 
       mkNixos =
         system: modules:
@@ -38,6 +71,7 @@
           [
             self.nixosModules.${profile}
             ./nixos/modules/generic-disk.nix
+            ./nixos/modules/firmware.nix
           ]
           ++ modules
         );
@@ -56,11 +90,16 @@
         (mkNixos system [
           self.nixosModules.${profile}
           ./nixos/modules/iso.nix
+          ./nixos/modules/firmware.nix
           {
             pandaos.installer = {
-              inherit flakeUrl;
+              inherit flakeUrl revision;
+              inherit flakeLock;
+              defaultProfile = profile;
               systems = lib.genAttrs targets (installable system);
             };
+            # iso-image.nix sets this (it is what names the .iso file).
+            image.baseName = lib.mkForce "pandaos-${version}-${profile}-${system}";
           }
         ]).config.system.build.isoImage;
     in
@@ -69,6 +108,10 @@
 
       nixosModules = {
         default = {
+          system.nixos = {
+            distroName = "PandaOS";
+            distroId = "pandaos";
+          };
           imports = [
             ./nixos/modules/base.nix
             ./components/agentd/module.nix
@@ -104,7 +147,7 @@
           ];
           vm-headless = (mkPandaSystem { profile = "headless"; inherit system; }).config.system.build.vm;
           panda-install = pkgs.callPackage ./nixos/installer/package.nix {
-            inherit flakeUrl;
+            inherit flakeUrl revision flakeLock;
             systems = lib.genAttrs [ "headless" "desktop" ] (installable system);
           };
         }

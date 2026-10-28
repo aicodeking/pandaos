@@ -1,7 +1,13 @@
 # The PandaOS disk layout, as created by panda-install (nixos/installer):
 # GPT, a 512M ESP labelled PANDABOOT, and the rest as btrfs labelled PANDAOS
-# with one subvolume per mount. Mounting by label means no per-machine
-# fileSystems: the installer runs nixos-generate-config --no-filesystems.
+# with one subvolume per mount.
+#
+# Devices default to the labels, which is what the prebuilt system that
+# panda-install copies to disk uses. The installer also writes
+# /etc/pandaos/disk.nix, which overrides each `device` with the disk's UUID
+# (mkForce), so from the first `nixos-rebuild` on, a second disk with the same
+# labels can't be mounted instead. Only `device` is overridden there; fsType
+# and options stay defined here.
 { lib, ... }:
 let
   subvolumes = {
@@ -13,7 +19,7 @@ let
     "/.snapshots" = "@snapshots";
   };
   btrfs = subvol: {
-    device = "/dev/disk/by-label/PANDAOS";
+    device = lib.mkDefault "/dev/disk/by-label/PANDAOS";
     fsType = "btrfs";
     options = [
       "subvol=${subvol}"
@@ -28,9 +34,9 @@ in
     configurationLimit = lib.mkDefault 10;
   };
 
-  fileSystems = lib.mapAttrs (_: subvol: lib.mkDefault (btrfs subvol)) subvolumes // {
-    "/boot" = lib.mkDefault {
-      device = "/dev/disk/by-label/PANDABOOT";
+  fileSystems = lib.mapAttrs (_: btrfs) subvolumes // {
+    "/boot" = {
+      device = lib.mkDefault "/dev/disk/by-label/PANDABOOT";
       fsType = "vfat";
       options = [
         "fmask=0077"
