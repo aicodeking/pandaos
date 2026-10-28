@@ -15,6 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Require flake.lock
+        run: |
+          test -f flake.lock || { echo "::error::flake.lock is missing; run the 'lock' workflow and commit its artifact"; exit 1; }
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -37,7 +41,7 @@ jobs:
       - name: nix flake check
         run: |
           set -o pipefail
-          nix flake check -L --keep-going 2>&1 | tee check.log
+          nix flake check -L --keep-going --no-update-lock-file 2>&1 | tee check.log
 
       - name: Print metrics
         if: always()
@@ -84,6 +88,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Require flake.lock
+        run: |
+          test -f flake.lock || { echo "::error::flake.lock is missing; run the 'lock' workflow and commit its artifact"; exit 1; }
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -94,7 +102,7 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@v9
 
       - name: Build ISO
-        run: nix build .#iso-${{ matrix.profile }} -L
+        run: nix build .#iso-${{ matrix.profile }} -L --no-update-lock-file
 
       - name: ISO size
         run: |
