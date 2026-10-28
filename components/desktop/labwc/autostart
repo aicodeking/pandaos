@@ -1,0 +1,4 @@
+# Started by labwc after the compositor is up. @swaybg@ and @wallpaper@ are
+# substituted by components/desktop/default.nix.
+@swaybg@ -c '#14161b' -m center -i @wallpaper@ >/dev/null 2>&1 &
+waybar >/dev/null 2>&1 &

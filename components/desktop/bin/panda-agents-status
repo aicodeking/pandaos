@@ -1,0 +1,20 @@
+#!/bin/sh
+# Waybar custom module: one JSON line from panda-agentd's status file.
+f=${PANDA_AGENTD_STATUS:-/run/panda-agentd/status.json}
+
+if [ ! -r "$f" ]; then
+  printf '%s\n' '{"text":"Agents: off","tooltip":"panda-agentd status file not found","class":"off"}'
+  exit 0
+fi
+
+if ! jq -c '
+  (.slots // 0) as $s | (.running // 0) as $r
+  | if (.paired | not) then
+      {text: "Pairing: \(.pairingCode // "-")", class: "pairing"}
+    else
+      {text: "Agents \($r)/\($s)", class: (if (.failed // 0) > 0 then "failed" elif $r > 0 then "busy" else "idle" end)}
+    end
+  + {tooltip: "relay: \(.relay // "-")\ncompleted: \(.completed // 0)  failed: \(.failed // 0)\nversion: \(.version // "-")  since: \(.since // "-")"}
+' "$f" 2>/dev/null; then
+  printf '%s\n' '{"text":"Agents: ?","tooltip":"status file unreadable","class":"failed"}'
+fi

@@ -1,0 +1,39 @@
+#!/bin/sh
+# Panda repair menu (fuzzel dmenu). Each action opens in foot so output stays visible.
+
+# Run a command in a terminal that stays open after it exits.
+term() {
+  title=$1
+  shift
+  foot --hold --title "Panda: $title" "$@" &
+}
+
+# Yes/no prompt through fuzzel; succeeds only on "Yes".
+confirm() {
+  [ "$(printf 'No\nYes\n' | fuzzel --dmenu --prompt "$1? ")" = "Yes" ]
+}
+
+choice=$(printf '%s\n' \
+  "Network" \
+  "Disks" \
+  "Disk usage" \
+  "Logs" \
+  "Failed services" \
+  "Memory browser" \
+  "Roll back system" \
+  "Reboot" \
+  "Power off" | fuzzel --dmenu --prompt "panda> ") || exit 0
+
+case "$choice" in
+  "Network") foot --title "Panda: network" nmtui & ;;
+  "Disks") term disks sh -c 'lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINTS; echo; df -h' ;;
+  "Disk usage") foot --title "Panda: ncdu" ncdu -x / & ;;
+  "Logs") foot --title "Panda: logs" journalctl -f -n 200 & ;;
+  "Failed services") term services systemctl --failed ;;
+  "Memory browser") term memory panda-mem list ;;
+  "Roll back system")
+    confirm "Roll back to previous generation" &&
+      term rollback sudo nixos-rebuild switch --rollback ;;
+  "Reboot") confirm "Reboot" && systemctl reboot ;;
+  "Power off") confirm "Power off" && systemctl poweroff ;;
+esac

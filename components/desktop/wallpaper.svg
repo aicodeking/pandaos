@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 320 320">
+  <!-- Panda mark: drawn on a transparent canvas, centred by swaybg over the solid background. -->
+  <circle cx="92" cy="88" r="38" fill="#2a2e37"/>
+  <circle cx="228" cy="88" r="38" fill="#2a2e37"/>
+  <circle cx="160" cy="168" r="104" fill="#1d2027" stroke="#5ec39a" stroke-width="6"/>
+  <ellipse cx="118" cy="160" rx="24" ry="30" fill="#2a2e37" transform="rotate(-20 118 160)"/>
+  <ellipse cx="202" cy="160" rx="24" ry="30" fill="#2a2e37" transform="rotate(20 202 160)"/>
+  <circle cx="122" cy="160" r="7" fill="#5ec39a"/>
+  <circle cx="198" cy="160" r="7" fill="#5ec39a"/>
+  <ellipse cx="160" cy="206" rx="14" ry="9" fill="#2a2e37"/>
+</svg>

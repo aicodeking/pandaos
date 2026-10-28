@@ -1,6 +1,9 @@
 # Desktop: very light Wayland session (labwc), no GNOME/KDE, no X server.
 { pkgs, ... }:
 {
+  # Panda shell: theme, waybar top bar + dock, wallpaper, panda-menu.
+  imports = [ ../../components/desktop ];
+
   programs.labwc.enable = true;
   services.xserver.enable = false;
   # labwc's module turns on graphical-desktop, which brings these in by default.
@@ -36,7 +39,5 @@
   environment.systemPackages = with pkgs; [
     foot
     fuzzel
-    # Placeholder dock until the Panda shell lands.
-    waybar
   ];
 }
