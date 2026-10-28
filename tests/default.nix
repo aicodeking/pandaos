@@ -195,8 +195,8 @@ in
         machine.succeed(f"panda-mem write -dir {d} -kind semantic -title 'ci probe' -body 'pandaos-ci-marker body'")
         hits = machine.succeed(f"panda-mem search -dir {d} pandaos-ci-marker")
         assert "ci probe" in hits or "pandaos-ci-marker" in hits, f"search missed the memory: {hits!r}"
-        log = machine.succeed(f"git -c safe.directory='*' -C {d} log --oneline")
-        assert log.strip(), "panda-mem write made no git commit"
+        commits = machine.succeed(f"git -c safe.directory='*' -C {d} log --oneline")
+        assert commits.strip(), "panda-mem write made no git commit"
         mcp = json.loads(machine.succeed("cat /etc/panda/mcp.json"))
         assert isinstance(mcp, dict) and mcp, f"bad mcp.json: {mcp!r}"
       '';
