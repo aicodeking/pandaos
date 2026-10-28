@@ -543,7 +543,16 @@ in
           target.succeed("systemctl start btrbk-panda.service")
           snaps = target.succeed("ls /.snapshots")
           assert "mem." in snaps and "home." in snaps, f"no btrbk snapshots: {snaps!r}"
-          target.succeed("panda-rollback-mem 2>&1 | grep -q mem.")
+          snap = sorted(s for s in snaps.split() if s.startswith("mem."))[-1]
+          rc, usage = target.execute("panda-rollback-mem 2>&1")
+          assert rc == 2 and snap in usage, f"panda-rollback-mem usage: rc={rc} {usage!r}"
+
+      with subtest("panda-rollback-mem restores /mem from a snapshot"):
+          target.succeed("touch /mem/written-after-snapshot")
+          target.succeed(f"panda-rollback-mem {snap}")
+          target.fail("test -e /mem/written-after-snapshot")
+          target.succeed("test -d /mem/.git")
+          assert "mem-pre-rollback." in target.succeed("ls /.snapshots")
 
       target.shutdown()
     '';
