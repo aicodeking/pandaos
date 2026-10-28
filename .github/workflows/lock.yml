@@ -1,0 +1,31 @@
+name: lock
+
+# Regenerates flake.lock on a runner (Nix is not needed locally) and uploads
+# it as an artifact. Fetch it with:
+#   gh run download <run-id> -R AICodeKing/pandaos -n flake-lock
+on:
+  workflow_dispatch:
+    inputs:
+      update:
+        description: "Bump inputs to their latest revisions (nix flake update) instead of only locking missing ones"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Lock
+        run: |
+          if [ "${{ inputs.update }}" = "true" ]; then nix flake update; else nix flake lock; fi
+          nix flake metadata
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flake-lock
+          path: flake.lock
+          if-no-files-found: error
