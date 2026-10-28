@@ -1,6 +1,13 @@
 # PandaOS base: lean defaults shared by every profile.
 { lib, pkgs, ... }:
 {
+  imports = [
+    ./security.nix
+    ./updates.nix
+    ./firstboot.nix
+    ./snapshots.nix
+  ];
+
   system.stateVersion = "26.05";
 
   # Docs: man pages only.
@@ -37,7 +44,7 @@
     };
   };
 
-  # Network: nmtui for wifi, key-only ssh, firewall on.
+  # Network: nmtui for wifi, key-only ssh, firewall on (see security.nix).
   networking = {
     hostName = lib.mkDefault "pandaos";
     networkmanager.enable = true;
@@ -85,9 +92,8 @@
       "networkmanager"
       "panda-mem"
     ];
-    # WARNING: well-known default password. Change it with `passwd` on first
-    # login, or override with hashedPassword / openssh.authorizedKeys.
-    initialPassword = "panda";
+    # No default password: the installer sets a hashed one via local.nix;
+    # otherwise firstboot.nix prompts for one on the console.
   };
 
   services.panda-agentd = {
