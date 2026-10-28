@@ -21,8 +21,8 @@ let
 
   prelude = ''
     import json
-    import re
-    import shlex
+    import re  # noqa: F401 (not every test uses it)
+    import shlex  # noqa: F401
     import os
     import time
 
