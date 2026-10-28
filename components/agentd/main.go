@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	mrand "math/rand/v2"
 	"os"
@@ -28,6 +29,7 @@ import (
 const (
 	version      = "0.2.0"
 	maxBackoff   = 60 * time.Second
+	codeGroup    = "wheel"                            // may read the pairing code
 	codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // no I/O/0/1; 32 symbols so b%32 is unbiased
 )
 
@@ -39,7 +41,11 @@ type config struct {
 	runDir        string
 	cpuQuota      string   // per-job CPUQuota=, "" for none
 	jobRWPaths    []string // extra writable paths for jobs, e.g. /mem
+	relayFile     string   // if it holds a URL, it overrides relay
+	minFreeMB     int64    // refuse jobs below this much free space on stateDir; 0 = off
 }
+
+const maxRelayFile = 4 << 10
 
 var cpuQuotaRe = regexp.MustCompile(`^[1-9][0-9]*%$`)
 
@@ -67,6 +73,8 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	fs.IntVar(&c.slots, "slots", slots, "max concurrent jobs (env PANDA_AGENTD_SLOTS)")
 	fs.StringVar(&c.stateDir, "state-dir", env("PANDA_AGENTD_STATE_DIR", "/var/lib/panda-agentd"), "persistent state (env PANDA_AGENTD_STATE_DIR)")
 	fs.StringVar(&c.runDir, "run-dir", env("PANDA_AGENTD_RUN_DIR", "/run/panda-agentd"), "runtime files (env PANDA_AGENTD_RUN_DIR)")
+	fs.StringVar(&c.relayFile, "relay-file", env("PANDA_AGENTD_RELAY_FILE", ""), "file whose URL overrides -relay, written by panda-install --relay (default <state-dir>/relay)")
+	fs.Int64Var(&c.minFreeMB, "min-free-mb", 1024, "refuse jobs when the state dir has less free space (MiB); 0 disables")
 	fs.StringVar(&c.cpuQuota, "cpu-quota", env("PANDA_AGENTD_CPU_QUOTA", "200%"), `per-job CPUQuota, e.g. "200%"; "" for none`)
 	fs.Func("job-rw-path", "extra absolute path jobs may write (repeatable)", func(p string) error {
 		if !filepath.IsAbs(p) || strings.ContainsAny(p, " \t\n") {
@@ -78,8 +86,24 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
-	if err := checkRelayURL(c.relay, c.allowInsecure); err != nil {
+	if c.relayFile == "" {
+		c.relayFile = filepath.Join(c.stateDir, "relay")
+	}
+	switch url, err := readRelayFile(c.relayFile); {
+	case err != nil:
 		return config{}, err
+	case url != "":
+		if err := checkRelayURL(url, c.allowInsecure); err != nil {
+			return config{}, fmt.Errorf("%s: %w", c.relayFile, err)
+		}
+		c.relay = url
+	default:
+		if err := checkRelayURL(c.relay, c.allowInsecure); err != nil {
+			return config{}, err
+		}
+	}
+	if c.minFreeMB < 0 {
+		return config{}, fmt.Errorf("invalid -min-free-mb %d: must be >= 0", c.minFreeMB)
 	}
 	if c.slots < 1 {
 		return config{}, fmt.Errorf("invalid -slots %d: must be >= 1", c.slots)
@@ -88,6 +112,26 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf(`invalid -cpu-quota %q: want e.g. "200%%"`, c.cpuQuota)
 	}
 	return c, nil
+}
+
+// readRelayFile returns the URL in path, or "" if the file is missing or empty.
+func readRelayFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("relay file: %w", err)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxRelayFile+1))
+	if err != nil {
+		return "", fmt.Errorf("relay file: %w", err)
+	}
+	if len(b) > maxRelayFile {
+		return "", fmt.Errorf("relay file %s: larger than %d bytes", path, maxRelayFile)
+	}
+	return string(bytes.TrimSpace(b)), nil
 }
 
 type daemon struct {
@@ -99,6 +143,10 @@ type daemon struct {
 	shutdownGrace  time.Duration // how long SIGTERM waits for running jobs
 	postGrace      time.Duration // then how long cancelled jobs get to report
 	owner          *owner        // chown job workdirs to this user; nil = leave as is
+	codeGID        int           // group of the pairing-code file; -1 = leave as is
+	systemctl      systemctlFunc // nil when jobs do not run in systemd units
+	freeMB         func(path string) (int64, error)
+	interrupted    []string // job ids whose units outlived a previous agentd
 
 	mu      sync.Mutex
 	st      Status
@@ -116,6 +164,8 @@ func newDaemon(cfg config, r Runner) *daemon {
 		pairPollEvery:  2 * time.Second,
 		shutdownGrace:  30 * time.Second,
 		postGrace:      15 * time.Second,
+		codeGID:        -1,
+		freeMB:         freeMB,
 		st:             Status{Relay: cfg.relay, Slots: cfg.slots, Version: version, Since: time.Now().UTC().Truncate(time.Second)},
 		running:        map[string]context.CancelCauseFunc{},
 	}
@@ -140,6 +190,25 @@ func (d *daemon) setStatusLocked(f func(*Status)) {
 	if err := writeStatus(d.statusPath(), next); err != nil {
 		slog.Warn("write status failed", "err", err)
 	}
+}
+
+// noteErr records the outcome of a relay call in status.json: err sets
+// lastError, nil clears it. Only changes are written.
+func (d *daemon) noteErr(what string, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err == nil {
+		if d.st.LastError != "" {
+			d.setStatusLocked(func(s *Status) { s.LastError, s.LastErrorAt = "", nil })
+		}
+		return
+	}
+	msg := what + ": " + err.Error()
+	if msg == d.st.LastError {
+		return
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	d.setStatusLocked(func(s *Status) { s.LastError, s.LastErrorAt = msg, &now })
 }
 
 func (d *daemon) status() Status {
@@ -169,6 +238,16 @@ func (d *daemon) Run(ctx context.Context) error {
 	if err := d.setup(); err != nil {
 		return err
 	}
+	if d.systemctl != nil {
+		ids, err := cleanupUnits(ctx, d.systemctl)
+		if err != nil {
+			slog.Warn("cleaning up leftover job units", "err", err)
+		}
+		if len(ids) > 0 {
+			slog.Warn("stopped job units left by a previous agentd", "jobs", ids)
+		}
+		d.interrupted = ids
+	}
 	for {
 		token, err := d.loadToken()
 		if err != nil {
@@ -176,7 +255,7 @@ func (d *daemon) Run(ctx context.Context) error {
 				return err
 			}
 		}
-		d.setStatus(func(s *Status) { s.Paired, s.PairingCode = true, "" })
+		d.setStatus(func(s *Status) { s.Paired, s.Pairing = true, false })
 		err = d.serve(ctx, newClient(d.cfg.relay, token))
 		if !errors.Is(err, errUnauthorized) {
 			return err
@@ -198,7 +277,7 @@ func (d *daemon) loadToken() (string, error) {
 }
 
 func (d *daemon) saveToken(token string) error {
-	return writeFileAtomic(d.tokenPath(), []byte(token+"\n"), 0o600)
+	return writeFileAtomic(d.tokenPath(), []byte(token+"\n"), 0o600, -1)
 }
 
 func (d *daemon) pair(ctx context.Context) (string, error) {
@@ -208,11 +287,13 @@ func (d *daemon) pair(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if err := os.WriteFile(d.codePath(), []byte(code+"\n"), 0o644); err != nil {
+		// Whoever reads the code can claim the box: root and wheel only.
+		if err := writeFileAtomic(d.codePath(), []byte(code+"\n"), 0o640, d.codeGID); err != nil {
 			slog.Warn("write pairing code failed", "err", err)
 		}
-		d.setStatus(func(s *Status) { s.Paired, s.PairingCode = false, code })
-		// "pairing code:" in the message is grepped by the NixOS VM tests.
+		d.setStatus(func(s *Status) { s.Paired, s.Pairing = false, true })
+		// The journal is readable by the same audience (root, wheel,
+		// systemd-journal). "pairing code:" is grepped by the NixOS VM tests.
 		slog.Info("pairing code: "+code, "code", code)
 		token, err := d.pairWith(ctx, c, code)
 		if errors.Is(err, errPairExpired) {
@@ -223,6 +304,7 @@ func (d *daemon) pair(ctx context.Context) (string, error) {
 			return "", err
 		}
 		os.Remove(d.codePath())
+		d.setStatus(func(s *Status) { s.Pairing = false })
 		if err := d.saveToken(token); err != nil {
 			return "", fmt.Errorf("save token: %w", err)
 		}
@@ -233,12 +315,12 @@ func (d *daemon) pair(ctx context.Context) (string, error) {
 
 func (d *daemon) pairWith(ctx context.Context, c *client, code string) (string, error) {
 	caps := d.caps()
-	if err := retry(ctx, "pair start", func() error { return c.pairStart(ctx, code, caps) }); err != nil {
+	if err := d.retry(ctx, "pair start", func() error { return c.pairStart(ctx, code, caps) }); err != nil {
 		return "", err
 	}
 	for {
 		var token string
-		err := retry(ctx, "pair status", func() (err error) {
+		err := d.retry(ctx, "pair status", func() (err error) {
 			token, err = c.pairStatus(ctx, code)
 			return err
 		})
@@ -301,16 +383,21 @@ func meminfo(path string) (totalMB, availMB int) {
 }
 
 // retry calls f until it succeeds, the relay says 401 / unknown code, or ctx ends.
-func retry(ctx context.Context, what string, f func() error) error {
+func (d *daemon) retry(ctx context.Context, what string, f func() error) error {
 	for attempt := 0; ; attempt++ {
 		err := f()
 		if err == nil {
+			d.noteErr(what, nil)
 			return nil // even if ctx just ended: a job we were handed must not be dropped
 		}
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
-		if errors.Is(err, errUnauthorized) || errors.Is(err, errPairExpired) {
+		if errors.Is(err, errPairExpired) {
+			return err
+		}
+		d.noteErr(what, err)
+		if errors.Is(err, errUnauthorized) {
 			return err
 		}
 		slog.Warn(what+" failed; retrying", "err", err, "attempt", attempt+1)
@@ -379,11 +466,19 @@ func main() {
 	if err != nil {
 		fatal("bad config", err)
 	}
-	runner, kind, sandboxed := defaultRunner(cfg)
+	runner, kind, sc := defaultRunner(cfg)
 	d := newDaemon(cfg, runner)
-	if sandboxed {
+	d.systemctl = sc
+	if sc != nil {
 		if d.owner, err = lookupOwner(jobUser); err != nil {
 			fatal("look up job user "+jobUser, err)
+		}
+	}
+	if os.Geteuid() == 0 {
+		if g, err := user.LookupGroup(codeGroup); err == nil {
+			d.codeGID, _ = strconv.Atoi(g.Gid)
+		} else {
+			slog.Warn("pairing code will be root-only", "group", codeGroup, "err", err)
 		}
 	}
 	slog.Info("panda-agentd starting", "version", version, "relay", cfg.relay, "slots", cfg.slots, "runner", kind, "insecure", cfg.allowInsecure)

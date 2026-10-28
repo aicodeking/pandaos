@@ -36,6 +36,7 @@ func (d *daemon) serve(parent context.Context, c *client) error {
 			stopPost(err)
 		}
 	}
+	d.reportInterrupted(postCtx, c)
 	var hb sync.WaitGroup
 	hb.Add(1)
 	go func() { defer hb.Done(); d.heartbeat(jobCtx, c, fail) }()
@@ -48,7 +49,7 @@ func (d *daemon) serve(parent context.Context, c *client) error {
 			continue
 		}
 		var job *Job
-		err := retry(pollCtx, "next job", func() (err error) {
+		err := d.retry(pollCtx, "next job", func() (err error) {
 			job, err = c.nextJob(pollCtx)
 			return err
 		})
@@ -94,6 +95,20 @@ func (d *daemon) drain(jobs *sync.WaitGroup, shutdown bool, stopJobs, stopPost c
 	}
 }
 
+// reportInterrupted tells the relay, once, about jobs whose units outlived a
+// previous agentd. One attempt each: the relay may no longer care.
+func (d *daemon) reportInterrupted(ctx context.Context, c *client) {
+	ids := d.interrupted
+	d.interrupted = nil
+	for _, id := range ids {
+		res := Result{ExitCode: -1, Stderr: "panda-agentd: job interrupted: agentd restarted while it ran\n", Interrupted: true}
+		if err := c.postResult(ctx, id, res); err != nil {
+			slog.Info("relay did not take interrupted-job report", "job", id, "err", err)
+		}
+		d.setStatus(func(s *Status) { s.Failed++ })
+	}
+}
+
 func waitFor(done <-chan struct{}, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -110,6 +125,9 @@ func waitFor(done <-chan struct{}, d time.Duration) bool {
 func (d *daemon) heartbeat(ctx context.Context, c *client, fail func(error)) {
 	for {
 		ids, err := c.heartbeat(ctx, d.caps())
+		if ctx.Err() == nil {
+			d.noteErr("heartbeat", err)
+		}
 		if err != nil && ctx.Err() == nil {
 			slog.Warn("heartbeat failed", "err", err)
 			fail(err)
@@ -140,9 +158,13 @@ func (d *daemon) cancel(ids []string) {
 func (d *daemon) handle(jobCtx, postCtx context.Context, c *client, j Job, fail func(error)) {
 	log := slog.With("job", j.ID)
 	post := func(res Result) {
-		fail(retry(postCtx, "post result "+j.ID, func() error { return c.postResult(postCtx, j.ID, res) }))
+		fail(d.retry(postCtx, "post result "+j.ID, func() error { return c.postResult(postCtx, j.ID, res) }))
 	}
-	if err := validateJob(j); err != nil {
+	err := validateJob(j)
+	if err == nil {
+		err = d.checkDisk()
+	}
+	if err != nil {
 		log.Warn("rejecting job", "err", err)
 		res := Result{ExitCode: -1, Stderr: "panda-agentd: " + err.Error()}
 		post(res)

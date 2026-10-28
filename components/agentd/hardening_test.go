@@ -116,6 +116,10 @@ func TestSystemdArgs(t *testing.T) {
 		"-p PrivateTmp=yes", "-p ProtectSystem=strict", "-p ProtectHome=read-only", "-p NoNewPrivileges=yes",
 		"-p ReadWritePaths=/var/lib/panda-agentd/jobs/j1", "-p MemoryMax=80%", "-p CPUQuota=150%",
 		"-p TasksMax=512", "-p RuntimeMaxSec=30", "-p ReadWritePaths=-/mem", "-- echo hi",
+		"-p BindsTo=panda-agentd.service", "-p PrivateDevices=yes", "-p ProtectProc=invisible", "-p ProcSubset=pid",
+		"-p ProtectKernelTunables=yes", "-p ProtectKernelModules=yes", "-p ProtectKernelLogs=yes",
+		"-p ProtectControlGroups=yes", "-p RestrictSUIDSGID=yes", "-p LockPersonality=yes", "-p RestrictRealtime=yes",
+		"-p SystemCallArchitectures=native", "-p SystemCallFilter=@system-service",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("systemd-run args missing %q:\n%s", want, args)
@@ -194,7 +198,7 @@ func TestStatusFile(t *testing.T) {
 	relay.Enqueue(fakerelay.Job{ID: "j1", Argv: []string{"x"}})
 	waitResult(t, relay, "j1")
 	st := waitStatus(t, d, func(s Status) bool { return s.Failed == 1 })
-	if !st.Paired || st.PairingCode != "" || st.Relay != url || st.Slots != 3 || st.Running != 0 ||
+	if !st.Paired || st.Pairing || st.LastError != "" || st.LastErrorAt != nil || st.Relay != url || st.Slots != 3 || st.Running != 0 ||
 		st.Completed != 0 || st.Version != version || st.Since.IsZero() {
 		t.Fatalf("status = %+v", st)
 	}
@@ -216,21 +220,13 @@ func TestStatusFile(t *testing.T) {
 	}
 }
 
-func TestStatusPairingCodeAndAtomicity(t *testing.T) {
+func TestStatusAtomicity(t *testing.T) {
 	d := newTestDaemon(t, "https://r", 1, echoRunner)
 	if err := d.setup(); err != nil {
 		t.Fatal(err)
 	}
-	d.setStatus(func(s *Status) { s.PairingCode = "ABC234" })
-	if st := readStatus(t, d); st.Paired || st.PairingCode != "ABC234" {
-		t.Fatalf("pairing status = %+v", st)
-	}
-	var out bytes.Buffer
-	statusCmd([]string{"-run-dir", d.cfg.runDir}, func(string) string { return "" }, &out)
-	if !strings.Contains(out.String(), "pairing code ABC234") {
-		t.Fatalf("status output:\n%s", out.String())
-	}
 
+	d.setStatus(func(s *Status) {})
 	// Readers racing a writer must always see a complete document.
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -242,7 +238,7 @@ func TestStatusPairingCodeAndAtomicity(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				d.setStatus(func(s *Status) { s.Completed = i; s.PairingCode = strings.Repeat("X", i%500) })
+				d.setStatus(func(s *Status) { s.Completed = i; s.LastError = strings.Repeat("X", i%500) })
 			}
 		}
 	}()

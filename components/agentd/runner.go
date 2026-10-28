@@ -15,23 +15,25 @@ const (
 	// Per-job memory cap when the job does not set one (percent of RAM).
 	defaultMemoryMax = "80%"
 	jobUser          = "panda-agent"
+	agentdUnit       = "panda-agentd.service"
 )
 
 // Runner executes one job in dir, its private working directory. Injected so
 // tests can fake it.
 type Runner func(ctx context.Context, j Job, dir string) Result
 
-// defaultRunner prefers systemd-run. sandboxed reports whether jobs run as
-// jobUser, in which case their workdirs must be chowned to it.
-func defaultRunner(cfg config) (r Runner, kind string, sandboxed bool) {
+// defaultRunner prefers systemd-run. A non-nil systemctl means jobs run as
+// jobUser in transient units, so workdirs must be chowned to it and leftover
+// units cleaned up at start.
+func defaultRunner(cfg config) (r Runner, kind string, sc systemctlFunc) {
 	if runtime.GOOS == "linux" {
 		bin, err1 := exec.LookPath("systemd-run")
 		ctl, err2 := exec.LookPath("systemctl")
 		if err1 == nil && err2 == nil {
-			return systemdRunner(bin, ctl, cfg), "systemd-run", true
+			return systemdRunner(bin, ctl, cfg), "systemd-run", execSystemctl(ctl)
 		}
 	}
-	return execRunner, "exec", false
+	return execRunner, "exec", nil
 }
 
 func jobTimeout(j Job) time.Duration {
@@ -59,6 +61,22 @@ func systemdArgs(cfg config, j Job, dir string) []string {
 		"-p", "TasksMax=512",
 		"-p", fmt.Sprintf("RuntimeMaxSec=%d", int(jobTimeout(j).Seconds())),
 		"-p", "TimeoutStopSec=10",
+		// Stopping agentd stops its jobs; units that outlive a crash are
+		// cleaned up at the next start (cleanupUnits).
+		"-p", "BindsTo=" + agentdUnit,
+		"-p", "PrivateDevices=yes",
+		"-p", "ProtectProc=invisible",
+		"-p", "ProcSubset=pid",
+		"-p", "ProtectKernelTunables=yes",
+		"-p", "ProtectKernelModules=yes",
+		"-p", "ProtectKernelLogs=yes",
+		"-p", "ProtectControlGroups=yes",
+		"-p", "RestrictSUIDSGID=yes",
+		"-p", "LockPersonality=yes",
+		"-p", "RestrictRealtime=yes",
+		"-p", "SystemCallArchitectures=native",
+		"-p", "SystemCallFilter=@system-service",
+		// No IPAddressDeny=localhost: jobs drive the local browser over CDP.
 	}
 	if cfg.cpuQuota != "" {
 		args = append(args, "-p", "CPUQuota="+cfg.cpuQuota)

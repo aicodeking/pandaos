@@ -46,6 +46,8 @@ type Result struct {
 	Stderr   string `json:"stderr"`
 	// Cancelled is set when the job was stopped by a cancel or daemon shutdown.
 	Cancelled bool `json:"cancelled,omitempty"`
+	// Interrupted is set for a job whose agentd died mid-run (reported at next start).
+	Interrupted bool `json:"interrupted,omitempty"`
 }
 
 var (

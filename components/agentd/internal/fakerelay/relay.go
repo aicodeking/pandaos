@@ -22,10 +22,11 @@ type Job struct {
 }
 
 type Result struct {
-	ExitCode  int    `json:"exitCode"`
-	Stdout    string `json:"stdout"`
-	Stderr    string `json:"stderr"`
-	Cancelled bool   `json:"cancelled,omitempty"`
+	ExitCode    int    `json:"exitCode"`
+	Stdout      string `json:"stdout"`
+	Stderr      string `json:"stderr"`
+	Cancelled   bool   `json:"cancelled,omitempty"`
+	Interrupted bool   `json:"interrupted,omitempty"`
 }
 
 type Relay struct {
