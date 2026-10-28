@@ -272,7 +272,11 @@ in
       with subtest("logged-in labwc session comes up and stays up"):
           machine.wait_until_succeeds("pgrep -u panda -x labwc", timeout=120)
           machine.wait_until_succeeds("test -S /run/user/$(id -u panda)/wayland-0", timeout=60)
-          machine.wait_until_succeeds("pgrep -u panda -x waybar", timeout=60)
+          # Not -x: the nixpkgs wrapper names the process .waybar-wrapped.
+          rc, _ = machine.execute("timeout 60 sh -c 'until pgrep -u panda waybar; do sleep 2; done'")
+          if rc != 0:
+              print(machine.execute("journalctl -b --no-pager -n 80 _UID=$(id -u panda)")[1])
+              raise AssertionError("waybar did not start in the labwc session")
       session_ram, session_minus_avail = idle_ram_mb(machine)
       machine.screenshot("session")
       machine.succeed("pgrep -u panda -x labwc")

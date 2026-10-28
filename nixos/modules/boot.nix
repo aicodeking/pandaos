@@ -31,9 +31,11 @@ let
     ++ lib.optional config.services.greetd.enable "greetd.service"
     ++ lib.optional config.networking.networkmanager.enable "NetworkManager.service";
 
-  # panda-health [--route] [--wait SECONDS]
-  # 0 when every core unit is active (and, with --route, a default route
-  # exists); retries every 5 s for up to --wait seconds (default 0).
+  # panda-health [--route] [--wait SECONDS] [--settle SECONDS]
+  # 0 when every core unit is active and stays up (no restarts) for --settle
+  # seconds (default 10), and with --route a default route exists; retries
+  # every 5 s for up to --wait seconds (default 0). The settle window catches
+  # a unit that is "active" for an instant and then crash-loops.
   health = pkgs.writeShellApplication {
     name = "panda-health";
     runtimeInputs = [
@@ -44,11 +46,13 @@ let
     text = ''
       route=no
       max_wait=0
+      settle=10
       while [ $# -gt 0 ]; do
         case "$1" in
           --route) route=yes ;;
           --wait) max_wait=$2; shift ;;
-          *) echo "usage: panda-health [--route] [--wait SECONDS]" >&2; exit 2 ;;
+          --settle) settle=$2; shift ;;
+          *) echo "usage: panda-health [--route] [--wait SECONDS] [--settle SECONDS]" >&2; exit 2 ;;
         esac
         shift
       done
@@ -63,12 +67,24 @@ let
         fi
       }
 
+      restarts() {
+        for u in "''${units[@]}"; do
+          echo "$u $(systemctl show -P NRestarts "$u")"
+        done
+      }
+
       deadline=$(( $(date +%s) + max_wait ))
       while :; do
         p=$(problems)
         if [ -z "$p" ]; then
-          echo "panda-health: ok"
-          exit 0
+          before=$(restarts)
+          sleep "$settle"
+          p=$(problems)
+          if [ -z "$p" ] && [ "$before" = "$(restarts)" ]; then
+            echo "panda-health: ok"
+            exit 0
+          fi
+          p=''${p:-"a core unit restarted within ''${settle}s"}
         fi
         [ "$(date +%s)" -ge "$deadline" ] && break
         sleep 5
