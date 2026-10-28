@@ -36,7 +36,7 @@ All notable changes to PandaOS are documented here. The format follows
 - `panda-agentd` requires an `https://` relay. `services.panda-agentd.allowInsecure` permits http to
   local hosts only.
 - The ISOs are built on nixpkgs' bare `iso-image.nix`, not `installation-cd-minimal.nix`, and carry
-  the prebuilt systems for the offline install. Sizes: headless 1.4 GB in v0.1.0, now about 0.6 GB.
+  the prebuilt systems for the offline install. The headless ISO went from 1.4 GB in v0.1.0 to 608 MiB. The desktop ISO is 993 MiB.
 
 ### Security
 

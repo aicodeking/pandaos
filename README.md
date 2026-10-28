@@ -6,19 +6,21 @@ every day and rolls back if an update breaks it.
 
 ## Measured numbers
 
-These come from the NixOS VM tests in CI on nixos-26.05 (`nix flake check`, see [docs/benchmarks.md](docs/benchmarks.md)
-for how each one is measured). They are PandaOS's own numbers, not a comparison.
+These come from the NixOS VM tests and ISO builds in CI on nixos-26.05 (`nix flake check`, see [docs/benchmarks.md](docs/benchmarks.md)
+for how each one is measured; sizes are MiB). They are PandaOS's own numbers, not a comparison.
 
 | | headless | desktop |
 |---|---|---|
-| Idle RAM, `free` used + shmem | 117 MB | 135 MB |
-| Idle RAM, `MemTotal - MemAvailable` | 235 MB | 274 MB |
-| System closure | 1.27 GB | 2.8 GB |
+| Idle RAM, `free` used + shmem | 128 MB | 138 MB |
+| Idle RAM, `MemTotal - MemAvailable` | 247 MB | 279 MB |
+| System closure | 1.32 GB | 2.85 GB |
+| ISO size (the desktop ISO also carries the headless system) | 608 MB | 993 MB |
 
 | Agent job round trip (pair, then run `echo hi`) | |
 |---|---|
-| Normal VM network | 4.4 s |
-| 1 Mbit/s, 300 ms delay, 2% loss (netem) | 5.4 s |
+| Normal VM network | 3.7 s |
+| 1 Mbit/s, 300 ms delay, 2% loss (netem) | 8.6 s |
+| Offline install to an empty disk (`panda-install --yes`, VM) | 208 s |
 
 A side-by-side comparison with Ubuntu and Debian on identical VMs is **planned, not built yet**. Until it
 exists, we make no claims about how PandaOS compares with other systems.
@@ -64,10 +66,14 @@ There is no default password: you set one (and optionally an ssh key) during the
 
 | Path | What |
 |---|---|
-| `flake.nix` | ISOs, VM, NixOS configs, checks |
-| `nixos/` | base module, `headless` and `desktop` (labwc) profiles |
+| `flake.nix` | ISOs, VM, NixOS configs, `lib.mkPandaSystem`, checks (`flake.lock` pins nixpkgs) |
+| `nixos/modules` | base, security, updates, first boot, snapshots, disk layout, ISO |
+| `nixos/profiles` | `headless` and `desktop` (labwc) |
+| `nixos/installer` | `panda-install`, the offline installer |
 | `components/agentd` | `panda-agentd`: pairs with the relay (dials out) and runs jobs |
 | `components/mem` | `panda-mem`: the `/mem` store and MCP server |
+| `components/browser` | optional `panda-browser` (headless Chromium, CDP on localhost) |
+| `components/desktop` | labwc/waybar config, `panda-menu`, `panda-agents-status` |
 | `tests/` | NixOS VM tests and RAM/disk budgets |
 | `bench/` | metric collection |
 

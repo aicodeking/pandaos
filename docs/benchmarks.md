@@ -8,14 +8,22 @@ the same object to `$out/metrics.json`; `bench/collect.py` gathers them into a t
 
 | Metric | headless | desktop |
 |---|---|---|
-| Idle RAM, `free` used + shmem (`idleRamMB`) | 117 MB | 135 MB |
-| Idle RAM, `MemTotal - MemAvailable` (`memTotalMinusAvailableMB`) | 235 MB | 274 MB |
-| System closure (`closureMB`) | 1.27 GB | 2.8 GB |
+| Idle RAM, `free` used + shmem (`idleRamMB`) | 128 MB | 138 MB |
+| Idle RAM, `MemTotal - MemAvailable` (`memTotalMinusAvailableMB`) | 247 MB | 279 MB |
+| System closure (`closureMB`) | 1321 MB | 2847 MB |
+| ISO (`isoMB`, CI `iso` job) | 608 MB | 993 MB |
 
 | Agent job round trip (`roundtripSec`) | |
 |---|---|
-| `agentd-roundtrip`, normal VM network | 4.4 s |
-| `slow-network`, 1 Mbit/s, 300 ms, 2% loss | 5.4 s |
+| `agentd-roundtrip`, normal VM network | 3.7 s |
+| `slow-network`, 1 Mbit/s, 300 ms, 2% loss | 8.6 s |
+
+| Install (`installSec`) | |
+|---|---|
+| `install`: `panda-install --yes` of the headless system onto an empty 10 GiB virtio disk | 208 s |
+
+Sizes are MiB. These numbers are from CI run
+[40733737472](https://github.com/AICodeKing/pandaos/actions/runs/40733737472), nixpkgs `718f670`.
 
 The tests fail when a metric goes over its budget in `tests/budgets.json`. The budgets are
 deliberately loose for now.
@@ -48,7 +56,8 @@ Report both when you compare with another system, and state the RAM size of the 
 `closureMB` is the NAR size of the test VM's system closure, the same number as `nix path-info -S`.
 It is computed on the host from `closureInfo`, because the test VM does not register its own closure.
 It includes the NixOS test-driver instrumentation, so it is not exactly the installed size.
-The ISO size is printed separately by the CI `iso` job. On failure, the test also prints the 40
+The CI `iso` job prints each ISO's size as a `METRIC {"test": "iso-<profile>", "isoMB": ...}` line.
+The desktop ISO is bigger partly because it carries both prebuilt systems, so it can install either. On failure, the test also prints the 40
 largest store paths and what refers to them.
 
 ## Round trip and netem
