@@ -12,19 +12,26 @@ import (
 const (
 	maxOutput      = 64 << 10
 	defaultTimeout = time.Hour
-	jobUser        = "panda-agent"
+	// Per-job memory cap when the job does not set one (percent of RAM).
+	defaultMemoryMax = "80%"
+	jobUser          = "panda-agent"
 )
 
-// Runner executes one job. Injected so tests can fake it.
-type Runner func(ctx context.Context, j Job) Result
+// Runner executes one job in dir, its private working directory. Injected so
+// tests can fake it.
+type Runner func(ctx context.Context, j Job, dir string) Result
 
-func defaultRunner() (Runner, string) {
+// defaultRunner prefers systemd-run. sandboxed reports whether jobs run as
+// jobUser, in which case their workdirs must be chowned to it.
+func defaultRunner(cfg config) (r Runner, kind string, sandboxed bool) {
 	if runtime.GOOS == "linux" {
-		if bin, err := exec.LookPath("systemd-run"); err == nil {
-			return systemdRunner(bin), "systemd-run"
+		bin, err1 := exec.LookPath("systemd-run")
+		ctl, err2 := exec.LookPath("systemctl")
+		if err1 == nil && err2 == nil {
+			return systemdRunner(bin, ctl, cfg), "systemd-run", true
 		}
 	}
-	return execRunner, "exec"
+	return execRunner, "exec", false
 }
 
 func jobTimeout(j Job) time.Duration {
@@ -34,31 +41,63 @@ func jobTimeout(j Job) time.Duration {
 	return time.Duration(j.TimeoutSec) * time.Second
 }
 
-func systemdRunner(bin string) Runner {
-	return func(ctx context.Context, j Job) Result {
-		t := jobTimeout(j)
-		args := []string{"--wait", "--collect", "--pipe", "--quiet"}
-		if j.MemoryMaxMB > 0 {
-			args = append(args, "-p", fmt.Sprintf("MemoryMax=%dM", j.MemoryMaxMB))
-		}
-		args = append(args, "-p", fmt.Sprintf("RuntimeMaxSec=%d", int(t.Seconds())), "--uid="+jobUser, "--")
-		// systemd enforces RuntimeMaxSec; the context deadline is only a backstop.
-		// ponytail: killing systemd-run may leave the unit running until RuntimeMaxSec; stop it via `systemctl stop` if that matters.
-		return run(ctx, t+30*time.Second, bin, append(args, j.Argv...))
+func systemdArgs(cfg config, j Job, dir string) []string {
+	mem := defaultMemoryMax
+	if j.MemoryMaxMB > 0 {
+		mem = fmt.Sprintf("%dM", j.MemoryMaxMB)
+	}
+	args := []string{
+		"--wait", "--collect", "--pipe", "--quiet",
+		"--unit=" + jobUnit(j), "--uid=" + jobUser,
+		"--working-directory=" + dir, "--setenv=HOME=" + dir,
+		"-p", "PrivateTmp=yes",
+		"-p", "ProtectSystem=strict",
+		"-p", "ProtectHome=read-only",
+		"-p", "NoNewPrivileges=yes",
+		"-p", "ReadWritePaths=" + dir,
+		"-p", "MemoryMax=" + mem,
+		"-p", "TasksMax=512",
+		"-p", fmt.Sprintf("RuntimeMaxSec=%d", int(jobTimeout(j).Seconds())),
+		"-p", "TimeoutStopSec=10",
+	}
+	if cfg.cpuQuota != "" {
+		args = append(args, "-p", "CPUQuota="+cfg.cpuQuota)
+	}
+	for _, p := range cfg.jobRWPaths {
+		args = append(args, "-p", "ReadWritePaths=-"+p) // "-": skip if missing
+	}
+	return append(append(args, "--"), j.Argv...)
+}
+
+func jobUnit(j Job) string { return "panda-job-" + j.ID + ".service" }
+
+func systemdRunner(bin, systemctl string, cfg config) Runner {
+	return func(ctx context.Context, j Job, dir string) Result {
+		// Killing systemd-run does not stop the unit, so cancels and timeouts
+		// stop it explicitly. systemd enforces RuntimeMaxSec; the context
+		// deadline is only a backstop.
+		stop := func() { exec.Command(systemctl, "stop", "--no-block", jobUnit(j)).Run() }
+		return run(ctx, jobTimeout(j)+30*time.Second, bin, systemdArgs(cfg, j, dir), "", stop)
 	}
 }
 
-func execRunner(ctx context.Context, j Job) Result {
-	return run(ctx, jobTimeout(j), j.Argv[0], j.Argv[1:])
+func execRunner(ctx context.Context, j Job, dir string) Result {
+	return run(ctx, jobTimeout(j), j.Argv[0], j.Argv[1:], dir, nil)
 }
 
-func run(ctx context.Context, timeout time.Duration, name string, args []string) Result {
+// run executes name in dir; onCancel, if set, runs before the process is
+// killed when ctx ends.
+func run(ctx context.Context, timeout time.Duration, name string, args []string, dir string, onCancel func()) Result {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var stdout, stderr capWriter
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.WaitDelay = 5 * time.Second
+	if onCancel != nil {
+		cmd.Cancel = func() error { onCancel(); return cmd.Process.Kill() }
+	}
 	err := cmd.Run()
 
 	code := 0

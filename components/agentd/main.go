@@ -10,58 +10,82 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	mrand "math/rand/v2"
-	"net/url"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
 const (
-	version      = "0.1.0"
+	version      = "0.2.0"
 	maxBackoff   = 60 * time.Second
 	codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // no I/O/0/1; 32 symbols so b%32 is unbiased
 )
 
 type config struct {
-	relay    string
-	slots    int
-	stateDir string
-	runDir   string
+	relay         string
+	allowInsecure bool
+	slots         int
+	stateDir      string
+	runDir        string
+	cpuQuota      string   // per-job CPUQuota=, "" for none
+	jobRWPaths    []string // extra writable paths for jobs, e.g. /mem
+}
+
+var cpuQuotaRe = regexp.MustCompile(`^[1-9][0-9]*%$`)
+
+func envOr(getenv func(string) string, k, def string) string {
+	if v := getenv(k); v != "" {
+		return v
+	}
+	return def
 }
 
 func parseConfig(args []string, getenv func(string) string) (config, error) {
-	env := func(k, def string) string {
-		if v := getenv(k); v != "" {
-			return v
-		}
-		return def
-	}
+	env := func(k, def string) string { return envOr(getenv, k, def) }
 	slots, err := strconv.Atoi(env("PANDA_AGENTD_SLOTS", "2"))
 	if err != nil {
 		return config{}, fmt.Errorf("PANDA_AGENTD_SLOTS: %w", err)
 	}
 	var c config
 	fs := flag.NewFlagSet("panda-agentd", flag.ContinueOnError)
-	fs.StringVar(&c.relay, "relay", getenv("PANDA_AGENTD_RELAY"), "relay base URL, http(s) (env PANDA_AGENTD_RELAY)")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "usage: panda-agentd [flags]\n       panda-agentd status [-json] [-run-dir DIR]")
+		fs.PrintDefaults()
+	}
+	fs.StringVar(&c.relay, "relay", getenv("PANDA_AGENTD_RELAY"), "relay base URL, https (env PANDA_AGENTD_RELAY)")
+	fs.BoolVar(&c.allowInsecure, "allow-insecure", env("PANDA_AGENTD_ALLOW_INSECURE", "") == "1", "allow http to loopback, private, .local or single-label hosts (env PANDA_AGENTD_ALLOW_INSECURE=1)")
 	fs.IntVar(&c.slots, "slots", slots, "max concurrent jobs (env PANDA_AGENTD_SLOTS)")
 	fs.StringVar(&c.stateDir, "state-dir", env("PANDA_AGENTD_STATE_DIR", "/var/lib/panda-agentd"), "persistent state (env PANDA_AGENTD_STATE_DIR)")
 	fs.StringVar(&c.runDir, "run-dir", env("PANDA_AGENTD_RUN_DIR", "/run/panda-agentd"), "runtime files (env PANDA_AGENTD_RUN_DIR)")
+	fs.StringVar(&c.cpuQuota, "cpu-quota", env("PANDA_AGENTD_CPU_QUOTA", "200%"), `per-job CPUQuota, e.g. "200%"; "" for none`)
+	fs.Func("job-rw-path", "extra absolute path jobs may write (repeatable)", func(p string) error {
+		if !filepath.IsAbs(p) || strings.ContainsAny(p, " \t\n") {
+			return fmt.Errorf("want an absolute path without whitespace, got %q", p)
+		}
+		c.jobRWPaths = append(c.jobRWPaths, filepath.Clean(p))
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
-	u, err := url.Parse(c.relay)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return config{}, fmt.Errorf("invalid -relay %q: want http(s)://host[:port]", c.relay)
+	if err := checkRelayURL(c.relay, c.allowInsecure); err != nil {
+		return config{}, err
 	}
 	if c.slots < 1 {
 		return config{}, fmt.Errorf("invalid -slots %d: must be >= 1", c.slots)
+	}
+	if c.cpuQuota != "" && !cpuQuotaRe.MatchString(c.cpuQuota) {
+		return config{}, fmt.Errorf(`invalid -cpu-quota %q: want e.g. "200%%"`, c.cpuQuota)
 	}
 	return c, nil
 }
@@ -72,7 +96,16 @@ type daemon struct {
 	sem            chan struct{} // one token per running job
 	heartbeatEvery time.Duration
 	pairPollEvery  time.Duration
+	shutdownGrace  time.Duration // how long SIGTERM waits for running jobs
+	postGrace      time.Duration // then how long cancelled jobs get to report
+	owner          *owner        // chown job workdirs to this user; nil = leave as is
+
+	mu      sync.Mutex
+	st      Status
+	running map[string]context.CancelCauseFunc // job id -> cancel
 }
+
+type owner struct{ uid, gid int }
 
 func newDaemon(cfg config, r Runner) *daemon {
 	return &daemon{
@@ -81,18 +114,59 @@ func newDaemon(cfg config, r Runner) *daemon {
 		sem:            make(chan struct{}, cfg.slots),
 		heartbeatEvery: 30 * time.Second,
 		pairPollEvery:  2 * time.Second,
+		shutdownGrace:  30 * time.Second,
+		postGrace:      15 * time.Second,
+		st:             Status{Relay: cfg.relay, Slots: cfg.slots, Version: version, Since: time.Now().UTC().Truncate(time.Second)},
+		running:        map[string]context.CancelCauseFunc{},
 	}
 }
 
-func (d *daemon) tokenPath() string { return filepath.Join(d.cfg.stateDir, "token") }
-func (d *daemon) codePath() string  { return filepath.Join(d.cfg.runDir, "pairing-code") }
+func (d *daemon) tokenPath() string  { return filepath.Join(d.cfg.stateDir, "token") }
+func (d *daemon) jobsDir() string    { return filepath.Join(d.cfg.stateDir, "jobs") }
+func (d *daemon) codePath() string   { return filepath.Join(d.cfg.runDir, "pairing-code") }
+func (d *daemon) statusPath() string { return filepath.Join(d.cfg.runDir, "status.json") }
 
-// Run pairs if needed, then serves until ctx ends. A 401 drops the token and re-pairs.
-func (d *daemon) Run(ctx context.Context) error {
+// setStatus applies f to a copy of the status and publishes it.
+func (d *daemon) setStatus(f func(*Status)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.setStatusLocked(f)
+}
+
+func (d *daemon) setStatusLocked(f func(*Status)) {
+	next := d.st
+	f(&next)
+	d.st = next
+	if err := writeStatus(d.statusPath(), next); err != nil {
+		slog.Warn("write status failed", "err", err)
+	}
+}
+
+func (d *daemon) status() Status {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.st
+}
+
+func (d *daemon) setup() error {
 	if err := os.MkdirAll(d.cfg.stateDir, 0o700); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(d.cfg.runDir, 0o755); err != nil {
+	if d.owner != nil {
+		// The job user must traverse stateDir to reach its workdir; the token stays 0600.
+		if err := os.Chmod(d.cfg.stateDir, 0o711); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(d.jobsDir(), 0o711); err != nil {
+		return err
+	}
+	return os.MkdirAll(d.cfg.runDir, 0o755)
+}
+
+// Run pairs if needed, then serves until ctx ends. A 401 drops the token and re-pairs.
+func (d *daemon) Run(ctx context.Context) error {
+	if err := d.setup(); err != nil {
 		return err
 	}
 	for {
@@ -102,11 +176,13 @@ func (d *daemon) Run(ctx context.Context) error {
 				return err
 			}
 		}
+		d.setStatus(func(s *Status) { s.Paired, s.PairingCode = true, "" })
 		err = d.serve(ctx, newClient(d.cfg.relay, token))
 		if !errors.Is(err, errUnauthorized) {
 			return err
 		}
-		log.Print("relay rejected token; re-pairing")
+		slog.Warn("relay rejected token; re-pairing")
+		d.setStatus(func(s *Status) { s.Paired = false })
 		if err := os.Remove(d.tokenPath()); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -122,19 +198,7 @@ func (d *daemon) loadToken() (string, error) {
 }
 
 func (d *daemon) saveToken(token string) error {
-	f, err := os.CreateTemp(d.cfg.stateDir, ".token-*") // created 0600
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err := f.WriteString(token + "\n"); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), d.tokenPath())
+	return writeFileAtomic(d.tokenPath(), []byte(token+"\n"), 0o600)
 }
 
 func (d *daemon) pair(ctx context.Context) (string, error) {
@@ -145,12 +209,14 @@ func (d *daemon) pair(ctx context.Context) (string, error) {
 			return "", err
 		}
 		if err := os.WriteFile(d.codePath(), []byte(code+"\n"), 0o644); err != nil {
-			log.Printf("write pairing code: %v", err)
+			slog.Warn("write pairing code failed", "err", err)
 		}
-		log.Printf("pairing code: %s", code)
+		d.setStatus(func(s *Status) { s.Paired, s.PairingCode = false, code })
+		// "pairing code:" in the message is grepped by the NixOS VM tests.
+		slog.Info("pairing code: "+code, "code", code)
 		token, err := d.pairWith(ctx, c, code)
 		if errors.Is(err, errPairExpired) {
-			log.Print("pairing code expired; generating a new one")
+			slog.Info("pairing code expired; generating a new one")
 			continue
 		}
 		if err != nil {
@@ -160,7 +226,7 @@ func (d *daemon) pair(ctx context.Context) (string, error) {
 		if err := d.saveToken(token); err != nil {
 			return "", fmt.Errorf("save token: %w", err)
 		}
-		log.Print("paired")
+		slog.Info("paired")
 		return token, nil
 	}
 }
@@ -194,73 +260,6 @@ func pairingCode() (string, error) {
 		b[i] = codeAlphabet[int(b[i])%len(codeAlphabet)]
 	}
 	return string(b), nil
-}
-
-// serve heartbeats and pulls jobs until ctx ends or the relay returns 401.
-func (d *daemon) serve(parent context.Context, c *client) error {
-	ctx, cancel := context.WithCancelCause(parent)
-	fail := func(err error) {
-		if errors.Is(err, errUnauthorized) {
-			cancel(err)
-		}
-	}
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() { defer wg.Done(); d.heartbeat(ctx, c, fail) }()
-
-	for ctx.Err() == nil {
-		select {
-		case d.sem <- struct{}{}: // wait for a free slot before asking for work
-		case <-ctx.Done():
-			continue
-		}
-		var job *Job
-		err := retry(ctx, "next job", func() (err error) {
-			job, err = c.nextJob(ctx)
-			return err
-		})
-		if err != nil || job == nil {
-			<-d.sem
-			fail(err)
-			continue
-		}
-		wg.Add(1)
-		go func(j Job) {
-			defer wg.Done()
-			defer func() { <-d.sem }()
-			d.handle(ctx, c, j, fail)
-		}(*job)
-	}
-	cancel(nil)
-	wg.Wait()
-	return context.Cause(ctx)
-}
-
-func (d *daemon) heartbeat(ctx context.Context, c *client, fail func(error)) {
-	t := time.NewTicker(d.heartbeatEvery)
-	defer t.Stop()
-	for {
-		if err := c.heartbeat(ctx, d.caps()); err != nil && ctx.Err() == nil {
-			log.Printf("heartbeat: %v", err)
-			fail(err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-	}
-}
-
-func (d *daemon) handle(ctx context.Context, c *client, j Job, fail func(error)) {
-	log.Printf("job %s: start %q", j.ID, j.Argv)
-	res := Result{ExitCode: -1, Stderr: "panda-agentd: empty argv"}
-	if len(j.Argv) > 0 {
-		res = d.run(ctx, j)
-	}
-	res = Result{ExitCode: res.ExitCode, Stdout: truncate(res.Stdout), Stderr: truncate(res.Stderr)}
-	log.Printf("job %s: exit %d", j.ID, res.ExitCode)
-	fail(retry(ctx, "post result "+j.ID, func() error { return c.postResult(ctx, j.ID, res) }))
 }
 
 func (d *daemon) caps() Caps {
@@ -305,13 +304,16 @@ func meminfo(path string) (totalMB, availMB int) {
 func retry(ctx context.Context, what string, f func() error) error {
 	for attempt := 0; ; attempt++ {
 		err := f()
+		if err == nil {
+			return nil // even if ctx just ended: a job we were handed must not be dropped
+		}
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
-		if err == nil || errors.Is(err, errUnauthorized) || errors.Is(err, errPairExpired) {
+		if errors.Is(err, errUnauthorized) || errors.Is(err, errPairExpired) {
 			return err
 		}
-		log.Printf("%s: %v (retrying)", what, err)
+		slog.Warn(what+" failed; retrying", "err", err, "attempt", attempt+1)
 		if !sleep(ctx, backoff(attempt)) {
 			return context.Cause(ctx)
 		}
@@ -335,19 +337,60 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// newLogger logs JSON (for journald) unless w is a terminal.
+func newLogger(w *os.File) *slog.Logger {
+	if fi, err := w.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		return slog.New(slog.NewTextHandler(w, nil))
+	}
+	return slog.New(slog.NewJSONHandler(w, nil))
+}
+
+func lookupOwner(name string) (*owner, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return nil, err
+	}
+	uid, err1 := strconv.Atoi(u.Uid)
+	gid, err2 := strconv.Atoi(u.Gid)
+	if err := errors.Join(err1, err2); err != nil {
+		return nil, err
+	}
+	return &owner{uid, gid}, nil
+}
+
+func fatal(msg string, err error) {
+	slog.Error(msg, "err", err)
+	os.Exit(1)
+}
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "status" {
+		if err := statusCmd(os.Args[2:], os.Getenv, os.Stdout); err != nil && !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(os.Stderr, "panda-agentd status:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	slog.SetDefault(newLogger(os.Stderr))
 	cfg, err := parseConfig(os.Args[1:], os.Getenv)
 	if errors.Is(err, flag.ErrHelp) {
 		return
 	}
 	if err != nil {
-		log.Fatal(err)
+		fatal("bad config", err)
 	}
-	runner, kind := defaultRunner()
-	log.Printf("panda-agentd %s: relay=%s slots=%d runner=%s", version, cfg.relay, cfg.slots, kind)
+	runner, kind, sandboxed := defaultRunner(cfg)
+	d := newDaemon(cfg, runner)
+	if sandboxed {
+		if d.owner, err = lookupOwner(jobUser); err != nil {
+			fatal("look up job user "+jobUser, err)
+		}
+	}
+	slog.Info("panda-agentd starting", "version", version, "relay", cfg.relay, "slots", cfg.slots, "runner", kind, "insecure", cfg.allowInsecure)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := newDaemon(cfg, runner).Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatal(err)
+	if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		fatal("panda-agentd stopped", err)
 	}
+	slog.Info("panda-agentd stopped")
 }

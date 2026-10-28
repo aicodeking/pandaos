@@ -2,10 +2,16 @@ package main
 
 // Placeholder PandaConnect wire protocol. Everything HTTP/JSON-specific lives
 // in this file so it can be swapped for the real protocol later.
+//
+// Box-facing endpoints: POST /v1/pair/start, GET /v1/pair/status,
+// POST /v1/heartbeat (response {"cancel":[ids]}), GET /v1/jobs/next,
+// POST /v1/jobs/{id}/result. Controllers cancel a job with
+// POST /v1/jobs/{id}/cancel; the box learns about it from the next heartbeat.
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,12 +37,15 @@ type Job struct {
 	Argv        []string `json:"argv"`
 	TimeoutSec  int      `json:"timeoutSec"`
 	MemoryMaxMB int      `json:"memoryMaxMB"`
+	KeepWorkdir bool     `json:"keepWorkdir"`
 }
 
 type Result struct {
 	ExitCode int    `json:"exitCode"`
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
+	// Cancelled is set when the job was stopped by a cancel or daemon shutdown.
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 var (
@@ -44,8 +53,19 @@ var (
 	errPairExpired  = errors.New("relay does not know pairing code")
 )
 
-// Long-polls hold for up to 30s; leave headroom above that.
-var httpClient = &http.Client{Timeout: 60 * time.Second}
+// Long-polls hold for up to 30s; leave headroom above that. Redirects are not
+// followed so a relay cannot bounce the bearer token to another URL or scheme.
+var httpClient = &http.Client{
+	Timeout:       60 * time.Second,
+	Transport:     tlsTransport(),
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+func tlsTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	return t
+}
 
 type client struct {
 	base, token string
@@ -113,9 +133,13 @@ func (c *client) pairStatus(ctx context.Context, code string) (string, error) {
 	return out.Token, err
 }
 
-func (c *client) heartbeat(ctx context.Context, caps Caps) error {
-	_, err := c.do(ctx, http.MethodPost, "/v1/heartbeat", caps, nil)
-	return err
+// heartbeat reports caps and returns the ids of jobs the relay wants cancelled.
+func (c *client) heartbeat(ctx context.Context, caps Caps) ([]string, error) {
+	var out struct {
+		Cancel []string `json:"cancel"`
+	}
+	_, err := c.do(ctx, http.MethodPost, "/v1/heartbeat", caps, &out)
+	return out.Cancel, err
 }
 
 // nextJob returns nil, nil when the long-poll ends without a job.

@@ -18,12 +18,14 @@ type Job struct {
 	Argv        []string `json:"argv"`
 	TimeoutSec  int      `json:"timeoutSec,omitempty"`
 	MemoryMaxMB int      `json:"memoryMaxMB,omitempty"`
+	KeepWorkdir bool     `json:"keepWorkdir,omitempty"`
 }
 
 type Result struct {
-	ExitCode int    `json:"exitCode"`
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
+	ExitCode  int    `json:"exitCode"`
+	Stdout    string `json:"stdout"`
+	Stderr    string `json:"stderr"`
+	Cancelled bool   `json:"cancelled,omitempty"`
 }
 
 type Relay struct {
@@ -34,6 +36,7 @@ type Relay struct {
 	codes    map[string]string // pairing code -> token ("" until first status poll)
 	tokens   map[string]bool
 	results  map[string]Result
+	cancels  map[string]bool // cancelled jobs without a result yet
 	pairings int
 }
 
@@ -44,6 +47,7 @@ func New(longPoll time.Duration) *Relay {
 		codes:    map[string]string{},
 		tokens:   map[string]bool{},
 		results:  map[string]Result{},
+		cancels:  map[string]bool{},
 	}
 }
 
@@ -56,6 +60,7 @@ func (r *Relay) Handler(admin bool) http.Handler {
 	mux.HandleFunc("GET /v1/jobs/next", r.auth(r.nextJob))
 	mux.HandleFunc("POST /v1/jobs/{id}/result", r.auth(r.result))
 	if admin {
+		mux.HandleFunc("POST /v1/jobs/{id}/cancel", r.cancel)
 		mux.HandleFunc("POST /admin/jobs", r.adminEnqueue)
 		mux.HandleFunc("GET /admin/results/{id}", r.adminResult)
 	}
@@ -77,6 +82,19 @@ func (r *Relay) Result(id string) (Result, bool) {
 	defer r.mu.Unlock()
 	res, ok := r.results[id]
 	return res, ok
+}
+
+// Cancel asks boxes (via heartbeat) to stop job id. A job still queued is
+// dropped with a cancelled result when a box next polls. False if the job
+// already has a result.
+func (r *Relay) Cancel(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, done := r.results[id]; done {
+		return false
+	}
+	r.cancels[id] = true
+	return true
 }
 
 // Revoke invalidates every issued token, forcing boxes to re-pair.
@@ -148,25 +166,53 @@ func (r *Relay) pairStatus(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) heartbeat(w http.ResponseWriter, req *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
+	r.mu.Lock()
+	ids := make([]string, 0, len(r.cancels))
+	for id := range r.cancels {
+		ids = append(ids, id)
+	}
+	r.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string][]string{"cancel": ids})
+}
+
+// takeCancelled records a cancelled result for j if it was cancelled while queued.
+func (r *Relay) takeCancelled(j Job) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.cancels[j.ID] {
+		return false
+	}
+	delete(r.cancels, j.ID)
+	r.results[j.ID] = Result{ExitCode: 130, Stderr: "cancelled before start", Cancelled: true}
+	return true
 }
 
 func (r *Relay) nextJob(w http.ResponseWriter, req *http.Request) {
 	t := time.NewTimer(r.longPoll)
 	defer t.Stop()
-	select {
-	case j := <-r.jobs:
-		// The token may have been revoked while we waited; don't hand the job to a dead session.
-		if tok, _ := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer "); !r.valid(tok) {
-			r.Enqueue(j)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+	for {
+		select {
+		case j := <-r.jobs:
+			if r.takeCancelled(j) {
+				continue
+			}
+			r.sendJob(w, req, j)
+		case <-t.C:
+			w.WriteHeader(http.StatusNoContent)
+		case <-req.Context().Done():
 		}
-		writeJSON(w, http.StatusOK, j)
-	case <-t.C:
-		w.WriteHeader(http.StatusNoContent)
-	case <-req.Context().Done():
+		return
 	}
+}
+
+func (r *Relay) sendJob(w http.ResponseWriter, req *http.Request, j Job) {
+	// The token may have been revoked while we waited; don't hand the job to a dead session.
+	if tok, _ := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer "); !r.valid(tok) {
+		r.Enqueue(j)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	writeJSON(w, http.StatusOK, j)
 }
 
 func (r *Relay) result(w http.ResponseWriter, req *http.Request) {
@@ -177,14 +223,23 @@ func (r *Relay) result(w http.ResponseWriter, req *http.Request) {
 	}
 	r.mu.Lock()
 	r.results[req.PathValue("id")] = res
+	delete(r.cancels, req.PathValue("id"))
 	r.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (r *Relay) cancel(w http.ResponseWriter, req *http.Request) {
+	if !r.Cancel(req.PathValue("id")) {
+		http.Error(w, "job already finished", http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (r *Relay) adminEnqueue(w http.ResponseWriter, req *http.Request) {
 	var j Job
 	if err := json.NewDecoder(req.Body).Decode(&j); err != nil || len(j.Argv) == 0 {
-		http.Error(w, "want {id?, argv:[...], timeoutSec?, memoryMaxMB?}", http.StatusBadRequest)
+		http.Error(w, "want {id?, argv:[...], timeoutSec?, memoryMaxMB?, keepWorkdir?}", http.StatusBadRequest)
 		return
 	}
 	if j.ID == "" {

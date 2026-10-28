@@ -12,7 +12,7 @@ import (
 
 func main() {
 	listen := flag.String("listen", ":8787", "listen address")
-	enqueue := flag.Bool("enqueue", true, "serve admin endpoints POST /admin/jobs and GET /admin/results/{id}")
+	enqueue := flag.Bool("enqueue", true, "serve admin endpoints POST /admin/jobs, GET /admin/results/{id} and POST /v1/jobs/{id}/cancel")
 	flag.Parse()
 	log.Printf("fake-relay listening on %s (admin=%v)", *listen, *enqueue)
 	log.Fatal(http.ListenAndServe(*listen, fakerelay.New(30*time.Second).Handler(*enqueue)))

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,22 +22,41 @@ func startRelay(t *testing.T) (*fakerelay.Relay, string) {
 	return r, srv.URL
 }
 
-// startDaemon runs a daemon with fast intervals until the test ends.
-func startDaemon(t *testing.T, relay string, slots int, run Runner) *daemon {
+func newTestDaemon(t *testing.T, relay string, slots int, run Runner) *daemon {
 	t.Helper()
 	dir := t.TempDir()
 	d := newDaemon(config{relay: relay, slots: slots, stateDir: filepath.Join(dir, "state"), runDir: filepath.Join(dir, "run")}, run)
 	d.heartbeatEvery = 50 * time.Millisecond
 	d.pairPollEvery = 10 * time.Millisecond
+	return d
+}
+
+// runDaemon runs d in the background. stop cancels it (like SIGTERM) and
+// returns Run's error; the test cleanup calls it if the test did not.
+func runDaemon(t *testing.T, d *daemon) (stop func() error) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Run(ctx) }()
+	var once sync.Once
+	var err error
+	stop = func() error {
+		once.Do(func() { cancel(); err = <-done })
+		return err
+	}
 	t.Cleanup(func() {
-		cancel()
-		if err := <-done; err != context.Canceled {
+		if err := stop(); err != context.Canceled {
 			t.Errorf("Run returned %v, want context.Canceled", err)
 		}
 	})
+	return stop
+}
+
+// startDaemon runs a daemon with fast intervals until the test ends.
+func startDaemon(t *testing.T, relay string, slots int, run Runner) *daemon {
+	t.Helper()
+	d := newTestDaemon(t, relay, slots, run)
+	runDaemon(t, d)
 	return d
 }
 
@@ -51,7 +71,7 @@ func waitResult(t *testing.T, r *fakerelay.Relay, id string) fakerelay.Result {
 	return fakerelay.Result{}
 }
 
-func echoRunner(_ context.Context, j Job) Result {
+func echoRunner(_ context.Context, j Job, _ string) Result {
 	return Result{ExitCode: 7, Stdout: strings.Join(j.Argv, " "), Stderr: "err"}
 }
 
@@ -89,7 +109,7 @@ func TestPairingCode(t *testing.T) {
 func TestTruncation(t *testing.T) {
 	relay, url := startRelay(t)
 	big := strings.Repeat("x", 100_000)
-	startDaemon(t, url, 1, func(context.Context, Job) Result { return Result{Stdout: big, Stderr: big} })
+	startDaemon(t, url, 1, func(context.Context, Job, string) Result { return Result{Stdout: big, Stderr: big} })
 	relay.Enqueue(fakerelay.Job{ID: "big", Argv: []string{"x"}})
 	res := waitResult(t, relay, "big")
 	if len(res.Stdout) != maxOutput || len(res.Stderr) != maxOutput {
@@ -97,14 +117,14 @@ func TestTruncation(t *testing.T) {
 	}
 
 	// The real runner caps output while capturing.
-	r := execRunner(context.Background(), Job{Argv: []string{"sh", "-c", "head -c 100000 /dev/zero; exit 3"}})
+	r := execRunner(context.Background(), Job{Argv: []string{"sh", "-c", "head -c 100000 /dev/zero; exit 3"}}, "")
 	if len(r.Stdout) != maxOutput || r.ExitCode != 3 {
 		t.Fatalf("execRunner: stdout=%d exit=%d", len(r.Stdout), r.ExitCode)
 	}
 }
 
 func TestExecRunnerTimeout(t *testing.T) {
-	r := run(context.Background(), 50*time.Millisecond, "sleep", []string{"5"})
+	r := run(context.Background(), 50*time.Millisecond, "sleep", []string{"5"}, "", nil)
 	if r.ExitCode != 124 {
 		t.Fatalf("exit = %d, want 124", r.ExitCode)
 	}
@@ -132,7 +152,7 @@ func TestUnauthorizedRepairs(t *testing.T) {
 func TestSlotLimit(t *testing.T) {
 	relay, url := startRelay(t)
 	var cur, peak atomic.Int32
-	startDaemon(t, url, 2, func(context.Context, Job) Result {
+	startDaemon(t, url, 2, func(context.Context, Job, string) Result {
 		n := cur.Add(1)
 		for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
 		}
@@ -154,7 +174,7 @@ func TestSlotLimit(t *testing.T) {
 
 func TestConfig(t *testing.T) {
 	noenv := func(string) string { return "" }
-	for _, relay := range []string{"", "ftp://x", "relay.example", "http://", "://bad"} {
+	for _, relay := range []string{"", "ftp://x", "relay.example", "http://", "://bad", "http://r:8787"} {
 		if _, err := parseConfig([]string{"-relay", relay}, noenv); err == nil {
 			t.Errorf("relay %q accepted", relay)
 		}
@@ -163,10 +183,22 @@ func TestConfig(t *testing.T) {
 		t.Error("slots 0 accepted")
 	}
 	env := func(k string) string {
-		return map[string]string{"PANDA_AGENTD_RELAY": "http://r:8787", "PANDA_AGENTD_SLOTS": "4"}[k]
+		return map[string]string{"PANDA_AGENTD_RELAY": "http://r:8787", "PANDA_AGENTD_SLOTS": "4", "PANDA_AGENTD_ALLOW_INSECURE": "1"}[k]
 	}
 	c, err := parseConfig(nil, env)
-	if err != nil || c.relay != "http://r:8787" || c.slots != 4 || c.stateDir != "/var/lib/panda-agentd" {
+	if err != nil || c.relay != "http://r:8787" || !c.allowInsecure || c.slots != 4 || c.stateDir != "/var/lib/panda-agentd" || c.cpuQuota != "200%" {
 		t.Fatalf("env config = %+v, %v", c, err)
+	}
+	for _, q := range []string{"200", "0%", "x%", "-5%"} {
+		if _, err := parseConfig([]string{"-relay", "https://r", "-cpu-quota", q}, noenv); err == nil {
+			t.Errorf("cpu-quota %q accepted", q)
+		}
+	}
+	if _, err := parseConfig([]string{"-relay", "https://r", "-job-rw-path", "mem"}, noenv); err == nil {
+		t.Error("relative -job-rw-path accepted")
+	}
+	c, err = parseConfig([]string{"-relay", "https://r", "-cpu-quota", "", "-job-rw-path", "/mem/"}, noenv)
+	if err != nil || c.cpuQuota != "" || len(c.jobRWPaths) != 1 || c.jobRWPaths[0] != "/mem" {
+		t.Fatalf("config = %+v, %v", c, err)
 	}
 }
