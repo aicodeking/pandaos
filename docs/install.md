@@ -4,7 +4,9 @@
 
 ## What you need
 
-- An x86_64 machine that boots in UEFI mode. The installer sets up systemd-boot, which is UEFI only.
+- An x86_64 machine that boots in **UEFI mode with Secure Boot disabled**. The installer sets up
+  systemd-boot, which is UEFI only, and PandaOS's boot files are not signed. BIOS/legacy (CSM) boot
+  is not supported.
 - A target disk of at least 8 GiB.
 - A USB stick at least as big as the ISO.
 - A target disk you are happy to **erase completely**.
@@ -12,7 +14,16 @@
 
 ## 1. Get the ISO
 
-Download from [Releases](https://github.com/AICodeKing/pandaos/releases):
+**The first release is pending**: there is no release tag yet, so there is nothing to download.
+Until then, build the ISO yourself (x86_64 Linux with Nix and flakes):
+
+```sh
+git clone https://github.com/AICodeKing/pandaos && cd pandaos
+nix build .#iso-headless          # or .#iso-desktop; the ISO is in result/iso/
+```
+
+See [development.md](development.md) for more. Once a release exists, download from
+[Releases](https://github.com/AICodeKing/pandaos/releases):
 
 - `pandaos-<version>-headless-x86_64-linux.iso`: console only, for an agent server.
 - `pandaos-<version>-desktop-x86_64-linux.iso`: adds the labwc desktop.
@@ -25,8 +36,6 @@ sha256sum -c --ignore-missing SHA256SUMS
 gh attestation verify pandaos-<version>-headless-x86_64-linux.iso --repo AICodeKing/pandaos
 ```
 
-Or build it yourself: `nix build .#iso-headless` (or `.#iso-desktop`), see [development.md](development.md).
-
 ## 2. Write the USB stick
 
 Find the stick with `lsblk`, then (this erases `/dev/sdX`):
@@ -37,14 +46,16 @@ sudo dd if=pandaos-<version>-headless-x86_64-linux.iso of=/dev/sdX bs=4M status=
 
 ## 3. Boot and install
 
-Boot the machine from the stick, then run:
+In the firmware setup, choose UEFI boot and turn Secure Boot off. Boot the machine from the stick,
+then run:
 
 ```sh
 sudo panda-install
 ```
 
 The interactive installer asks for the target disk, the profile, a hostname, a user, a password, an
-optional ssh public key and a time zone. Before it erases anything, it asks you to type the disk's
+optional ssh public key, an optional relay URL and a time zone. On the desktop ISO the default
+profile is `desktop`; on the headless ISO it is `headless`. Before it erases anything, it asks you to type the disk's
 name. The live ISO logs you in as `panda`, and `sudo` needs no password there.
 
 To script it, pass everything and `--yes`:
@@ -58,18 +69,20 @@ sudo panda-install \
   --password-hash "$(mkpasswd -m yescrypt)" \
   --ssh-key "ssh-ed25519 AAAA... alice@laptop" \
   --timezone Europe/Berlin \
+  --relay https://relay.example.com \
   --yes
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--disk DEV` | (required with `--yes`) | Whole target disk, e.g. `/dev/sda`, `/dev/nvme0n1`. **All of it is erased.** |
-| `--profile NAME` | `headless` | `headless`, or `desktop` (desktop ISO only) |
+| `--profile NAME` | the ISO's own profile | `headless`, or `desktop` (desktop ISO only). The desktop ISO defaults to `desktop` |
 | `--hostname NAME` | `pandaos` | `a-z`, `0-9` and `-`, at most 63 characters |
 | `--user NAME` | `panda` | Your login user, in `wheel`, `networkmanager` and `panda-mem`. Any other name gets created, and `panda` is then locked |
 | `--password-hash H` | (required with `--yes`) | A crypt(3) hash, not the plain password |
 | `--ssh-key K` | none | One authorized ssh public key line for the user |
 | `--timezone TZ` | `UTC` | A zone under `/etc/zoneinfo`, e.g. `Europe/Berlin` |
+| `--relay URL` | the placeholder relay | The `https://` relay `panda-agentd` pairs with. Written to `/var/lib/panda-agentd/relay`, which overrides `services.panda-agentd.relayUrl` |
 | `--yes` | | No questions and no typed disk confirmation |
 
 The installer refuses a disk that is a partition, is smaller than 8 GiB, or has anything mounted or
@@ -93,7 +106,9 @@ console and add a key later (see [security.md](security.md)).
 | `@snapshots` | `/.snapshots`: btrfs snapshots of `/mem` and `/home` |
 
 The disk is GPT: a 512 MB EFI partition labelled `PANDABOOT`, then the btrfs partition labelled
-`PANDAOS`. The subvolumes are mounted with `compress=zstd:1,noatime`.
+`PANDAOS`. The subvolumes are mounted with `compress=zstd:1,noatime`. The installer writes the
+filesystems' UUIDs into `/etc/pandaos/disk.nix`, and the system mounts them by UUID, so a second disk
+or USB stick with the same label cannot be mounted by mistake.
 
 Keeping `/mem` and `/home` in their own subvolumes is what lets them be snapshotted hourly and
 restored without touching the rest of the system.
@@ -103,13 +118,16 @@ restored without touching the rest of the system.
 
 **Offline install.** The ISO carries the prebuilt system, so the installer only copies it from the
 ISO's Nix store to the disk. Nothing is built or downloaded. The installed system has the storage
-drivers for most machines, but no `linux-firmware`. That firmware arrives with the first online
-rebuild, so wifi chips that need it only work after that.
+drivers for most machines and a **curated firmware set** for common wifi chips, so
+wifi works right after install without a network (new in Unreleased). It is not the full
+`linux-firmware`; a chip outside the set may still need firmware you add yourself.
 
-**Local flake.** `/etc/pandaos` holds `flake.nix`, `hardware-configuration.nix` and `local.nix`
-(your hostname, time zone, user, password hash and ssh key). `flake.nix` defines
-`nixosConfigurations.pandaos`, which tracks `github:AICodeKing/pandaos`. The daily update and any
-manual rebuild use it. The first rebuild needs the network and creates `/etc/pandaos/flake.lock`:
+**Local flake.** `/etc/pandaos` holds `flake.nix`, a pinned `flake.lock`, `hardware-configuration.nix`,
+`disk.nix`, `local.nix` (your hostname, time zone, user, password hash and ssh key) and `VERSION`.
+`flake.nix` defines `nixosConfigurations.pandaos`, which tracks the release channel
+`github:AICodeKing/pandaos/release` (see [updates-and-rollback.md](updates-and-rollback.md#the-release-channel)).
+`flake.lock` pins the exact revisions the ISO was built from, so a rebuild works offline right after
+install. The daily update and any manual rebuild use this flake:
 
 ```sh
 sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
@@ -118,5 +136,6 @@ sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
 ## After the first boot
 
 1. Connect to the network: wired works out of the box, use `nmtui` for wifi.
-2. Pair the agent with your relay, see [agents.md](agents.md#pairing).
+2. Pair the agent with your relay, see [agents.md](agents.md#pairing). If you did not pass `--relay`,
+   set the relay first (see [troubleshooting.md](troubleshooting.md#re-pairing)).
 3. Check the state with `panda-agentd status`.
