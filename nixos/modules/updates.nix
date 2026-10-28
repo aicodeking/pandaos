@@ -27,6 +27,8 @@ let
     runtimeInputs = [
       pkgs.coreutils
       pkgs.iproute2
+      pkgs.gnugrep
+      config.systemd.package
       config.nix.package.out
       config.system.build.nixos-rebuild
       health
@@ -63,6 +65,12 @@ let
             echo "panda-update: system unchanged"
           fi
           exit "$rc"
+        fi
+        # agentd has restartIfChanged=false so an update never kills running
+        # jobs. When it is idle, restart it so the health check tests the new
+        # agentd instead of the old process that is still running.
+        if [ "$switch_rc" -eq 0 ] && ! grep -Eqs '"running": ?[1-9]' /run/panda-agentd/status.json; then
+          systemctl restart panda-agentd.service || true
         fi
         if [ "$switch_rc" -eq 0 ] && panda-health "''${health_args[@]}"; then
           echo "panda-update: $now is healthy"

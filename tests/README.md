@@ -32,6 +32,6 @@ Each test prints `METRIC {json}` (so failed runs still report) and writes `$out/
 - `updateBytes` is the NAR bytes of the paths that a machine on `nixosConfigurations.headless` lacks
   for the same system with a rebuilt agentd.
 
-`budgets.json` is deliberately loose. The RAM budgets are unchanged. The closure budgets stay at
-1500/2900 MB until CI reports the real-system closure numbers. The plan is then to set each to
-the measured value + 10% (the old VM numbers were 1321/2847 MB).
+`budgets.json`: the RAM budgets are deliberately loose. The closure budgets are the measured
+real-system closures + 10% (headless 1637 MB with the curated firmware set, desktop 2114 MB
+with GPU off), so any growth past that fails CI.

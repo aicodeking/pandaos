@@ -190,23 +190,23 @@ let
 
 
         def agents_status(fixture):
-            path = "/tmp/fixture-status.json"
-            machine.succeed(f"printf %s {shlex.quote(fixture)} > {path}")
-            return json.loads(machine.succeed(f"PANDA_AGENTD_STATUS={path} panda-agents-status"))
+            machine.succeed(f"mkdir -p /tmp/fixture && printf %s {shlex.quote(fixture)} > /tmp/fixture/status.json")
+            return json.loads(machine.succeed("PANDA_AGENTD_RUN_DIR=/tmp/fixture panda-agents-status"))
 
 
         busy = agents_status(json.dumps({"paired": True, "slots": 2, "running": 1, "completed": 3,
                                          "failed": 0, "relay": "https://relay.example", "version": "0.2.0"}))
         assert busy["text"] == "Agents 1/2" and busy["class"] == "busy", busy
         assert "completed: 3" in busy["tooltip"], busy
-        failed = agents_status(json.dumps({"paired": True, "slots": 2, "running": 0, "failed": 1}))
+        failed = agents_status(json.dumps({"paired": True, "slots": 2, "running": 0, "failed": 1,
+                                           "lastError": "relay unreachable"}))
         assert failed["class"] == "failed", failed
         # status.json never carries the code (it is in a 0640 file), only `pairing`.
         pairing = agents_status(json.dumps({"paired": False, "pairing": True, "slots": 2}))
         assert pairing["text"].startswith("Pairing") and pairing["class"] == "pairing", pairing
         garbage = agents_status("not json")
         assert garbage["text"] == "Agents: ?", garbage
-        off = json.loads(machine.succeed("PANDA_AGENTD_STATUS=/nonexistent panda-agents-status"))
+        off = json.loads(machine.succeed("PANDA_AGENTD_RUN_DIR=/nonexistent panda-agents-status"))
         assert off["class"] == "off", off
         # The real daemon's file (unpaired: the default relay is a placeholder).
         machine.wait_for_file("/run/panda-agentd/status.json")
