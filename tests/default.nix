@@ -7,92 +7,21 @@
 let
   inherit (pkgs) lib;
   budgets = lib.importJSON ./budgets.json;
+  t = import ./lib.nix { inherit lib; };
+  inherit (t)
+    nodeName
+    vlanNode
+    noFirstboot
+    prelude
+    ;
 
-  # The base module pins hostName = "pandaos", which would give every node the
-  # same name and break `relay` resolution, so each node forces its own.
-  nodeName = name: { networking.hostName = lib.mkForce name; };
-
-  # Multi-node tests: keep NetworkManager off the test VLAN so the driver's
-  # static eth1 addresses stay put; agentd is what's under test, not NM.
-  vlanNode = name: {
-    imports = [ (nodeName name) ];
-    networking.networkmanager.enable = lib.mkForce false;
-  };
-
-  prelude = ''
-    import json
-    import re  # noqa: F401 (not every test uses it)
-    import shlex  # noqa: F401
-    import os
-    import time
-
-
-    def emit(metrics):
-        print("METRIC " + json.dumps(metrics, sort_keys=True))
-        out = os.environ.get("out")
-        if out:
-            with open(os.path.join(out, "metrics.json"), "w") as f:
-                json.dump(metrics, f, indent=2, sort_keys=True)
-
-
-    def idle_ram_mb(m):
-        """Return (used, total_minus_available) in MB after 30s of idle.
-
-        `used` is what `free` reports as used, plus tmpfs/shmem: anon memory,
-        unreclaimable slab, kernel stacks, etc. MemTotal - MemAvailable is
-        also returned for reference, but it counts the kernel's free-page
-        watermark reserve (tens of MB, scaling with VM RAM) as used, so the
-        budget is checked against `used`.
-        """
-        time.sleep(30)
-        # Breakdown in the log so a budget miss can be diagnosed from CI alone.
-        print(m.succeed("ps -eo rss=,comm= --sort=-rss | head -n 15"))
-        mi = {}
-        for line in m.succeed("cat /proc/meminfo").splitlines():
-            k, v = line.split(":", 1)
-            mi[k] = int(v.split()[0])
-        print({k: mi[k] for k in ("MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached",
-                                  "Shmem", "SReclaimable", "SUnreclaim", "AnonPages")})
-        used = mi["MemTotal"] - mi["MemFree"] - mi["Buffers"] - (mi["Cached"] - mi["Shmem"]) - mi["SReclaimable"]
-        return used // 1024, (mi["MemTotal"] - mi["MemAvailable"]) // 1024
-
-
-    def top_paths(registration, n=40):
-        """Print the n largest store paths from a closureInfo registration file."""
-        # Format per path: path, narHash, narSize, deriver, nRefs, refs...
-        lines = open(registration).read().split("\n")
-        sizes = []
-        referrers = {}
-        i = 0
-        try:
-            while i + 4 < len(lines) and lines[i]:
-                sizes.append((int(lines[i + 2]), lines[i]))
-                refs = lines[i + 5 : i + 5 + int(lines[i + 4])]
-                for r in refs:
-                    if r != lines[i]:
-                        referrers.setdefault(r, []).append(lines[i][44:])
-                i += 5 + len(refs)
-        except ValueError as e:
-            print(f"top_paths: unexpected registration format near line {i}: {e}")
-        for size, path in sorted(sizes, reverse=True)[:n]:
-            print(f"{size // (1024 * 1024):6d} MB  {path[44:]}  <- {', '.join(referrers.get(path, [])[:4])}")
-  '';
-
-  # Tests that don't exercise first boot keep it off: it would grab tty8 and
-  # switch VTs on every boot of a passwordless VM.
-  noFirstboot = {
-    pandaos.firstboot.enable = false;
-  };
-
-  # Closure size is computed host-side: closureInfo's total-nar-size is the same
-  # number `nix path-info -S` prints, but the test VM's Nix DB does not register
-  # its own system closure. Note this is the VM toplevel (includes test
-  # instrumentation); the real ISO sizes are printed by CI.
+  # Boot tests measure idle RAM only; closure sizes come from the real
+  # installable systems in closures.nix, not from these instrumented VMs.
   mkBootTest =
     {
       name,
       profile,
-      unitChecks,
+      script,
       extraConfig ? { },
     }:
     pkgs.testers.runNixOSTest {
@@ -107,25 +36,30 @@ let
         ];
       };
       testScript =
-        { nodes, ... }:
-        let
-          closure = pkgs.closureInfo { rootPaths = [ nodes.machine.system.build.toplevel ]; };
-          budget = budgets.${profile};
-        in
         prelude
         + ''
+          ram_budget = ${toString budgets.${profile}.idleRamMB}
           machine.wait_for_unit("multi-user.target")
-          ${unitChecks}
-          ram, ram_minus_avail = idle_ram_mb(machine)
-          with open("${closure}/total-nar-size") as f:
-              closure_mb = int(f.read()) // (1024 * 1024)
-          top_paths("${closure}/registration")
-          emit({"test": "${name}", "profile": "${profile}", "idleRamMB": ram,
-                "memTotalMinusAvailableMB": ram_minus_avail, "closureMB": closure_mb})
-          assert ram <= ${toString budget.idleRamMB}, f"idle RAM {ram} MB > budget ${toString budget.idleRamMB} MB"
-          assert closure_mb <= ${toString budget.closureMB}, f"closure {closure_mb} MB > budget ${toString budget.closureMB} MB"
+          ${script}
         '';
     };
+
+  # Unpaired box, relay unreachable (the default relay is a placeholder).
+  agentdUnpairedChecks = ''
+    with subtest("agentd: pairing code 0640 root:wheel, not in status.json; lastError while the relay is down"):
+        machine.wait_for_file("/run/panda-agentd/pairing-code")
+        perms = machine.succeed("stat -c '%a %U %G' /run/panda-agentd/pairing-code").strip()
+        assert perms == "640 root wheel", f"pairing-code is {perms}"
+        machine.fail("runuser -u nobody -- cat /run/panda-agentd/pairing-code")
+        wait_last_error(machine, present=True)
+        st = status_json(machine)
+        code = machine.succeed("cat /run/panda-agentd/pairing-code").strip()
+        raw = machine.succeed("cat /run/panda-agentd/status.json")
+        assert "pairingCode" not in st and code not in raw, f"status.json leaks the code: {raw}"
+        assert st["pairing"] is True and st["paired"] is False, st
+        assert st.get("lastErrorAt"), f"lastError without lastErrorAt: {st}"
+        print(f"lastError while relay is down: {st['lastError']}")
+  '';
 
   # Cancel: a long job is stopped through the relay and reported as cancelled.
   cancelCheck = ''
@@ -141,6 +75,18 @@ let
         box.wait_until_succeeds("grep -q '\"running\": 0' /run/panda-agentd/status.json", timeout=30)
   '';
 
+  # The relay goes away: lastError is set; it comes back: lastError clears.
+  # fake-relay keeps tokens in memory, so the restart also forces a re-pair.
+  outageCheck = ''
+    with subtest("relay outage sets lastError, recovery clears it"):
+        relay.succeed("systemctl stop fake-relay.service")
+        wait_last_error(box, present=True)
+        print(f"lastError during outage: {status_json(box)['lastError']}")
+        relay.succeed("systemctl start fake-relay.service")
+        wait_last_error(box, present=False, timeout=180)
+        box.wait_until_succeeds("grep -q '\"paired\": true' /run/panda-agentd/status.json", timeout=60)
+  '';
+
   mkRoundtrip =
     { name, slow }:
     pkgs.testers.runNixOSTest {
@@ -154,6 +100,7 @@ let
             noFirstboot
           ];
           services.panda-agentd.enable = lib.mkForce false;
+          boot.kernelModules = lib.optional slow "sch_netem";
           networking.firewall.allowedTCPPorts = [ 8787 ];
           environment.systemPackages = [ pkgs.curl ];
           systemd.services.fake-relay = {
@@ -184,10 +131,21 @@ let
       };
       testScript =
         let
+          # netem only shapes egress, so each side delays its half: 150 ms out
+          # of each node makes a 300 ms RTT, and 1% loss each way ~ 2% per round trip.
           startAgent = lib.optionalString slow ''
-            box.succeed("tc qdisc add dev eth1 root netem delay 300ms loss 2% rate 1mbit")
+            for node in (box, relay):
+                node.succeed("tc qdisc add dev eth1 root netem delay 150ms loss 1% rate 1mbit")
+            ping = box.succeed("ping -c 10 -i 0.3 -W 2 relay")
+            rtt_match = re.search(r"= [0-9.]+/([0-9.]+)/", ping)
+            assert rtt_match, f"no rtt summary in ping output: {ping}"
+            rtt_ms = float(rtt_match.group(1))
+            print(f"netem RTT box<->relay: {rtt_ms} ms")
+            assert 290 <= rtt_ms <= 450, f"netem RTT {rtt_ms} ms, want ~300 ms"
+            start = time.monotonic()
             box.succeed("systemctl start panda-agentd.service")
           '';
+          rttMetric = lib.optionalString slow ", \"rttMs\": rtt_ms";
           limit = lib.optionalString slow ''
             assert elapsed <= 120, f"round trip took {elapsed}s over a slow link (limit 120s)"
           '';
@@ -208,13 +166,17 @@ let
           relay.succeed(f"curl -sf -X POST -H 'Content-Type: application/json' -d '{job}' http://localhost:8787/admin/jobs")
           result = json.loads(relay.wait_until_succeeds("curl -sf http://localhost:8787/admin/results/echo-hi", timeout=120))
           elapsed = round(time.monotonic() - start, 1)
-          emit({"test": "${name}", "roundtripSec": elapsed})
+          emit({"test": "${name}", "roundtripSec": elapsed${rttMetric}})
           assert result["exitCode"] == 0, f"job failed: {result}"
           assert result["stdout"].strip() == "hi", f"unexpected stdout: {result}"
           ${limit}
-          status = json.loads(box.succeed("cat /run/panda-agentd/status.json"))
-          assert status["paired"] is True, f"status.json is not paired: {status}"
-          ${lib.optionalString (!slow) cancelCheck}
+          with subtest("agentd status after pairing: paired, no code anywhere, no error"):
+              box.fail("test -e /run/panda-agentd/pairing-code")
+              wait_last_error(box, present=False)
+              status = status_json(box)
+              assert status["paired"] is True and status["pairing"] is False, f"status.json: {status}"
+              assert "pairingCode" not in status, f"status.json has a pairing code: {status}"
+          ${lib.optionalString (!slow) (cancelCheck + outageCheck)}
         '';
     };
 
@@ -237,8 +199,9 @@ let
         assert "completed: 3" in busy["tooltip"], busy
         failed = agents_status(json.dumps({"paired": True, "slots": 2, "running": 0, "failed": 1}))
         assert failed["class"] == "failed", failed
-        pairing = agents_status(json.dumps({"paired": False, "pairingCode": "ABC123", "slots": 2}))
-        assert pairing["text"] == "Pairing: ABC123" and pairing["class"] == "pairing", pairing
+        # status.json never carries the code (it is in a 0640 file), only `pairing`.
+        pairing = agents_status(json.dumps({"paired": False, "pairing": True, "slots": 2}))
+        assert pairing["text"].startswith("Pairing") and pairing["class"] == "pairing", pairing
         garbage = agents_status("not json")
         assert garbage["text"] == "Agents: ?", garbage
         off = json.loads(machine.succeed("PANDA_AGENTD_STATUS=/nonexistent panda-agents-status"))
@@ -272,17 +235,57 @@ in
   boot-headless = mkBootTest {
     name = "boot-headless";
     profile = "headless";
-    unitChecks = ''
+    script = ''
       machine.wait_for_unit("panda-agentd.service")
-      machine.wait_for_unit("panda-mem-init.service")
+      machine.wait_for_unit("panda-mem.service")
+      ${agentdUnpairedChecks}
+      ram, ram_minus_avail = idle_ram_mb(machine)
+      emit({"test": "boot-headless", "profile": "headless", "idleRamMB": ram,
+            "memTotalMinusAvailableMB": ram_minus_avail})
+      assert ram <= ram_budget, f"idle RAM {ram} MB > budget {ram_budget} MB"
     '';
   };
 
+  # idleRamMB (budgeted) is measured inside a logged-in labwc session, which
+  # greetd starts via initial_session (autologin, test only). Logging out then
+  # brings up tuigreet, measured as greeterIdleRamMB (reported only).
   boot-desktop = mkBootTest {
     name = "boot-desktop";
     profile = "desktop";
-    unitChecks = desktopChecks;
-    extraConfig.virtualisation.memorySize = 2048;
+    extraConfig = {
+      virtualisation.memorySize = 2048;
+      # A virtio GPU for wlroots' DRM backend, rendered in software (pixman).
+      virtualisation.qemu.options = [
+        "-vga none"
+        "-device virtio-gpu-pci"
+      ];
+      environment.sessionVariables.WLR_RENDERER = lib.mkDefault "pixman";
+      services.greetd.settings.initial_session = {
+        command = "labwc";
+        user = "panda";
+      };
+    };
+    script = ''
+      ${desktopChecks}
+      with subtest("logged-in labwc session comes up and stays up"):
+          machine.wait_until_succeeds("pgrep -u panda -x labwc", timeout=120)
+          machine.wait_until_succeeds("test -S /run/user/$(id -u panda)/wayland-0", timeout=60)
+          machine.wait_until_succeeds("pgrep -u panda -x waybar", timeout=60)
+      session_ram, session_minus_avail = idle_ram_mb(machine)
+      machine.screenshot("session")
+      machine.succeed("pgrep -u panda -x labwc")
+
+      with subtest("logout returns to the greeter"):
+          machine.succeed("loginctl terminate-user panda")
+          machine.wait_until_fails("pgrep -u panda -x labwc", timeout=60)
+          machine.wait_until_succeeds("pgrep -x tuigreet", timeout=60)
+      greeter_ram, greeter_minus_avail = idle_ram_mb(machine)
+
+      emit({"test": "boot-desktop", "profile": "desktop", "idleRamMB": session_ram,
+            "memTotalMinusAvailableMB": session_minus_avail, "greeterIdleRamMB": greeter_ram,
+            "greeterMemTotalMinusAvailableMB": greeter_minus_avail})
+      assert session_ram <= ram_budget, f"idle session RAM {session_ram} MB > budget {ram_budget} MB"
+    '';
   };
 
   agentd-roundtrip = mkRoundtrip {
@@ -294,6 +297,11 @@ in
     name = "slow-network";
     slow = true;
   };
+
+  closures = import ./closures.nix { inherit pkgs self; };
+  mem-security = import ./mem-security.nix { inherit pkgs self t; };
+  update-rollback = import ./update-rollback.nix { inherit pkgs self t; };
+  iso-boot = import ./iso-boot.nix { inherit pkgs self t; };
 
   mem = pkgs.testers.runNixOSTest {
     name = "mem";
@@ -310,9 +318,12 @@ in
       prelude
       + ''
         d = "${nodes.machine.services.panda-mem.dir}"
-        machine.wait_for_unit("panda-mem-init.service")
-        machine.succeed(f"panda-mem write -dir {d} -kind semantic -title 'ci probe' -body 'pandaos-ci-marker body'")
-        hits = machine.succeed(f"panda-mem search -dir {d} pandaos-ci-marker")
+        machine.wait_for_unit("panda-mem.service")
+        sock = "-socket /run/panda-mem/sock"
+        machine.wait_for_file("/run/panda-mem/sock")
+        # As a client user, through the single-writer socket.
+        machine.succeed(f"runuser -u panda -- panda-mem write {sock} -kind semantic -title 'ci probe' -body 'pandaos-ci-marker body'")
+        hits = machine.succeed(f"runuser -u panda -- panda-mem search {sock} pandaos-ci-marker")
         assert "ci probe" in hits or "pandaos-ci-marker" in hits, f"search missed the memory: {hits!r}"
         commits = machine.succeed(f"git -c safe.directory='*' -C {d} log --oneline")
         assert commits.strip(), "panda-mem write made no git commit"
@@ -537,7 +548,7 @@ in
               target.succeed(f"findmnt -no FSTYPE {mnt} | grep -qx btrfs")
           target.succeed("test -s /etc/pandaos/flake.nix")
           target.wait_for_unit("panda-agentd.service")
-          target.wait_for_unit("panda-mem-init.service")
+          target.wait_for_unit("panda-mem.service")
 
       with subtest("snapshots: btrbk on the installed btrfs"):
           target.succeed("systemctl start btrbk-panda.service")

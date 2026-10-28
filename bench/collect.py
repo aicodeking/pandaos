@@ -59,13 +59,26 @@ def collect(paths):
     return results
 
 
+def budget_for(key, profile, budgets):
+    """Budget for a metric: by the test's profile, or by a profile-prefixed key
+    (closures reports headlessClosureMB against budgets.headless.closureMB)."""
+    if key in budgets.get(profile, {}):
+        return budgets[profile][key]
+    for p, b in budgets.items():
+        rest = key[len(p):]
+        if key.startswith(p) and rest:
+            sub = rest[0].lower() + rest[1:]
+            if sub in b:
+                return b[sub]
+    return ""
+
+
 def table(results, budgets):
     rows = ["| test | metric | value | budget |", "|---|---|---|---|"]
     for name in sorted(results):
         m = results[name]
-        budget = budgets.get(m.get("profile"), {})
         for key in sorted(k for k in m if k not in ("test", "profile")):
-            rows.append(f"| {name} | {key} | {m[key]} | {budget.get(key, '')} |")
+            rows.append(f"| {name} | {key} | {m[key]} | {budget_for(key, m.get('profile'), budgets)} |")
     return "\n".join(rows)
 
 

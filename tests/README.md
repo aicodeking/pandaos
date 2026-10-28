@@ -1,35 +1,37 @@
 # PandaOS VM tests
 
-`default.nix` holds the NixOS VM tests, which the flake exposes as `checks.x86_64-linux.*`:
+`default.nix` exposes these as `checks.x86_64-linux.*`. Shared helpers are in `lib.nix`, and the larger tests have their own files.
 
-| test | what it checks |
-|---|---|
-| `boot-headless` | boots, `panda-agentd` and `panda-mem-init` come up, idle RAM and closure size stay within budget |
-| `boot-desktop` | boots, `greetd` is active, `panda-agents-status` against fixture `status.json` files, waybar/labwc config, idle RAM and closure size within budget (2 GB VM) |
-| `agentd-roundtrip` | `box` pairs with a `fake-relay` node and runs `echo hi`, `status.json` says paired, then a `sleep 600` job is cancelled through the relay |
-| `slow-network` | same round trip with 300 ms delay, 2% loss and 1 Mbit/s, must finish in 120 s |
-| `mem` | `panda-mem write`/`search` work, the write makes a git commit, `/etc/panda/mcp.json` is valid JSON, btrbk skips cleanly without `/.snapshots` |
-| `security` | no usable `panda` password and `panda-firstboot` prompts, sshd refuses passwords (from a second node too), only port 22 is reachable, hardening sysctls applied |
-| `browser` | `panda-browser` CDP on 127.0.0.1:9222 only, unreachable from a second node, fresh profile per start |
-| `install` | `panda-install --yes` to an empty 10 GiB disk, checks labels, subvolumes and `/etc/pandaos`, then boots the installed disk via OVMF and checks hostname, password, time zone, mounts, services and a btrbk run |
+| test | what it proves | what it does not prove |
+|---|---|---|
+| `boot-headless` | boots; `panda-agentd` and `panda-mem.service` come up; with the relay unreachable, `pairing-code` is `0640 root:wheel`, unreadable by `nobody`, the code is not in `status.json`, `pairing` is true and `lastError`/`lastErrorAt` are set; idle RAM within budget | behaviour on real hardware |
+| `boot-desktop` | `greetd` + `initial_session` autologin into labwc (pixman on virtio-gpu); labwc, its Wayland socket and waybar come up and labwc is still alive after 30 s; `idleRamMB` (budgeted) is the logged-in session; after logout tuigreet comes back and `greeterIdleRamMB` is reported; `panda-agents-status` against fixtures; a screenshot `session.png` is in `$out` | GPU rendering, real displays, input, audio |
+| `agentd-roundtrip` | `box` pairs with `fake-relay` and runs `echo hi`; after pairing the code file is gone, `status.json` has no code and `lastError` is empty; a `sleep 600` job is cancelled; stopping the relay sets `lastError` and restarting it clears it (and re-pairs) | the real PandaConnect relay |
+| `slow-network` | netem on **both** nodes (150 ms + 1% loss + 1 Mbit/s each way), with ping checking the RTT is ~300 ms (`rttMs`) before agentd starts; pairing + job round trip finish within 120 s (`roundtripSec`) | jitter, reordering, NAT, relay restarts |
+| `mem` | write/search as `panda` over `/run/panda-mem/sock`, git commit, valid `/etc/panda/mcp.json`, btrbk skips without `/.snapshots` | |
+| `mem-security` | `panda-agent` cannot write `.git` (no hook, no `core.fsmonitor`). Root then plants both, and plain `git` fires them (so the check is not vacuous). `panda-mem write` over the socket as `panda` and `panda-agent` then fires neither; refusing the tampered repo is accepted. Markers live in `.git`, the only place the sandboxed service could write them | other git vectors beyond panda-mem's config allow-list; an attacker who can replace the panda-mem binary or its unit |
+| `update-rollback` | the real `nixos-upgrade` unit, `panda-update-run`, `panda-health` and rollback: a good generation is switched to and logged healthy; a generation whose agentd `ExecStart` is `false` is rolled back to the previous one, with `panda-agentd.service is …` and `rolling back to` in the journal and the system profile back on the good generation; `panda-update hold` makes the unit skip (`ConditionResult=no`), `panda-update run` refuse, and `unhold` removes the file | **`pandaos.updates.switchCommand` replaces `nixos-rebuild switch`** with a switch to a prebuilt specialisation. Not covered: evaluating `/etc/pandaos#pandaos`, `--update-input pandaos`, fetching `github:AICodeKing/pandaos/release`, binary-cache substitution, `flake.lock` restore, boot counting / `panda-boot-check` (needs EFI and reboots) |
+| `iso-boot` | the headless live ISO boots from a virtual CD-ROM (BIOS, squashfs root, `PANDAOS-LIVE` label) to multi-user, and `panda-install --help` runs; `isoBootSec` | the image is built from the same modules as `packages.iso-headless` **plus `test-instrumentation.nix` and zstd level 3**, so it is not the byte-identical release artifact; EFI boot of the ISO; USB boot |
+| `closures` | host-side, no VM: NAR closure of `nixosConfigurations.{headless,desktop}` (what panda-install puts on disk) vs `budgets.json`; `updateBytes`/`updatePaths` for an agentd-only update | compressed download size (NAR bytes are an upper bound); nixpkgs-bump updates |
+| `security`, `browser`, `install` | see the test bodies in `default.nix` | |
 
-Firstboot is off in every test except `security`. The `install` test installs the real prebuilt
-headless system plus the NixOS test backdoor (`test-instrumentation.nix`), so the driver can talk to
-the installed system.
+Firstboot is off in every test except `security`. Run one test with
+`nix build .#checks.x86_64-linux.boot-headless -L`, or all with `nix flake check -L` (needs KVM).
+`python3 tests/test_closures.py` self-tests `closures.py`.
 
-Run one test with `nix build .#checks.x86_64-linux.boot-headless -L`. Run all of them with `nix flake check -L`. You need KVM.
+## Metrics and budgets
 
-## Budgets
+Each test prints `METRIC {json}` (so failed runs still report) and writes `$out/metrics.json`.
+`bench/collect.py` reads both.
 
-`budgets.json` sets the limits the boot tests fail on. The numbers are **deliberately loose** for now.
-CI prints the real values as `METRIC {...}` lines. Once we have a few runs of data we will tighten
-the budgets to the measured value plus some headroom.
+- `idleRamMB` is `MemTotal - MemFree - Buffers - (Cached - Shmem) - SReclaimable`, read after a 30 s settle.
+  This is budgeted. `memTotalMinusAvailableMB` is reported but not budgeted, because it also counts the kernel's free-page reserve.
+- `closureMB` (`headlessClosureMB`, `desktopClosureMB` in `closures`) is the NAR size of the real
+  installable system, the same number `nix path-info -S` gives. Earlier versions measured the test VM
+  closure, which included test instrumentation.
+- `updateBytes` is the NAR bytes of the paths that a machine on `nixosConfigurations.headless` lacks
+  for the same system with a rebuilt agentd.
 
-- `idleRamMB` is what `free` reports as used, plus shmem/tmpfs (`MemTotal - MemFree - Buffers - (Cached - Shmem) - SReclaimable`), read after a 30 s settle.
-  `memTotalMinusAvailableMB` is also reported. It is not budgeted, because it also counts the kernel's free-page watermark reserve (about 80 MB on a 1 GB VM).
-- `closureMB` is the NAR size of the test VM's system closure, the same number `nix path-info -S` gives.
-  It is computed on the host, because the VM does not register its own closure in its Nix database.
-  This closure includes the test-driver instrumentation. CI also prints the real ISO sizes (`isoMB`).
-
-Each test writes its metrics to `$out/metrics.json` and prints a `METRIC` line, so the line is still
-there when a test fails. `bench/collect.py` reads both.
+`budgets.json` is deliberately loose. The RAM budgets are unchanged. The closure budgets stay at
+1500/2900 MB until CI reports the real-system closure numbers. The plan is then to set each to
+the measured value + 10% (the old VM numbers were 1321/2847 MB).

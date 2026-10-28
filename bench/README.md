@@ -13,6 +13,12 @@ runs every check, runs this script, and uploads the results as an artifact.
 
 Run `python3 bench/test_collect.py` to self-test the script.
 
+Budgets are looked up by the test's `profile`, or by a profile-prefixed key: the `closures` check
+reports `headlessClosureMB`, which is compared with `budgets.headless.closureMB`. Closure sizes now
+come from the real `nixosConfigurations`, not the instrumented test VMs. Desktop `idleRamMB` is
+measured in a logged-in labwc session, and the greeter is reported separately as `greeterIdleRamMB`.
+`updateBytes` is an upper bound (NAR bytes, not compressed downloads) for an agentd-only update.
+
 ## Plan: comparison against mainstream distros (not built yet)
 
 Once we have a Hetzner box, a nightly job will provision **identical cloud VMs** (same size, region

@@ -25,6 +25,9 @@ with tempfile.TemporaryDirectory() as tmp:
     assert results["slow-network"]["roundtripSec"] == 42.5, results
     md = collect.table(results, {"headless": {"idleRamMB": 200}})
     assert "| boot-headless | idleRamMB | 150 | 200 |" in md, md
+    md = collect.table({"closures": {"test": "closures", "headlessClosureMB": 900, "updateBytes": 5}},
+                       {"headless": {"closureMB": 1500}})
+    assert "| closures | headlessClosureMB | 900 | 1500 |" in md and "| closures | updateBytes | 5 |  |" in md, md
 
     os.environ["BENCH_RESULTS_DIR"] = str(t / "out")
     assert collect.main([str(t / "slow.log")]) == 0
