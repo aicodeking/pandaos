@@ -52,9 +52,20 @@ restore_mem() {
     term restore "$sudo" panda-rollback-mem "$snap"
 }
 
-pairing() {
-  code=$(cat /run/panda-agentd/pairing-code 2>/dev/null || true)
-  term pairing echo "${code:-No pairing in progress.}"
+connect() {
+  case "$(printf '%s\n' "Sign in" Status Logs "Full access on" "Full access off" "Sign out" |
+    pick "pandacode>")" in
+    "Sign in") term pandacode panda-connect sign-in ;;
+    "Status") term pandacode sh -c 'panda-connect status --json | jq .' ;;
+    "Logs") term pandacode panda-connect logs ;;
+    "Full access on")
+      confirm "Give PandaCode agents full access to this machine" &&
+        term pandacode panda-connect full-access on ;;
+    "Full access off")
+      confirm "Turn off full access for PandaCode agents" &&
+        term pandacode panda-connect full-access off ;;
+    "Sign out") confirm "Sign this device out of PandaCode" && term pandacode panda-connect sign-out ;;
+  esac
 }
 
 choice=$(printf '%s\n' \
@@ -63,8 +74,8 @@ choice=$(printf '%s\n' \
   "Disk usage" \
   "Logs" \
   "Failed services" \
+  "PandaCode Connect" \
   "Agents status" \
-  "Pairing code" \
   "Memory browser" \
   "Restore /mem from snapshot" \
   "Updates" \
@@ -80,7 +91,7 @@ case "$choice" in
   "Logs") foot --title "Panda: logs" journalctl -f -n 200 & ;;
   "Failed services") term services systemctl --failed ;;
   "Agents status") term agents panda-agentd status ;;
-  "Pairing code") pairing ;;
+  "PandaCode Connect") connect ;;
   "Memory browser") memory ;;
   "Restore /mem from snapshot") restore_mem ;;
   "Updates") updates ;;

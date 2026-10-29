@@ -32,10 +32,10 @@ window#waybar.dock {
   font-weight: bold;
 }
 
-#custom-agents.pairing { color: #5ec39a; font-weight: bold; }
-#custom-agents.busy { color: #5ec39a; }
-#custom-agents.off { color: #7d8590; }
-#custom-agents.failed,
+#custom-connect.active { color: #5ec39a; }
+#custom-connect.connecting { color: #5ec39a; font-style: italic; }
+#custom-connect.off { color: #7d8590; }
+#custom-connect.failed,
 #battery.critical,
 #network.disconnected,
 #pulseaudio.muted { color: #e5707a; }

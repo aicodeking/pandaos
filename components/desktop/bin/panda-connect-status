@@ -1,0 +1,43 @@
+#!/bin/sh
+# Waybar custom module: one JSON line from `panda-connect status --json`.
+# `panda-connect-status click` is the module's on-click: sign in, or show logs.
+# PANDA_CONNECT_CMD is only overridden by the fixture test.
+cli=${PANDA_CONNECT_CMD:-panda-connect}
+
+if [ "${1:-}" = click ]; then
+  if "$cli" status --json 2>/dev/null | jq -e '.signedIn == true' >/dev/null 2>&1; then
+    exec foot --hold --title 'Panda: PandaCode logs' "$cli" logs
+  fi
+  exec foot --hold --title 'Panda: PandaCode sign-in' "$cli" sign-in
+fi
+
+if ! command -v "$cli" >/dev/null 2>&1; then
+  printf '%s\n' '{"text":"PandaCode: off","tooltip":"panda-connect is not installed","class":"off"}'
+  exit 0
+fi
+
+# Don't trust the exit code: a signed-out host may still print valid JSON.
+out=$("$cli" status --json 2>/dev/null || true)
+res=$(printf '%s' "$out" | jq -c '
+  if type != "object" then error("not an object") else . end
+  | "version: \(.version // "-")" as $v
+  | (.deviceName // "") as $dev
+  | if .signedIn != true then
+      {text: "PandaCode: sign in", class: "off", tooltip: "\($v)\nClick to sign in with GitHub"}
+    elif .service == "failed" then
+      {text: "PandaCode: error", class: "failed", tooltip: "\($v)\nThe host service failed. Click for logs"}
+    elif .service == "activating" then
+      {text: "PandaCode: connecting", class: "connecting", tooltip: "\($v)\nStarting the host. Click for logs"}
+    elif .service == "active" then
+      {text: "PandaCode: \(if $dev == "" then "connected" else $dev end)", class: "active",
+       tooltip: "\($v)\nConnected as \(if $dev == "" then "-" else $dev end). Click for logs"}
+    else
+      {text: "PandaCode: stopped", class: "off", tooltip: "\($v)\nservice: \(.service // "-"). Click for logs"}
+    end
+' 2>/dev/null || true)
+
+if [ -n "$res" ]; then
+  printf '%s\n' "$res"
+else
+  printf '%s\n' '{"text":"PandaCode: ?","tooltip":"panda-connect status --json gave no valid JSON. Click for logs","class":"failed"}'
+fi

@@ -7,7 +7,6 @@ let
 
   footExe = "${pkgs.foot}/bin/foot";
   inTerm = cmd: "${footExe} --title 'Panda: ${cmd}' ${cmd}";
-  held = cmd: "${footExe} --hold --title 'Panda: ${cmd}' ${cmd}";
 
   # No Xwayland: drops Xwayland and its X/GL libs from labwc's closure.
   # wlroots reads enableXWayland through finalAttrs, so overrideAttrs is enough.
@@ -75,7 +74,13 @@ let
     text = builtins.readFile ./bin/panda-agents-status;
   };
 
-  # panda-mem, panda-agentd, panda-update, panda-rollback-mem and
+  panda-connect-status = pkgs.writeShellApplication {
+    name = "panda-connect-status";
+    runtimeInputs = [ pkgs.jq pkgs.foot ];
+    text = builtins.readFile ./bin/panda-connect-status;
+  };
+
+  # panda-mem, panda-agentd, panda-connect, panda-update, panda-rollback-mem and
   # nixos-rebuild come from the system PATH: they belong to the running
   # system generation, not to this script.
   panda-menu = pkgs.writeShellApplication {
@@ -115,7 +120,9 @@ let
       layer = "top";
       position = "top";
       height = 26;
-      modules-left = [ "custom/panda" "custom/agents" ];
+      # panda-agents-status stays installed; agentd is off by default, so its
+      # module is not on the default bar.
+      modules-left = [ "custom/panda" "custom/connect" ];
       modules-center = [ "clock" ];
       modules-right = [ "network" "cpu" "memory" "disk" "battery" "pulseaudio" ];
       "custom/panda" = {
@@ -123,11 +130,11 @@ let
         tooltip-format = "Repair menu (Super+X)";
         on-click = lib.getExe panda-menu;
       };
-      "custom/agents" = {
-        exec = lib.getExe panda-agents-status;
+      "custom/connect" = {
+        exec = lib.getExe panda-connect-status;
         return-type = "json";
         interval = 5;
-        on-click = held "panda-agentd status";
+        on-click = "${lib.getExe panda-connect-status} click";
       };
       clock = {
         format = "{:%a %d %b  %H:%M}";
@@ -241,6 +248,7 @@ in
       panda-session
       panda-lock
       panda-agents-status
+      panda-connect-status
       panda-menu
     ];
 
