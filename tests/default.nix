@@ -323,6 +323,7 @@ in
   mem-security = import ./mem-security.nix { inherit pkgs self t; };
   update-rollback = import ./update-rollback.nix { inherit pkgs self t; };
   boot-fallback = import ./boot-fallback.nix { inherit pkgs self t; };
+  update-e2e = import ./update-e2e.nix { inherit pkgs self t; };
   iso-boot = import ./iso-boot.nix { inherit pkgs self t; };
   pandacode-host = import ./pandacode-host.nix { inherit pkgs self t; };
   panda-ckpt = import ../components/checkpoint/vmtest.nix { inherit pkgs self; };
