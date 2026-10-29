@@ -20,16 +20,12 @@ need_root() {
   fi
 }
 
-# pandacode as the host user; it needs a display to start, even for one-shot
-# flags. Own process group: one-shot flags leave WebKit helpers behind.
+# pandacode as the host user; it needs a display to start, even for one-shot flags.
+# ponytail: one-shot runs may leave WebKit helpers behind (the service sweeps
+# its cgroup; here they live until reboot); a transient unit would fix it.
 as_host() {
-  setsid runuser -u "$HOST_USER" -- env HOME="$HOST_HOME" PANDACODE_SECRETS_FILE=1 \
-    xvfb-run -a pandacode "$@" &
-  host_pid=$!
-  host_rc=0
-  wait "$host_pid" || host_rc=$?
-  kill -TERM -- "-$host_pid" 2>/dev/null || true
-  return "$host_rc"
+  runuser -u "$HOST_USER" -- env HOME="$HOST_HOME" PANDACODE_SECRETS_FILE=1 \
+    xvfb-run -a pandacode "$@"
 }
 
 sign_in() {

@@ -41,13 +41,17 @@ let
       on) flag=--full-access ;;
       *) flag=--no-full-access ;;
     esac
-    # serve exits but leaves WebKit helpers (and so Xvfb) running in the
-    # unit's cgroup; its own process group lets us stop them all.
-    ${pkgs.util-linux}/bin/setsid ${lib.getExe pkgs.xvfb-run} -a ${lib.getExe cfg.package} serve "$flag" &
-    pid=$!
     rc=0
-    wait "$pid" || rc=$?
-    kill -TERM -- "-$pid" 2>/dev/null || true
+    ${lib.getExe pkgs.xvfb-run} -a ${lib.getExe cfg.package} serve "$flag" || rc=$?
+    # serve exits but leaves WebKit helpers and Xvfb in the unit's cgroup (a
+    # process-group kill misses them), so stop everything there but us.
+    procs=/sys/fs/cgroup$(${pkgs.coreutils}/bin/cut -d: -f3 /proc/self/cgroup)/cgroup.procs
+    for sig in TERM KILL; do
+      while read -r p; do
+        [ "$p" = $$ ] || kill -s "$sig" "$p" 2>/dev/null || true
+      done <"$procs"
+      ${pkgs.coreutils}/bin/sleep 1
+    done
     exit "$rc"
   '';
 
