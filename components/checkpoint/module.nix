@@ -98,6 +98,9 @@ in
       description = "panda-ckpt auto-checkpoints for ${u}";
       wants = [ "panda-ckpt-init-${u}.service" ];
       after = [ "local-fs.target" "systemd-tmpfiles-setup.service" "panda-ckpt-init-${u}.service" ];
+      # A short oneshot that the timer, users and tests start back to back;
+      # systemd's default limit (5 starts in 10 s) would make it fail.
+      unitConfig.StartLimitIntervalSec = 0;
       serviceConfig = {
         Type = "oneshot";
         User = u;
