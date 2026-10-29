@@ -31,6 +31,10 @@ let
     ++ lib.optional config.services.greetd.enable "greetd.service"
     ++ lib.optional config.networking.networkmanager.enable "NetworkManager.service";
 
+  # Checked only once signed in (marker exists), so an unsigned box never
+  # fails health or rolls back.
+  pandacodeHost = config.services.pandacode-host;
+
   # panda-health [--route] [--wait SECONDS] [--settle SECONDS]
   # 0 when every core unit is active and stays up (no restarts) for --settle
   # seconds (default 10), and with --route a default route exists; retries
@@ -58,6 +62,9 @@ let
       done
 
       units=(${lib.escapeShellArgs units})
+      ${lib.optionalString pandacodeHost.enable ''
+        if [ -e ${pandacodeHost.signedInMarker} ]; then units+=(pandacode-host.service); fi
+      ''}
       problems() {
         for u in "''${units[@]}"; do
           systemctl is-active --quiet "$u" || echo "$u is $(systemctl is-active "$u" || true)"
@@ -168,7 +175,8 @@ in
         requiredBy = [ "boot-complete.target" ];
         before = [ "boot-complete.target" "shutdown.target" ];
         # DefaultDependencies off so multi-user.target does not wait for us.
-        after = [ "multi-user.target" ] ++ units;
+        after = [ "multi-user.target" ] ++ units
+          ++ lib.optional pandacodeHost.enable "pandacode-host.service";
         conflicts = [ "shutdown.target" ];
         unitConfig = {
           DefaultDependencies = false;

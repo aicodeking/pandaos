@@ -107,9 +107,13 @@
     # otherwise firstboot.nix prompts for one on the console.
   };
 
+  # PandaCode Connect: the box shows up in the owner's PandaCode app once
+  # signed in (`panda-connect sign-in`); idle until then.
+  services.pandacode-host.enable = lib.mkDefault true;
+  # Superseded by PandaCode Connect; kept as an optional generic job runner.
   services.panda-agentd = {
-    enable = lib.mkDefault true;
-    # PandaConnect isn't defined yet; placeholder relay.
+    enable = lib.mkDefault false;
+    # Placeholder relay; set your own when enabling.
     relayUrl = lib.mkDefault "https://connect.pandacode.invalid";
   };
   services.panda-mem = {

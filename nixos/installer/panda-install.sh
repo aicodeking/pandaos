@@ -57,7 +57,7 @@ $UEFI_NOTE
   --password-hash HASH    crypt(3) hash, e.g. from: mkpasswd -m yescrypt
   --ssh-key KEY           optional ssh public key for the user (one line)
   --timezone TZ           e.g. Europe/Berlin (default: UTC)
-  --relay URL             optional PandaConnect relay for panda-agentd (https)
+  --relay URL             enable the optional panda-agentd with this relay (https)
   --allow-insecure-relay  accept an http:// relay URL
   --yes                   no questions; --disk and --password-hash are required
   -h, --help              this text
@@ -241,7 +241,7 @@ gather() {
     ask_valid ssh_key check_ssh_key "ssh public key (optional, Enter to skip)"
   fi
   if ((relay_set || yes)); then check_relay "$relay" || exit 1; else
-    ask_valid relay check_relay "Relay URL (optional, Enter to skip)"
+    ask_valid relay check_relay "panda-agentd relay URL (optional, most boxes skip it; Enter to skip)"
   fi
   if [[ -n $password_hash ]]; then check_hash "$password_hash" || exit 1; else
     ask_password
@@ -329,7 +329,8 @@ write_local_nix() {
 '
   fi
   if [[ -n $relay ]]; then
-    agent="  services.panda-agentd.relayUrl = \"$relay\";
+    agent="  services.panda-agentd.enable = true;
+  services.panda-agentd.relayUrl = \"$relay\";
 "
     [[ $relay == https://* ]] || agent+="  services.panda-agentd.allowInsecure = true;
 "

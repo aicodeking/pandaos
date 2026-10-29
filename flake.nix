@@ -117,6 +117,7 @@
             ./components/agentd/module.nix
             ./components/mem/module.nix
             ./components/browser/module.nix
+            ./components/pandacode-host/module.nix
           ];
         };
         headless = ./nixos/profiles/headless.nix;
