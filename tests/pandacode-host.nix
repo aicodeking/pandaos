@@ -41,7 +41,7 @@ pkgs.testers.runNixOSTest {
 
       with subtest("the AppImage runs: pandacode serve --help under xvfb-run, as the host user"):
           rc, out = machine.execute(
-              "runuser -u ${host.user} -- env HOME=/home/${host.user} ${xvfbRun} -a ${pandacode} serve --help 2>&1"
+              "runuser -u ${host.user} -- env HOME=${nodes.machine.users.users.${host.user}.home} ${xvfbRun} -a ${pandacode} serve --help 2>&1"
           )
           print(out)
           # serve prints its usage and exits 2 for --help.

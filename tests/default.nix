@@ -225,14 +225,19 @@ let
   # The system panda-install copies in the install test: the real prebuilt
   # headless target plus the test backdoor, so the driver can talk to it
   # after it boots from the installed disk.
-  installTarget =
+  installCfg =
     (self.lib.mkPandaSystem {
       profile = "headless";
       modules = [
         ../nixos/installer/target.nix
         "${pkgs.path}/nixos/modules/testing/test-instrumentation.nix"
       ];
-    }).config.system.build.toplevel;
+    }).config;
+  installTarget = installCfg.system.build.toplevel;
+  # The user panda-ckpt manages on the installed system (the agent user, not
+  # necessarily the owner `panda`), and its home.
+  ckptUser = builtins.head installCfg.services.panda-ckpt.users;
+  ckptHome = installCfg.users.users.${ckptUser}.home;
   panda-install = pkgs.callPackage ../nixos/installer/package.nix {
     flakeUrl = "github:AICodeKing/pandaos";
     systems.headless = installTarget;
@@ -317,11 +322,14 @@ in
   closures = import ./closures.nix { inherit pkgs self; };
   mem-security = import ./mem-security.nix { inherit pkgs self t; };
   update-rollback = import ./update-rollback.nix { inherit pkgs self t; };
+  boot-fallback = import ./boot-fallback.nix { inherit pkgs self t; };
   iso-boot = import ./iso-boot.nix { inherit pkgs self t; };
   pandacode-host = import ./pandacode-host.nix { inherit pkgs self t; };
   panda-ckpt = import ../components/checkpoint/vmtest.nix { inherit pkgs self; };
   agent-env = import ../components/agent-env/vmtest.nix { inherit pkgs self; };
   panda-sys = import ../components/sysmcp/vmtest.nix { inherit pkgs self; };
+  panda-mem-tools = import ../components/mem/vmtest.nix { inherit pkgs self; };
+  agent-clis = import ../components/agent-clis/vmtest.nix { inherit pkgs self; };
 
   mem = pkgs.testers.runNixOSTest {
     name = "mem";
@@ -573,16 +581,30 @@ in
           assert st["signedIn"] is False, st
           target.fail("systemctl is-active panda-agentd.service")
 
-      with subtest("checkpoints on the installed disk: mount option, ~/work subvolume, prune as panda"):
+      with subtest("first boot on the installed box: no password step, agent picker, then never again"):
+          done = "/var/lib/pandaos/firstboot-done"
+          target.wait_until_tty_matches("8", "Which agent CLIs")
+          assert "Set a password" not in target.get_tty_text("8"), target.get_tty_text("8")
+          target.send_chars("\n")  # blank: no agent CLIs
+          target.wait_until_succeeds(f"test -e {done} || grep -q 'Connect this box' /dev/vcs8", timeout=60)
+          if target.execute(f"test -e {done}")[0] != 0:
+              target.send_chars("n\n")
+          target.wait_for_file(done, timeout=60)
+          target.wait_until_fails("systemctl is-active panda-firstboot.service", timeout=30)
+          target.succeed("systemctl start panda-firstboot.service")
+          cond = target.succeed("systemctl show -p ConditionResult --value panda-firstboot.service").strip()
+          assert cond == "no", f"panda-firstboot ran again after {done}: ConditionResult={cond}"
+
+      with subtest("checkpoints on the installed disk: mount option, ~/work subvolume, prune as ${ckptUser}"):
           # disk.nix overrides only `device`, so generic-disk.nix's options survive.
           assert "user_subvol_rm_allowed" in target.succeed("findmnt -no OPTIONS /home"), "missing user_subvol_rm_allowed"
-          target.succeed("btrfs subvolume show /home/panda/work")
-          ck = "runuser -l panda -c "
+          target.succeed("btrfs subvolume show ${ckptHome}/work")
+          ck = "runuser -u ${ckptUser} -- env HOME=${ckptHome} sh -c "
           target.succeed(ck + "'panda-ckpt init proj && echo x > ~/work/proj/f'")
           first = json.loads(target.succeed(ck + "'panda-ckpt create proj -m one --json'"))
           target.succeed(ck + "'panda-ckpt create proj -m two --json'")
           target.succeed(ck + "'panda-ckpt prune proj --keep 1 --json'")
-          target.fail(f"test -e /home/panda/.checkpoints/proj/{first['id']}")
+          target.fail(f"test -e ${ckptHome}/.checkpoints/proj/{first['id']}")
           entries = json.loads(target.succeed("cat /etc/panda/mcp.json"))["mcpServers"]
           assert {"panda-mem", "panda-ckpt", "panda-sys"} <= set(entries), entries
 
@@ -591,6 +613,18 @@ in
           snaps = target.succeed("ls /.snapshots")
           assert "mem." in snaps and "home." in snaps, f"no btrbk snapshots: {snaps!r}"
           snap = sorted(s for s in snaps.split() if s.startswith("mem."))[-1]
+
+      with subtest("snapshots: the agent home, ~/work and each workspace (btrbk-agent)"):
+          # proj is a workspace from the checkpoints subtest above.
+          target.succeed("btrfs subvolume show ${ckptHome}")
+          target.succeed("systemctl start btrbk-agent.service")
+          res = target.succeed("systemctl show -p Result --value btrbk-agent.service").strip()
+          assert res == "success", f"btrbk-agent: {res}"
+          top = target.succeed("ls /.snapshots").split()
+          assert any(x.startswith("agent.") for x in top) and any(x.startswith("agent-work.") for x in top), top
+          ws = target.succeed("ls /.snapshots/agent-workspaces").split()
+          assert any(x.startswith("proj.") for x in ws), ws
+          target.succeed(f"test -s /.snapshots/agent-workspaces/{sorted(ws)[-1]}/f")
           rc, usage = target.execute("panda-rollback-mem 2>&1")
           assert rc == 2 and snap in usage, f"panda-rollback-mem usage: rc={rc} {usage!r}"
 
