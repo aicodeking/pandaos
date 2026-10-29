@@ -1,7 +1,11 @@
 # PandaCode's headless host (`pandacode serve`): joins the owner's PandaCode
 # Connect network, so the PandaCode app shows this box as a computer that can
 # start, watch and approve tasks. Sign in once with `panda-connect sign-in`.
-{ config, lib, pkgs, ... }:
+#
+# The host and every agent it starts run as the dedicated, non-wheel system
+# user `agent` (home /var/lib/agent), never as the owner: an agent that could
+# write the owner's dotfiles could capture their sudo password.
+{ config, lib, pkgs, options, ... }:
 let
   cfg = config.services.pandacode-host;
   stateDir = "/var/lib/pandacode-host";
@@ -10,6 +14,17 @@ let
   # device name; `full-access` holds "on" or "off".
   fullAccessFile = "${stateDir}/full-access";
   notSignedIn = "This server is not signed in to PandaCode Connect";
+  agentHome = "/var/lib/agent";
+
+  enter = pkgs.writeShellApplication {
+    name = "pandacode-host-enter";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.attr # setfattr
+      pkgs.gnugrep
+    ];
+    text = builtins.readFile ./cgroup-enter.sh;
+  };
 
   panda-connect = pkgs.writeShellApplication {
     name = "panda-connect";
@@ -79,11 +94,21 @@ in
     };
     user = lib.mkOption {
       type = lib.types.str;
-      default = "panda";
+      default = "agent";
       description = ''
         User the host and every agent CLI it starts run as. Its home holds the
         PandaCode data dir (sign-in, secrets.json), CLI logins and checkouts.
+        The default `agent` is a system user created here (home ${agentHome},
+        not in wheel). Never use a wheel/login user: agents could plant a
+        fake `sudo` in its shell startup files.
       '';
+    };
+    serveCommand = lib.mkOption {
+      type = lib.types.str;
+      default = "${lib.getExe pkgs.xvfb-run} -a ${lib.getExe cfg.package} serve";
+      defaultText = lib.literalExpression ''"xvfb-run -a pandacode serve"'';
+      internal = true;
+      description = "What pandacode-host-enter execs; tests swap in a stub host.";
     };
     deviceName = lib.mkOption {
       type = lib.types.str;
@@ -108,66 +133,103 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ panda-connect ];
+  config = lib.mkIf cfg.enable (lib.mkMerge [
+    {
+      environment.systemPackages = [ panda-connect ];
 
-    systemd.tmpfiles.rules = [ "d ${stateDir} 0755 root root - -" ];
+      users.users = lib.mkIf (cfg.user == "agent") {
+        agent = {
+          isSystemUser = true;
+          group = "agent";
+          home = agentHome;
+          # Made by tmpfiles below, not by the users activation: it must be
+          # a btrfs subvolume so btrbk-agent can snapshot it (snapshots.nix).
+          createHome = false;
+          # For debugging only (`sudo -iu agent`); no password, no ssh keys.
+          shell = pkgs.bashInteractive;
+          description = "PandaCode host and agent CLIs";
+        };
+      };
+      users.groups = lib.mkIf (cfg.user == "agent") { agent = { }; };
 
-    systemd.services.pandacode-host = {
-      description = "PandaCode Connect headless host";
-      wantedBy = [ "multi-user.target" ];
-      wants = [ "network-online.target" ];
-      after = [ "network-online.target" ];
-      # Agent CLIs the host starts find their tools through the user's PATH
-      # (per-user profile, then system packages).
-      path = [ "/etc/profiles/per-user/${cfg.user}" "/run/current-system/sw" ];
-      environment = {
-        # docs/headless.md: secrets in a 0600 file, not a Secret Service.
-        PANDACODE_SECRETS_FILE = "1";
-      };
-      unitConfig = {
-        # Not signed in: skipped (inactive, not failed). panda-connect sign-in
-        # writes the marker and starts the unit.
-        ConditionPathExists = cfg.signedInMarker;
-        # Never give up; the backoff below keeps retries slow.
-        StartLimitIntervalSec = 0;
-      };
-      serviceConfig = {
-        # Restart= skips Condition*= checks, so after forgetLostSignIn drops
-        # the marker only this stops the next automatic restart.
-        ExecCondition = "${pkgs.coreutils}/bin/test -e ${cfg.signedInMarker}";
-        User = cfg.user;
-        WorkingDirectory = home;
-        ExecStartPre = applyFullAccess;
-        ExecStart = "${lib.getExe pkgs.xvfb-run} -a ${lib.getExe cfg.package} serve";
-        ExecStopPost = "+${forgetLostSignIn}";
-        Restart = "on-failure";
-        RestartSec = 5;
-        RestartSteps = 6;
-        RestartMaxDelaySec = "5min";
+      # `v`: a subvolume when / is a btrfs subvolume (installed boxes), a
+      # plain directory otherwise. Never converts an existing directory.
+      systemd.tmpfiles.rules = [ "d ${stateDir} 0755 root root - -" ]
+        ++ lib.optional (cfg.user == "agent") "v ${agentHome} 0700 agent agent - -";
 
-        # Agents need the user's home (checkouts, CLI logins), the network,
-        # and exec of anything. appimageTools runs pandacode in a bubblewrap
-        # FHS env, which needs user namespaces. Left out on purpose:
-        # ProtectHome, RestrictNamespaces, PrivateUsers, CapabilityBoundingSet,
-        # MemoryDenyWriteExecute (Node/JIT), SystemCallFilter, and
-        # ProtectKernelTunables/ProtectKernelLogs/ProtectProc: their /proc
-        # overmounts make the kernel refuse bwrap's fresh /proc mount.
-        NoNewPrivileges = true; # no sudo from agents
-        ProtectSystem = "strict";
-        ReadWritePaths = [ home ];
-        PrivateTmp = true;
-        PrivateDevices = true;
-        ProtectKernelModules = true;
-        ProtectControlGroups = true;
-        ProtectClock = true;
-        ProtectHostname = true;
-        RestrictRealtime = true;
-        RestrictSUIDSGID = true;
-        LockPersonality = true;
-        SystemCallArchitectures = "native";
-        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+      systemd.services.pandacode-host = {
+        description = "PandaCode Connect headless host";
+        # A rebuild must not kill running agent tasks. A new host version or
+        # unit setting applies on reboot or `panda-connect restart`.
+        restartIfChanged = false;
+        stopIfChanged = false;
+        wantedBy = [ "multi-user.target" ];
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
+        # Agent CLIs the host starts find their tools through the user's PATH
+        # (per-user profile, then system packages).
+        path = [ "/etc/profiles/per-user/${cfg.user}" "/run/current-system/sw" ];
+        environment = {
+          # docs/headless.md: secrets in a 0600 file, not a Secret Service.
+          PANDACODE_SECRETS_FILE = "1";
+        };
+        unitConfig = {
+          # Not signed in: skipped (inactive, not failed). panda-connect sign-in
+          # writes the marker and starts the unit.
+          ConditionPathExists = cfg.signedInMarker;
+          # Never give up; the backoff below keeps retries slow.
+          StartLimitIntervalSec = 0;
+        };
+        serviceConfig = {
+          # Restart= skips Condition*= checks, so after forgetLostSignIn drops
+          # the marker only this stops the next automatic restart.
+          ExecCondition = "${pkgs.coreutils}/bin/test -e ${cfg.signedInMarker}";
+          User = cfg.user;
+          WorkingDirectory = home;
+          ExecStartPre = applyFullAccess;
+          # Each agent task gets its own cgroup (see cgroup-enter.sh and the
+          # agent CLI shims in agent-env), so oomd kills a task, not the host.
+          Delegate = true;
+          ExecStart = "${lib.getExe enter} ${cfg.serveCommand}";
+          ManagedOOMMemoryPressure = "kill";
+          ManagedOOMMemoryPressureLimit = "50%";
+          ManagedOOMSwap = "kill";
+          # An OOM-killed task must not stop the unit (default OOMPolicy=stop).
+          OOMPolicy = "continue";
+          ExecStopPost = "+${forgetLostSignIn}";
+          Restart = "on-failure";
+          RestartSec = 5;
+          RestartSteps = 6;
+          RestartMaxDelaySec = "5min";
+
+          # Agents need the user's home (checkouts, CLI logins), the network,
+          # and exec of anything. appimageTools runs pandacode in a bubblewrap
+          # FHS env, which needs user namespaces. Left out on purpose:
+          # ProtectHome, RestrictNamespaces, PrivateUsers, CapabilityBoundingSet,
+          # MemoryDenyWriteExecute (Node/JIT), SystemCallFilter, and
+          # ProtectKernelTunables/ProtectKernelLogs/ProtectProc: their /proc
+          # overmounts make the kernel refuse bwrap's fresh /proc mount.
+          # ProtectControlGroups: /sys/fs/cgroup must stay writable for the
+          # delegated subtree (only it is owned by the user).
+          NoNewPrivileges = true; # no sudo from agents
+          ProtectSystem = "strict";
+          ReadWritePaths = [ home ];
+          PrivateTmp = true;
+          PrivateDevices = true;
+          ProtectKernelModules = true;
+          ProtectClock = true;
+          ProtectHostname = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          LockPersonality = true;
+          SystemCallArchitectures = "native";
+          RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+        };
       };
-    };
-  };
+    }
+    # The agent user reaches /mem through the panda-mem socket.
+    (lib.optionalAttrs (options.services ? panda-mem) {
+      services.panda-mem.clients = [ cfg.user ];
+    })
+  ]);
 }

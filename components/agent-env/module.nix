@@ -1,8 +1,10 @@
 # A safe, well-wired home for agents:
 # - agents.slice caps what pandacode-host (and every agent CLI it starts)
-#   may use, and systemd-oomd kills inside it under memory pressure, so a
-#   runaway agent dies instead of the box locking up. System daemons get a
-#   low OOMScoreAdjust for the global OOM killer.
+#   may use. PATH shims for the agent CLIs (wrapCommands) give every agent
+#   run its own task cgroup under the host's delegated cgroup, so systemd-oomd
+#   (watching pandacode-host.service) or the kernel kills one runaway task,
+#   not the host and the other tasks. System daemons get a low
+#   OOMScoreAdjust for the global OOM killer.
 # - /etc/panda/mcp.d/<name>.json is the MCP registry; `panda-agents sync`
 #   merges it into each agent CLI's config as panda-<name> and links the
 #   system brief /etc/panda/AGENTS.md.
@@ -21,6 +23,18 @@ let
   sysEnabled = config.services.panda-sys.enable or false;
   # Not -1000: sshd sessions inherit it, so keep them killable when huge.
   protect = -500;
+
+  shims = pkgs.symlinkJoin {
+    name = "panda-agent-shims";
+    paths = map (
+      name:
+      pkgs.writeShellApplication {
+        inherit name;
+        # No runtimeInputs: they would be prepended to the agent's PATH.
+        text = "name=${name}\n" + builtins.readFile ./shim.sh;
+      }
+    ) cfg.wrapCommands;
+  };
 
   # mcp.d entry; env only when set, so plain entries stay {command, args}.
   entry = s: { inherit (s) command args; } // lib.optionalAttrs (s.env != { }) { inherit (s) env; };
@@ -59,9 +73,12 @@ let
     ## Limits
     You share `agents.slice` with every other agent: memory is throttled
     above ${cfg.memoryHigh} of RAM and hard-capped at ${cfg.memoryMax}, at most
-    ${toString cfg.tasksMax} tasks. Under memory pressure systemd-oomd kills
-    the agent processes first, without warning. Keep builds and test runs
-    bounded (`-j`, worker counts) and stream large data instead of loading it.
+    ${toString cfg.tasksMax} tasks. Each agent run (${lib.concatStringsSep ", " cfg.wrapCommands})
+    gets its own cgroup. Under memory pressure systemd-oomd, or the kernel at
+    the cap, kills the task using the most memory, with all its child
+    processes and without warning; the host and other tasks keep running.
+    Keep builds and test runs bounded (`-j`, worker counts) and stream large
+    data instead of loading it.
 
     ## Rules
     - Checkpoint before risky changes (mass edits, migrations, deletes), and
@@ -77,8 +94,8 @@ in
     };
     user = lib.mkOption {
       type = lib.types.str;
-      default = config.services.pandacode-host.user or "panda";
-      defaultText = lib.literalExpression ''config.services.pandacode-host.user or "panda"'';
+      default = config.services.pandacode-host.user or "agent";
+      defaultText = lib.literalExpression ''config.services.pandacode-host.user or "agent"'';
       description = "User whose agent CLI configs `panda-agents-sync.service` keeps in sync.";
     };
     memoryHigh = lib.mkOption {
@@ -112,6 +129,14 @@ in
       type = lib.types.ints.positive;
       default = 8192;
       description = "agents.slice TasksMax= (fork-bomb guard).";
+    };
+    wrapCommands = lib.mkOption {
+      type = lib.types.listOf (lib.types.strMatching "[A-Za-z0-9._-]+");
+      default = [ "claude" "codex" "kimi" "opencode" "gemini" ];
+      description = ''
+        Agent CLIs shimmed first on pandacode-host's PATH: each run gets its
+        own task cgroup, so an OOM kill takes that task, not the host.
+      '';
     };
     mcpServers = lib.mkOption {
       type = lib.types.attrsOf (
@@ -161,12 +186,9 @@ in
         MemorySwapMax = cfg.memorySwapMax;
         CPUWeight = cfg.cpuWeight;
         TasksMax = cfg.tasksMax;
-        # oomd kills the cgroup under this slice with the most reclaim once
-        # memory pressure stays above the limit for 30 s (oomd default)...
-        ManagedOOMMemoryPressure = "kill";
-        ManagedOOMMemoryPressureLimit = "50%";
-        # ...or when the box's swap is over 90 % full.
-        ManagedOOMSwap = "kill";
+        # No ManagedOOM* here: oomd watches pandacode-host.service itself
+        # (components/pandacode-host), so it picks a task cgroup inside it,
+        # not the whole host.
       };
     };
     # NixOS default, but this module relies on it.
@@ -183,11 +205,10 @@ in
         pandacode-host = {
           wants = [ "panda-agents-sync.service" ];
           after = [ "panda-agents-sync.service" ];
+          # Shims before the CLIs they wrap.
+          path = lib.mkBefore [ shims ];
           serviceConfig = {
             Slice = "agents.slice";
-            # An OOM-killed agent must not take the host down with it
-            # (the default OOMPolicy=stop stops the whole unit).
-            OOMPolicy = "continue";
             # Agents are the first pick for the global OOM killer too.
             OOMScoreAdjust = 500;
           };

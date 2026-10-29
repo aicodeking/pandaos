@@ -8,6 +8,7 @@ usage() {
 usage: panda-connect sign-in [--device-name NAME]
        panda-connect sign-out
        panda-connect full-access on|off
+       panda-connect restart
        panda-connect status [--json]
        panda-connect logs [journalctl args, e.g. -f]
 EOF
@@ -104,6 +105,18 @@ full_access() {
   echo "panda-connect: full access $1"
 }
 
+# The unit has restartIfChanged=false so rebuilds never kill running agent
+# tasks; this applies a new host version or unit setting now.
+restart() {
+  [ $# -eq 0 ] || usage
+  if [ ! -e "$MARKER" ]; then
+    echo "panda-connect: not signed in; run: panda-connect sign-in" >&2
+    exit 1
+  fi
+  systemctl restart "$unit"
+  echo "panda-connect: $unit restarted (running agent tasks were stopped)"
+}
+
 status() {
   json=no
   case "${1-}" in
@@ -141,6 +154,7 @@ case "$cmd" in
   sign-in) need_root "$cmd" "$@"; sign_in "$@" ;;
   sign-out) need_root "$cmd" "$@"; sign_out "$@" ;;
   full-access) need_root "$cmd" "$@"; full_access "$@" ;;
+  restart) need_root "$cmd" "$@"; restart "$@" ;;
   status) status "$@" ;;
   logs) exec journalctl -u "$unit" "$@" ;;
   *) usage ;;
