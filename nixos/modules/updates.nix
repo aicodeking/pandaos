@@ -46,6 +46,15 @@ let
       fi
       switch_rc=1 # pessimistic until the switch returns 0
 
+      # The box is going down (we got TERM from the shutdown, or one is
+      # queued): don't start a rollback that the shutdown would cut short.
+      # The bootloader already points at the new generation, and boot.nix
+      # tries it once and falls back to the last good entry if it fails.
+      shutting_down() {
+        [ "$(systemctl is-system-running 2>/dev/null || true)" = stopping ] \
+          || [ -n "$(systemctl list-jobs --no-legend shutdown.target 2>/dev/null || true)" ]
+      }
+
       restore_lock() {
         if [ -f ${rundir}/flake.lock ]; then
           cp -p ${rundir}/flake.lock "$lock"
@@ -75,6 +84,10 @@ let
         if [ "$switch_rc" -eq 0 ] && panda-health "''${health_args[@]}"; then
           echo "panda-update: $now is healthy"
           exit 0
+        fi
+        if shutting_down; then
+          echo "panda-update: interrupted by shutdown while on $now; not rolling back (the next boot is a one-shot trial with fallback)" >&2
+          exit "$rc"
         fi
         echo "panda-update: switch to $now failed (exit $switch_rc) or is unhealthy; rolling back to $before" >&2
         restore_lock
@@ -208,7 +221,12 @@ in
         "${flakeDir}/flake.nix"
         "!${holdFile}"
       ];
-      serviceConfig.RuntimeDirectory = "panda-update";
+      serviceConfig = {
+        RuntimeDirectory = "panda-update";
+        # On `systemctl stop` (not shutdown) the trap still rolls back, which
+        # can take a couple of minutes; don't let systemd SIGKILL it at 90 s.
+        TimeoutStopSec = "5min";
+      };
       script = lib.mkForce "exec ${lib.getExe runner}";
     };
 

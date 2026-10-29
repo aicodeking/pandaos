@@ -30,6 +30,15 @@
   services.journald.extraConfig = ''
     SystemMaxUse=50M
   '';
+  # Closure: don't pin the nixpkgs source (~197 MB) into the system for the
+  # `nixpkgs` registry entry and NIX_PATH. Updates evaluate /etc/pandaos,
+  # whose flake.lock fetches its own inputs; `nix shell nixpkgs#x` falls back
+  # to the global registry, and `<nixpkgs>` / nix-shell -p no longer resolve.
+  nixpkgs.flake = {
+    setNixPath = false;
+    setFlakeRegistry = false;
+  };
+
   # No systemd-nspawn/nixos-container tooling (Perl script + units); agentd
   # uses plain systemd-run units.
   boot.enableContainers = false;
@@ -60,6 +69,13 @@
     # NetworkManager turns ModemManager on by default (a daemon plus
     # libmbim/libqmi). PandaOS boxes don't use cellular modems.
     modemmanager.enable = false;
+    # ...and NetworkManager itself links libmm-glib (-> libqmi, libmbim,
+    # ~80 MB) with modem support hard-coded on; nixpkgs has no flag for it.
+    # Cost: this NM is not on cache.nixos.org, so CI and (until
+    # pandaos.binaryCache is set up) every box builds it, ~5-10 min.
+    networkmanager.package = (pkgs.networkmanager.override { modemmanager = null; }).overrideAttrs (old: {
+      mesonFlags = map (f: if f == "-Dmodem_manager=true" then "-Dmodem_manager=false" else f) old.mesonFlags;
+    });
     firewall.enable = true;
   };
   services.openssh = {
@@ -124,7 +140,14 @@
   services.panda-sys.enable = lib.mkDefault true;
   services.panda-mem = {
     enable = lib.mkDefault true;
-    # Users allowed on the panda-mem socket.
-    clients = [ "panda" ] ++ lib.optional config.services.panda-agentd.enable "panda-agent";
+    # Users allowed on the panda-mem socket: the owner, the user agents run
+    # as (pandacode-host.user, e.g. a non-wheel `agent`), and agentd jobs.
+    clients = lib.unique (
+      [
+        "panda"
+        config.services.pandacode-host.user
+      ]
+      ++ lib.optional config.services.panda-agentd.enable "panda-agent"
+    );
   };
 }

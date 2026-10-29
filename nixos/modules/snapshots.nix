@@ -8,8 +8,44 @@
 #
 # Only runs when /.snapshots is a mountpoint, i.e. on installs whose disk
 # layout has a snapshots subvolume (same btrfs filesystem as /mem and /home).
-{ lib, pkgs, ... }:
+#
+# The agent user's home (services.pandacode-host.user) is covered by @home
+# when it lives under /home. If it lives elsewhere (e.g. /var/lib/agent), a
+# second instance, btrbk-agent, snapshots it with the same retention. btrfs
+# can only snapshot subvolumes, so btrbk-agent is skipped (and says so in the
+# journal) until that directory IS one; pandacode-host creates /var/lib/agent
+# with tmpfiles `v` (a subvolume when / is one, as on installed boxes).
+#
+# Snapshots are not recursive, so nested subvolumes are separate entries:
+# ~/work (made by panda-ckpt-init) and every workspace ~/work/<name>
+# (btrbk glob; it skips read-only subvolumes, i.e. panda-ckpt's checkpoints,
+# and only warns while there are no workspaces). Workspace snapshots go to
+# /.snapshots/agent-workspaces/<name>.<time>, so a workspace named like
+# another snapshot (mem, home) cannot mix up retention.
+{ config, lib, pkgs, ... }:
 let
+  hostUser = lib.attrByPath [ "services" "pandacode-host" "user" ] "panda" config;
+  hostHome = lib.attrByPath [ "users" "users" hostUser "home" ] "/home/${hostUser}" config;
+  agentHome = if lib.hasPrefix "/home/" hostHome || hostHome == "/var/empty" then null else hostHome;
+  agentRel = lib.removePrefix "/" agentHome;
+  # panda-ckpt keeps the agent's workspaces in ~/work/<name>.
+  ckptWork =
+    (config.services.panda-ckpt.enable or false)
+    && lib.elem hostUser (config.services.panda-ckpt.users or [ ]);
+  workspaceDir = ".snapshots/agent-workspaces";
+
+  retention = {
+    # Run as root without sudo: execWheelOnly (security.nix) makes sudo
+    # unusable for the non-wheel btrbk user.
+    backend = "btrfs-progs";
+    timestamp_format = "long"; # hourly names need the time, not just the date
+    snapshot_preserve_min = "latest";
+    snapshot_preserve = "24h 7d";
+  };
+  asRoot = {
+    User = lib.mkForce "root";
+    Group = lib.mkForce "root";
+  };
   rollbackMem = pkgs.writeShellApplication {
     name = "panda-rollback-mem";
     runtimeInputs = [
@@ -47,31 +83,58 @@ in
 {
   services.btrbk = {
     extraPackages = [ pkgs.btrfs-progs ];
-    instances.panda = {
-      onCalendar = "hourly";
-      settings = {
-        # Run as root without sudo: execWheelOnly (security.nix) makes sudo
-        # unusable for the non-wheel btrbk user.
-        backend = "btrfs-progs";
-        timestamp_format = "long"; # hourly names need the time, not just the date
-        snapshot_preserve_min = "latest";
-        snapshot_preserve = "24h 7d";
-        volume."/" = {
-          snapshot_dir = ".snapshots";
-          subvolume = {
-            mem = { };
-            home = { };
+    instances = {
+      panda = {
+        onCalendar = "hourly";
+        settings = retention // {
+          volume."/" = {
+            snapshot_dir = ".snapshots";
+            subvolume = {
+              mem = { };
+              home = { };
+            };
+          };
+        };
+      };
+    }
+    // lib.optionalAttrs (agentHome != null) {
+      agent = {
+        onCalendar = "hourly";
+        settings = retention // {
+          volume."/" = {
+            snapshot_dir = ".snapshots";
+            subvolume = {
+              ${agentRel} = { };
+            }
+            // lib.optionalAttrs ckptWork {
+              "${agentRel}/work".snapshot_name = "agent-work";
+              "${agentRel}/work/*".snapshot_dir = workspaceDir;
+            };
           };
         };
       };
     };
   };
 
-  systemd.services.btrbk-panda = {
-    unitConfig.ConditionPathIsMountPoint = "/.snapshots";
-    serviceConfig = {
-      User = lib.mkForce "root";
-      Group = lib.mkForce "root";
+  systemd.services = {
+    btrbk-panda = {
+      unitConfig.ConditionPathIsMountPoint = "/.snapshots";
+      serviceConfig = asRoot;
+    };
+  }
+  // lib.optionalAttrs (agentHome != null) {
+    btrbk-agent = {
+      unitConfig.ConditionPathIsMountPoint = "/.snapshots";
+      serviceConfig = asRoot // {
+        ExecCondition = pkgs.writeShellScript "btrbk-agent-is-subvolume" ''
+          if ! ${pkgs.btrfs-progs}/bin/btrfs subvolume show ${agentHome} >/dev/null 2>&1; then
+            echo "${agentHome} is not a btrfs subvolume; the agent home is NOT snapshotted" >&2
+            exit 1
+          fi
+        '';
+        # btrbk needs the snapshot_dir to exist.
+        ExecStartPre = lib.optional ckptWork "${pkgs.coreutils}/bin/mkdir -p /${workspaceDir}";
+      };
     };
   };
 
