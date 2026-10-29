@@ -10,8 +10,8 @@
 # layout has a snapshots subvolume (same btrfs filesystem as /mem and /home).
 #
 # The agent user's home (services.pandacode-host.user) is covered by @home
-# when it lives under /home. If it lives elsewhere (e.g. /var/lib/agent), a
-# second instance, btrbk-agent, snapshots it with the same retention. btrfs
+# when it lives under /home. The default user `agent` lives in /var/lib/agent,
+# so a second instance, btrbk-agent, snapshots it with the same retention. btrfs
 # can only snapshot subvolumes, so btrbk-agent is skipped (and says so in the
 # journal) until that directory IS one; pandacode-host creates /var/lib/agent
 # with tmpfiles `v` (a subvolume when / is one, as on installed boxes).
@@ -25,8 +25,11 @@
 { config, lib, pkgs, ... }:
 let
   hostUser = lib.attrByPath [ "services" "pandacode-host" "user" ] "panda" config;
-  hostHome = lib.attrByPath [ "users" "users" hostUser "home" ] "/home/${hostUser}" config;
-  agentHome = if lib.hasPrefix "/home/" hostHome || hostHome == "/var/empty" then null else hostHome;
+  # Not users.users.<user>.home: services.btrbk.instances defines
+  # users.users.btrbk, so reading users.users here is infinite recursion.
+  # pandacode-host makes the default `agent` user with this home (and other
+  # host users live under /home, covered by the `home` snapshot).
+  agentHome = if hostUser == "agent" then "/var/lib/agent" else null;
   agentRel = lib.removePrefix "/" agentHome;
   # panda-ckpt keeps the agent's workspaces in ~/work/<name>.
   ckptWork =
