@@ -81,6 +81,8 @@ pkgs.testers.runNixOSTest {
           n = restarts()
           assert n <= 2, f"NRestarts={n}"
           machine.fail("systemctl is-active pandacode-host.service")
+          # The full-access ExecStartPre cleans up after itself.
+          machine.fail("journalctl -u pandacode-host.service | grep -q 'left-over process'")
           assert status()["signedIn"] is False
           machine.succeed("panda-health --settle 10")
     '';

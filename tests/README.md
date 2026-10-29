@@ -4,15 +4,16 @@
 
 | test | what it proves | what it does not prove |
 |---|---|---|
-| `boot-headless` | boots; `panda-agentd` and `panda-mem.service` come up; with the relay unreachable, `pairing-code` is `0640 root:wheel`, unreadable by `nobody`, the code is not in `status.json`, `pairing` is true and `lastError`/`lastErrorAt` are set; idle RAM within budget | behaviour on real hardware |
-| `boot-desktop` | `greetd` + `initial_session` autologin into labwc (pixman on virtio-gpu); labwc, its Wayland socket and waybar come up and labwc is still alive after 30 s; `idleRamMB` (budgeted) is the logged-in session; after logout tuigreet comes back and `greeterIdleRamMB` is reported; `panda-agents-status` against fixtures; a screenshot `session.png` is in `$out` | GPU rendering, real displays, input, audio |
+| `boot-headless` | boots; `panda-agentd` (enabled for this test; off by default) and `panda-mem.service` come up; with the relay unreachable, `pairing-code` is `0640 root:wheel`, unreadable by `nobody`, the code is not in `status.json`, `pairing` is true and `lastError`/`lastErrorAt` are set; idle RAM within budget | behaviour on real hardware |
+| `boot-desktop` | `greetd` + `initial_session` autologin into labwc (pixman on virtio-gpu); labwc, its Wayland socket and waybar come up and labwc is still alive after 30 s; `idleRamMB` (budgeted) is the logged-in session; after logout tuigreet comes back and `greeterIdleRamMB` is reported; `panda-agents-status` and `panda-connect-status` (`test-connect-status.sh`) against fixtures, the real unsigned box shows *PandaCode: sign in*; a screenshot `session.png` is in `$out` | GPU rendering, real displays, input, audio |
 | `agentd-roundtrip` | `box` pairs with `fake-relay` and runs `echo hi`; after pairing the code file is gone, `status.json` has no code and `lastError` is empty; a `sleep 600` job is cancelled; stopping the relay sets `lastError` and restarting it clears it (and re-pairs) | the real PandaConnect relay |
 | `slow-network` | netem on **both** nodes (150 ms + 1% loss + 1 Mbit/s each way), with ping checking the RTT is ~300 ms (`rttMs`) before agentd starts; pairing + job round trip finish within 120 s (`roundtripSec`) | jitter, reordering, NAT, relay restarts |
 | `mem` | write/search as `panda` over `/run/panda-mem/sock`, git commit, valid `/etc/panda/mcp.json`, btrbk skips without `/.snapshots` | |
 | `mem-security` | `panda-agent` cannot write `.git` (no hook, no `core.fsmonitor`). Root then plants both, and plain `git` fires them (so the check is not vacuous). `panda-mem write` over the socket as `panda` and `panda-agent` then fires neither; refusing the tampered repo is accepted. Markers live in `.git`, the only place the sandboxed service could write them | other git vectors beyond panda-mem's config allow-list; an attacker who can replace the panda-mem binary or its unit |
 | `update-rollback` | the real `nixos-upgrade` unit, `panda-update-run`, `panda-health` and rollback: a good generation is switched to and logged healthy; a generation whose agentd `ExecStart` is `false` is rolled back to the previous one, with `panda-agentd.service is …` and `rolling back to` in the journal and the system profile back on the good generation; `panda-update hold` makes the unit skip (`ConditionResult=no`), `panda-update run` refuse, and `unhold` removes the file | **`pandaos.updates.switchCommand` replaces `nixos-rebuild switch`** with a switch to a prebuilt specialisation. Not covered: evaluating `/etc/pandaos#pandaos`, `--update-input pandaos`, fetching `github:AICodeKing/pandaos/release`, binary-cache substitution, `flake.lock` restore, boot counting / `panda-boot-check` (needs EFI and reboots) |
 | `iso-boot` | the headless live ISO boots from a virtual CD-ROM (BIOS, squashfs root, `PANDAOS-LIVE` label) to multi-user, and `panda-install --help` runs; `isoBootSec` | the image is built from the same modules as `packages.iso-headless` **plus `test-instrumentation.nix` and zstd level 3**, so it is not the byte-identical release artifact; EFI boot of the ISO; USB boot |
-| `closures` | host-side, no VM: NAR closure of `nixosConfigurations.{headless,desktop}` (what panda-install puts on disk) vs `budgets.json`; `updateBytes`/`updatePaths` for an agentd-only update | compressed download size (NAR bytes are an upper bound); nixpkgs-bump updates |
+| `pandacode-host` | the pinned PandaCode AppImage runs (`pandacode serve --help` under `xvfb-run` as `panda`); not signed in, `panda-connect status --json` says `signedIn:false`, the service is skipped with 0 restarts over 60 s and `panda-health` passes; `panda-connect full-access on/off` exit 0 and are saved; a stale sign-in marker makes `serve` exit "not signed in", the unit drops the marker and stops (≤ 2 restarts, no left-over processes) and `panda-health` still passes | **real sign-in** (`panda-connect sign-in` needs GitHub's device flow and PandaCode's Connect relay, not reachable from CI), a signed-in host serving, and real tasks from another device: test those by hand |
+| `closures` | host-side, no VM: NAR closure of `nixosConfigurations.{headless,desktop}` (what panda-install puts on disk) vs `budgets.json`; `updateBytes`/`updatePaths` for a panda-mem-only update | compressed download size (NAR bytes are an upper bound); nixpkgs-bump updates |
 | `security`, `browser`, `install` | see the test bodies in `default.nix` | |
 
 Firstboot is off in every test except `security`. Run one test with
@@ -30,8 +31,11 @@ Each test prints `METRIC {json}` (so failed runs still report) and writes `$out/
   installable system, the same number `nix path-info -S` gives. Earlier versions measured the test VM
   closure, which included test instrumentation.
 - `updateBytes` is the NAR bytes of the paths that a machine on `nixosConfigurations.headless` lacks
-  for the same system with a rebuilt agentd.
+  for the same system with a rebuilt panda-mem (agentd, used before, is off by default now).
 
 `budgets.json`: the RAM budgets are deliberately loose. The closure budgets are the measured
-real-system closures + 10% (headless 1637 MB with the curated firmware set, desktop 2114 MB
-with GPU off), so any growth past that fails CI.
+real-system closures + 10%, so any growth past that fails CI. Measured: headless 2834 MB, desktop
+2915 MB (with the curated firmware set; desktop GPU off). **PandaCode Connect added about 1.2 GB to
+headless and 0.8 GB to desktop** (from 1637 / 2114 MB): the AppImage itself is 275 MB extracted, and
+`appimageTools`' FHS environment pulls in GTK, WebKit-adjacent and media libraries. Slimming that
+(a minimal FHS env) is possible future work; the budgets record the size honestly meanwhile.

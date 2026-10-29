@@ -41,7 +41,14 @@ let
       on) flag=--full-access ;;
       *) flag=--no-full-access ;;
     esac
-    exec ${lib.getExe pkgs.xvfb-run} -a ${lib.getExe cfg.package} serve "$flag"
+    # serve exits but leaves WebKit helpers (and so Xvfb) running in the
+    # unit's cgroup; its own process group lets us stop them all.
+    ${pkgs.util-linux}/bin/setsid ${lib.getExe pkgs.xvfb-run} -a ${lib.getExe cfg.package} serve "$flag" &
+    pid=$!
+    rc=0
+    wait "$pid" || rc=$?
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    exit "$rc"
   '';
 
   # A sign-in revoked or lost outside panda-connect makes `serve` exit
@@ -122,6 +129,9 @@ in
         StartLimitIntervalSec = 0;
       };
       serviceConfig = {
+        # Restart= skips Condition*= checks, so after forgetLostSignIn drops
+        # the marker only this stops the next automatic restart.
+        ExecCondition = "${pkgs.coreutils}/bin/test -e ${cfg.signedInMarker}";
         User = cfg.user;
         WorkingDirectory = home;
         ExecStartPre = applyFullAccess;
