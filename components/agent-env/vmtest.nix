@@ -41,7 +41,8 @@ pkgs.testers.runNixOSTest {
         sshd_pid = prop("sshd.service", "MainPID")
         # Random data: zero pages would just sit in zram for free.
         machine.succeed(
-            "systemd-run --unit=hog --slice=agents.slice "
+            # systemd-run units get systemd's default PATH, not NixOS's.
+            "systemd-run --unit=hog --slice=agents.slice --setenv=PATH=/run/current-system/sw/bin "
             "bash -c 'x=$(head -c 6G /dev/urandom | tr -d \"\\0\"); sleep 600'"
         )
         machine.wait_until_fails("systemctl is-active hog.service", timeout=240)
