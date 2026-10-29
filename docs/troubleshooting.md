@@ -105,11 +105,50 @@ The box does not show up in PandaCode:
    refuses requests whose clock is more than a minute off, so check `timedatectl` (NTP synced).
 3. Sign-in hangs or fails: it needs outbound HTTPS to GitHub and to PandaCode's relay. Check the
    network (above) and try again; Ctrl-C stops it.
-4. Agents cannot find a CLI: the host runs as `panda`. Install and log in each agent CLI (and `gh`)
-   as that user, then `sudo systemctl restart pandacode-host`.
+4. Agents cannot find a CLI: install it with `sudo panda-agents-install <cli>` (or
+   `pandaos.agents.clis`), then log it in as the agent user: `sudo -iu agent claude` (or `codex`,
+   ...), and the same for `gh`. Then run `sudo panda-agents sync --user agent` and
+   `sudo panda-connect restart`. The restart ends running tasks. Rebuilds never restart the host by
+   themselves.
+5. **Signed out after updating to the `agent` user.** Before Unreleased, the host ran as `panda`, and
+   its PandaCode sign-in and CLI logins lived in `/home/panda`. The host now runs as `agent`, with home
+   `/var/lib/agent`, which starts empty. `panda-connect status` then shows the box as signed in (the
+   marker in `/var/lib/pandacode-host` stays), but the host's journal says it is not signed in, and
+   the unit drops the marker. Fix:
+   ```sh
+   sudo panda-connect sign-in            # signs in as `agent`; approve in PandaCode again
+   sudo -iu agent claude                 # log each agent CLI in again as `agent`
+   ```
+   Old checkouts stay in `/home/panda`. Copy the ones agents need, for example
+   `sudo cp -a /home/panda/src/repo /var/lib/agent/work/ && sudo chown -R agent:agent /var/lib/agent/work/repo`.
+   Do not copy `~/.ssh` or tokens that agents should not have.
 
 An unsigned box never fails the health check, so updates are not affected. Real sign-in is not
 covered by CI (it needs GitHub); the `pandacode-host` VM test covers everything up to it.
+
+## `nix-shell -p` or `<nixpkgs>` does not work
+
+To keep the closure small (about 197 MB less), PandaOS no longer pins the nixpkgs source into the
+system. There is no `<nixpkgs>` on `NIX_PATH` and no local `nixpkgs` registry entry. So
+`nix-shell -p htop` and `import <nixpkgs> {}` fail with `file 'nixpkgs' was not found`. Instead:
+
+```sh
+nix shell nixpkgs#htop          # flakes: uses the global registry (downloads nixpkgs once, needs a network)
+nix shell github:NixOS/nixpkgs/nixos-26.05#htop   # pin the channel explicitly
+```
+
+For something permanent, add it to `/etc/pandaos/local.nix` (`environment.systemPackages`), or for
+agent CLIs use `sudo panda-agents-install`. System updates are not affected, because they evaluate
+`/etc/pandaos`, whose `flake.lock` brings its own nixpkgs.
+
+## First-boot questions did not show up, or need to run again
+
+The first-boot steps (password if unset, agent CLIs, PandaCode Connect) run once on tty8 and then
+write `/var/lib/pandaos/firstboot-done`. Press `Ctrl-Alt-F8` to see them. To run them again:
+
+```sh
+sudo rm /var/lib/pandaos/firstboot-done && sudo systemctl start panda-firstboot
+```
 
 ## Re-pairing
 

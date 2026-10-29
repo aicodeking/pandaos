@@ -51,17 +51,25 @@ before handing the box on. PandaCode keeps the GitHub token only long enough to 
 between your devices, and the Connect relay forwards them and stores no task content (see PandaCode's
 [remote-access docs](https://github.com/aicodeking/pandacode/blob/main/docs/remote-access.md)). The
 connection is outbound only: nothing listens on the box for it. The relay token and device key live
-in the `panda` user's PandaCode data directory, in files mode 0600.
+in the `agent` user's PandaCode data directory, in files mode 0600.
 
 **Full access is off by default.** Remote tasks need your approval for each action that asks for it.
 `sudo panda-connect full-access on` (or `services.pandacode-host.fullAccess = true`) lets your devices
 pick Full access, with no approval prompts; turn it back off with `full-access off`. Both need `sudo`.
 
-**What agents can touch.** The host and the agent CLIs it starts run as `panda`, with that user's
-home (checkouts, CLI logins, `~/.ssh`), the network, and `panda-mem` through its socket. The service
-has `NoNewPrivileges`, so agents cannot use `sudo` even though `panda` is in `wheel`; the rest of the
-system is read-only to them (`ProtectSystem=strict`, private `/tmp` and devices). This is weaker
-isolation than `panda-agentd`'s job units: treat anything in `panda`'s home as reachable by your tasks.
+**Agent user separation (new in Unreleased).** The host and the agent CLIs it starts run as the system
+user `agent`: home `/var/lib/agent` (mode 0700), not in `wheel`, no password, no ssh keys. Before
+this, they ran as `panda`, the owner's login and `wheel` user. A task could then have written
+`~/.bashrc` (for example a fake `sudo` that captures the password), `~/.ssh` or the owner's git
+config, and the owner would run it at the next login. Now agents cannot read or write `/home/panda`
+(mode 0700), and they cannot use `sudo` at all: the service has `NoNewPrivileges`, and `agent` is not
+in `wheel`.
+
+**What agents can touch.** The agent home (checkouts, CLI logins, PandaCode's data, `~/.ssh` of
+`agent`), the network, `panda-mem` through its socket, and anything world-readable. The rest of the
+system is read-only to them (`ProtectSystem=strict`, private `/tmp` and devices). Treat everything in
+`/var/lib/agent` as reachable by every task, including the tokens of the agent CLIs logged in there.
+The `agent-env` VM test checks that `agent` cannot list `/home/panda` or touch `/home/panda/.bashrc`.
 
 ## panda-agentd (optional)
 
@@ -149,14 +157,21 @@ zram stores incompressible pages at about their full size, so the slice can hold
 slice alone. Keep the sum well under 100% if you change these values. On boxes with little RAM (about
 2 GB or less), the system's own share can be more than 15%.
 
+Inside the slice, each agent run gets its own cgroup under the host's delegated cgroup (the CLI
+shims, see [agents.md](agents.md#agent-runtime-new-in-unreleased)). systemd-oomd watches
+`pandacode-host.service` and kills the task cgroup that uses the most memory, never the `host/` leaf,
+which is marked `user.oomd_avoid`. The agent CLIs own their task cgroups, so a task could move itself
+into `host/`, or set its own memory limits. This setup contains runaway tasks. It does not contain a
+task that tries to dodge oomd on purpose. `MemoryMax` on the slice still holds for every task.
+
 `pandacode-host` has `OOMPolicy=continue` (a killed agent does not stop the host) and
 `OOMScoreAdjust=500`. sshd, journald, NetworkManager and panda-mem get `OOMScoreAdjust=-500`,
 so the global OOM killer picks agents first. They do not get -1000, because ssh sessions inherit the
 value. The `agent-env` VM test runs a 6 GB memory hog in the slice and checks that it is killed while
 sshd keeps its PID. There is no earlyoom: it would watch the whole box and could kill a system daemon.
 
-These limits protect the box from runaway agents. They do not isolate agents from your files:
-agents run as `panda`, the login user.
+These limits protect the box from runaway agents. File isolation comes from the separate `agent`
+user (above).
 
 ## MCP tools and their permissions
 
@@ -167,13 +182,22 @@ None of them runs as root or has a setuid helper.
 |---|---|---|
 | `panda-mem` | memories, through the panda-mem socket | the socket's group (`panda-mem`), and every change is a git commit |
 | `panda-ckpt` | the caller's own `~/work` and `~/.checkpoints` | `ckpt_restore` needs `confirm: true` and takes a safety checkpoint first. The auto timer runs as the user, with no network and write access to that user's home only |
-| `panda-sys` | nothing by default | `sys_updates action=run` needs `services.panda-sys.allowMutations = true` (in root-owned `/etc/panda/sys.json`), `confirm: true`, a root or `wheel` caller, and a passwordless `sudo -n panda-update run`. PandaOS does not grant that sudo rule, so add one if you want agents to update the box |
+| `panda-sys` | nothing by default | `sys_updates action=run` needs `services.panda-sys.allowMutations = true` (in root-owned `/etc/panda/sys.json`), `confirm: true`, and a caller in the group `panda-sys-update` |
 
-`panda-sys` read limits: callers outside `wheel` can read the journal only for an allow-list of
-PandaOS units (pandacode-host, panda-mem, panda-browser, panda-ckpt-auto-panda, panda-agents-sync,
-systemd-oomd, nixos-upgrade, sshd, NetworkManager). Unit names and `since` are validated, and `lines`
-is 1..500. **`panda` is in `wheel`, so agents running as `panda` can read every journal.** Run agents
-as a non-wheel user if they must not. `sys_net` sends one HEAD request to `connectivityUrl`, and
+**The polkit update group.** `sudo` cannot work for agents (`NoNewPrivileges`, and `agent` is not in
+`wheel`), so `sys_updates action=run` starts `nixos-upgrade.service` over D-Bus. With
+`allowMutations = true`, PandaOS puts `services.panda-sys.updateUsers` (default `[ "agent" ]`) into
+the group `panda-sys-update`, and adds one polkit rule. The rule lets that group **start** exactly
+`nixos-upgrade.service` and nothing else: no other unit, and no stop, restart or edit. The update
+itself runs as root under `panda-update`'s health check and rollback, from the `release` channel the
+box already trusts. An agent can choose *when* to update, but not *what* gets installed. With
+`allowMutations = false` (the default), the group has no members and there is no rule. The
+`panda-sys` VM test covers both cases.
+
+`panda-sys` read limits: callers outside `wheel`, which includes `agent`, can read the journal only
+for an allow-list of PandaOS units (pandacode-host, panda-mem, panda-browser,
+panda-ckpt-auto-agent, panda-agents-sync, systemd-oomd, nixos-upgrade, sshd, NetworkManager).
+Unit names and `since` are validated, and `lines` is 1..500. `sys_net` sends one HEAD request to `connectivityUrl`, and
 nothing else in these servers uses the network.
 
 `confirm: true` protects against mistakes. It is not a security boundary, because an agent can always
@@ -185,7 +209,8 @@ the user's CLI configs, and it writes only `panda-*` keys there.
 ## System hardening
 
 - No default password. The installer sets yours. A system without one (for example, built
-  directly from this flake) prompts for one on tty8 at boot (`panda-firstboot.service`).
+  directly from this flake) prompts for one on tty8 at first boot (`panda-firstboot.service`, which
+  runs once and then writes `/var/lib/pandaos/firstboot-done`).
 - `sudo` only for `wheel`, always with a password (the live ISO is the exception: no password).
 - Kernel sysctls: `kptr_restrict=2`, `dmesg_restrict=1`, no unprivileged eBPF, BPF JIT hardening,
   strict reverse-path filtering, no ICMP redirects or source routing, protected links, FIFOs and

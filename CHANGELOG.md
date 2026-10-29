@@ -8,6 +8,32 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Added
 
+- **Agent CLIs:** `pandaos.agents.clis` (claude-code, codex, gemini-cli, opencode; claude-code allowed
+  by name, no global allowUnfree) and `sudo panda-agents-install <cli>...`, which writes
+  `/etc/pandaos/agents.nix` and applies it through `panda-update`. The installer's `local.nix` imports
+  that file.
+- **First boot runs once on every box**, installed ones included: an agent-CLI picker and the
+  PandaCode Connect offer on tty8 (plus the password step on boxes without `local.nix` and without a
+  password), then `/var/lib/pandaos/firstboot-done`.
+- **Per-task cgroups:** `pandacode-host` gets a delegated cgroup. `pandacode-host-enter` puts the host
+  in an oomd-avoided `host/` leaf, and PATH shims for the agent CLIs (`pandaos.agents.wrapCommands`)
+  give every run its own `task-*` cgroup, so oomd kills one task, not the host.
+  `sudo panda-connect restart`.
+- **panda-ckpt:** `init`/`adopt`/`discover` (CLI and MCP), checkpoints of git checkouts outside
+  `~/work` (reflink copies in `~/.checkpoints/_ext`, restored in place), `list --limit`, and MCP tool
+  annotations.
+- **panda-mem:** `mem_write` refuses to replace an existing title without `overwrite`; new
+  `mem_append`, `mem_delete` (with confirm) and `mem_log_episode` (the end-of-task episode
+  convention), and tool annotations. The three MCP servers share one `mcpserve.go`.
+- **panda-sys:** `sys_updates action=run` starts `nixos-upgrade.service` through a polkit rule for the
+  group `panda-sys-update` (only with `allowMutations`), instead of `sudo`.
+- **Snapshots of the agent:** `btrbk-agent` snapshots `/var/lib/agent` (now a btrfs subvolume),
+  `~/work` and each workspace (`/.snapshots/agent-workspaces/`).
+- Tests: `boot-fallback` (UEFI one-shot trial falls back to the last good generation),
+  `panda-mem-tools`, `agent-clis`; `agent-env` checks per-task oomd kills, `panda-ckpt` external
+  repos, and `panda-sys` the polkit path. The install test checks the first boot runs once and the
+  agent snapshots. CI runs the `panda-agents-install` and desktop shell tests and the closure script
+  tests, retries Nix on cache throttling, and idle RAM is a median of 3 samples.
 - **Agent runtime** (`pandaos.agents`, on by default): `pandacode-host` and the agent CLIs it starts
   run in `agents.slice` (MemoryHigh 65%, MemoryMax 75%, MemorySwapMax 10%, CPUWeight 50,
   TasksMax 8192) with systemd-oomd killing inside the slice under pressure; system daemons get
@@ -72,6 +98,17 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Changed
 
+- **Agents run as the new non-wheel system user `agent`** (home `/var/lib/agent`), not as `panda`.
+  Existing boxes must sign in again (`sudo panda-connect sign-in`) and log their CLIs in as `agent`;
+  see [troubleshooting](docs/troubleshooting.md). `services.panda-ckpt.users` now defaults to
+  `[ "agent" ]`.
+- Rebuilds no longer restart `pandacode-host` (`restartIfChanged = false`), so updates do not kill
+  running tasks. A new host version applies at reboot or `panda-connect restart`.
+- Closure cuts: the nixpkgs source is no longer pinned into the system (`nix-shell -p` and
+  `<nixpkgs>` no longer resolve; use `nix shell nixpkgs#...`), and NetworkManager is built without
+  ModemManager. That NM is not on cache.nixos.org, so CI and each box build it once (about 5 to 10 min).
+- `panda-update` does not start a rollback while the box is shutting down; the boot-time one-shot
+  trial handles it.
 - `/etc/panda/mcp.json` is now generated from `mcp.d` (compat); panda-mem registers in `mcp.d`.
 - The btrfs mounts carry `user_subvol_rm_allowed`, so `panda-ckpt` can delete checkpoints as the
   owner. Existing installs pick it up on the next rebuild (`disk.nix` overrides only devices).

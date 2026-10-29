@@ -9,15 +9,53 @@ keeps shared memory, and the optional `panda-browser` gives agents a headless br
 
 `pandaos.agents` (on by default, `components/agent-env`) is where agent CLIs live:
 
-- **`agents.slice`.** `pandacode-host` and every agent CLI it starts run in this slice. Its limits are
+- **The `agent` user.** `pandacode-host` and every agent it starts run as the system user `agent`
+  (home `/var/lib/agent`, not in `wheel`, no password). Agents cannot read or write your `/home/panda`,
+  so they cannot plant a fake `sudo` in your shell startup files. They reach `/mem` through the
+  panda-mem socket.
+- **`agents.slice`.** `pandacode-host` and everything it starts run in this slice. Its limits are
   `MemoryHigh=65%` (throttling), `MemoryMax=75%` (the kernel OOM-kills inside the slice),
   `MemorySwapMax=10%`, `CPUWeight=50` (system units have 100, so agents yield under load) and
-  `TasksMax=8192`. **systemd-oomd** kills inside the slice when memory pressure stays above 50% or
-  swap is over 90% full. `pandacode-host` has `OOMPolicy=continue`, so one killed agent does not stop
-  the host. Each limit is an option, for example `pandaos.agents.memoryMax = "70%";`. See
+  `TasksMax=8192`. Each limit is an option, for example `pandaos.agents.memoryMax = "70%";`. See
   [security.md](security.md#agent-limits-and-oom).
+- **One cgroup per agent task.** `pandacode-host` has a delegated cgroup (`Delegate=yes`). Its
+  start wrapper, `pandacode-host-enter`, moves the host itself into a `host/` leaf marked
+  `user.oomd_avoid`. The agent CLIs on the host's PATH (`pandaos.agents.wrapCommands`, default
+  `claude codex kimi opencode gemini`) are shims. Each run of one of them moves itself into a new
+  `task-<pid>-<rand>` cgroup and then execs the real CLI. **systemd-oomd** watches the host unit
+  (memory pressure above 50%, or swap more than 90% full) and kills the task cgroup that uses the
+  most memory, together with all its child processes. The host and the other tasks keep running
+  (`OOMPolicy=continue`). The wrapper removes empty task cgroups every 30 s. A program that the host
+  starts by a name that is not in `wrapCommands` runs in `host/` and gets no task cgroup.
+- **Updates do not kill running tasks.** The host unit has `restartIfChanged = false`, so a new
+  host version applies at the next reboot or after `sudo panda-connect restart`.
 - **`/etc/panda/AGENTS.md`**: a short brief for agents (the box, its tools, its limits, its rules).
   `panda-agents sync` links it to `~/AGENTS.md`, and to `~/.codex/AGENTS.md` when Codex is installed.
+
+### Agent CLIs
+
+No agent CLI ships by default. Choose them in config:
+
+```nix
+pandaos.agents.clis = [ "claude-code" "codex" ];   # also gemini-cli, opencode
+```
+
+or at runtime: `sudo panda-agents-install codex opencode`. That writes `/etc/pandaos/agents.nix`
+(the installer's `local.nix` imports it if it exists), applies it through `panda-update run` (health
+check and rollback included), and restores the old file if the apply fails. `panda-agents-install
+--check NAME...` only validates the names. claude-code is unfree; it is allowed by name only, and
+global `allowUnfree` stays off. kimi is not packaged in nixpkgs 26.05, so selecting it fails
+evaluation. The ISO's prebuilt systems contain no CLIs, so this step needs a network. Sizes and
+details: [components/agent-clis/README.md](../components/agent-clis/README.md).
+
+**First-boot picker.** On the first boot of every box, including installed ones, the console
+switches to tty8 and asks which CLIs to install. It then offers `panda-connect sign-in` when a
+network is up. Only boxes that were not made by `panda-install` and have no password also get the
+password step first. Once the steps finish, `/var/lib/pandaos/firstboot-done` is written and the
+picker never runs again. If the box reboots half-way, the picker starts over at the next boot.
+
+Log the CLIs in as the agent user, for example `sudo -iu agent claude`, then run
+`sudo panda-agents sync --user agent`.
 
 ### MCP registry
 
@@ -64,14 +102,21 @@ use `panda-menu` → **Agents doctor**.
 | `sys_updates` | `panda-update status`. `action=run` is the only tool that changes anything, and it is gated |
 | `sys_ckpt_space` | btrfs usage of `/` and `/.snapshots` |
 
-Callers outside `wheel` can read only the PandaOS units' logs. For the permission model, see
-[security.md](security.md#mcp-tools-and-their-permissions).
+Callers outside `wheel` (like `agent`) can read only the PandaOS units' logs. `sys_updates
+action=run` starts `nixos-upgrade.service` through polkit. It works only with
+`services.panda-sys.allowMutations = true` (off by default) and `confirm: true`, and only for members
+of the `panda-sys-update` group (`services.panda-sys.updateUsers`, default `[ "agent" ]`). For the
+permission model, see [security.md](security.md#mcp-tools-and-their-permissions).
+
+Every MCP tool of panda-mem, panda-ckpt and panda-sys carries MCP `annotations` (`readOnlyHint`,
+`destructiveHint`, `idempotentHint`). Clients can use them to decide what to auto-approve.
 
 ### Checkpoints
 
-`panda-ckpt` (on by default) keeps instant btrfs checkpoints of `~/work/<name>` workspaces. Agents
-use its MCP tools to checkpoint before risky changes, and to diff, restore or fork. See
-[checkpoints.md](checkpoints.md).
+`panda-ckpt` (on by default, for the `agent` user) keeps instant btrfs checkpoints of `~/work/<name>`
+workspaces. It also checkpoints git checkouts elsewhere in the agent's home, with reflink copies.
+Agents use its MCP tools: `ckpt_create`, `ckpt_list`, `ckpt_diff`, `ckpt_restore`, `ckpt_fork`,
+`ckpt_init`, `ckpt_adopt` and `ckpt_discover`. See [checkpoints.md](checkpoints.md).
 
 ## PandaCode Connect (pandacode-host)
 
@@ -96,6 +141,7 @@ start, watch and approve tasks on it. On the desktop, the dock's *PandaCode* but
 | `panda-connect status [--json]` | `signedIn`, `service` (`active`, `activating`, `inactive`, `failed`), `deviceName`, `version` |
 | `sudo panda-connect full-access on\|off` | Let your devices pick Full access (no approval prompts). **Off by default.** |
 | `panda-connect logs [-f]` | The host's journal |
+| `sudo panda-connect restart` | Restart the host, which ends running tasks. Rebuilds don't restart it |
 | `sudo panda-connect sign-out` | Stop the host and forget the sign-in |
 
 NixOS options:
@@ -103,14 +149,15 @@ NixOS options:
 ```nix
 services.pandacode-host = {
   enable = true;          # on by default; idle until signed in
-  user = "panda";         # the host and every agent CLI it starts run as this user
+  user = "agent";         # the host and every agent CLI it starts run as this user (non-wheel)
   deviceName = "pandaos"; # default name for sign-in (default: networking.hostName)
   fullAccess = false;     # default for Full access; `panda-connect full-access` overrides it
 };
 ```
 
-Agents run as `user` with its home: install and log in the agent CLIs (`claude`, `codex`, ...) and
-`gh` as that user. PandaCode keeps its sign-in and secrets in that user's PandaCode data directory
+Agents run as `user` with its home (`/var/lib/agent` for the default `agent`): log in the agent
+CLIs (`claude`, `codex`, ...) and `gh` as that user (`sudo -iu agent`). Never set `user` to a login
+or `wheel` user. PandaCode keeps its sign-in and secrets in that user's PandaCode data directory
 (files mode 0600, not a keyring).
 
 Until you sign in, the service is skipped (`ConditionPathExists` on
@@ -232,6 +279,10 @@ panda-mem search "build host"            # multi-term: ranked by how many terms 
 panda-mem list
 panda-mem read semantic/<file>.md
 panda-mem history
+panda-mem write -kind semantic -title "build host" -overwrite -body "..."   # replace (refused without -overwrite)
+panda-mem append -title "build host" -body "Also: 32 GB RAM"                # adds a "### <UTC time>" section
+panda-mem delete -path semantic/<file>.md -confirm                          # git history keeps it
+panda-mem episode -task "Fix flaky login test" -outcome success -files a.go -body "What I did..."
 ```
 
 Search splits the query into terms. A memory matches if it contains any term; memories that match
@@ -247,7 +298,16 @@ compat `/etc/panda/mcp.json` still carries it:
 {"mcpServers": {"panda-mem": {"command": "panda-mem", "args": ["mcp", "-socket", "/run/panda-mem/sock"]}}}
 ```
 
-Tools: `mem_write`, `mem_search`, `mem_read`, `mem_list`, `mem_history`.
+Tools: `mem_write` (refuses to replace an existing title without `overwrite: true`), `mem_append`,
+`mem_delete` (needs `confirm: true`), `mem_log_episode`, `mem_search`, `mem_read`, `mem_list`,
+`mem_history`.
+
+**Episode convention.** At the end of every task, an agent calls `mem_log_episode` with the task
+(one line), an `outcome` (`success`, `partial` or `failure`), a markdown summary (what it did, what
+worked and what did not, what the next agent should know), and optionally the files it touched. This
+writes `episodic/<date>-<slug>.md`. Before it starts work, an agent searches memory, so it can find
+earlier attempts. Facts that stay true go into `semantic` memories, and recipes go into `procedural`
+ones. `/etc/panda/AGENTS.md` tells agents the same thing.
 
 `/mem` is its own btrfs subvolume and is snapshotted hourly (new in Unreleased), see
 [updates-and-rollback.md](updates-and-rollback.md#snapshots-of-mem-and-home).
