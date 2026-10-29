@@ -73,7 +73,7 @@ pkgs.testers.runNixOSTest {
         _, _, res = mcp([("mem_delete", {"path": path, "confirm": True}), ("mem_read", {"path": path})])
         assert not res[0]["isError"] and res[1]["isError"], res
         machine.fail(f"test -e /mem/{path}")
-        log = machine.succeed("runuser -u panda-mem -- git -C /mem log --format=%s")
-        assert f"mem: delete {path}" in log and f"mem: append {path}" in log and f"mem: episode {ep}" in log, log
+        commits = machine.succeed("runuser -u panda-mem -- git -C /mem log --format=%s")
+        assert f"mem: delete {path}" in commits and f"mem: append {path}" in commits and f"mem: episode {ep}" in commits, commits
   '';
 }

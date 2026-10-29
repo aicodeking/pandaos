@@ -15,7 +15,7 @@ pkgs.testers.runNixOSTest {
     pandaos.firstboot.enable = false;
     services.panda-sys.enable = true;
     services.panda-sys.connectivityUrl = "http://127.0.0.1:9/";
-    users.users.agent.isNormalUser = true; # not wheel
+    # `agent` (non-wheel system user) comes from pandacode-host in the default module.
   };
   nodes.mut = {
     imports = [

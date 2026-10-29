@@ -212,7 +212,10 @@ pkgs.testers.runNixOSTest {
         p("test ! -e ~/src/app/junk.txt && cd ~/src/app && test -z \"$(git status --porcelain)\"")
         p("cd ~/src/app && git log --oneline | grep -q init")
         safety = json.loads(text(res[0]))["safety"]
-        assert len(pj(f"panda-ckpt diff {repo} {safety}")) == 2
+        # The `git status` above refreshed .git/index, so compare the work tree only.
+        d = pj(f"panda-ckpt diff {repo} {safety}")
+        kinds = {c["path"]: c["kind"] for c in d if not c["path"].startswith(".git/")}
+        assert kinds == {"main.txt": "modified", "junk.txt": "deleted"}, d
         p("echo v3 > ~/src/app/main.txt")
         machine.succeed("systemctl start panda-ckpt-auto-agent.service")
         assert any(c["reason"] == "auto" for c in ckpts(repo)), ckpts(repo)
