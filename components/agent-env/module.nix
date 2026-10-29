@@ -55,9 +55,10 @@ let
     `/etc/pandaos` (a Nix flake) and a rebuild, never by editing `/etc` or `/nix`.
 
     ## Tools
-    - Shared memory: the `panda-mem` MCP server (`mem_write`, `mem_search`,
-      `mem_read`, `mem_list`, `mem_history`), or the `panda-mem` CLI. Every agent
-      on the box shares `/mem`; search it before you start, write what you learn.
+    - Shared memory: the `panda-mem` MCP server (`mem_search`, `mem_read`,
+      `mem_list`, `mem_history`, `mem_write`, `mem_append`, `mem_delete`,
+      `mem_log_episode`), or the `panda-mem` CLI. Every agent on the box shares
+      `/mem`; search it before you start, write what you learn.
     - Checkpoints: ${
       if ckptEnabled then
         "keep each project in `~/work/<name>` (`panda-ckpt init <name>`, or\n      `panda-ckpt adopt` for an existing dir); then `panda-ckpt create/list/diff/\n      restore/fork`, or the `panda-ckpt` MCP tools. Changed workspaces are\n      auto-checkpointed."
@@ -81,8 +82,10 @@ let
     data instead of loading it.
 
     ## Rules
-    - Checkpoint before risky changes (mass edits, migrations, deletes), and
-      record what you did in memory.
+    - Checkpoint before risky changes (mass edits, migrations, deletes).
+    - At the end of every task, call `mem_log_episode` (task, outcome
+      success|partial|failure, a summary of what worked and what did not,
+      files touched). Facts go in `semantic` memories, recipes in `procedural`.
     - Do not try to escape the limits or sudo; ask the owner instead.
     - Keep secrets out of memory, logs and commits.
   '';

@@ -69,8 +69,10 @@ They are **not tamper-resistant**. Checkpoints belong to the same uid as the age
 The tamper-resistant layer is the hourly, root-owned btrbk snapshots in `/.snapshots` (`nixos/modules/snapshots.nix`: 24 hourly and 7 daily).
 They cover `/home`, and the agent's home through a second `btrbk-agent` instance when that home lives outside `/home` and is itself a subvolume.
 btrfs snapshots are not recursive, so those snapshots contain the plain files of the homes, including external repos.
-They do **not** contain nested subvolumes: `~/work`, each `~/work/<ws>`, and every checkpoint appear there as empty directories.
-To make `~/work` workspaces tamper-resistant too, btrbk would also need `subvolume home/*/work/*` entries, with unique `snapshot_name`s.
+Nested subvolumes appear there as empty directories, so `btrbk-agent` lists them as extra entries for the agent user (`services.pandacode-host.user`, when panda-ckpt manages it):
+`~/work` itself (`/.snapshots/agent-work.<time>`) and each writable `~/work/<ws>` through a glob (`/.snapshots/agent-workspaces/<ws>.<time>`).
+The glob skips read-only subvolumes, so panda-ckpt's own checkpoints are not snapshotted again.
+Gaps: workspaces of other `services.panda-ckpt.users` under `/home` (for example `panda`'s) are only in the `home` snapshot as empty directories, and a workspace created and deleted within the same hour is never snapshotted.
 
 ## Privileges and mount options
 
