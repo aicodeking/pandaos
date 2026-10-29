@@ -34,8 +34,9 @@ Each test prints `METRIC {json}` (so failed runs still report) and writes `$out/
   for the same system with a rebuilt panda-mem (agentd, used before, is off by default now).
 
 `budgets.json`: the RAM budgets are deliberately loose. The closure budgets are the measured
-real-system closures + 10%, so any growth past that fails CI. Measured: headless 2834 MB, desktop
-2915 MB (with the curated firmware set; desktop GPU off). **PandaCode Connect added about 1.2 GB to
-headless and 0.8 GB to desktop** (from 1637 / 2114 MB): the AppImage itself is 275 MB extracted, and
-`appimageTools`' FHS environment pulls in GTK, WebKit-adjacent and media libraries. Slimming that
-(a minimal FHS env) is possible future work; the budgets record the size honestly meanwhile.
+real-system closures + 10%, so any growth past that fails CI. Measured: headless 1971 MB, desktop
+2413 MB (with the curated firmware set; desktop GPU off), including panda-ckpt, panda-sys and
+panda-agents. PandaCode Connect first added about 1.2 GB to headless and 0.8 GB to desktop (from
+1637 / 2114 MB to 2834 / 2915 MB), mostly `appimageTools`' default FHS library set. The slim FHS env
+in `components/pandacode-host/package.nix` (only the libraries the AppImage leaves to the host, no
+`glibcLocales`; see `slim-notes.md`) brought that down by 863 MB (headless) and 502 MB (desktop).
