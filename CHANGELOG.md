@@ -112,7 +112,9 @@ All notable changes to PandaOS are documented here. The format follows
   it ranks by reclaim rate and picked an idle bystander. The kernel's cgroup OOM killer at the
   slice's `MemoryMax` kills the offending task; oomd acts only on swap exhaustion.
 - Installed systems (`lib.mkPandaSystem`) set `system.disableInstallerTools`, keeping
-  `nixos-rebuild` and `nixos-version`. The live ISO keeps the installer tools.
+  `nixos-rebuild` and `nixos-version`. The live ISO keeps the installer tools. This saves only about
+  1 MB (headless 1691 to 1690 MB; budgets 1859 / 2346 MB). perl (55 MB) stays for the activation
+  scripts, and python3 (127 MB) stays for systemd-boot's installer.
 - **Agents run as the new non-wheel system user `agent`** (home `/var/lib/agent`), not as `panda`.
   Existing boxes must sign in again (`sudo panda-connect sign-in`) and log their CLIs in as `agent`;
   see [troubleshooting](docs/troubleshooting.md). `services.panda-ckpt.users` now defaults to

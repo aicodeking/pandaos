@@ -25,16 +25,16 @@ is the median of 3 readings.
 
 | | headless | desktop |
 |---|---|---|
-| Idle RAM, `free` used + shmem | 115 MB (with the optional agentd on) | 175 MB in a logged-in labwc session (172 MB at the greeter) |
-| Idle RAM, `MemTotal - MemAvailable` | 235 MB | 330 MB in session (328 MB at the greeter) |
+| Idle RAM, `free` used + shmem | 114 MB (with the optional agentd on) | 176 MB in a logged-in labwc session (174 MB at the greeter) |
+| Idle RAM, `MemTotal - MemAvailable` | 234 MB | 331 MB in session (329 MB at the greeter) |
 | Closure of the installed system (`nixosConfigurations`, incl. curated firmware) | 1.69 GB | 2.13 GB |
 | ISO size (the desktop ISO also carries the headless system) | 855 MB | 975 MB |
 
 | Optional agentd job round trip (pair, then run `echo hi`) | |
 |---|---|
-| Normal VM network | 3.7 s |
-| 1 Mbit/s, ~340 ms RTT, 1% loss each way (netem on both nodes) | 6.1 s |
-| Offline install to an empty disk (`panda-install --yes`, VM) | 98 s |
+| Normal VM network | 3.8 s |
+| 1 Mbit/s, ~340 ms RTT, 1% loss each way (netem on both nodes) | 6.3 s |
+| Offline install to an empty disk (`panda-install --yes`, VM) | 106 s |
 | A panda-mem-only update (uncompressed bytes substituted) | 8 MB |
 
 PandaCode Connect is the pinned PandaCode AppImage (289 MB extracted) in a slim FHS environment that
