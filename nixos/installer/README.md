@@ -72,7 +72,8 @@ mount. On success it unmounts `/mnt` and prints `==> Done.`
    - `VERSION`: the ISO's git revision (`-dirty` suffix if built from a dirty tree).
    - `hardware-configuration.nix`: `nixos-generate-config --no-filesystems`
    - `local.nix`: hostname, time zone, user + `hashedPassword`, ssh key,
-     optional `services.panda-agentd.relayUrl`; imports `disk.nix`
+     optional `services.panda-agentd.relayUrl`; imports `disk.nix`, and `agents.nix` once
+     `panda-agents-install` has written it
    - `disk.nix`: `fileSystems.<mount>.device = lib.mkForce "/dev/disk/by-uuid/..."`
      for every mount, from `blkid`
 4. Installs the system offline (see below) with systemd-boot (`configurationLimit = 10`).

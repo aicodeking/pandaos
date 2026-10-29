@@ -1,8 +1,15 @@
-# First boot: the panda user ships without a password (installed systems get
-# a hashed one from the installer's local.nix). If it is still unset at boot,
-# prompt for one with `passwd panda` on a dedicated console (tty8) and switch
-# to it, then offer `panda-connect sign-in` when a network is up. Once a
-# password exists the unit is skipped by ExecCondition.
+# First boot, once per box, on a dedicated console (tty8):
+# 1. Password: only on systems not made by panda-install (no
+#    /etc/pandaos/local.nix) whose panda user has no usable hash yet; the
+#    installer already set the real user's password (and may lock panda on
+#    purpose). Asks `passwd panda` until it succeeds.
+# 2. Which agent CLIs to install (panda-agents-install, needs a network).
+#    PANDA_FIRSTBOOT_AGENTS (unit environment) answers it unattended; ""
+#    skips it.
+# 3. Offers `panda-connect sign-in` when a network is up.
+# Then it writes /var/lib/pandaos/firstboot-done and never runs again.
+# Killed half-way (a reboot), it starts over at the next boot; the password
+# step skips itself once a hash exists.
 #
 # Why tty8 and not blocking getty on tty1: blocking would hold multi-user.target
 # (and greetd on the desktop) until someone types at the console, which hangs
@@ -22,22 +29,25 @@ let
   cfg = config.pandaos.firstboot;
   vt = "8";
   connect = config.services.pandacode-host.enable;
+  agents = config.pandaos.agents;
+  doneMarker = "/var/lib/pandaos/firstboot-done";
 in
 {
+  # panda-agents-install and pandaos.agents.clis.
+  imports = [ ../../components/agent-clis/module.nix ];
+
   options.pandaos.firstboot.enable = lib.mkOption {
     type = lib.types.bool;
     default = !(options ? isoImage);
     defaultText = lib.literalMD "`true`, except on the live ISO";
-    description = "Prompt for the panda user's password on the console when it has none.";
+    description = "Run the first-boot console steps (password if unset, agent CLIs, PandaCode Connect) once.";
   };
 
   config = lib.mkIf (cfg.enable && config.users.mutableUsers) {
     systemd.services.panda-firstboot = {
-      description = "PandaOS first boot: set the panda password";
+      description = "PandaOS first boot: password, agent CLIs, PandaCode Connect";
       wantedBy = [ "multi-user.target" ];
-      # Installed systems: panda-install sets the real user's password there
-      # (and may lock panda on purpose when installing for another user).
-      unitConfig.ConditionPathExists = "!/etc/pandaos/local.nix";
+      unitConfig.ConditionPathExists = "!${doneMarker}";
       # Start after the login managers so their VT switch to tty1 is done.
       after = [
         "systemd-user-sessions.service"
@@ -54,14 +64,6 @@ in
       serviceConfig = {
         # simple, not oneshot: must never hold up multi-user.target.
         Type = "simple";
-        # Exit 0 (run) only while panda has no usable password hash.
-        ExecCondition = pkgs.writeShellScript "panda-needs-password" ''
-          hash=$(${pkgs.gnugrep}/bin/grep '^panda:' /etc/shadow | ${pkgs.coreutils}/bin/cut -d: -f2)
-          case "$hash" in
-            "" | "!" | "*" | "!*" | "!!") exit 0 ;;
-            *) exit 1 ;;
-          esac
-        '';
         StandardInput = "tty";
         StandardOutput = "tty";
         StandardError = "journal";
@@ -74,20 +76,55 @@ in
         # ponytail: fixed sleep to let greetd finish its own VT switch first.
         sleep 3
         chvt ${vt}
-        until
-          echo
-          echo "Welcome to PandaOS. Set a password for the 'panda' user."
-          echo "(It is also your sudo password.)"
-          passwd panda
-        do
-          echo "Password not set, try again."
-          sleep 1
-        done
+        echo
+        echo "Welcome to PandaOS."
+        # Boxes from panda-install already have their user's password.
+        needs_password() {
+          [ ! -e /etc/pandaos/local.nix ] || return 1
+          case "$(grep '^panda:' /etc/shadow | cut -d: -f2)" in
+            "" | "!" | "*" | "!*" | "!!") return 0 ;;
+            *) return 1 ;;
+          esac
+        }
+        if needs_password; then
+          until
+            echo "Set a password for the 'panda' user (it is also your sudo password)."
+            passwd panda
+          do
+            echo "Password not set, try again."
+            sleep 1
+          done
+        fi
+        online() { [ -n "$(ip -4 route show default; ip -6 route show default)" ]; }
+        install=${lib.getExe agents.installer}
+        # Ctrl-C stops the install or sign-in, not this script. 2>&1 below:
+        # stderr is the journal here, the console should see why it failed.
+        trap echo INT
+        echo
+        if [ -n "''${PANDA_FIRSTBOOT_AGENTS+x}" ]; then
+          clis=$PANDA_FIRSTBOOT_AGENTS
+        else
+          # Ask again until the names are valid or blank.
+          while
+            printf 'Which agent CLIs should this box run? [%s] (space-separated, blank to skip) ' \
+              "${toString agents.installable}"
+            read -r clis || clis=
+            # shellcheck disable=SC2086 # one word per CLI
+            [ -n "$clis" ] && ! "$install" --check $clis 2>&1
+          do :; done
+        fi
+        if [ -z "$clis" ]; then
+          echo "No agent CLIs. Add some later: sudo panda-agents-install codex"
+        elif online; then
+          # shellcheck disable=SC2086
+          "$install" $clis 2>&1 ||
+            echo "Not installed. Retry later: sudo panda-agents-install $clis"
+        else
+          echo "No network yet. When online, run: sudo panda-agents-install $clis"
+        fi
         ${lib.optionalString connect ''
-          # Ctrl-C stops the sign-in, not this script.
-          trap echo INT
           echo
-          if [ -n "$(ip -4 route show default; ip -6 route show default)" ]; then
+          if online; then
             # Not read -p: its prompt goes to stderr, which is the journal here.
             printf 'Connect this box to PandaCode now? [y/N] '
             read -r answer || answer=
@@ -102,7 +139,9 @@ in
             echo "'sudo panda-connect sign-in', or use the desktop menu (PandaCode Connect)."
           fi
         ''}
-        echo "Done. Log in as 'panda' on the main console."
+        mkdir -p ${dirOf doneMarker}
+        touch ${doneMarker}
+        echo "Done. Log in on the main console."
         sleep 2
         chvt 1
       '';

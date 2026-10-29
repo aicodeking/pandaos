@@ -340,7 +340,8 @@ write_local_nix() {
 # Machine settings written by panda-install.
 { lib, ... }:
 {
-  imports = [ ./disk.nix ];
+  # agents.nix: written by panda-agents-install (agent CLIs), when present.
+  imports = [ ./disk.nix ] ++ lib.optional (builtins.pathExists ./agents.nix) ./agents.nix;
 
   networking.hostName = "$hostname";
   time.timeZone = "$timezone";
