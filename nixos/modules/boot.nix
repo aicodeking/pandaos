@@ -107,9 +107,36 @@ let
     runtimeInputs = [
       pkgs.coreutils
       config.systemd.package
+      config.nix.package.out
       health
     ];
     text = ''
+      profile=/nix/var/nix/profiles/system
+
+      # After a fallback boot the system profile still points at the failed
+      # generation: gc could then delete the good one, and the next update
+      # would start from the bad one. Point the profile back at what is
+      # running (its newest generation, or a new one), and make it the
+      # bootloader default again.
+      repoint_profile() {
+        running=$(readlink -f /run/current-system)
+        [ "$(readlink -f "$profile")" != "$running" ] || return 0
+        gen=
+        for link in "$profile"-*-link; do
+          [ "$(readlink -f "$link")" = "$running" ] || continue
+          n=''${link#"$profile"-}
+          n=''${n%-link}
+          if [ -z "$gen" ] || [ "$n" -gt "$gen" ]; then gen=$n; fi
+        done
+        if [ -n "$gen" ]; then
+          nix-env -p "$profile" --switch-generation "$gen"
+        else
+          nix-env -p "$profile" --set "$running"
+        fi
+        "$running/bin/switch-to-configuration" boot
+        echo "panda-boot-check: booted the fallback $running; the system profile points at it again"
+      }
+
       efivar() {
         f=${efiVars}/$1-${loaderGuid}
         # 4-byte attribute header, then a UTF-16LE string.
@@ -119,6 +146,7 @@ let
       good=$(efivar LoaderEntryDefault || true)
 
       if panda-health --wait 120; then
+        repoint_profile
         if [ -n "$selected" ] && [ "$selected" != "$good" ]; then
           bootctl set-default "$selected"
           echo "panda-boot-check: $selected is now the known-good boot entry"

@@ -6,7 +6,10 @@
 #   boot 2: (driver reboot) the bad generation is tried; panda-mem never comes
 #           up, panda-boot-check fails and schedules a reboot by itself.
 #   boot 3: (guest-initiated reboot) the firmware falls back to the known-good
-#           entry; LoaderEntryDefault is still the good one.
+#           entry; LoaderEntryDefault is still the good one, and
+#           panda-boot-check points the system profile (still on the bad
+#           generation) back at the running good one and makes it the
+#           loader.conf default again, so gc keeps it and updates start there.
 # Not covered: a kernel/initrd that panics (panic=10 + boot.panic_on_fail take
 # the same fallback path, but a panicking generation is slow and flaky in CI).
 { pkgs, self, t }:
@@ -103,5 +106,16 @@ pkgs.testers.runNixOSTest {
           assert efivar("LoaderEntryOneShot") == "", "one-shot entry not consumed"
           assert gen() == "good"
           machine.wait_for_unit("panda-boot-check.service", timeout=300)
+
+      with subtest("boot 3: the system profile and loader.conf point at the running good system again"):
+          running = machine.succeed("readlink -f /run/current-system").strip()
+          assert running != "${bad}"
+          # Before the check it was still "${bad}" (set above); now it is the running system.
+          assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == running
+          print(machine.succeed("nix-env -p /nix/var/nix/profiles/system --list-generations"))
+          machine.succeed("journalctl -b -o cat -u panda-boot-check.service | grep -q 'points at it again'")
+          default = machine.succeed("sed -n 's/^default //p' /boot/loader/loader.conf").strip()
+          assert default == good_entry, f"loader.conf default {default!r}, want {good_entry!r}"
+          assert efivar("LoaderEntryOneShot") == "", "no new one-shot trial for the same system"
     '';
 }
