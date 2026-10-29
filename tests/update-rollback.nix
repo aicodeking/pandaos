@@ -104,11 +104,11 @@ pkgs.testers.runNixOSTest {
 
       with subtest("bad update (agentd broken): health check rolls back and logs it"):
           rc, out = update_to(bad)
-          log = upgrade_log()
-          print(log)
+          ulog = upgrade_log()
+          print(ulog)
           assert rc != 0, "an update that broke agentd reported success"
           assert current() == good, f"not rolled back: {current()} != {good}"
-          assert "panda-agentd.service is" in log and "rolling back to" in log and "rolled back to" in log, log
+          assert "panda-agentd.service is" in ulog and "rolling back to" in ulog and "rolled back to" in ulog, ulog
           assert machine.succeed("cat /etc/pandaos-test-gen").strip() == "good"
           gens = machine.succeed("nix-env -p /nix/var/nix/profiles/system --list-generations")
           assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == good, gens
@@ -138,10 +138,10 @@ pkgs.testers.runNixOSTest {
           machine.start()
           machine.wait_for_unit("multi-user.target")
           machine.succeed("rm /var/lib/panda-test-sleep")
-          log = machine.succeed(f"journalctl -o cat --since @{since} -u nixos-upgrade.service")
-          print(log)
-          assert "interrupted by shutdown" in log, log
-          assert "rolling back to" not in log and "rolled back to" not in log, log
+          ulog = machine.succeed(f"journalctl -o cat --since @{since} -u nixos-upgrade.service")
+          print(ulog)
+          assert "interrupted by shutdown" in ulog, ulog
+          assert "rolling back to" not in ulog and "rolled back to" not in ulog, ulog
           machine.wait_for_unit("panda-agentd.service")
           machine.succeed("panda-health --wait 120")
     '';
