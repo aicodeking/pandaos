@@ -25,6 +25,8 @@ pkgs.testers.runNixOSTest {
         (t.nodeName "machine")
         t.noFirstboot
       ];
+      # Off by default; the bad generation below breaks it.
+      services.panda-agentd.enable = true;
       # nixos-upgrade's ConditionPathExists; the test switchCommand never reads it.
       environment.etc."pandaos/flake.nix".text = "# update-rollback test stub\n";
       # Replaces only `nixos-rebuild switch ...` inside panda-update-run; the

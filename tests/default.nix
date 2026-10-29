@@ -208,13 +208,18 @@ let
         assert garbage["text"] == "Agents: ?", garbage
         off = json.loads(machine.succeed("PANDA_AGENTD_RUN_DIR=/nonexistent panda-agents-status"))
         assert off["class"] == "off", off
-        # The real daemon's file (unpaired: the default relay is a placeholder).
-        machine.wait_for_file("/run/panda-agentd/status.json")
+        # agentd is off by default: no status file, so the module says "off".
         real = json.loads(machine.succeed("panda-agents-status"))
-        assert real["class"] in ("pairing", "idle"), real
+        assert real["class"] == "off", real
         bars = json.loads(machine.succeed("cat /etc/xdg/waybar/config"))
         assert [b["name"] for b in bars] == ["top", "dock"], bars
         machine.succeed("grep -q swaybg /etc/xdg/labwc/autostart")
+    with subtest("desktop: panda-connect-status (fixtures, then the real unsigned box)"):
+        machine.succeed("sh ${../components/desktop/test-connect-status.sh} ${../components/desktop/bin/panda-connect-status}")
+        real = json.loads(machine.succeed("panda-connect-status"))
+        assert real["text"] == "PandaCode: sign in" and real["class"] == "off", real
+        top = json.loads(machine.succeed("cat /etc/xdg/waybar/config"))[0]
+        assert "custom/connect" in top["modules-left"], top
   '';
 
   # The system panda-install copies in the install test: the real prebuilt
@@ -234,9 +239,12 @@ let
   };
 in
 {
+  # agentd is off by default; this test enables it to cover the unpaired
+  # daemon, so its idle RAM includes agentd (an upper bound for the default).
   boot-headless = mkBootTest {
     name = "boot-headless";
     profile = "headless";
+    extraConfig.services.panda-agentd.enable = true;
     script = ''
       machine.wait_for_unit("panda-agentd.service")
       machine.wait_for_unit("panda-mem.service")
@@ -262,6 +270,8 @@ in
         "-device virtio-gpu-pci"
       ];
       environment.sessionVariables.WLR_RENDERER = lib.mkDefault "pixman";
+      # test-connect-status.sh runs the module with plain sh and needs jq.
+      environment.systemPackages = [ pkgs.jq ];
       services.greetd.settings.initial_session = {
         command = "labwc";
         user = "panda";
@@ -308,6 +318,7 @@ in
   mem-security = import ./mem-security.nix { inherit pkgs self t; };
   update-rollback = import ./update-rollback.nix { inherit pkgs self t; };
   iso-boot = import ./iso-boot.nix { inherit pkgs self t; };
+  pandacode-host = import ./pandacode-host.nix { inherit pkgs self t; };
 
   mem = pkgs.testers.runNixOSTest {
     name = "mem";
@@ -553,8 +564,11 @@ in
           for mnt in ["/", "/nix", "/home", "/mem", "/var/log", "/.snapshots"]:
               target.succeed(f"findmnt -no FSTYPE {mnt} | grep -qx btrfs")
           target.succeed("test -s /etc/pandaos/flake.nix")
-          target.wait_for_unit("panda-agentd.service")
           target.wait_for_unit("panda-mem.service")
+          # Not signed in: the PandaCode host is installed but idle, agentd is off.
+          st = json.loads(target.succeed("panda-connect status --json"))
+          assert st["signedIn"] is False, st
+          target.fail("systemctl is-active panda-agentd.service")
 
       with subtest("snapshots: btrbk on the installed btrfs"):
           target.succeed("systemctl start btrbk-panda.service")

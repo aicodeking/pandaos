@@ -1,11 +1,11 @@
 # Host-side, no VM: closure sizes of what panda-install actually puts on disk
 # (nixosConfigurations.*, no test instrumentation), checked against
-# budgets.json, plus `updateBytes` for an agentd-only update.
+# budgets.json, plus `updateBytes` for a panda-mem-only update.
 #
 # updateBytes is the NAR size of the store paths in the new system that the
 # old one lacks, i.e. what a machine on `old` substitutes to switch. Real
 # downloads are compressed NARs, so this is an upper bound on the transfer. The
-# update simulated here is "PandaOS ships a new agentd"; a nixpkgs bump would
+# update simulated here is "PandaOS ships a new panda-mem"; a nixpkgs bump would
 # pull far more and is not measured.
 { pkgs, self }:
 let
@@ -20,11 +20,11 @@ let
       modules = [
         ../nixos/installer/target.nix
         {
-          services.panda-agentd.package = lib.mkForce (
-            headless.config.services.panda-agentd.package.overrideAttrs (old: {
+          services.panda-mem.package = lib.mkForce (
+            headless.config.services.panda-mem.package.overrideAttrs (old: {
               postInstall = (old.postInstall or "") + ''
-                mkdir -p $out/share/panda-agentd
-                echo "simulated update" > $out/share/panda-agentd/update-marker
+                mkdir -p $out/share/panda-mem
+                echo "simulated update" > $out/share/panda-mem/update-marker
               '';
             })
           );
