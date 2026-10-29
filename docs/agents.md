@@ -10,8 +10,8 @@ keeps shared memory, and the optional `panda-browser` gives agents a headless br
 `pandaos.agents` (on by default, `components/agent-env`) is where agent CLIs live:
 
 - **`agents.slice`.** `pandacode-host` and every agent CLI it starts run in this slice. Its limits are
-  `MemoryHigh=75%` (throttling), `MemoryMax=85%` (the kernel OOM-kills inside the slice),
-  `MemorySwapMax=25%`, `CPUWeight=50` (system units have 100, so agents yield under load) and
+  `MemoryHigh=65%` (throttling), `MemoryMax=75%` (the kernel OOM-kills inside the slice),
+  `MemorySwapMax=10%`, `CPUWeight=50` (system units have 100, so agents yield under load) and
   `TasksMax=8192`. **systemd-oomd** kills inside the slice when memory pressure stays above 50% or
   swap is over 90% full. `pandacode-host` has `OOMPolicy=continue`, so one killed agent does not stop
   the host. Each limit is an option, for example `pandaos.agents.memoryMax = "70%";`. See

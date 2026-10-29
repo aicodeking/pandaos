@@ -9,7 +9,7 @@ All notable changes to PandaOS are documented here. The format follows
 ### Added
 
 - **Agent runtime** (`pandaos.agents`, on by default): `pandacode-host` and the agent CLIs it starts
-  run in `agents.slice` (MemoryHigh 75%, MemoryMax 85%, MemorySwapMax 25%, CPUWeight 50,
+  run in `agents.slice` (MemoryHigh 65%, MemoryMax 75%, MemorySwapMax 10%, CPUWeight 50,
   TasksMax 8192) with systemd-oomd killing inside the slice under pressure; system daemons get
   `OOMScoreAdjust=-500`. `/etc/panda/AGENTS.md` briefs agents on the box.
 - **MCP registry** `/etc/panda/mcp.d/<name>.json` (`pandaos.agents.mcpServers`), and `panda-agents`

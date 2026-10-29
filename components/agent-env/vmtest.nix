@@ -11,7 +11,10 @@ pkgs.testers.runNixOSTest {
     ];
     networking.hostName = pkgs.lib.mkForce "machine";
     pandaos.firstboot.enable = false;
-    virtualisation.memorySize = 1536;
+    virtualisation.memorySize = 2048;
+    # test-instrumentation.nix sets vm.panic_on_oom = mkDefault 2, which turns
+    # the OOM kill under test into a kernel panic. Production keeps 0.
+    boot.kernel.sysctl."vm.panic_on_oom" = 0;
   };
   testScript = ''
     import json
@@ -25,8 +28,8 @@ pkgs.testers.runNixOSTest {
     with subtest("agents.slice has its limits; pandacode-host and system units are wired"):
         total = int(machine.succeed("awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo"))
         high, mx = int(prop("agents.slice", "MemoryHigh")), int(prop("agents.slice", "MemoryMax"))
-        assert abs(high - total * 0.75) < total * 0.02, (high, total)
-        assert abs(mx - total * 0.85) < total * 0.02, (mx, total)
+        assert abs(high - total * 0.65) < total * 0.02, (high, total)
+        assert abs(mx - total * 0.75) < total * 0.02, (mx, total)
         assert prop("agents.slice", "CPUWeight") == "50"
         assert prop("agents.slice", "TasksMax") == "8192"
         assert prop("agents.slice", "ManagedOOMMemoryPressure") == "kill"

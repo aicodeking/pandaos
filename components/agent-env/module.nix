@@ -83,21 +83,24 @@ in
     };
     memoryHigh = lib.mkOption {
       type = lib.types.str;
-      default = "75%";
+      default = "65%";
       description = "agents.slice MemoryHigh= (throttle point), bytes or % of RAM.";
     };
     memoryMax = lib.mkOption {
       type = lib.types.str;
-      default = "85%";
+      default = "75%";
       description = "agents.slice MemoryMax= (kernel OOM-kills inside the slice above this).";
     };
     memorySwapMax = lib.mkOption {
       type = lib.types.str;
-      default = "25%";
+      default = "10%";
       description = ''
         agents.slice MemorySwapMax=. Bounds how much an agent may push into
-        (z)swap; zram memory is not charged to MemoryMax, so without this a
-        hog could fill RAM through zram.
+        (z)swap; zram memory is not charged to MemoryMax, and incompressible
+        data costs zram about its full size, so the slice can hold up to
+        memoryMax + memorySwapMax of physical RAM. Keep the sum well under
+        100% (the defaults leave 15% for the system), or a hog triggers the
+        global OOM killer instead of the slice's.
       '';
     };
     cpuWeight = lib.mkOption {

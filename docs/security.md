@@ -136,12 +136,18 @@ New in Unreleased (`pandaos.agents`, see [agents.md](agents.md#agent-runtime-new
 
 | Limit | Default | Effect |
 |---|---|---|
-| `MemoryHigh` | 75% of RAM | the slice is throttled and reclaimed above this |
-| `MemoryMax` | 85% of RAM | the kernel OOM-kills a process inside the slice, never outside it |
-| `MemorySwapMax` | 25% of RAM | caps how much the slice can push into zram, which `MemoryMax` does not count |
+| `MemoryHigh` | 65% of RAM | the slice is throttled and reclaimed above this |
+| `MemoryMax` | 75% of RAM | the kernel OOM-kills a process inside the slice |
+| `MemorySwapMax` | 10% of RAM | caps how much the slice can push into zram, which `MemoryMax` does not count |
 | `CPUWeight` | 50 | system units (weight 100) win under CPU contention |
 | `TasksMax` | 8192 | stops fork bombs |
 | systemd-oomd | pressure > 50% for 30 s, or swap > 90% | kills the slice's cgroup with the most reclaim |
+
+zram stores incompressible pages at about their full size, so the slice can hold up to
+`MemoryMax + MemorySwapMax` (85%) of physical RAM. That leaves 15% for the system. In an early CI run,
+85% + 25% did not fit, and a 6 GB random-data hog made the whole box run out of memory instead of the
+slice alone. Keep the sum well under 100% if you change these values. On boxes with little RAM (about
+2 GB or less), the system's own share can be more than 15%.
 
 `pandacode-host` has `OOMPolicy=continue` (a killed agent does not stop the host) and
 `OOMScoreAdjust=500`. sshd, journald, NetworkManager and panda-mem get `OOMScoreAdjust=-500`,
