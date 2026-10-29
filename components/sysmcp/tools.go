@@ -22,8 +22,10 @@ var pandaUnits = []string{
 	"pandacode-host.service",
 	"panda-mem.service",
 	"panda-browser.service",
-	"panda-ckpt.timer",
-	"panda-ckpt.service",
+	"panda-ckpt-auto-panda.timer", // services.panda-ckpt.users defaults to [ "panda" ]
+	"panda-ckpt-auto-panda.service",
+	"panda-agents-sync.service",
+	"systemd-oomd.service", // kills in agents.slice
 	"nixos-upgrade.service",
 	"nixos-upgrade.timer",
 	"sshd.service",
