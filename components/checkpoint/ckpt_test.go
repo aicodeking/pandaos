@@ -67,7 +67,7 @@ func (f *fakeBtrfs) run(argv ...string) error {
 		if !f.subvols[argv[4]] {
 			return fmt.Errorf("not a subvolume")
 		}
-		f.ro[argv[4]] = false
+		f.ro[argv[4]] = argv[6] == "true"
 		return nil
 	case argv[0] == "cp":
 		return copyTree(strings.TrimSuffix(argv[len(argv)-2], "/."), strings.TrimSuffix(last, "/"))
@@ -252,8 +252,8 @@ func TestCreateListDiffRestoreFork(t *testing.T) {
 	if got := must(m.Diff("proj", res.Safety, "")); len(got) != 3 {
 		t.Fatalf("safety checkpoint lost the pre-restore state: %v", got)
 	}
-	if m.head("proj") != c1.ID {
-		t.Fatalf("head %q", m.head("proj"))
+	if m.head(must(m.target("proj"))) != c1.ID {
+		t.Fatalf("head %q", m.head(must(m.target("proj"))))
 	}
 
 	fork := must(m.Fork("proj", c2.ID, "proj-b"))
@@ -297,7 +297,7 @@ func TestRejectsBadInputAndSymlinks(t *testing.T) {
 	if _, err := m.Init("ws"); err == nil {
 		t.Fatal("init over existing")
 	}
-	if _, err := m.Adopt(outside); err == nil {
+	if _, err := m.Adopt(outside, false); err == nil {
 		t.Fatal("adopted a dir outside ~/work")
 	}
 }
@@ -309,12 +309,12 @@ func TestAutoRetention(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		write(t, filepath.Join(ws.Path, "f"), fmt.Sprint(i))
 		os.Chtimes(filepath.Join(ws.Path, "f"), time.Unix(int64(1000+i), 0), time.Unix(int64(1000+i), 0))
-		r := must(m.Auto(3))
+		r := must(m.Auto(3, false))
 		if len(r) != 1 || r[0].Created == "" {
 			t.Fatalf("auto %d: %+v", i, r)
 		}
 	}
-	r := must(m.Auto(3))
+	r := must(m.Auto(3, false))
 	if r[0].Created != "" || r[0].Skipped != "unchanged" {
 		t.Fatalf("unchanged workspace checkpointed: %+v", r)
 	}
@@ -332,7 +332,7 @@ func TestAutoRetention(t *testing.T) {
 	}
 	// plain directories are skipped, not failed
 	os.Mkdir(filepath.Join(m.workDir(), "plain"), 0o755)
-	r = must(m.Auto(3))
+	r = must(m.Auto(3, false))
 	if len(r) != 2 || r[0].Workspace != "plain" || !strings.Contains(r[0].Skipped, "subvolume") {
 		t.Fatalf("plain dir: %+v", r)
 	}
@@ -378,14 +378,14 @@ func TestAdopt(t *testing.T) {
 	m, f := newTest(t)
 	p := filepath.Join(m.workDir(), "old")
 	write(t, filepath.Join(p, "x/y.txt"), "data")
-	ws := must(m.Adopt(p))
+	ws := must(m.Adopt(p, false))
 	// the fake does not follow renames, so check the subvolume+copy calls
 	if fmt.Sprint(f.calls[0]) != "[btrfs subvolume create "+filepath.Join(m.workDir(), ".old.adopt")+"]" || f.calls[1][0] != "cp" ||
 		ws.Path != p || read(t, filepath.Join(p, "x/y.txt")) != "data" || exists(filepath.Join(m.workDir(), ".old.adopt")) {
 		t.Fatal("adopt")
 	}
 	m.IsSubvol = func(string) bool { return true }
-	if _, err := m.Adopt(p); err == nil {
+	if _, err := m.Adopt(p, false); err == nil {
 		t.Fatal("adopted a subvolume")
 	}
 }

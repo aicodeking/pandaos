@@ -238,8 +238,9 @@ func parse(rel string, data []byte) Entry {
 	return e
 }
 
-// Write creates or updates the memory for title and commits it. Returns the relative path.
-func (s *Store) Write(kind, title, body string, tags []string) (string, error) {
+// Write creates the memory for title and commits it; replacing an existing
+// one needs overwrite. Returns the relative path.
+func (s *Store) Write(kind, title, body string, tags []string, overwrite bool) (string, error) {
 	if err := validKind(kind); err != nil {
 		return "", err
 	}
@@ -256,6 +257,31 @@ func (s *Store) Write(kind, title, body string, tags []string) (string, error) {
 			clean = append(clean, t)
 		}
 	}
+	return s.mutate("write", func(root string) (string, error) {
+		if err := os.Mkdir(filepath.Join(root, kind), 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+		name := slug(title) + ".md"
+		rel := kind + "/" + name
+		created := time.Now().UTC().Format(time.RFC3339)
+		if old, err := readIn(root, kind, name); err == nil {
+			if !overwrite {
+				return "", fmt.Errorf("a memory titled %q already exists at %s: pass overwrite:true to replace it, or use mem_append to add to it", title, rel)
+			}
+			if c := parse(rel, old).Created; c != "" {
+				created = c
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		e := Entry{Title: title, Kind: kind, Created: created, Tags: clean, Body: body}
+		return rel, writeIn(root, kind, name, render(e))
+	})
+}
+
+// mutate runs fn under the repo lock, then stages (incl. deletion) and
+// commits the path fn returns. An unchanged file makes no commit.
+func (s *Store) mutate(verb string, fn func(root string) (string, error)) (string, error) {
 	if err := s.Init(); err != nil {
 		return "", err
 	}
@@ -271,30 +297,17 @@ func (s *Store) Write(kind, title, body string, tags []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.Mkdir(filepath.Join(root, kind), 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+	rel, err := fn(root)
+	if err != nil {
 		return "", err
 	}
-	name := slug(title) + ".md"
-	rel := kind + "/" + name
-	created := time.Now().UTC().Format(time.RFC3339)
-	if old, err := readIn(root, kind, name); err == nil {
-		if c := parse(rel, old).Created; c != "" {
-			created = c
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return "", err
-	}
-	e := Entry{Title: title, Kind: kind, Created: created, Tags: clean, Body: body}
-	if err := writeIn(root, kind, name, render(e)); err != nil {
-		return "", err
-	}
-	if _, err := s.git("add", "--", rel); err != nil {
+	if _, err := s.git("add", "-A", "--", rel); err != nil {
 		return "", err
 	}
 	if _, err := s.git("diff", "--cached", "--quiet", "--no-ext-diff", "--no-textconv", "--", rel); err == nil {
 		return rel, nil // unchanged
 	}
-	if _, err := s.git("commit", "-q", "--no-verify", "-m", "mem: "+rel, "--", rel); err != nil {
+	if _, err := s.git("commit", "-q", "--no-verify", "-m", "mem: "+verb+" "+rel, "--", rel); err != nil {
 		return "", err
 	}
 	return rel, nil

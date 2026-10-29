@@ -9,7 +9,17 @@ in
     allowMutations = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Allow mutating tools (sys_updates action=run). They still need confirm:true and a root or wheel caller.";
+      description = ''
+        Allow mutating tools (sys_updates action=run). They still need
+        confirm:true and a caller in group panda-sys-update. Enabling this
+        adds updateUsers to that group and a polkit rule that lets the group
+        start nixos-upgrade.service, and nothing else.
+      '';
+    };
+    updateUsers = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "agent" ];
+      description = "Users put in group panda-sys-update (only when allowMutations is set), i.e. allowed to start nixos-upgrade.service via sys_updates.";
     };
     connectivityUrl = lib.mkOption {
       type = lib.types.str;
@@ -26,6 +36,25 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
+
+    users.groups.panda-sys-update.members = lib.mkIf cfg.allowMutations cfg.updateUsers;
+
+    # sudo cannot work under NoNewPrivileges (agent sandboxes), so the upgrade
+    # is started over D-Bus: `systemctl start --no-block nixos-upgrade.service`,
+    # allowed for this group, this unit and the start verb only. Not wheel.
+    security.polkit = lib.mkIf cfg.allowMutations {
+      enable = true;
+      extraConfig = ''
+        polkit.addRule(function (action, subject) {
+          if (action.id == "org.freedesktop.systemd1.manage-units" &&
+              action.lookup("unit") == "nixos-upgrade.service" &&
+              action.lookup("verb") == "start" &&
+              subject.isInGroup("panda-sys-update")) {
+            return polkit.Result.YES;
+          }
+        });
+      '';
+    };
 
     # Read by `panda-sys mcp` (root-owned, so agents cannot enable mutations).
     environment.etc."panda/sys.json".text = builtins.toJSON {

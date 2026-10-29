@@ -7,7 +7,7 @@ buildGoModule {
   vendorHash = null;
   ldflags = [ "-s" "-w" ];
   nativeBuildInputs = [ makeWrapper ];
-  # systemctl, journalctl, sudo and panda-update come from the system PATH.
+  # systemctl and journalctl come from the system PATH.
   postInstall = ''
     wrapProgram $out/bin/panda-sys --prefix PATH : ${lib.makeBinPath [ coreutils procps iproute2 btrfs-progs ]}
   '';

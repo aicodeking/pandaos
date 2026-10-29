@@ -15,7 +15,6 @@ import (
 const (
 	maxOutput   = 64 << 10 // per exec, stdout+stderr
 	execTimeout = 10 * time.Second
-	runTimeout  = 60 * time.Minute // panda-update run: a full nixos-upgrade
 )
 
 // Execer runs one argv (never a shell) and returns combined output, capped
@@ -64,12 +63,12 @@ func (s *Server) run(timeout time.Duration, argv ...string) (string, error) {
 	return string(out), err
 }
 
-// callerIsWheel: root, or a process in the wheel group.
-func callerIsWheel() bool {
+// callerInGroup: root, or a process whose real groups include name.
+func callerInGroup(name string) bool {
 	if os.Geteuid() == 0 {
 		return true
 	}
-	g, err := user.LookupGroup("wheel")
+	g, err := user.LookupGroup(name)
 	if err != nil {
 		return false
 	}

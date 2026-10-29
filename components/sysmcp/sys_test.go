@@ -54,7 +54,7 @@ func newTest(t *testing.T, cfg Config, wheel bool, resps map[string]fakeResp) (*
 		cfg.ConnectivityURL = "http://127.0.0.1:1/"
 	}
 	f := &fakeExec{resps: resps}
-	return &Server{cfg: cfg, exec: f.exec, root: t.TempDir(), wheel: func() bool { return wheel },
+	return &Server{cfg: cfg, exec: f.exec, root: t.TempDir(), inGroup: func(string) bool { return wheel },
 		http: &http.Client{Timeout: 2 * time.Second}}, f
 }
 
@@ -248,25 +248,25 @@ func TestLogsNoMatchIsNotError(t *testing.T) {
 }
 
 func TestUpdatesMutationGate(t *testing.T) {
+	show := "systemctl show --no-pager nixos-upgrade.service -p LoadState,ActiveState,SubState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp"
 	resps := map[string]fakeResp{
-		"panda-update status":      {out: "updates: automatic\nsystem: /nix/store/x\n"},
-		"sudo -n panda-update run": {out: "Update finished.\n"},
-		"panda-update run":         {out: "Update finished.\n"},
+		show: {out: "LoadState=loaded\nActiveState=inactive\nSubState=dead\nResult=success\n"},
+		"systemctl start --no-block nixos-upgrade.service": {},
 	}
 	cases := []struct {
 		name   string
 		allow  bool
-		wheel  bool
+		member bool
 		args   toolArgs
 		refuse string
 	}{
 		{"mutations off", false, true, toolArgs{Action: "run", Confirm: true}, "mutations are disabled"},
 		{"no confirm", true, true, toolArgs{Action: "run"}, "confirm:true"},
-		{"not wheel", true, false, toolArgs{Action: "run", Confirm: true}, "not root or wheel"},
+		{"not in group", true, false, toolArgs{Action: "run", Confirm: true}, "panda-sys-update"},
 		{"bad action", true, true, toolArgs{Action: "rollback", Confirm: true}, "unknown action"},
 	}
 	for _, c := range cases {
-		s, f := newTest(t, Config{AllowMutations: c.allow}, c.wheel, resps)
+		s, f := newTest(t, Config{AllowMutations: c.allow}, c.member, resps)
 		_, err := s.updates(c.args)
 		if err == nil || !strings.Contains(err.Error(), c.refuse) {
 			t.Errorf("%s: err=%v", c.name, err)
@@ -276,18 +276,29 @@ func TestUpdatesMutationGate(t *testing.T) {
 		}
 	}
 
+	var groups []string
 	s, f := newTest(t, Config{AllowMutations: true}, true, resps)
+	s.inGroup = func(g string) bool { groups = append(groups, g); return g == "panda-sys-update" }
 	v, err := s.updates(toolArgs{Action: "run", Confirm: true})
-	if err != nil || asMap(t, v)["ok"] != true {
+	if err != nil || asMap(t, v)["started"] != "nixos-upgrade.service" {
 		t.Fatalf("allowed run: v=%v err=%v", v, err)
 	}
-	if len(f.called("sudo -n panda-update run"))+len(f.called("panda-update run")) != 1 {
+	if len(f.called("systemctl start --no-block nixos-upgrade.service")) != 1 || len(f.called("sudo")) != 0 {
 		t.Errorf("run calls: %v", f.calls)
+	}
+	if strings.Join(groups, ",") != "panda-sys-update" {
+		t.Errorf("checked groups %v (wheel must not matter)", groups)
+	}
+
+	writeFile(t, s.root, holdFile, "held by owner\n")
+	if _, err := s.updates(toolArgs{Action: "run", Confirm: true}); err == nil || !strings.Contains(err.Error(), "on hold") {
+		t.Errorf("held run: %v", err)
 	}
 
 	s, _ = newTest(t, Config{}, false, resps)
 	v, err = s.updates(toolArgs{})
-	if err != nil || len(asMap(t, v)["status"].([]any)) != 2 {
+	m := asMap(t, v)
+	if err != nil || m["onHold"] != false || m["status"].(map[string]any)["ActiveState"] != "inactive" {
 		t.Errorf("status: v=%v err=%v", v, err)
 	}
 }

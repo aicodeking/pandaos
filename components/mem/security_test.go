@@ -54,7 +54,7 @@ func TestPlantedHookDoesNotRun(t *testing.T) {
 	for _, h := range []string{"pre-commit", "post-commit", "commit-msg"} {
 		os.Symlink(script, filepath.Join(s.Dir, ".git", "hooks", h))
 	}
-	if _, err := s.Write("semantic", "a", "b", nil); err == nil || !strings.Contains(err.Error(), "unexpected hook") {
+	if _, err := s.Write("semantic", "a", "b", nil, false); err == nil || !strings.Contains(err.Error(), "unexpected hook") {
 		t.Fatalf("write with planted hook: %v", err)
 	}
 	// Layer 2: even if the startup check were bypassed, hooksPath neuters hooks.
@@ -83,7 +83,7 @@ func TestMaliciousConfigDoesNotRun(t *testing.T) {
 			if kv[0] == "filter.x.clean" {
 				os.WriteFile(filepath.Join(s.Dir, ".gitattributes"), []byte("* filter=x\n"), 0o644)
 			}
-			if _, err := s.Write("semantic", "a", "b", nil); err == nil || !strings.Contains(err.Error(), "unexpected git config") {
+			if _, err := s.Write("semantic", "a", "b", nil, false); err == nil || !strings.Contains(err.Error(), "unexpected git config") {
 				t.Fatalf("write with %s: %v", kv[0], err)
 			}
 			// Layer 2: hardened flags alone.
@@ -107,7 +107,7 @@ func TestSymlinkedParentRejected(t *testing.T) {
 	if _, err := s.Read("episodic/x.md"); err == nil {
 		t.Error("read through in-store symlinked dir allowed")
 	}
-	if _, err := s.Write("episodic", "y", "z", nil); err == nil {
+	if _, err := s.Write("episodic", "y", "z", nil, false); err == nil {
 		t.Error("write through in-store symlinked dir allowed")
 	}
 	if _, err := os.Lstat(filepath.Join(s.Dir, "semantic", slug("y")+".md")); err == nil {
@@ -115,7 +115,7 @@ func TestSymlinkedParentRejected(t *testing.T) {
 	}
 	// file symlink to .git/config inside the store
 	os.Symlink("../.git/config", filepath.Join(s.Dir, "semantic", slug("cfg")+".md"))
-	if _, err := s.Write("semantic", "cfg", "[core]\nfsmonitor=/tmp/x\n", nil); err == nil {
+	if _, err := s.Write("semantic", "cfg", "[core]\nfsmonitor=/tmp/x\n", nil, false); err == nil {
 		t.Error("write through file symlink allowed")
 	}
 	if b, _ := os.ReadFile(filepath.Join(s.Dir, ".git", "config")); strings.Contains(string(b), "fsmonitor") {
@@ -148,7 +148,7 @@ func TestConcurrentWriters(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			other := &Store{Dir: s.Dir} // separate instance, separate lock fd
-			if _, err := other.Write("semantic", fmt.Sprintf("store %d", i), "y", nil); err != nil {
+			if _, err := other.Write("semantic", fmt.Sprintf("store %d", i), "y", nil, false); err != nil {
 				errs <- err
 			}
 		}(i)
@@ -165,10 +165,10 @@ func TestConcurrentWriters(t *testing.T) {
 
 func TestMultiTermSearch(t *testing.T) {
 	s := newStore(t)
-	s.Write("semantic", "both", "nix flakes are nice", nil)
-	s.Write("semantic", "spam", "nix nix nix nix nix", nil)
-	s.Write("semantic", "both-twice", "NIX flakes\nnix FLAKES", nil)
-	s.Write("semantic", "none", "rust", nil)
+	s.Write("semantic", "both", "nix flakes are nice", nil, false)
+	s.Write("semantic", "spam", "nix nix nix nix nix", nil, false)
+	s.Write("semantic", "both-twice", "NIX flakes\nnix FLAKES", nil, false)
+	s.Write("semantic", "none", "rust", nil, false)
 	hits, err := s.Search("Flakes  nix nix", "", 10)
 	if err != nil {
 		t.Fatal(err)

@@ -16,7 +16,10 @@ const usage = `usage: panda-mem <command> [-dir /mem | -socket /run/panda-mem/so
   serve  -dir D -socket S                 single-writer daemon (owns the repo)
   mcp                                     serve MCP over stdio (proxies to -socket if set)
   init                                    create the git repo
-  write -kind K -title T [-tags a,b] [-body B | stdin]
+  write -kind K -title T [-tags a,b] [-overwrite] [-body B | stdin]
+  append (-path P | -title T) [-body B | stdin]
+  delete -path P -confirm
+  episode -task T -outcome success|partial|failure [-files a,b] [-body SUMMARY | stdin]
   search [-kind K] [-limit N] QUERY
   read PATH
   list [-kind K] [-limit N]
@@ -44,6 +47,12 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	body := fl.String("body", "", "memory body (default: read stdin)")
 	tags := fl.String("tags", "", "comma-separated tags")
 	limit := fl.Int("limit", 0, "max results")
+	overwrite := fl.Bool("overwrite", false, "write: replace an existing memory with this title")
+	confirm := fl.Bool("confirm", false, "delete: really delete")
+	path := fl.String("path", "", "append/delete: memory path")
+	task := fl.String("task", "", "episode: the task, one line")
+	outcome := fl.String("outcome", "", "episode: success|partial|failure")
+	files := fl.String("files", "", "episode: comma-separated files touched")
 	if err := fl.Parse(args); err != nil {
 		return err
 	}
@@ -55,6 +64,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 	}
 	s := &Store{Dir: *dir}
+	var err error
 	arg := strings.Join(fl.Args(), " ")
 
 	var name string
@@ -79,16 +89,27 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	case "init":
 		return s.Init()
 	case "write":
-		name, a.Title, a.Body = "mem_write", *title, *body
-		if a.Body == "" {
-			data, err := io.ReadAll(io.LimitReader(stdin, maxBody+1))
-			if err != nil {
-				return err
-			}
-			a.Body = string(data)
+		name, a.Title, a.Overwrite = "mem_write", *title, *overwrite
+		if a.Body, err = bodyOrStdin(*body, stdin); err != nil {
+			return err
 		}
 		if *tags != "" {
 			a.Tags = strings.Split(*tags, ",")
+		}
+	case "append":
+		name, a.Path, a.Title = "mem_append", *path, *title
+		if a.Text, err = bodyOrStdin(*body, stdin); err != nil {
+			return err
+		}
+	case "delete":
+		name, a.Path, a.Confirm = "mem_delete", *path, *confirm
+	case "episode":
+		name, a.Task, a.Outcome = "mem_log_episode", *task, *outcome
+		if a.Summary, err = bodyOrStdin(*body, stdin); err != nil {
+			return err
+		}
+		if *files != "" {
+			a.Files = strings.Split(*files, ",")
 		}
 	case "search":
 		name, a.Query = "mem_search", arg
@@ -102,7 +123,6 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return fmt.Errorf("unknown command %q\n%s", cmd, usage)
 	}
 	var out string
-	var err error
 	if *sock != "" {
 		out, err = remoteTool(*sock, name, a)
 	} else {
@@ -113,4 +133,12 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 	_, err = fmt.Fprintln(stdout, out)
 	return err
+}
+
+func bodyOrStdin(body string, stdin io.Reader) (string, error) {
+	if body != "" {
+		return body, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(stdin, maxBody+1))
+	return string(data), err
 }

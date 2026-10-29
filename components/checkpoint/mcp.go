@@ -1,41 +1,27 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 )
 
-type rpcReq struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-type rpcErr struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-type rpcResp struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Result  any             `json:"result,omitempty"`
-	Error   *rpcErr         `json:"error,omitempty"`
-}
+// Shared parameter text: a target is a ~/work workspace or a directory path.
+const wsParam = `"workspace":{"type":"string","description":"A workspace name in ~/work (e.g. \"myproj\"), or the absolute or ~/ path of a directory elsewhere in your home, e.g. a git checkout (\"~/src/app\"). Paths are checkpointed by reflink copy and are never moved."}`
 
 const toolsJSON = `[
-{"name":"ckpt_create","description":"Checkpoint a workspace (~/work/<workspace>): an instant, read-only copy-on-write snapshot. ALWAYS call this BEFORE risky changes: large refactors, deleting or moving files, mass edits, migrations, code generators, dependency upgrades, or running unfamiliar scripts. Returns the checkpoint id; ckpt_restore can bring this state back.","inputSchema":{"type":"object","required":["workspace"],"properties":{"workspace":{"type":"string"},"label":{"type":"string","description":"what you are about to try"}}}},
-{"name":"ckpt_list","description":"List checkpoints of a workspace, oldest first (reason: manual, auto, pre-restore). Without workspace, lists the workspaces.","inputSchema":{"type":"object","properties":{"workspace":{"type":"string"}}}},
-{"name":"ckpt_diff","description":"Files added/deleted/modified between checkpoint id and id2 (default: the current workspace), with unified diffs for small text files.","inputSchema":{"type":"object","required":["workspace","id"],"properties":{"workspace":{"type":"string"},"id":{"type":"string"},"id2":{"type":"string","description":"checkpoint id or \"current\""}}}},
-{"name":"ckpt_restore","description":"Replace the whole workspace with checkpoint id. Uncommitted work since then is replaced, so a safety checkpoint of the current state is taken first (returned as safety). Requires confirm:true. Afterwards re-open files and cd into the workspace again.","inputSchema":{"type":"object","required":["workspace","id","confirm"],"properties":{"workspace":{"type":"string"},"id":{"type":"string"},"confirm":{"type":"boolean"}}}},
-{"name":"ckpt_fork","description":"Create a new writable workspace <name> from checkpoint id of workspace, so parallel attempts can start from the same state without touching each other. Checkpoint the fork before risky changes too.","inputSchema":{"type":"object","required":["workspace","id","name"],"properties":{"workspace":{"type":"string"},"id":{"type":"string"},"name":{"type":"string"}}}}
+{"name":"ckpt_create","description":"Checkpoint a workspace or directory: an instant, read-only copy-on-write copy of its current state. ALWAYS call this BEFORE risky changes: large refactors, deleting or moving files, mass edits, migrations, code generators, dependency upgrades, or running unfamiliar scripts. Returns the checkpoint (its id is what ckpt_diff, ckpt_restore and ckpt_fork take). Checkpoints protect against mistakes, not against a process running as you deliberately deleting them.","annotations":{"title":"Create checkpoint","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false},"inputSchema":{"type":"object","required":["workspace"],"properties":{` + wsParam + `,"label":{"type":"string","description":"Short note on what you are about to try, e.g. \"before switching ORM\". Default: \"manual\"."}}}},
+{"name":"ckpt_list","description":"List checkpoints of a workspace or directory, oldest first, each with id, created, label, reason (manual, auto, pre-restore), parent and sizeEstimate. Without workspace: the ~/work workspaces and the git repos found elsewhere in your home (with their checkpoint counts).","annotations":{"title":"List checkpoints","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false},"inputSchema":{"type":"object","properties":{` + wsParam + `,"limit":{"type":"integer","minimum":1,"default":20,"description":"Return only the newest N checkpoints (still oldest first). Default 20."}}}},
+{"name":"ckpt_diff","description":"Files added, deleted or modified between checkpoint id and id2 (default: the current state), with unified diffs for text files up to 64 KiB. Use it to see what changed since a checkpoint before deciding to restore.","annotations":{"title":"Diff checkpoint","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false},"inputSchema":{"type":"object","required":["workspace","id"],"properties":{` + wsParam + `,"id":{"type":"string","description":"The older checkpoint id, from ckpt_list or ckpt_create."},"id2":{"type":"string","description":"The newer checkpoint id, or \"current\" (default) for the live files."}}}},
+{"name":"ckpt_restore","description":"Replace the whole workspace or directory with checkpoint id. Everything changed since then is replaced, so a safety checkpoint of the current state is taken first and returned as safety (restore that id to undo). Requires confirm:true. Afterwards re-open files and cd into the directory again: processes still inside see the old tree.","annotations":{"title":"Restore checkpoint","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false},"inputSchema":{"type":"object","required":["workspace","id","confirm"],"properties":{` + wsParam + `,"id":{"type":"string","description":"The checkpoint id to bring back, from ckpt_list."},"confirm":{"type":"boolean","description":"Must be true: you understand the current files are replaced (a safety checkpoint is kept)."}}}},
+{"name":"ckpt_fork","description":"Create a new writable workspace ~/work/<name> from checkpoint id, so parallel attempts can start from the same state without touching each other. Works for checkpoints of ~/work workspaces and of directories elsewhere. Checkpoint the fork before risky changes too.","annotations":{"title":"Fork checkpoint","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false},"inputSchema":{"type":"object","required":["workspace","id","name"],"properties":{` + wsParam + `,"id":{"type":"string","description":"The checkpoint id to start from."},"name":{"type":"string","description":"Name of the new workspace in ~/work: [A-Za-z0-9._-]{1,64}, not starting with '.', must not exist yet."}}}},
+{"name":"ckpt_init","description":"Create a new, empty workspace ~/work/<workspace> as a btrfs subvolume, so its checkpoints are instant snapshots. Use it for new projects; for an existing directory use ckpt_adopt (inside ~/work) or just pass its path to ckpt_create (elsewhere).","annotations":{"title":"Create workspace","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false},"inputSchema":{"type":"object","required":["workspace"],"properties":{"workspace":{"type":"string","description":"New workspace name: [A-Za-z0-9._-]{1,64}, not starting with '.', must not exist yet in ~/work."}}}},
+{"name":"ckpt_adopt","description":"Convert an existing plain directory ~/work/<name> into a subvolume workspace in place (new subvolume, reflink copy, atomic swap, old tree removed). Refused while any of your processes has its cwd or open files inside it, because they would keep using the old, deleted tree; then stop them or pass confirm:true and cd back in afterwards. Directories outside ~/work are not adopted: pass their path to ckpt_create instead.","annotations":{"title":"Adopt directory","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false},"inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The directory, directly inside ~/work: ~/work/<name> or its absolute path."},"confirm":{"type":"boolean","default":false,"description":"Adopt even though processes are using the directory (they must cd back in afterwards)."}}}},
+{"name":"ckpt_discover","description":"Find git repos in your home outside ~/work (up to 4 levels deep, skipping caches) that panda-ckpt checkpoints automatically by reflink copy, with their checkpoint counts. Their paths are valid workspace values for every ckpt_ tool.","annotations":{"title":"Discover repos","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false},"inputSchema":{"type":"object","properties":{}}}
 ]`
 
-var tools = json.RawMessage(toolsJSON)
+var mcpTools = json.RawMessage(toolsJSON)
 
 type toolArgs struct {
 	Workspace string `json:"workspace"`
@@ -43,11 +29,9 @@ type toolArgs struct {
 	ID        string `json:"id"`
 	ID2       string `json:"id2"`
 	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Limit     int    `json:"limit"`
 	Confirm   bool   `json:"confirm"`
-}
-
-func textResult(text string, isErr bool) map[string]any {
-	return map[string]any{"content": []map[string]string{{"type": "text", "text": text}}, "isError": isErr}
 }
 
 func (m *Manager) runTool(name string, a toolArgs) (any, error) {
@@ -56,9 +40,13 @@ func (m *Manager) runTool(name string, a toolArgs) (any, error) {
 		return m.Create(a.Workspace, a.Label)
 	case "ckpt_list":
 		if a.Workspace == "" {
-			return m.Workspaces()
+			return m.Targets()
 		}
-		return m.List(a.Workspace)
+		if a.Limit <= 0 {
+			a.Limit = 20
+		}
+		list, err := m.List(a.Workspace)
+		return lastN(list, a.Limit), err
 	case "ckpt_diff":
 		return m.Diff(a.Workspace, a.ID, a.ID2)
 	case "ckpt_restore":
@@ -68,86 +56,30 @@ func (m *Manager) runTool(name string, a toolArgs) (any, error) {
 		return m.Restore(a.Workspace, a.ID)
 	case "ckpt_fork":
 		return m.Fork(a.Workspace, a.ID, a.Name)
+	case "ckpt_init":
+		return m.Init(a.Workspace)
+	case "ckpt_adopt":
+		return m.Adopt(a.Path, a.Confirm)
+	case "ckpt_discover":
+		return m.Discover()
 	}
 	return nil, fmt.Errorf("unknown tool %q", name)
 }
 
-func (m *Manager) callTool(params json.RawMessage) map[string]any {
-	var p struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	var a toolArgs
-	if err := json.Unmarshal(params, &p); err != nil {
-		return textResult("bad params: "+err.Error(), true)
-	}
-	if len(p.Arguments) > 0 {
-		if err := json.Unmarshal(p.Arguments, &a); err != nil {
-			return textResult("bad arguments: "+err.Error(), true)
-		}
-	}
-	v, err := m.runTool(p.Name, a)
-	if err != nil {
-		return textResult(err.Error(), true)
-	}
-	b, _ := json.MarshalIndent(v, "", "  ")
-	return textResult(string(b), false)
-}
-
-func (m *Manager) handle(req rpcReq) *rpcResp {
-	resp := &rpcResp{JSONRPC: "2.0", ID: req.ID}
-	switch req.Method {
-	case "initialize":
-		var p struct {
-			ProtocolVersion string `json:"protocolVersion"`
-		}
-		_ = json.Unmarshal(req.Params, &p)
-		if p.ProtocolVersion == "" {
-			p.ProtocolVersion = "2025-06-18"
-		}
-		resp.Result = map[string]any{
-			"protocolVersion": p.ProtocolVersion,
-			"serverInfo":      map[string]string{"name": "panda-ckpt", "version": version},
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"instructions":    "Workspaces live in ~/work. Call ckpt_create before any risky change; ckpt_restore (confirm:true) rolls back, ckpt_fork branches.",
-		}
-	case "ping":
-		resp.Result = map[string]any{}
-	case "tools/list":
-		resp.Result = map[string]any{"tools": tools}
-	case "tools/call":
-		resp.Result = m.callTool(req.Params)
-	default:
-		resp.Error = &rpcErr{-32601, "method not found: " + req.Method}
-	}
-	if req.ID == nil { // notification: never reply
-		return nil
-	}
-	return resp
-}
-
-// ServeMCP speaks newline-delimited JSON-RPC 2.0 until r hits EOF.
+// ServeMCP speaks MCP over r/w until EOF.
 func (m *Manager) ServeMCP(r io.Reader, w io.Writer) error {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64<<10), 8<<20)
-	enc := json.NewEncoder(w)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var req rpcReq
-		var resp *rpcResp
-		if err := json.Unmarshal(line, &req); err != nil {
-			resp = &rpcResp{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcErr{-32700, "parse error"}}
-		} else {
-			resp = m.handle(req)
-		}
-		if resp != nil {
-			if err := enc.Encode(resp); err != nil {
-				return err
+	s := &mcpServer{
+		Name:         "panda-ckpt",
+		Version:      version,
+		Instructions: "Workspaces live in ~/work; git repos elsewhere in your home can be checkpointed by path. Call ckpt_create before any risky change; ckpt_diff shows what changed; ckpt_restore (confirm:true) rolls back; ckpt_fork branches.",
+		Tools:        mcpTools,
+		Call: func(name string, raw json.RawMessage) (string, error) {
+			var a toolArgs
+			if err := decodeArgs(raw, &a); err != nil {
+				return "", fmt.Errorf("bad arguments: %w", err)
 			}
-		}
+			return jsonText(m.runTool(name, a))
+		},
 	}
-	return sc.Err()
+	return s.Serve(r, w)
 }

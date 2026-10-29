@@ -17,16 +17,21 @@ import (
 const version = "0.1.0"
 
 const usage = `usage: panda-ckpt <command> [args] [--json]
+<ws> is a workspace name in ~/work, or the absolute or ~/ path of a directory
+elsewhere in your home (checkpointed by reflink copy, never moved).
   init <name>                         create ~/work/<name> as a subvolume
-  adopt <path>                        convert the plain directory ~/work/<name> in place
+  adopt <path> [--confirm]            convert the plain directory ~/work/<name> in place
+                                      (--confirm: even if processes are using it)
   create <ws> [-m label]              read-only checkpoint
-  list [<ws>]                         checkpoints (or workspaces)
+  list [<ws>] [--limit N]             checkpoints, newest N (or workspaces + repos)
+  discover                            git repos outside ~/work that auto checkpoints
   diff <ws> <id> [<id2>|current]      changed files, unified diff for small text files
   restore <ws> <id>                   safety checkpoint, then atomic swap back to <id>
   fork <ws> <id> <newname>            new writable workspace from <id>
   prune <ws> [--keep N] [--older-than D]   delete beyond newest N and older than D (e.g. 7d, 12h)
   gc                                  remove leftovers of interrupted operations
-  auto [--keep-auto 24]               checkpoint changed workspaces (timer), keep newest N auto
+  auto [--keep-auto 24] [--no-external]   checkpoint changed workspaces and discovered
+                                      repos (timer), keep the newest N auto ones each
   mcp                                 serve MCP over stdio
 `
 
@@ -96,6 +101,9 @@ func runWith(m *Manager, args []string, stdin io.Reader, stdout io.Writer) error
 	keep := fl.Int("keep", 0, "prune: keep the newest N")
 	older := fl.String("older-than", "", "prune: only delete checkpoints older than D")
 	keepAuto := fl.Int("keep-auto", 24, "auto: auto checkpoints kept per workspace")
+	noExt := fl.Bool("no-external", false, "auto: only ~/work workspaces, no discovered repos")
+	confirm := fl.Bool("confirm", false, "adopt: even if processes are using the directory")
+	limit := fl.Int("limit", 0, "list: only the newest N checkpoints")
 	pos, err := parseInterleaved(fl, args)
 	if err != nil {
 		return err
@@ -117,7 +125,7 @@ func runWith(m *Manager, args []string, stdin io.Reader, stdout io.Writer) error
 		}
 	case "adopt":
 		if err = nargs(cmd, pos, 1, 1); err == nil {
-			v, err = m.Adopt(arg(0))
+			v, err = m.Adopt(arg(0), *confirm)
 		}
 	case "create":
 		if err = nargs(cmd, pos, 1, 1); err == nil {
@@ -125,9 +133,15 @@ func runWith(m *Manager, args []string, stdin io.Reader, stdout io.Writer) error
 		}
 	case "list":
 		if err = nargs(cmd, pos, 0, 1); err == nil && len(pos) == 0 {
-			v, err = m.Workspaces()
+			v, err = m.Targets()
 		} else if err == nil {
-			v, err = m.List(arg(0))
+			var list []Meta
+			list, err = m.List(arg(0))
+			v = lastN(list, *limit)
+		}
+	case "discover":
+		if err = nargs(cmd, pos, 0, 0); err == nil {
+			v, err = m.Discover()
 		}
 	case "diff":
 		if err = nargs(cmd, pos, 2, 3); err == nil {
@@ -157,7 +171,7 @@ func runWith(m *Manager, args []string, stdin io.Reader, stdout io.Writer) error
 			return fmt.Errorf("--keep-auto must be >= 1")
 		}
 		if err = nargs(cmd, pos, 0, 0); err == nil {
-			v, err = m.Auto(*keepAuto)
+			v, err = m.Auto(*keepAuto, !*noExt)
 		}
 	case "version":
 		v = version
@@ -189,6 +203,17 @@ func printOut(w io.Writer, v any, asJSON bool) error {
 	case []Workspace:
 		for _, ws := range x {
 			fmt.Fprintf(&b, "%s\t%s\n", ws.Name, ws.Path)
+		}
+	case Targets:
+		for _, ws := range x.Workspaces {
+			fmt.Fprintf(&b, "%s\t%s\n", ws.Name, ws.Path)
+		}
+		for _, r := range x.External {
+			fmt.Fprintf(&b, "%s\t(external, %d checkpoints)\n", r.Path, r.Checkpoints)
+		}
+	case []ExtRepo:
+		for _, r := range x {
+			fmt.Fprintf(&b, "%s\t%d\t%s\n", r.Path, r.Checkpoints, r.Latest)
 		}
 	case Meta:
 		fmt.Fprintln(&b, x.ID)

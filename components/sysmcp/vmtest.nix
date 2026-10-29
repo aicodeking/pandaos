@@ -1,6 +1,8 @@
-# panda-sys over MCP stdio in a VM: every tool answers, mutations are refused
-# without services.panda-sys.allowMutations, and a non-wheel caller cannot
-# read journals outside the PandaOS unit allow-list.
+# panda-sys over MCP stdio in VMs: every tool answers, mutations are refused
+# without services.panda-sys.allowMutations, a non-wheel caller cannot read
+# journals outside the PandaOS unit allow-list, and (node `mut`) with
+# allowMutations the non-wheel `agent` starts a stub nixos-upgrade.service
+# through the polkit rule, which allows nothing else.
 { pkgs, self }:
 pkgs.testers.runNixOSTest {
   name = "panda-sys";
@@ -15,14 +17,33 @@ pkgs.testers.runNixOSTest {
     services.panda-sys.connectivityUrl = "http://127.0.0.1:9/";
     users.users.agent.isNormalUser = true; # not wheel
   };
+  nodes.mut = {
+    imports = [
+      ./module.nix
+      ../agent-env/module.nix
+    ];
+    services.panda-sys = {
+      enable = true;
+      allowMutations = true;
+      connectivityUrl = "http://127.0.0.1:9/";
+    };
+    users.users.agent.isNormalUser = true; # not wheel; updateUsers default
+    users.users.other.isNormalUser = true; # neither wheel nor in the group
+    # Stub upgrade: proves the start went through without building anything.
+    systemd.services.nixos-upgrade = {
+      serviceConfig.Type = "oneshot";
+      script = "date > /run/stub-upgraded";
+    };
+  };
   testScript = ''
     import json
     import shlex
 
+    start_all()
     machine.wait_for_unit("multi-user.target")
 
 
-    def mcp(user, calls):
+    def mcp(user, calls, node=machine):
         """One stdio session: initialize, then tools/call each (name, args)."""
         reqs = [
             {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
@@ -33,7 +54,7 @@ pkgs.testers.runNixOSTest {
             for i, (n, a) in enumerate(calls)
         ]
         body = "\n".join(json.dumps(r) for r in reqs) + "\n"
-        out = machine.succeed(
+        out = node.succeed(
             f"printf %s {shlex.quote(body)} | runuser -u {user} -- timeout 120 panda-sys mcp"
         )
         resps = {r["id"]: r for r in map(json.loads, out.splitlines())}
@@ -96,5 +117,28 @@ pkgs.testers.runNixOSTest {
         # Allowed; journald may still hide system logs from a non-wheel user.
         assert "not readable" not in text(res[1]), text(res[1])
         assert res[2]["isError"] is True, res[2]
+
+    with subtest("polkit: agent (group panda-sys-update) starts nixos-upgrade only"):
+        mut.wait_for_unit("multi-user.target")
+        assert "panda-sys-update" in mut.succeed("id -nG agent").split()
+        assert "panda-sys-update" not in mut.succeed("id -nG other").split()
+        _, res = mcp("agent", [("sys_updates", {"action": "run"}), ("sys_updates", {"action": "run", "confirm": True})], node=mut)
+        assert res[0]["isError"] is True and "confirm" in text(res[0]), res[0]
+        assert res[1]["isError"] is False, text(res[1])
+        assert json.loads(text(res[1]))["started"] == "nixos-upgrade.service", text(res[1])
+        mut.wait_for_file("/run/stub-upgraded")
+        mut.wait_until_succeeds("systemctl show -p ActiveState nixos-upgrade.service | grep -q =inactive")
+        _, res = mcp("agent", [("sys_updates", {})], node=mut)
+        st = json.loads(text(res[0]))
+        assert st["status"]["Result"] == "success" and st["onHold"] is False, st
+        # The rule covers this unit and verb only.
+        mut.fail("runuser -u agent -- systemctl start --no-block systemd-tmpfiles-clean.service")
+        mut.fail("runuser -u agent -- systemctl stop nixos-upgrade.service")
+        mut.fail("runuser -u other -- systemctl start --no-block nixos-upgrade.service")
+        _, res = mcp("other", [("sys_updates", {"action": "run", "confirm": True})], node=mut)
+        assert res[0]["isError"] is True and "panda-sys-update" in text(res[0]), res[0]
+        mut.succeed("mkdir -p /var/lib/pandaos && echo test > /var/lib/pandaos/update-hold")
+        _, res = mcp("agent", [("sys_updates", {"action": "run", "confirm": True})], node=mut)
+        assert res[0]["isError"] is True and "on hold" in text(res[0]), res[0]
   '';
 }

@@ -23,8 +23,22 @@ in
     };
     users = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [ "panda" ];
-      description = "Users that get ~/work (a btrfs subvolume), ~/.checkpoints and an auto-checkpoint timer.";
+      default = [ "agent" ];
+      example = [ "agent" "panda" ];
+      description = ''
+        Users that get ~/work (a btrfs subvolume), ~/.checkpoints and an
+        auto-checkpoint timer. Defaults to the non-wheel agent user; add the
+        owner (e.g. "panda") to checkpoint their workspaces and repos too.
+      '';
+    };
+    external = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Also auto-checkpoint git repos found in each user's home outside
+        ~/work (up to 4 levels deep), by reflink copy into
+        ~/.checkpoints/_ext, without moving them.
+      '';
     };
     interval = lib.mkOption {
       type = lib.types.str;
@@ -87,7 +101,7 @@ in
       serviceConfig = {
         Type = "oneshot";
         User = u;
-        ExecStart = "${lib.getExe cfg.package} auto --keep-auto ${toString cfg.keepAuto}";
+        ExecStart = "${lib.getExe cfg.package} auto --keep-auto ${toString cfg.keepAuto}${lib.optionalString (!cfg.external) " --no-external"}";
         Nice = 10;
         IOSchedulingClass = "idle";
         NoNewPrivileges = true;

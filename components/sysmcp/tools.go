@@ -22,8 +22,8 @@ var pandaUnits = []string{
 	"pandacode-host.service",
 	"panda-mem.service",
 	"panda-browser.service",
-	"panda-ckpt-auto-panda.timer", // services.panda-ckpt.users defaults to [ "panda" ]
-	"panda-ckpt-auto-panda.service",
+	"panda-ckpt-auto-agent.timer", // services.panda-ckpt.users defaults to [ "agent" ]
+	"panda-ckpt-auto-agent.service",
 	"panda-agents-sync.service",
 	"systemd-oomd.service", // kills in agents.slice
 	"nixos-upgrade.service",
@@ -47,18 +47,28 @@ type toolArgs struct {
 	Confirm bool   `json:"confirm,omitempty"`
 }
 
+// Update control: members of updateGroup may start upgradeUnit (only that,
+// only "start") through the polkit rule module.nix installs with allowMutations.
+const (
+	updateGroup = "panda-sys-update"
+	upgradeUnit = "nixos-upgrade.service"
+	holdFile    = "/var/lib/pandaos/update-hold"
+)
+
 type Server struct {
-	cfg   Config
-	exec  Execer
-	root  string      // prefix for /proc, /etc, /sys reads ("" in production)
-	wheel func() bool // is the caller privileged
-	http  *http.Client
+	cfg     Config
+	exec    Execer
+	root    string                 // prefix for /proc, /etc, /sys reads ("" in production)
+	inGroup func(name string) bool // is the calling process root or in this group
+	http    *http.Client
 }
 
 func newServer(cfg Config) *Server {
-	return &Server{cfg: cfg, exec: realExec, wheel: callerIsWheel,
+	return &Server{cfg: cfg, exec: realExec, inGroup: callerInGroup,
 		http: &http.Client{Timeout: 5 * time.Second}}
 }
+
+func (s *Server) wheel() bool { return s.inGroup("wheel") }
 
 func (s *Server) runTool(name string, a toolArgs) (any, error) {
 	switch name {
@@ -367,34 +377,50 @@ func (s *Server) net() any {
 
 // ---- sys_updates
 
+// upgradeStatus is `systemctl show` of the upgrade unit plus the hold flag.
+func (s *Server) upgradeStatus() (map[string]any, error) {
+	out, err := s.run(execTimeout, "systemctl", "show", "--no-pager", upgradeUnit,
+		"-p", "LoadState,ActiveState,SubState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp")
+	if err != nil {
+		return nil, fmt.Errorf("systemctl show %s: %v: %s", upgradeUnit, err, out)
+	}
+	unit := map[string]string{}
+	for _, l := range nonEmptyLines(out) {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			unit[k] = v
+		}
+	}
+	_, herr := os.Stat(filepath.Join(s.root, holdFile))
+	return map[string]any{"unit": upgradeUnit, "status": unit, "onHold": herr == nil}, nil
+}
+
 func (s *Server) updates(a toolArgs) (any, error) {
 	switch a.Action {
 	case "", "status":
-		out, err := s.run(execTimeout, "panda-update", "status")
-		if err != nil {
-			return nil, fmt.Errorf("panda-update status: %v: %s", err, out)
-		}
-		return map[string]any{"status": nonEmptyLines(out)}, nil
+		return s.upgradeStatus()
 	case "run":
 		if !s.cfg.AllowMutations {
 			return nil, errors.New("refused: mutations are disabled (services.panda-sys.allowMutations = false)")
 		}
 		if !a.Confirm {
-			return nil, errors.New("refused: sys_updates run is mutating; pass confirm:true")
+			return nil, errors.New("refused: sys_updates run starts a system upgrade; pass confirm:true")
 		}
-		if !s.wheel() {
-			return nil, errors.New("refused: caller is not root or wheel")
+		if !s.inGroup(updateGroup) {
+			return nil, fmt.Errorf("refused: caller is not in group %s (services.panda-sys.updateUsers)", updateGroup)
 		}
-		argv := []string{"sudo", "-n", "panda-update", "run"}
-		if os.Geteuid() == 0 {
-			argv = argv[2:]
-		}
-		out, err := s.run(runTimeout, argv...)
-		res := map[string]any{"ok": err == nil, "output": nonEmptyLines(out)}
+		st, err := s.upgradeStatus()
 		if err != nil {
-			res["error"] = err.Error()
+			return nil, err
 		}
-		return res, nil
+		if st["onHold"] == true {
+			return nil, errors.New("refused: updates are on hold; the owner must run `sudo panda-update unhold` first")
+		}
+		// --no-block: returns once queued; polkit allows exactly this start.
+		if out, err := s.run(execTimeout, "systemctl", "start", "--no-block", upgradeUnit); err != nil {
+			return nil, fmt.Errorf("systemctl start %s: %v: %s", upgradeUnit, err, out)
+		}
+		return map[string]any{"started": upgradeUnit, "before": st["status"],
+			"next": "poll sys_updates (status) until ActiveState is inactive or failed; details: sys_logs unit=nixos-upgrade"}, nil
 	}
 	return nil, fmt.Errorf("unknown action %q (status|run)", a.Action)
 }

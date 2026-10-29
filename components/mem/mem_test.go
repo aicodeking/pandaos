@@ -30,7 +30,7 @@ func commitCount(t *testing.T, s *Store) string {
 
 func TestWriteReadUpdate(t *testing.T) {
 	s := newStore(t)
-	p, err := s.Write("semantic", "Nix flakes", "use flakes", []string{"nix"})
+	p, err := s.Write("semantic", "Nix flakes", "use flakes", []string{"nix"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestWriteReadUpdate(t *testing.T) {
 	}
 	created := parse(p, []byte(got)).Created
 
-	p2, err := s.Write("semantic", "Nix flakes", "use flakes v2", nil)
+	p2, err := s.Write("semantic", "Nix flakes", "use flakes v2", nil, true)
 	if err != nil || p2 != p {
 		t.Fatalf("update %q %v", p2, err)
 	}
@@ -53,22 +53,22 @@ func TestWriteReadUpdate(t *testing.T) {
 		t.Fatalf("after update: %+v commits %s", e, commitCount(t, s))
 	}
 	// identical rewrite: no new commit, no error
-	if _, err := s.Write("semantic", "Nix flakes", "use flakes v2", nil); err != nil || commitCount(t, s) != "2" {
+	if _, err := s.Write("semantic", "Nix flakes", "use flakes v2", nil, true); err != nil || commitCount(t, s) != "2" {
 		t.Fatalf("noop write: %v commits %s", err, commitCount(t, s))
 	}
 	if h, _ := s.History(p, 20); strings.Count(h, "\n") != 1 {
 		t.Fatalf("history %q", h)
 	}
-	if _, err := s.Write("semantic", "big", strings.Repeat("x", maxBody+1), nil); err == nil {
+	if _, err := s.Write("semantic", "big", strings.Repeat("x", maxBody+1), nil, false); err == nil {
 		t.Fatal("oversize body accepted")
 	}
 }
 
 func TestSearchRanking(t *testing.T) {
 	s := newStore(t)
-	s.Write("semantic", "one", "golang once", nil)
-	s.Write("procedural", "three", "Golang GOLANG golang", nil)
-	s.Write("episodic", "none", "rust", nil)
+	s.Write("semantic", "one", "golang once", nil, false)
+	s.Write("procedural", "three", "Golang GOLANG golang", nil, false)
+	s.Write("episodic", "none", "rust", nil, false)
 	hits, err := s.Search("golang", "", 10)
 	if err != nil || len(hits) != 2 || hits[0].Title != "three" || hits[0].Matches != 3 || hits[1].Title != "one" {
 		t.Fatalf("hits %+v %v", hits, err)
@@ -95,7 +95,7 @@ func TestPathTraversal(t *testing.T) {
 	// symlinked kind dir pointing outside
 	s2 := newStore(t)
 	os.Symlink(filepath.Dir(s.Dir), filepath.Join(s2.Dir, "episodic"))
-	if _, err := s2.Write("episodic", "x", "y", nil); err == nil {
+	if _, err := s2.Write("episodic", "x", "y", nil, false); err == nil {
 		t.Error("write through symlinked dir allowed")
 	}
 	if _, err := s2.Read("episodic/secret.md"); err == nil {
@@ -148,7 +148,7 @@ func TestMCPSession(t *testing.T) {
 		t.Fatalf("ping %+v", r)
 	}
 	tl := c.call("tools/list", nil)["result"].(map[string]any)["tools"].([]any)
-	if len(tl) != 5 {
+	if len(tl) != 8 {
 		t.Fatalf("tools %+v", tl)
 	}
 	path, isErr := c.tool("mem_write", map[string]any{"kind": "procedural", "title": "deploy", "body": "run nixos-rebuild switch", "tags": []string{"ops"}})
