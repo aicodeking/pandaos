@@ -107,6 +107,9 @@ All notable changes to PandaOS are documented here. The format follows
 - Closure cuts: the nixpkgs source is no longer pinned into the system (`nix-shell -p` and
   `<nixpkgs>` no longer resolve; use `nix shell nixpkgs#...`), and NetworkManager is built without
   ModemManager. That NM is not on cache.nixos.org, so CI and each box build it once (about 5 to 10 min).
+  Closures went from 1971 / 2413 MB to 1691 / 2133 MB (headless / desktop), the ISOs from 901 / 1020 MB to
+  855 / 975 MB. Budgets are now 1860 / 2346 MB (measured + 10%). python3 (127 MB, systemd-boot's
+  installer) and perl (55 MB, activation) remain.
 - `agents.slice` no longer has a `MemoryHigh` throttle (`pandaos.agents.memoryHigh = "infinity"`):
   throttling stalled the hog, so oomd picked an idle task instead. The kernel now kills the biggest
   task at `MemoryMax` (75%).

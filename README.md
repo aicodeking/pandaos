@@ -19,26 +19,29 @@ approve agent tasks on it.
 
 These come from the NixOS VM tests and ISO builds in CI on nixos-26.05 (`nix flake check`; see
 [docs/benchmarks.md](docs/benchmarks.md) for how each one is measured). Sizes are MiB. They are
-PandaOS's own numbers in a VM, not a comparison, and **not yet measured on real hardware**.
+PandaOS's own numbers in a VM, not a comparison, and **not yet measured on real hardware**. Idle RAM
+is the median of 3 readings.
 
 | | headless | desktop |
 |---|---|---|
-| Idle RAM, `free` used + shmem | 117 MB (with the optional agentd on) | 173 MB in a logged-in labwc session (173 MB at the greeter) |
-| Idle RAM, `MemTotal - MemAvailable` | 241 MB | 328 MB in session (328 MB at the greeter) |
-| Closure of the installed system (`nixosConfigurations`, incl. curated firmware) | 1.97 GB | 2.41 GB |
-| ISO size (the desktop ISO also carries the headless system) | 901 MB | 1020 MB |
+| Idle RAM, `free` used + shmem | 115 MB (with the optional agentd on) | 175 MB in a logged-in labwc session (172 MB at the greeter) |
+| Idle RAM, `MemTotal - MemAvailable` | 235 MB | 330 MB in session (328 MB at the greeter) |
+| Closure of the installed system (`nixosConfigurations`, incl. curated firmware) | 1.69 GB | 2.13 GB |
+| ISO size (the desktop ISO also carries the headless system) | 855 MB | 975 MB |
 
 | Optional agentd job round trip (pair, then run `echo hi`) | |
 |---|---|
-| Normal VM network | 4.0 s |
-| 1 Mbit/s, ~340 ms RTT, 1% loss each way (netem on both nodes) | 5.7 s |
-| Offline install to an empty disk (`panda-install --yes`, VM) | 215 s |
+| Normal VM network | 3.7 s |
+| 1 Mbit/s, ~340 ms RTT, 1% loss each way (netem on both nodes) | 6.1 s |
+| Offline install to an empty disk (`panda-install --yes`, VM) | 98 s |
 | A panda-mem-only update (uncompressed bytes substituted) | 8 MB |
 
 PandaCode Connect is the pinned PandaCode AppImage (289 MB extracted) in a slim FHS environment that
 holds only the libraries the AppImage expects from the host. With `appimageTools`' default
 environment, the closures were 2.83 GB and 2.92 GB and the ISOs 1137 MB and 1160 MB. Before
-PandaCode Connect, they were 1.64 GB and 2.11 GB, and the ISOs 803 MB and 929 MB.
+PandaCode Connect, they were 1.64 GB and 2.11 GB, and the ISOs 803 MB and 929 MB. Dropping the pinned
+nixpkgs source and ModemManager then took the closures from 1.97 / 2.41 GB to 1.69 / 2.13 GB. Agent
+CLIs are not included: each one you pick adds 200 to 520 MB.
 
 A side-by-side comparison with Ubuntu and Debian on identical VMs is **planned, not built yet**. Until it
 exists, we make no claims about how PandaOS compares with other systems.
