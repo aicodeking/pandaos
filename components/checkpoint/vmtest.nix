@@ -2,7 +2,8 @@
 # init, write, create, modify, diff, restore, fork, prune, the auto timer
 # (+ retention), an MCP round trip, and delete without user_subvol_rm_allowed.
 # The disk is mounted over panda's home at runtime (like @home), so the test
-# does not depend on the initrd flavour; tmpfiles is re-run to make ~/work.
+# does not depend on the initrd flavour; tmpfiles and panda-ckpt-init are
+# re-run to make ~/.checkpoints and ~/work on it.
 { pkgs, self }:
 pkgs.testers.runNixOSTest {
   name = "panda-ckpt";
@@ -55,6 +56,7 @@ pkgs.testers.runNixOSTest {
         f"mount -o user_subvol_rm_allowed /dev/vdb {H}",
         f"chown panda:users {H} && chmod 700 {H}",
         "systemd-tmpfiles --create",
+        "systemctl restart panda-ckpt-init-panda.service",
     )
 
     with subtest("module: ~/work is a subvolume, MCP config, timer"):

@@ -5,7 +5,7 @@ It runs unprivileged as the workspace owner, and it has no root helper.
 
 ## Layout
 
-- Workspace: the subvolume `~/work/<name>`. `~/work` is itself a subvolume, made by tmpfiles `v`.
+- Workspace: the subvolume `~/work/<name>`. `~/work` is itself a subvolume (a plain directory off btrfs), made at boot by `panda-ckpt-init-<user>.service` (tmpfiles `v` would make a plain directory unless `/` itself is a btrfs subvolume).
 - Checkpoint: the read-only snapshot `~/.checkpoints/<ws>/<id>`, plus a `<id>.json` file with
   `{id, created, label, reason, parent, sizeEstimate}`.
   - `reason` is `manual`, `auto` or `pre-restore`.
@@ -60,7 +60,7 @@ services.panda-ckpt = { enable = true; users = [ "panda" ]; interval = "10min"; 
 
 The module provides:
 
-- tmpfiles rules for `~/work` (type `v`) and `~/.checkpoints` (mode 0700).
+- `panda-ckpt-init-<user>.service` (root, oneshot) for `~/work`, and a tmpfiles rule for `~/.checkpoints` (mode 0700).
 - `panda-ckpt-auto-<user>.{service,timer}`, run as the user, with write access only to their home.
 - The package.
 - `/etc/panda/mcp.d/panda-ckpt.json`.
