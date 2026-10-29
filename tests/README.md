@@ -36,8 +36,11 @@ Each test prints `METRIC {json}` (so failed runs still report) and writes `$out/
   for the same system with a rebuilt panda-mem (agentd, used before, is off by default now).
 
 `budgets.json`: the RAM budgets are deliberately loose. The closure budgets are the expected
-real-system closures + 10%, so any growth past that fails CI. Measured in CI run 40880779161:
-headless 1691 MB, desktop 2133 MB (budgets 1860 / 2346). From 1971 / 2413 MB, the cuts that landed are
+real-system closures + 10%, so any growth past that fails CI. Measured in CI run 40890670778:
+headless 1690 MB, desktop 2133 MB (budgets 1859 / 2346). `system.disableInstallerTools` on installed
+systems (`nixos/modules/installed.nix`) saved only about 1 MB: it removed nixos-generate-config's
+reference to perl, but the toplevel still references `perl-env` directly for the `/etc` and users
+activation scripts. From 1971 / 2413 MB, the cuts that landed are
 the pinned nixpkgs `source` (197 MB, `nixpkgs.flake.setNixPath`/`setFlakeRegistry = false`) and
 NetworkManager's ModemManager link (libqmi/libmbim/modemmanager, about 80 MB). On the desktop that cut
 only took effect once `panda-menu` used `config.networking.networkmanager.package` instead of the stock
