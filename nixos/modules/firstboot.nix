@@ -1,7 +1,8 @@
 # First boot: the panda user ships without a password (installed systems get
 # a hashed one from the installer's local.nix). If it is still unset at boot,
 # prompt for one with `passwd panda` on a dedicated console (tty8) and switch
-# to it. Once a password exists the unit is skipped by ExecCondition.
+# to it, then offer `panda-connect sign-in` when a network is up. Once a
+# password exists the unit is skipped by ExecCondition.
 #
 # Why tty8 and not blocking getty on tty1: blocking would hold multi-user.target
 # (and greetd on the desktop) until someone types at the console, which hangs
@@ -20,6 +21,7 @@
 let
   cfg = config.pandaos.firstboot;
   vt = "8";
+  connect = config.services.pandacode-host.enable;
 in
 {
   options.pandaos.firstboot.enable = lib.mkOption {
@@ -45,6 +47,7 @@ in
       path = [
         pkgs.coreutils
         pkgs.gnugrep
+        pkgs.iproute2
         pkgs.kbd
         pkgs.shadow
       ];
@@ -80,6 +83,25 @@ in
           echo "Password not set, try again."
           sleep 1
         done
+        ${lib.optionalString connect ''
+          # Ctrl-C stops the sign-in, not this script.
+          trap echo INT
+          echo
+          if [ -n "$(ip -4 route show default; ip -6 route show default)" ]; then
+            # Not read -p: its prompt goes to stderr, which is the journal here.
+            printf 'Connect this box to PandaCode now? [y/N] '
+            read -r answer || answer=
+            case "$answer" in
+              [yY]*)
+                /run/current-system/sw/bin/panda-connect sign-in ||
+                  echo "Sign-in did not finish. Try again later: sudo panda-connect sign-in" ;;
+              *) echo "Later: run 'sudo panda-connect sign-in', or use the desktop menu (PandaCode Connect)." ;;
+            esac
+          else
+            echo "No network yet. To connect this box to PandaCode later, run"
+            echo "'sudo panda-connect sign-in', or use the desktop menu (PandaCode Connect)."
+          fi
+        ''}
         echo "Done. Log in as 'panda' on the main console."
         sleep 2
         chvt 1
