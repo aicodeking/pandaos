@@ -8,6 +8,16 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Added
 
+- Agent CLI shims are also first on the `agent` user's login PATH (`bash -lc claude`), and every
+  shimmed task raises its `oom_score_adj` by 500; the host's `host/` cgroup has `memory.oom.group=0`.
+- `panda-boot-check` repairs the system profile after a fallback boot: it points
+  `/nix/var/nix/profiles/system` back at the running (good) generation and makes it the bootloader
+  default again, so garbage collection keeps it and the next update starts from it.
+- Tests: `agent-env` runs the shim inside PandaCode's real FHS/bubblewrap environment (cgroup fs
+  writable, task cgroups, OOM kill there); `boot-fallback` checks the profile repair;
+  `update-rollback` checks that a shutdown during an update starts no rollback; the new `update-e2e`
+  runs the real `nixos-upgrade` flake path offline against a local `release` branch (lock bump,
+  build, switch, health).
 - **Agent CLIs:** `pandaos.agents.clis` (claude-code, codex, gemini-cli, opencode; claude-code allowed
   by name, no global allowUnfree) and `sudo panda-agents-install <cli>...`, which writes
   `/etc/pandaos/agents.nix` and applies it through `panda-update`. The installer's `local.nix` imports
@@ -98,6 +108,11 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Changed
 
+- oomd no longer kills on memory pressure (`ManagedOOMMemoryPressure` removed from `pandacode-host`):
+  it ranks by reclaim rate and picked an idle bystander. The kernel's cgroup OOM killer at the
+  slice's `MemoryMax` kills the offending task; oomd acts only on swap exhaustion.
+- Installed systems (`lib.mkPandaSystem`) set `system.disableInstallerTools`, keeping
+  `nixos-rebuild` and `nixos-version`. The live ISO keeps the installer tools.
 - **Agents run as the new non-wheel system user `agent`** (home `/var/lib/agent`), not as `panda`.
   Existing boxes must sign in again (`sudo panda-connect sign-in`) and log their CLIs in as `agent`;
   see [troubleshooting](docs/troubleshooting.md). `services.panda-ckpt.users` now defaults to

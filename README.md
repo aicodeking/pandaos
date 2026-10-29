@@ -7,7 +7,8 @@ approve agent tasks on it.
 - **Agents are kept apart from you.** They run as a separate non-wheel user, `agent`, that cannot touch
   your home or use `sudo`.
 - **A runaway task dies alone.** Each agent run gets its own cgroup in a capped `agents.slice`, so
-  systemd-oomd kills that task and not the host, the other tasks or the box.
+  the kernel's cgroup OOM killer kills the offending task, not the host, the other tasks or the box.
+  systemd-oomd steps in only when swap runs out.
 - **Mistakes are one restore away.** panda-ckpt checkpoints agent workspaces and git checkouts, and
   root-owned hourly btrfs snapshots back them up where agents cannot delete them.
 - **Shared memory.** `/mem` is a git-backed store with an episode log, so every agent learns from
@@ -92,11 +93,11 @@ There is no default password: you set one (and optionally an ssh key) during the
                  ^  outbound only, encrypted between devices
                  |
   +--------------+--------------------------------------------------+
-  | agents.slice  (MemoryMax 75%, CPUWeight 50, oomd)               |
+  | agents.slice  (MemoryMax 75%, CPUWeight 50; kernel cgroup OOM)  |
   |   pandacode-host  `pandacode serve` as user `agent` (not wheel) |
   |     host/         the host itself, oomd_avoid                   |
   |     task-*        one cgroup per agent run (CLI shims);         |
-  |                   oomd/OOM kills a task, never the host         |
+  |                   the OOM killer takes a task, never the host   |
   +-----------------------------------------------------------------+
   | panda-mem      /mem (markdown + git), MCP; single writer        |
   | panda-ckpt     ~/work + repo checkpoints, forks, MCP            |
@@ -121,7 +122,7 @@ There is no default password: you set one (and optionally an ssh key) during the
 | `components/pandacode-host` | PandaCode's headless host (`pandacode serve`) and `panda-connect` |
 | `components/agentd` | optional `panda-agentd`: pairs with a relay (dials out) and runs jobs |
 | `components/mem` | `panda-mem`: the `/mem` store and MCP server |
-| `components/agent-env` | `agents.slice`, per-task cgroup shims, oomd, the `/etc/panda/mcp.d` registry, `panda-agents`, `/etc/panda/AGENTS.md` |
+| `components/agent-env` | `agents.slice`, per-task cgroup shims, OOM settings, the `/etc/panda/mcp.d` registry, `panda-agents`, `/etc/panda/AGENTS.md` |
 | `components/agent-clis` | `pandaos.agents.clis` and `panda-agents-install` |
 | `components/checkpoint` | `panda-ckpt`: btrfs workspace checkpoints, forks, auto-checkpoints, MCP |
 | `components/sysmcp` | `panda-sys`: box status/ops MCP server |

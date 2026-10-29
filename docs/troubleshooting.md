@@ -137,6 +137,10 @@ nix shell nixpkgs#htop          # flakes: uses the global registry (downloads ni
 nix shell github:NixOS/nixpkgs/nixos-26.05#htop   # pin the channel explicitly
 ```
 
+Installed boxes also have no `nixos-generate-config`, `nixos-install`, `nixos-enter` or
+`nixos-option` (`system.disableInstallerTools`); `nixos-rebuild` and `nixos-version` are there. Use
+the live ISO for reinstalls and recovery, or `nix shell nixpkgs#nixos-install-tools`.
+
 For something permanent, add it to `/etc/pandaos/local.nix` (`environment.systemPackages`), or for
 agent CLIs use `sudo panda-agents-install`. System updates are not affected, because they evaluate
 `/etc/pandaos`, whose `flake.lock` brings its own nixpkgs.

@@ -19,15 +19,18 @@ keeps shared memory, and the optional `panda-browser` gives agents a headless br
   `TasksMax=8192`. Each limit is an option, for example `pandaos.agents.memoryMax = "70%";`. See
   [security.md](security.md#agent-limits-and-oom).
 - **One cgroup per agent task.** `pandacode-host` has a delegated cgroup (`Delegate=yes`). Its
-  start wrapper, `pandacode-host-enter`, moves the host itself into a `host/` leaf marked
-  `user.oomd_avoid`. The agent CLIs on the host's PATH (`pandaos.agents.wrapCommands`, default
-  `claude codex kimi opencode gemini`) are shims. Each run of one of them moves itself into a new
-  `task-<pid>-<rand>` cgroup (`memory.oom.group=1`) and then execs the real CLI. At the slice's
-  `MemoryMax`, the kernel kills the biggest task together with all its child processes. The host and
-  the other tasks keep running (`OOMPolicy=continue`). **systemd-oomd** also watches the host unit
-  (memory pressure above 50% for 30 s, or swap more than 90% full) as a fallback. It kills the task
-  with the highest reclaim rate, which is not always the biggest one (see
-  [security.md](security.md#agent-limits-and-oom)). The wrapper removes empty task cgroups every 30 s. A program that the host
+  start wrapper, `pandacode-host-enter`, moves the host itself into a `host/` leaf (marked
+  `user.oomd_avoid`, `memory.oom.group=0`). The agent CLIs (`pandaos.agents.wrapCommands`, default
+  `claude codex kimi opencode gemini`) are shims, first on the host's PATH and on the `agent` user's
+  login PATH (so `bash -lc claude` hits them too). Each run moves itself into a new
+  `task-<pid>-<rand>` cgroup (`memory.oom.group=1`), raises its `oom_score_adj` by 500, and then execs
+  the real CLI. This also works inside PandaCode's bubblewrap sandbox, which keeps `/sys/fs/cgroup`
+  writable; the `agent-env` VM test runs it there. At the slice's `MemoryMax`, the kernel's cgroup OOM
+  killer kills the offending task together with all its child processes. The host and the other tasks
+  keep running (`OOMPolicy=continue`). **systemd-oomd** acts only when swap is more than 90% full
+  (`ManagedOOMSwap`). It no longer reacts to memory pressure, because it ranks by reclaim rate and
+  picked an idle bystander (see [security.md](security.md#agent-limits-and-oom)). The wrapper removes
+  empty task cgroups every 30 s. A program that the host
   starts by a name that is not in `wrapCommands` runs in `host/` and gets no task cgroup.
 - **Updates do not kill running tasks.** The host unit has `restartIfChanged = false`, so a new
   host version applies at the next reboot or after `sudo panda-connect restart`.

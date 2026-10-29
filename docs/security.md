@@ -149,7 +149,7 @@ New in Unreleased (`pandaos.agents`, see [agents.md](agents.md#agent-runtime-new
 | `MemorySwapMax` | 10% of RAM | caps how much the slice can push into zram, which `MemoryMax` does not count |
 | `CPUWeight` | 50 | system units (weight 100) win under CPU contention |
 | `TasksMax` | 8192 | stops fork bombs |
-| systemd-oomd | pressure > 50% for 30 s, or swap > 90% | kills the task cgroup with the highest reclaim rate (fallback) |
+| systemd-oomd | swap > 90% only (`ManagedOOMSwap` on `pandacode-host`) | kills the task cgroup using the most swap |
 
 zram stores incompressible pages at about their full size, so the slice can hold up to
 `MemoryMax + MemorySwapMax` (85%) of physical RAM. That leaves 15% for the system. In an early CI run,
@@ -161,21 +161,24 @@ Inside the slice, each agent run gets its own cgroup under the host's delegated 
 shims, see [agents.md](agents.md#agent-runtime-new-in-unreleased)). Each task cgroup has
 `memory.oom.group=1`. When the slice reaches `MemoryMax`, the kernel kills the process with the
 highest OOM score (in practice the biggest task) and, because of `oom.group`, its whole task with it.
-That choice is deterministic. systemd-oomd watches `pandacode-host.service` as a second line of
-defence for sustained pressure, and it never kills the `host/` leaf, which is marked
-`user.oomd_avoid`. **Caveat:** oomd does not pick the biggest task. It picks the task cgroup with the
-highest page-scan (reclaim) rate, which can be an idle bystander whose pages are being reclaimed.
-That is why the slice has no `MemoryHigh`. The throttle put the hog to sleep, its scan rate dropped
-to almost 0, and in CI run 40876914383 oomd killed the idle task first. Without the throttle, the
-hog reaches `MemoryMax` within seconds, and the kernel takes it before oomd's 30 s window ends. The agent CLIs own their task cgroups, so a task could move itself
+That choice is deterministic. Every shimmed task also raises its own `oom_score_adj` by 500 (to
+1000), and `host/` has `memory.oom.group=0`, so even when the host itself is large, a task is the
+preferred victim and an OOM kill in `host/` never takes the whole host. systemd-oomd watches
+`pandacode-host.service` for **swap exhaustion only** (`ManagedOOMSwap=kill`, the task using the
+most swap), and never kills the `host/` leaf, which is marked `user.oomd_avoid`. Pressure-based oomd
+(`ManagedOOMMemoryPressure`) is off on purpose: it picks the task cgroup with the highest page-scan
+(reclaim) rate, which can be an idle bystander whose pages are being reclaimed. In CI run
+40876914383 it killed the idle task first. For the same reason the slice has no `MemoryHigh`: the
+throttle put the hog to sleep, so its scan rate dropped to almost 0. The agent CLIs own their task cgroups, so a task could move itself
 into `host/`, or set its own memory limits. This setup contains runaway tasks. It does not contain a
-task that tries to dodge oomd on purpose. `MemoryMax` on the slice still holds for every task.
+task that tries to dodge the OOM killer on purpose. `MemoryMax` on the slice still holds for every task.
 
 `pandacode-host` has `OOMPolicy=continue` (a killed agent does not stop the host) and
 `OOMScoreAdjust=500`. sshd, journald, NetworkManager and panda-mem get `OOMScoreAdjust=-500`,
 so the global OOM killer picks agents first. They do not get -1000, because ssh sessions inherit the
-value. The `agent-env` VM test runs a 6 GB memory hog in the slice and checks that it is killed while
-sshd keeps its PID. There is no earlyoom: it would watch the whole box and could kill a system daemon.
+value. The `agent-env` VM test starts an idle task and a 6 GB memory hog through the shims, from a
+stub host running inside PandaCode's real FHS/bubblewrap environment. It checks that the kernel kills
+the hog's task while the host, the idle task and sshd keep their PIDs. There is no earlyoom: it would watch the whole box and could kill a system daemon.
 
 These limits protect the box from runaway agents. File isolation comes from the separate `agent`
 user (above).
