@@ -1,8 +1,9 @@
 # PandaOS
 
 A lightweight, agent-first Linux built on NixOS. Install it on an old PC and it becomes an agent box:
-it dials out to a relay, runs sandboxed agent jobs, keeps shared agent memory in `/mem`, updates itself
-every day and rolls back if an update breaks it.
+it connects through PandaCode Connect, so the PandaCode app on your other devices can start, watch and
+approve agent tasks on it. It keeps shared agent memory in `/mem`, updates itself every day and rolls
+back if an update breaks it.
 
 ## Measured numbers
 
@@ -48,6 +49,9 @@ Once a release exists, download `pandaos-<version>-headless-x86_64-linux.iso` (o
 2. In the firmware setup, **boot in UEFI mode and disable Secure Boot**. BIOS/legacy boot is not supported.
 3. Boot the target machine from the stick.
 4. Run `sudo panda-install` and answer the questions. No network is needed. See [docs/install.md](docs/install.md).
+5. After the first boot, with a network: run `sudo panda-connect sign-in`, open the GitHub link it
+   prints, and approve the box with the GitHub account you use in PandaCode. The box then shows up
+   as a computer in PandaCode. On the desktop, the dock's *PandaCode* button does the same.
 
 There is no default password: you set one (and optionally an ssh key) during the install.
 
@@ -66,12 +70,13 @@ There is no default password: you set one (and optionally an ssh key) during the
 ## Architecture
 
 ```
-            relay (PandaConnect, placeholder protocol)
-                 ^  outbound HTTPS only
+     your devices (PandaCode app) <-> PandaCode Connect
+                 ^  outbound only, encrypted between devices
                  |
   +--------------+------------------------------------------+
-  | panda-agentd   pairs, heartbeats, pulls jobs            |
-  |   '-> jobs     transient systemd units, user panda-agent|
+  | pandacode-host `pandacode serve` as user panda          |
+  |   '-> agents   CLIs started by PandaCode tasks          |
+  | panda-agentd   optional, off: generic relay job runner  |
   | panda-mem      /mem (markdown + git), MCP server        |
   | panda-browser  optional headless Chromium, CDP :9222    |
   | desktop        optional labwc + Panda dock + panda-menu |
@@ -86,10 +91,11 @@ There is no default password: you set one (and optionally an ssh key) during the
 | `nixos/modules` | base, security, updates, first boot, snapshots, disk layout, ISO |
 | `nixos/profiles` | `headless` and `desktop` (labwc) |
 | `nixos/installer` | `panda-install`, the offline installer |
-| `components/agentd` | `panda-agentd`: pairs with the relay (dials out) and runs jobs |
+| `components/pandacode-host` | PandaCode's headless host (`pandacode serve`) and `panda-connect` |
+| `components/agentd` | optional `panda-agentd`: pairs with a relay (dials out) and runs jobs |
 | `components/mem` | `panda-mem`: the `/mem` store and MCP server |
 | `components/browser` | optional `panda-browser` (headless Chromium, CDP on localhost) |
-| `components/desktop` | labwc/waybar config, `panda-menu`, `panda-agents-status` |
+| `components/desktop` | labwc/waybar config, `panda-menu`, `panda-connect-status` |
 | `tests/` | NixOS VM tests and RAM/disk budgets |
 | `bench/` | metric collection |
 
@@ -98,7 +104,7 @@ There is no default password: you set one (and optionally an ssh key) during the
 - [Install](docs/install.md)
 - [Updates and rollback](docs/updates-and-rollback.md)
 - [Security model](docs/security.md)
-- [Agents: agentd, jobs, memory, browser](docs/agents.md)
+- [Agents: PandaCode Connect, memory, browser, agentd](docs/agents.md)
 - [Desktop](docs/desktop.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Benchmarks](docs/benchmarks.md)
@@ -107,11 +113,12 @@ There is no default password: you set one (and optionally an ssh key) during the
 
 ## Known limitations / owner actions
 
-- **PandaConnect is undefined.** `panda-agentd` speaks a placeholder relay protocol, and the default
-  relay URL is a placeholder (`https://connect.pandacode.invalid`). Point it at your own relay with
-  `panda-install --relay URL`.
+- **Connects through PandaCode Connect.** Sign in once with `panda-connect sign-in` (GitHub device
+  flow) and approve the box in PandaCode. That sign-in is not tested in CI (it needs GitHub); the VM
+  tests cover the host up to it. The older `panda-agentd` is off by default and still speaks a
+  placeholder relay protocol.
 - **No binary cache yet.** Until the owner sets up a cache and `pandaos.binaryCache`, boxes build
-  panda-agentd, panda-mem and the other PandaOS packages locally on every update that changes them.
+  panda-mem and the other PandaOS packages locally on every update that changes them.
   See [docs/updates-and-rollback.md](docs/updates-and-rollback.md#what-an-update-downloads-and-builds).
 - **No release tag yet.** There are no downloadable ISOs, and the `release` branch that installed
   boxes update from only appears with the first tag. Build from source meanwhile.

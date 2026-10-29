@@ -1,8 +1,12 @@
 # Desktop
 
 The `desktop` profile adds a very light Wayland session: labwc, a waybar top bar and Panda dock,
-the `panda-menu` repair menu, a lock screen and notifications. There is no X server and no Xwayland.
+the `panda-menu` repair menu, a lock screen and notifications. There is no X server and no Xwayland
+in the session (the PandaCode host runs its own invisible `Xvfb`, see [agents.md](agents.md)).
 Log in at the `tuigreet` greeter.
+
+The top bar's *PandaCode* module shows the Connect state (`sign in`, `connecting`, the device name
+when connected, `error`). Click it to sign in, or for the host's logs once signed in.
 
 > The Panda dock, agent status, lock/idle, notifications, laptop keys and the new menu items are
 > **new in Unreleased**. v0.1.0 had a bare labwc session.
@@ -50,8 +54,8 @@ open so you can read the output.
 | Network | `nmtui` |
 | Disks, Disk usage | `lsblk` and `df`; `ncdu` of `/` |
 | Logs, Failed services | `journalctl -f`; `systemctl --failed` |
-| Agents status | `panda-agentd status` |
-| Pairing code | shows the code from `/run/panda-agentd/pairing-code` (needs `wheel`) |
+| PandaCode Connect | sign in, status, logs, Full access on/off, sign out (`panda-connect`; asks for your password where it needs `sudo`) |
+| Agents status | `panda-agentd status` (the optional agentd, off by default) |
 | Memory browser | lists memories and opens one with `panda-mem read` |
 | Restore /mem from snapshot | `panda-rollback-mem <snapshot>`, after a confirmation |
 | Updates | `panda-update status`, *Run now*, *Hold*, *Unhold* |

@@ -1,9 +1,60 @@
 # Agents
 
-Three services make a PandaOS box an agent box: `panda-agentd` runs jobs, `panda-mem` keeps
-shared memory, and the optional `panda-browser` gives agents a headless browser.
+A PandaOS box is an agent box through **PandaCode Connect**: `pandacode-host` runs PandaCode's
+headless host, so the PandaCode app on your other devices sees the box as one more computer. `panda-mem`
+keeps shared memory, and the optional `panda-browser` gives agents a headless browser. The older
+`panda-agentd` job runner is **optional and off by default** (new in Unreleased).
 
-## panda-agentd
+## PandaCode Connect (pandacode-host)
+
+`services.pandacode-host` (on by default) runs `pandacode serve` from PandaCode's pinned release
+AppImage, under `xvfb-run` (PandaCode needs a display to start; it draws nothing). See PandaCode's
+[headless docs](https://github.com/aicodeking/pandacode/blob/main/docs/headless.md).
+
+Sign in once, with a network:
+
+```sh
+sudo panda-connect sign-in                    # or: --device-name build-box (default: the hostname)
+```
+
+It prints a GitHub device-flow code and link. Approve it with the GitHub account you use in
+PandaCode. When PandaCode reports the box is hosting, `panda-connect` saves the sign-in and starts the
+`pandacode-host` service. The box then shows up as a computer in the PandaCode app, where you can
+start, watch and approve tasks on it. On the desktop, the dock's *PandaCode* button and
+`panda-menu` → *PandaCode Connect* do the same. First boot also offers it, when a network is up.
+
+| Command | What |
+|---|---|
+| `panda-connect status [--json]` | `signedIn`, `service` (`active`, `activating`, `inactive`, `failed`), `deviceName`, `version` |
+| `sudo panda-connect full-access on\|off` | Let your devices pick Full access (no approval prompts). **Off by default.** |
+| `panda-connect logs [-f]` | The host's journal |
+| `sudo panda-connect sign-out` | Stop the host and forget the sign-in |
+
+NixOS options:
+
+```nix
+services.pandacode-host = {
+  enable = true;          # on by default; idle until signed in
+  user = "panda";         # the host and every agent CLI it starts run as this user
+  deviceName = "pandaos"; # default name for sign-in (default: networking.hostName)
+  fullAccess = false;     # default for Full access; `panda-connect full-access` overrides it
+};
+```
+
+Agents run as `user` with its home: install and log in the agent CLIs (`claude`, `codex`, ...) and
+`gh` as that user. PandaCode keeps its sign-in and secrets in that user's PandaCode data directory
+(files mode 0600, not a keyring).
+
+Until you sign in, the service is skipped (`ConditionPathExists` on
+`/var/lib/pandacode-host/signed-in`) and the health check ignores it, so an unsigned box is healthy
+and updates normally. Once signed in, `pandacode-host.service` is one of the units `panda-health`
+requires. If PandaCode reports it is no longer signed in (sign-in revoked elsewhere), the unit drops
+the marker instead of restarting forever; run `panda-connect sign-in` again.
+
+## panda-agentd (optional)
+
+Off by default; PandaCode Connect replaced it. Enable it with `services.panda-agentd.enable = true`
+(or `panda-install --relay URL`) if you run your own relay.
 
 `panda-agentd` dials **out** to a relay. Nothing on the box listens for it (see [security.md](security.md)).
 The relay protocol is a placeholder (HTTP/JSON) until PandaConnect is defined.
@@ -12,7 +63,7 @@ NixOS options:
 
 ```nix
 services.panda-agentd = {
-  enable = true;                              # on by default
+  enable = true;                              # off by default
   relayUrl = "https://relay.example.com";     # default is a placeholder: https://connect.pandacode.invalid
   allowInsecure = false;                      # true allows http://, to loopback, private, .local or single-label hosts only
   slots = 2;                                  # max jobs at once
@@ -66,7 +117,7 @@ cat /run/panda-agentd/status.json
 `paired`, `pairing` (true while a pairing code waits for approval; the code itself is only in
 `/run/panda-agentd/pairing-code`), `relay`, `slots`, `running`, `completed`, `failed`, `version`,
 `since`, and `lastError` / `lastErrorAt` (the last failed relay call, empty once a call works again).
-The desktop dock (`panda-agents-status`) shows the same status, and the pairing code when it can read it.
+`panda-agents-status` turns the same status into a waybar module; it is not on the default bar since agentd is off by default.
 
 ### Jobs
 

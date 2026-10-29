@@ -4,7 +4,7 @@ Start with the logs for the current boot:
 
 ```sh
 journalctl -b -p warning
-panda-agentd status        # new in Unreleased
+panda-connect status       # new in Unreleased
 ```
 
 On the desktop, the `panda-menu` repair menu (new in Unreleased) is the first place to look. Everything below also works from a console or ssh.
@@ -93,7 +93,27 @@ and `panda-agentd` refuses new jobs below 1 GiB free (`-min-free-mb`).
 On btrfs, `df` can show free space while writes still fail because metadata is full. A balance can help:
 `sudo btrfs balance start -dusage=50 /`.
 
+## PandaCode Connect
+
+The box does not show up in PandaCode:
+
+1. `panda-connect status`. `signed in: false` means it was never signed in, or the sign-in was lost
+   (revoked from another device, or `serve` reported it is not signed in): run
+   `sudo panda-connect sign-in` and approve it in PandaCode with the **same GitHub account** your
+   other devices use.
+2. `service: failed` or `activating` for long: read `panda-connect logs -n 100`. PandaCode Connect
+   refuses requests whose clock is more than a minute off, so check `timedatectl` (NTP synced).
+3. Sign-in hangs or fails: it needs outbound HTTPS to GitHub and to PandaCode's relay. Check the
+   network (above) and try again; Ctrl-C stops it.
+4. Agents cannot find a CLI: the host runs as `panda`. Install and log in each agent CLI (and `gh`)
+   as that user, then `sudo systemctl restart pandacode-host`.
+
+An unsigned box never fails the health check, so updates are not affected. Real sign-in is not
+covered by CI (it needs GitHub); the `pandacode-host` VM test covers everything up to it.
+
 ## Re-pairing
+
+Only for the optional `panda-agentd` (off by default).
 
 To pair the box with a relay again (new relay, or a revoked token):
 
@@ -105,7 +125,7 @@ sudo systemctl start panda-agentd
 sudo cat /run/panda-agentd/pairing-code
 ```
 
-Enter the new code on the relay side (or use `panda-menu` → *Pairing code* on the desktop). The relay
+Enter the new code on the relay side. The relay
 file overrides `services.panda-agentd.relayUrl`; delete it to go back to the configured URL.
 
 ## Recover /mem from a snapshot

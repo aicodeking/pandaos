@@ -82,7 +82,7 @@ sudo panda-install \
 | `--password-hash H` | (required with `--yes`) | A crypt(3) hash, not the plain password |
 | `--ssh-key K` | none | One authorized ssh public key line for the user |
 | `--timezone TZ` | `UTC` | A zone under `/etc/zoneinfo`, e.g. `Europe/Berlin` |
-| `--relay URL` | the placeholder relay | The `https://` relay `panda-agentd` pairs with. Written to `/var/lib/panda-agentd/relay`, which overrides `services.panda-agentd.relayUrl` |
+| `--relay URL` | none (agentd off) | Enables the optional `panda-agentd` with this `https://` relay. Written to `/var/lib/panda-agentd/relay`, which overrides `services.panda-agentd.relayUrl`. Most boxes skip it and use PandaCode Connect |
 | `--yes` | | No questions and no typed disk confirmation |
 
 The installer refuses a disk that is a partition, is smaller than 8 GiB, or has anything mounted or
@@ -136,6 +136,8 @@ sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
 ## After the first boot
 
 1. Connect to the network: wired works out of the box, use `nmtui` for wifi.
-2. Pair the agent with your relay, see [agents.md](agents.md#pairing). If you did not pass `--relay`,
-   set the relay first (see [troubleshooting.md](troubleshooting.md#re-pairing)).
-3. Check the state with `panda-agentd status`.
+2. Connect the box to PandaCode: `sudo panda-connect sign-in`, open the GitHub link it prints and
+   approve it with the GitHub account you use in PandaCode (see
+   [agents.md](agents.md#pandacode-connect-pandacode-host)). On the desktop, click *PandaCode* in the dock.
+3. Check the state with `panda-connect status`. The box now shows up as a computer in PandaCode.
+4. Only if you passed `--relay`: pair `panda-agentd`, see [agents.md](agents.md#pairing).

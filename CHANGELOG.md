@@ -8,6 +8,16 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Added
 
+- **PandaCode Connect:** `services.pandacode-host` (on by default) runs PandaCode's headless host
+  (`pandacode serve`, pinned release AppImage, under `xvfb-run`) as `panda`, so the box shows up as a
+  computer in the PandaCode app. `panda-connect sign-in|sign-out|status [--json]|full-access on|off|logs`
+  manages it; Full access is off by default. Until signed in the service is skipped and the health check
+  ignores it. First boot offers `panda-connect sign-in` when a network is up. Desktop: a *PandaCode*
+  top-bar module and a *PandaCode Connect* menu in `panda-menu`.
+- `pandacode-host` VM test: the AppImage runs, an unsigned box stays idle and healthy, `full-access`
+  works, and a stale sign-in marker is dropped instead of crash-looping. Real sign-in needs GitHub and
+  is not tested in CI.
+
 - `panda-install`, an offline installer (interactive, or scripted with
   `--disk --profile headless|desktop --hostname --user --password-hash [--ssh-key] [--timezone] [--relay URL] --yes`).
   It lays out btrfs subvolumes `@`, `@nix`, `@home`, `@mem`, `@log`, `@snapshots`, installs
@@ -33,8 +43,8 @@ All notable changes to PandaOS are documented here. The format follows
   `-relay-file`, and reports of jobs interrupted by a daemon restart.
 - First boot asks for the `panda` password on tty8 when none is set (`pandaos.firstboot.enable`).
 - Optional `services.panda-browser`: headless Chromium with CDP on `127.0.0.1:9222`.
-- Desktop: a Panda dock with agent status, the `panda-menu` repair menu (network, disks, logs,
-  pairing code, memory browser, `/mem` restore, updates, rollback, lock), screen lock and idle lock
+- Desktop: a Panda dock, the `panda-menu` repair menu (network, disks, logs,
+  PandaCode Connect, memory browser, `/mem` restore, updates, rollback, lock), screen lock and idle lock
   (swaylock, swayidle), notifications (fnott), volume and brightness keys, and a
   `pandaos.desktop.gpu` option.
 - `flake.lock` is committed, and CI fails without it. A `lock` workflow regenerates it.
@@ -45,6 +55,10 @@ All notable changes to PandaOS are documented here. The format follows
 - Docs (including `docs/desktop.md`), MIT license, security policy, contributing guide and issue templates.
 
 ### Changed
+
+- `panda-agentd` is **off by default** (PandaCode Connect replaces it). `panda-install --relay URL`
+  enables it. Tests that use it enable it explicitly; the closure check's simulated update is now a
+  new `panda-mem`.
 
 - `panda-agentd` runs jobs sandboxed (`ProtectSystem=strict`, read-only `/home`, private `/tmp`
   and devices, `ProtectProc=invisible`, `SystemCallFilter=@system-service`, `NoNewPrivileges`,

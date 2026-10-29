@@ -2,8 +2,9 @@
 
 ## Threat model
 
-PandaOS assumes a **single-tenant box**: one owner, on their own hardware, running agent jobs that
-the owner (through their relay) chose to send. It is not a multi-user or hostile multi-tenant system.
+PandaOS assumes a **single-tenant box**: one owner, on their own hardware, running agent tasks that
+the owner started from PandaCode (or, with the optional `panda-agentd`, jobs their relay sent). It is
+not a multi-user or hostile multi-tenant system.
 
 What we defend against:
 
@@ -18,7 +19,9 @@ What we defend against:
 What we do not defend against:
 
 - Someone with physical access. There is no disk encryption by default.
-- A malicious or compromised relay. The relay decides which jobs run, so it can run any command the
+- A compromised GitHub account of the owner. Whoever controls it can sign a device in to the
+  owner's PandaCode Connect and start tasks on the box (see [PandaCode Connect](#pandacode-connect)).
+- A malicious or compromised `panda-agentd` relay (optional, off by default). The relay decides which jobs run, so it can run any command the
   job user is allowed to run. Pair only with a relay you trust.
 - Anything you run yourself as your login user, which is in `wheel` and can use `sudo`.
 - A compromised GitHub account or release pipeline. Boxes trust whatever lands on the `release`
@@ -30,11 +33,37 @@ What we do not defend against:
 | Direction | What |
 |---|---|
 | Inbound | nftables firewall on. Only ssh (22) is open. ssh: keys only, no passwords, no root login, `MaxAuthTries 3`, and `sshguard` blocks repeat offenders. |
-| Outbound | `panda-agentd` dials out to the relay. Nothing has to be opened or forwarded for agents. |
+| Outbound | `pandacode-host` (once signed in) dials out to PandaCode Connect; the optional `panda-agentd` dials out to its relay. Nothing has to be opened or forwarded for agents. |
 | Local only | `panda-browser`, if enabled, serves CDP on `127.0.0.1:9222` only. |
 
 > v0.1.0 already had the firewall on with only ssh open and ssh key-only, but it shipped the user
 > `panda` with the password `panda`. Setting credentials at install time is **new in Unreleased**.
+
+## PandaCode Connect
+
+**Trust model: the owner's GitHub account.** `panda-connect sign-in` runs PandaCode's GitHub device
+flow (identity only, no repository scopes). The box joins the PandaCode Connect account of whoever
+approves it, and every device signed in to that account can see the box and start, steer and approve
+tasks on it. Only approve the code with your own account, and sign out (`panda-connect sign-out`)
+before handing the box on. PandaCode keeps the GitHub token only long enough to sign in.
+
+**Encryption between devices.** Each device has its own X25519 key; PandaCode encrypts the frames
+between your devices, and the Connect relay forwards them and stores no task content (see PandaCode's
+[remote-access docs](https://github.com/aicodeking/pandacode/blob/main/docs/remote-access.md)). The
+connection is outbound only: nothing listens on the box for it. The relay token and device key live
+in the `panda` user's PandaCode data directory, in files mode 0600.
+
+**Full access is off by default.** Remote tasks need your approval for each action that asks for it.
+`sudo panda-connect full-access on` (or `services.pandacode-host.fullAccess = true`) lets your devices
+pick Full access, with no approval prompts; turn it back off with `full-access off`. Both need `sudo`.
+
+**What agents can touch.** The host and the agent CLIs it starts run as `panda`, with that user's
+home (checkouts, CLI logins, `~/.ssh`), the network, and `panda-mem` through its socket. The service
+has `NoNewPrivileges`, so agents cannot use `sudo` even though `panda` is in `wheel`; the rest of the
+system is read-only to them (`ProtectSystem=strict`, private `/tmp` and devices). This is weaker
+isolation than `panda-agentd`'s job units: treat anything in `panda`'s home as reachable by your tasks.
+
+## panda-agentd (optional)
 
 **The agent channel is outbound only.** `panda-agentd` makes HTTP(S) requests to the relay URL:
 it pairs, sends heartbeats, long-polls for the next job and posts results. The relay never connects
@@ -115,7 +144,8 @@ or flood shared memory. Every change is a git commit, and `/mem` is snapshotted 
 - Install with `--ssh-key`, or add a key to `~/.ssh/authorized_keys` on first login.
 - Leave `panda-browser` off unless every local user and every job is trusted (its CDP port has no
   authentication, and jobs can reach localhost).
-- Set an `https://` relay at install (`panda-install --relay URL`).
-- Use an `https://` relay you control.
+- Keep PandaCode Full access off unless you watch the tasks; protect the GitHub account you sign in
+  with (two-factor authentication).
+- If you enable `panda-agentd`: use an `https://` relay you control.
 - Keep auto-updates on: security fixes only reach boxes through updates.
 - Report vulnerabilities privately: [SECURITY.md](../SECURITY.md).
