@@ -94,7 +94,7 @@ let
       pkgs.findutils
       pkgs.util-linux # lsblk
       pkgs.coreutils # df
-      pkgs.networkmanager # nmtui
+      config.networking.networkmanager.package # nmtui; the configured NM (no ModemManager)
       panda-lock
     ];
     text = builtins.readFile ./bin/panda-menu;
