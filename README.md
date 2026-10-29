@@ -13,17 +13,21 @@ PandaOS's own numbers in a VM, not a comparison, and **not yet measured on real 
 
 | | headless | desktop |
 |---|---|---|
-| Idle RAM, `free` used + shmem | 126 MB | 178 MB in a logged-in labwc session (175 MB at the greeter) |
-| Idle RAM, `MemTotal - MemAvailable` | 245 MB | 333 MB in session (330 MB at the greeter) |
-| Closure of the installed system (`nixosConfigurations`, incl. curated firmware) | 1.64 GB | 2.11 GB |
-| ISO size (the desktop ISO also carries the headless system) | 803 MB | 929 MB |
+| Idle RAM, `free` used + shmem | 124 MB (with the optional agentd on) | 175 MB in a logged-in labwc session (172 MB at the greeter) |
+| Idle RAM, `MemTotal - MemAvailable` | 243 MB | 330 MB in session (327 MB at the greeter) |
+| Closure of the installed system (`nixosConfigurations`, incl. curated firmware) | 2.83 GB | 2.92 GB |
+| ISO size (the desktop ISO also carries the headless system) | 1137 MB | 1160 MB |
 
-| Agent job round trip (pair, then run `echo hi`) | |
+| Optional agentd job round trip (pair, then run `echo hi`) | |
 |---|---|
-| Normal VM network | 4.5 s |
-| 1 Mbit/s, ~340 ms RTT, 1% loss each way (netem on both nodes) | 13.1 s |
-| Offline install to an empty disk (`panda-install --yes`, VM) | 285 s |
-| An agentd-only update (uncompressed bytes substituted) | 18 MB |
+| Normal VM network | 3.9 s |
+| 1 Mbit/s, ~340 ms RTT, 1% loss each way (netem on both nodes) | 6.3 s |
+| Offline install to an empty disk (`panda-install --yes`, VM) | 372 s |
+| A panda-mem-only update (uncompressed bytes substituted) | 8 MB |
+
+PandaCode Connect (the pinned PandaCode AppImage and the libraries its `appimageTools` environment
+needs) is about 1.2 GB of the headless closure and 0.8 GB of the desktop one; before it, they were
+1.64 GB and 2.11 GB, and the ISOs 803 MB and 929 MB.
 
 A side-by-side comparison with Ubuntu and Debian on identical VMs is **planned, not built yet**. Until it
 exists, we make no claims about how PandaOS compares with other systems.
