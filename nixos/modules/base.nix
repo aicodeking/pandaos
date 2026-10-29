@@ -116,6 +116,12 @@
     # Placeholder relay; set your own when enabling.
     relayUrl = lib.mkDefault "https://connect.pandacode.invalid";
   };
+  # The agent runtime (components/agent-env: agents.slice, oomd, the
+  # /etc/panda/mcp.d registry) is on through pandaos.agents.enable's default.
+  # Workspace checkpoints in ~/work (btrfs; plain dirs elsewhere).
+  services.panda-ckpt.enable = lib.mkDefault true;
+  # Read-only box status MCP server; mutations stay off.
+  services.panda-sys.enable = lib.mkDefault true;
   services.panda-mem = {
     enable = lib.mkDefault true;
     # Users allowed on the panda-mem socket.

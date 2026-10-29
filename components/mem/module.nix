@@ -68,12 +68,7 @@ in
     };
 
     environment.systemPackages = [ cfg.package ];
-
-    environment.etc."panda/mcp.json".text = builtins.toJSON {
-      mcpServers.panda-mem = {
-        command = "panda-mem";
-        args = [ "mcp" "-socket" socket ];
-      };
-    };
+    # The MCP registry entry (/etc/panda/mcp.d/mem.json, plus the compat
+    # /etc/panda/mcp.json) comes from components/agent-env.
   };
 }

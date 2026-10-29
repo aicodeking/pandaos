@@ -7,7 +7,7 @@
 # /etc/pandaos/disk.nix, which overrides each `device` with the disk's UUID
 # (mkForce), so from the first `nixos-rebuild` on, a second disk with the same
 # labels can't be mounted instead. Only `device` is overridden there; fsType
-# and options stay defined here.
+# and options (including user_subvol_rm_allowed) stay defined here.
 { lib, ... }:
 let
   subvolumes = {
@@ -25,6 +25,9 @@ let
       "subvol=${subvol}"
       "compress=zstd:1"
       "noatime"
+      # Lets panda-ckpt delete its snapshots as the owner. btrfs applies
+      # mount options per filesystem, so every subvolume mount carries it.
+      "user_subvol_rm_allowed"
     ];
   };
 in

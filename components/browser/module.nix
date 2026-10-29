@@ -45,6 +45,26 @@ in
       default = "2G";
       description = "systemd MemoryMax for the browser.";
     };
+    mcp = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.submodule {
+          options = {
+            command = lib.mkOption { type = lib.types.str; };
+            args = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [ ];
+            };
+          };
+        }
+      );
+      default = null;
+      example = lib.literalExpression ''{ command = "chrome-devtools-mcp"; args = [ "--browserUrl" "http://127.0.0.1:9222" ]; }'';
+      description = ''
+        An MCP server that drives this browser over CDP. When set, it is
+        registered in /etc/panda/mcp.d/panda-browser.json for every agent CLI.
+        None ships by default; agents get the CDP URL from /etc/panda/browser.json.
+      '';
+    };
     fonts = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -98,6 +118,8 @@ in
         UMask = "0077";
       };
     };
+
+    pandaos.agents.mcpServers.panda-browser = lib.mkIf (cfg.mcp != null) cfg.mcp;
 
     environment.etc."panda/browser.json".text = builtins.toJSON {
       cdp = "http://127.0.0.1:${toString cfg.port}";

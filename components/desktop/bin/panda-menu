@@ -52,6 +52,45 @@ restore_mem() {
     term restore "$sudo" panda-rollback-mem "$snap"
 }
 
+# pick_ws: a workspace name from panda-ckpt; fails on Escape or none.
+pick_ws() {
+  if ! list=$(panda-ckpt list --json 2>&1); then
+    term checkpoints echo "panda-ckpt list failed: $list"
+    return 1
+  fi
+  names=$(printf '%s\n' "$list" | jq -r '.[].name')
+  if [ -z "$names" ]; then
+    term checkpoints echo "No workspaces yet. Create one: panda-ckpt init <name>"
+    return 1
+  fi
+  printf '%s\n' "$names" | pick "workspace>"
+}
+
+# pick_ckpt WS: a checkpoint id of WS, newest first. Lines are "created reason label | id".
+pick_ckpt() {
+  entry=$(panda-ckpt list "$1" --json |
+    jq -r 'reverse | .[] | "\(.created) \(.reason) \(.label // "") | \(.id)"' |
+    pick "checkpoint>") || return 1
+  printf '%s\n' "${entry##* | }"
+}
+
+checkpoints() {
+  action=$(printf '%s\n' List Create Restore Fork | pick "checkpoints>") || return 0
+  ws=$(pick_ws) || return 0
+  case "$action" in
+    "List") term checkpoints panda-ckpt list "$ws" ;;
+    "Create") term checkpoints panda-ckpt create "$ws" -m "from menu" ;;
+    "Restore")
+      id=$(pick_ckpt "$ws") || return 0
+      confirm "Restore $ws to $id (current state is checkpointed first)" &&
+        term checkpoints panda-ckpt restore "$ws" "$id" ;;
+    "Fork")
+      id=$(pick_ckpt "$ws") || return 0
+      name=$(printf '' | pick "new workspace name>") || return 0
+      [ -n "$name" ] && term checkpoints panda-ckpt fork "$ws" "$id" "$name" ;;
+  esac
+}
+
 connect() {
   case "$(printf '%s\n' "Sign in" Status Logs "Full access on" "Full access off" "Sign out" |
     pick "pandacode>")" in
@@ -76,6 +115,8 @@ choice=$(printf '%s\n' \
   "Failed services" \
   "PandaCode Connect" \
   "Agents status" \
+  "Agents doctor" \
+  "Checkpoints" \
   "Memory browser" \
   "Restore /mem from snapshot" \
   "Updates" \
@@ -91,6 +132,8 @@ case "$choice" in
   "Logs") foot --title "Panda: logs" journalctl -f -n 200 & ;;
   "Failed services") term services systemctl --failed ;;
   "Agents status") term agents panda-agentd status ;;
+  "Agents doctor") term agents panda-agents doctor ;;
+  "Checkpoints") checkpoints ;;
   "PandaCode Connect") connect ;;
   "Memory browser") memory ;;
   "Restore /mem from snapshot") restore_mem ;;

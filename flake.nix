@@ -118,6 +118,9 @@
             ./components/mem/module.nix
             ./components/browser/module.nix
             ./components/pandacode-host/module.nix
+            ./components/agent-env/module.nix
+            ./components/checkpoint/module.nix
+            ./components/sysmcp/module.nix
           ];
         };
         headless = ./nixos/profiles/headless.nix;

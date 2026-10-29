@@ -70,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        component: [agentd, mem]
+        component: [agentd, mem, checkpoint, agent-env, sysmcp]
     defaults:
       run:
         working-directory: components/${{ matrix.component }}
@@ -81,7 +81,7 @@ jobs:
           go-version-file: components/${{ matrix.component }}/go.mod
           cache: false
       - run: go vet ./...
-      - run: go test ./...
+      - run: go test -race ./...
 
   bench-script:
     permissions:

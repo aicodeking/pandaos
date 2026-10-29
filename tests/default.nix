@@ -319,6 +319,9 @@ in
   update-rollback = import ./update-rollback.nix { inherit pkgs self t; };
   iso-boot = import ./iso-boot.nix { inherit pkgs self t; };
   pandacode-host = import ./pandacode-host.nix { inherit pkgs self t; };
+  panda-ckpt = import ../components/checkpoint/vmtest.nix { inherit pkgs self; };
+  agent-env = import ../components/agent-env/vmtest.nix { inherit pkgs self; };
+  panda-sys = import ../components/sysmcp/vmtest.nix { inherit pkgs self; };
 
   mem = pkgs.testers.runNixOSTest {
     name = "mem";
@@ -569,6 +572,19 @@ in
           st = json.loads(target.succeed("panda-connect status --json"))
           assert st["signedIn"] is False, st
           target.fail("systemctl is-active panda-agentd.service")
+
+      with subtest("checkpoints on the installed disk: mount option, ~/work subvolume, prune as panda"):
+          # disk.nix overrides only `device`, so generic-disk.nix's options survive.
+          assert "user_subvol_rm_allowed" in target.succeed("findmnt -no OPTIONS /home"), "missing user_subvol_rm_allowed"
+          target.succeed("btrfs subvolume show /home/panda/work")
+          ck = "runuser -l panda -c "
+          target.succeed(ck + "'panda-ckpt init proj && echo x > ~/work/proj/f'")
+          first = json.loads(target.succeed(ck + "'panda-ckpt create proj -m one --json'"))
+          target.succeed(ck + "'panda-ckpt create proj -m two --json'")
+          target.succeed(ck + "'panda-ckpt prune proj --keep 1 --json'")
+          target.fail(f"test -e /home/panda/.checkpoints/proj/{first['id']}")
+          entries = json.loads(target.succeed("cat /etc/panda/mcp.json"))["mcpServers"]
+          assert {"panda-mem", "panda-ckpt", "panda-sys"} <= set(entries), entries
 
       with subtest("snapshots: btrbk on the installed btrfs"):
           target.succeed("systemctl start btrbk-panda.service")
