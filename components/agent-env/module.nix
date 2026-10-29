@@ -1,0 +1,212 @@
+# A safe, well-wired home for agents:
+# - agents.slice caps what pandacode-host (and every agent CLI it starts)
+#   may use, and systemd-oomd kills inside it under memory pressure, so a
+#   runaway agent dies instead of the box locking up. System daemons get a
+#   low OOMScoreAdjust for the global OOM killer.
+# - /etc/panda/mcp.d/<name>.json is the MCP registry; `panda-agents sync`
+#   merges it into each agent CLI's config as panda-<name> and links the
+#   system brief /etc/panda/AGENTS.md.
+#
+# No earlyoom: inside the slice, the kernel's cgroup OOM killer (MemoryMax)
+# and oomd (PSI) already act before the box thrashes, and they pick victims
+# from agents.slice only. earlyoom watches the whole box and kills by RSS, so
+# it would duplicate oomd and could pick a system daemon over an agent.
+{ config, lib, pkgs, ... }:
+let
+  cfg = config.pandaos.agents;
+  package = pkgs.callPackage ./package.nix { };
+  hostEnabled = config.services.pandacode-host.enable or false;
+  memEnabled = config.services.panda-mem.enable or false;
+  ckptEnabled = config.services.panda-ckpt.enable or false;
+  sysEnabled = config.services.panda-sys.enable or false;
+  # Not -1000: sshd sessions inherit it, so keep them killable when huge.
+  protect = -500;
+
+  # mcp.d entry; env only when set, so plain entries stay {command, args}.
+  entry = s: { inherit (s) command args; } // lib.optionalAttrs (s.env != { }) { inherit (s) env; };
+  key = name: "panda-${lib.removePrefix "panda-" name}";
+  registry = lib.mapAttrs' (
+    name: s: lib.nameValuePair "panda/mcp.d/${name}.json" { text = builtins.toJSON (entry s); }
+  ) cfg.mcpServers;
+  # Compat: the pre-mcp.d /etc/panda/mcp.json (Claude-style), generated from the registry.
+  mcpJson = builtins.toJSON {
+    mcpServers = lib.mapAttrs' (name: s: lib.nameValuePair (key name) (entry s)) cfg.mcpServers;
+  };
+
+  agentsMd = pkgs.writeText "AGENTS.md" ''
+    # PandaOS: notes for agents
+
+    You are running on PandaOS, a NixOS box made for coding agents. You run as
+    user `${cfg.user}`. The system is read-only to you: change it through
+    `/etc/pandaos` (a Nix flake) and a rebuild, never by editing `/etc` or `/nix`.
+
+    ## Tools
+    - Shared memory: the `panda-mem` MCP server (`mem_write`, `mem_search`,
+      `mem_read`, `mem_list`, `mem_history`), or the `panda-mem` CLI. Every agent
+      on the box shares `/mem`; search it before you start, write what you learn.
+    - Checkpoints: ${
+      if ckptEnabled then
+        "keep each project in `~/work/<name>` (`panda-ckpt init <name>`, or\n      `panda-ckpt adopt` for an existing dir); then `panda-ckpt create/list/diff/\n      restore/fork`, or the `panda-ckpt` MCP tools. Changed workspaces are\n      auto-checkpointed."
+      else
+        "`panda-ckpt` is not enabled on this box."
+    } `/mem` and `/home` also get hourly snapshots in `/.snapshots`.
+    - Box status: ${
+      if sysEnabled then "the `panda-sys` MCP tools (status, services, logs, top, net, ports, updates)." else "`systemctl`, `journalctl`."
+    }
+    - MCP servers on this box: ${lib.concatMapStringsSep ", " (n: "`${key n}`") (lib.attrNames cfg.mcpServers)}.
+      Run `panda-agents doctor` to check your setup.
+
+    ## Limits
+    You share `agents.slice` with every other agent: memory is throttled
+    above ${cfg.memoryHigh} of RAM and hard-capped at ${cfg.memoryMax}, at most
+    ${toString cfg.tasksMax} tasks. Under memory pressure systemd-oomd kills
+    the agent processes first, without warning. Keep builds and test runs
+    bounded (`-j`, worker counts) and stream large data instead of loading it.
+
+    ## Rules
+    - Checkpoint before risky changes (mass edits, migrations, deletes), and
+      record what you did in memory.
+    - Do not try to escape the limits or sudo; ask the owner instead.
+    - Keep secrets out of memory, logs and commits.
+  '';
+in
+{
+  options.pandaos.agents = {
+    enable = lib.mkEnableOption "agents.slice limits, OOM protection and MCP wiring for agent CLIs" // {
+      default = true;
+    };
+    user = lib.mkOption {
+      type = lib.types.str;
+      default = config.services.pandacode-host.user or "panda";
+      defaultText = lib.literalExpression ''config.services.pandacode-host.user or "panda"'';
+      description = "User whose agent CLI configs `panda-agents-sync.service` keeps in sync.";
+    };
+    memoryHigh = lib.mkOption {
+      type = lib.types.str;
+      default = "75%";
+      description = "agents.slice MemoryHigh= (throttle point), bytes or % of RAM.";
+    };
+    memoryMax = lib.mkOption {
+      type = lib.types.str;
+      default = "85%";
+      description = "agents.slice MemoryMax= (kernel OOM-kills inside the slice above this).";
+    };
+    memorySwapMax = lib.mkOption {
+      type = lib.types.str;
+      default = "25%";
+      description = ''
+        agents.slice MemorySwapMax=. Bounds how much an agent may push into
+        (z)swap; zram memory is not charged to MemoryMax, so without this a
+        hog could fill RAM through zram.
+      '';
+    };
+    cpuWeight = lib.mkOption {
+      type = lib.types.ints.between 1 10000;
+      default = 50;
+      description = "agents.slice CPUWeight= (system units default to 100, so agents yield under contention).";
+    };
+    tasksMax = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 8192;
+      description = "agents.slice TasksMax= (fork-bomb guard).";
+    };
+    mcpServers = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = {
+            command = lib.mkOption { type = lib.types.str; };
+            args = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [ ];
+            };
+            env = lib.mkOption {
+              type = lib.types.attrsOf lib.types.str;
+              default = { };
+              description = "Environment for the server. World-readable in /etc: no secrets.";
+            };
+          };
+        }
+      );
+      default = { };
+      example = lib.literalExpression ''{ mem = { command = "panda-mem"; args = [ "mcp" ]; }; }'';
+      description = ''
+        MCP servers written to /etc/panda/mcp.d/<name>.json. Agent CLIs see
+        them as `panda-<name>` (a leading `panda-` in the name is not doubled).
+        Names: lowercase letters, digits, `-`, `_`.
+      '';
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    environment.systemPackages = [ package ];
+    environment.etc = registry // {
+      "panda/AGENTS.md".source = agentsMd;
+      "panda/mcp.json".text = mcpJson;
+    };
+
+    pandaos.agents.mcpServers.mem = lib.mkIf memEnabled {
+      command = "panda-mem";
+      args = [ "mcp" "-socket" "/run/panda-mem/sock" ];
+    };
+
+    systemd.slices.agents = {
+      description = "Agent CLIs (pandacode-host and everything it starts)";
+      sliceConfig = {
+        MemoryAccounting = true;
+        MemoryHigh = cfg.memoryHigh;
+        MemoryMax = cfg.memoryMax;
+        MemorySwapMax = cfg.memorySwapMax;
+        CPUWeight = cfg.cpuWeight;
+        TasksMax = cfg.tasksMax;
+        # oomd kills the cgroup under this slice with the most reclaim once
+        # memory pressure stays above the limit for 30 s (oomd default)...
+        ManagedOOMMemoryPressure = "kill";
+        ManagedOOMMemoryPressureLimit = "50%";
+        # ...or when the box's swap is over 90 % full.
+        ManagedOOMSwap = "kill";
+      };
+    };
+    # NixOS default, but this module relies on it.
+    systemd.oomd.enable = true;
+
+    systemd.services = lib.mkMerge [
+      { systemd-journald.serviceConfig.OOMScoreAdjust = protect; }
+      (lib.mkIf config.services.openssh.enable { sshd.serviceConfig.OOMScoreAdjust = protect; })
+      (lib.mkIf config.networking.networkmanager.enable {
+        NetworkManager.serviceConfig.OOMScoreAdjust = protect;
+      })
+      (lib.mkIf memEnabled { panda-mem.serviceConfig.OOMScoreAdjust = protect; })
+      (lib.mkIf hostEnabled {
+        pandacode-host = {
+          wants = [ "panda-agents-sync.service" ];
+          after = [ "panda-agents-sync.service" ];
+          serviceConfig = {
+            Slice = "agents.slice";
+            # An OOM-killed agent must not take the host down with it
+            # (the default OOMPolicy=stop stops the whole unit).
+            OOMPolicy = "continue";
+            # Agents are the first pick for the global OOM killer too.
+            OOMScoreAdjust = 500;
+          };
+        };
+      })
+      {
+        # Re-syncs at boot and, through restartTriggers, whenever a rebuild
+        # changes the registry or the brief. CLIs installed later: run
+        # `panda-agents sync` (doctor says so).
+        panda-agents-sync = {
+          description = "Sync /etc/panda/mcp.d and AGENTS.md into agent CLI configs";
+          wantedBy = [ "multi-user.target" ];
+          restartTriggers = [ agentsMd mcpJson ];
+          path = [ "/etc/profiles/per-user/${cfg.user}" "/run/current-system/sw" ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            User = cfg.user;
+            ExecStart = "${lib.getExe package} sync";
+          };
+        };
+      }
+    ];
+  };
+}
