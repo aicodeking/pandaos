@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Self-check for closures.py: python3 tests/test_closures.py"""
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -38,7 +40,20 @@ with tempfile.TemporaryDirectory() as tmp:
                         "--system", f"headless={old}", "--update", f"headless={old}:{new}"])
     m = json.loads(out.read_text())
     assert rc == 0 and m["headlessClosureMB"] == 41 and m["updateBytes"] == 13 * mb, (rc, m)
-    rc = closures.main(["--budgets", str(budgets), "--out", str(out), "--system", f"desktop={new}"])
-    assert rc == 1, "over-budget closure must fail"
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+        rc = closures.main(["--budgets", str(budgets), "--out", str(out), "--system", f"desktop={new}"])
+    assert rc == 1 and "FAIL: desktop closure" in err.getvalue(), "over-budget closure must fail"
+
+    # why: shortest chain from the root (sys-*, referenced by nothing) to a path.
+    sizes, refs = closures.read_graph(old)
+    chains = closures.why(sizes, refs, ["glibc"])
+    assert chains == {H + "glibc": [H + "sys-1", H + "agentd-1", H + "glibc"]}, chains
+    sizes, refs = closures.read_graph(new)
+    assert closures.why(sizes, refs, ["glib"])[H + "glibc"] == [H + "sys-2", H + "glibc"], "not the shortest chain"
+    assert closures.why(sizes, refs, ["python3-"]) == {}
+    rc = closures.main(["--budgets", str(budgets), "--out", str(out),
+                        "--system", f"headless={new}", "--why", "glibc"])
+    assert rc == 0
 
 print("ok")

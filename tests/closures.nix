@@ -31,11 +31,27 @@ let
         }
       ];
     }).config.system.build.toplevel;
+
+  # Heavy paths whose referrers the log should show (see closures.py --why).
+  whyPrefixes = [
+    "source"
+    "python3-"
+    "perl-"
+    "libqmi-"
+    "libmbim-"
+    "modemmanager-"
+    "icu4c-"
+    "boost-"
+    "gnupg-"
+    "gettext-"
+    "groff-"
+  ];
 in
 pkgs.runCommand "pandaos-closures" { nativeBuildInputs = [ pkgs.python3 ]; } ''
   mkdir -p $out
   python3 ${./closures.py} --budgets ${./budgets.json} --out $out/metrics.json \
     --system headless=${info (toplevel "headless")} \
     --system desktop=${info (toplevel "desktop")} \
-    --update headless=${info (toplevel "headless")}:${info updatedHeadless}
+    --update headless=${info (toplevel "headless")}:${info updatedHeadless} \
+    ${lib.concatMapStringsSep " " (p: "--why ${p}") whyPrefixes}
 ''

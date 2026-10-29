@@ -8,6 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collect  # noqa: E402
+import contextlib  # noqa: E402
+import io  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
     t = Path(tmp)
@@ -19,8 +21,14 @@ with tempfile.TemporaryDirectory() as tmp:
         "vm-test-run-slow-network> booting\n"
         'vm-test-run-slow-network> METRIC {"roundtripSec": 42.5, "test": "slow-network"}\n'
         "vm-test-run-slow-network> METRIC {broken\n"
+        'vm-test-run-boot-desktop> METRIC {"idleRamMB": 176, "test": "boot-desktop"}<<< Welcome (tty1)\n'
     )
-    results = collect.collect([t / "result-boot-headless", t / "slow.log", t / "missing"])
+    # The broken line is on purpose; check its warning instead of printing it.
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        results = collect.collect([t / "result-boot-headless", t / "slow.log", t / "missing"])
+    assert "bad METRIC line" in err.getvalue() and "skipping" in err.getvalue(), err.getvalue()
+    assert results["boot-desktop"]["idleRamMB"] == 176, results
     assert results["boot-headless"]["idleRamMB"] == 150, results
     assert results["slow-network"]["roundtripSec"] == 42.5, results
     md = collect.table(results, {"headless": {"idleRamMB": 200}})
@@ -30,7 +38,8 @@ with tempfile.TemporaryDirectory() as tmp:
     assert "| closures | headlessClosureMB | 900 | 1500 |" in md and "| closures | updateBytes | 5 |  |" in md, md
 
     os.environ["BENCH_RESULTS_DIR"] = str(t / "out")
-    assert collect.main([str(t / "slow.log")]) == 0
+    with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+        assert collect.main([str(t / "slow.log")]) == 0
     written = json.loads(next((t / "out").glob("*.json")).read_text())
     assert written["results"]["slow-network"]["roundtripSec"] == 42.5, written
 

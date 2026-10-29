@@ -27,8 +27,14 @@ jobs:
         with:
           extra_nix_config: |
             system-features = nixos-test benchmark big-parallel kvm
+            fallback = true
+            connect-timeout = 15
 
+      # Best-effort: when the GitHub Actions cache throttles (HTTP 418/429),
+      # builds fall back to building locally (fallback = true) and
+      # .github/scripts/nix-retry.sh retries; it never fails the job by itself.
       - uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4 # v9
+        continue-on-error: true
 
       # Build each check separately so one failure doesn't hide the others' metrics.
       # Cached checks print no log, but their result-*/metrics.json still exists.
@@ -40,7 +46,7 @@ jobs:
           status=0
           for c in $(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames | jq -r '.[]'); do
             echo "::group::$c"
-            nix build ".#checks.x86_64-linux.$c" -L -o "result-$c" 2>&1 | tee "logs/$c.log" || status=1
+            .github/scripts/nix-retry.sh "logs/$c.log" nix build ".#checks.x86_64-linux.$c" -L -o "result-$c" || status=1
             echo "::endgroup::"
           done
           echo "status=$status" >> "$GITHUB_OUTPUT"

@@ -22,12 +22,15 @@ def warn(msg):
 
 
 def parse_log(text):
+    # raw_decode stops at the end of the JSON object, so console output glued
+    # onto the end of a METRIC line (interleaved writes) does not lose it.
+    decoder = json.JSONDecoder()
     for line in text.splitlines():
         i = line.find(MARKER + "{")
         if i < 0:
             continue
         try:
-            yield json.loads(line[i + len(MARKER):])
+            yield decoder.raw_decode(line[i + len(MARKER):])[0]
         except json.JSONDecodeError as e:
             warn(f"bad METRIC line ({e}): {line.strip()}")
 

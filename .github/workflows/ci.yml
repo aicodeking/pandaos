@@ -38,8 +38,14 @@ jobs:
         with:
           extra_nix_config: |
             system-features = nixos-test benchmark big-parallel kvm
+            fallback = true
+            connect-timeout = 15
 
+      # Best-effort: when the GitHub Actions cache throttles (HTTP 418/429),
+      # builds fall back to building locally (fallback = true) and
+      # .github/scripts/nix-retry.sh retries; it never fails the job by itself.
       - uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4 # v9
+        continue-on-error: true
 
       # Optional: push to the owner's Cachix cache (see docs/development.md).
       # Skipped when the CACHIX_AUTH_TOKEN secret is unset, e.g. on forks.
@@ -52,8 +58,7 @@ jobs:
 
       - name: nix flake check
         run: |
-          set -o pipefail
-          nix flake check -L --keep-going --no-update-lock-file 2>&1 | tee check.log
+          .github/scripts/nix-retry.sh check.log nix flake check -L --keep-going --no-update-lock-file
 
       - name: Print metrics
         if: always()
@@ -86,11 +91,14 @@ jobs:
   bench-script:
     permissions:
       contents: read
-    name: bench/collect.py self-test
+    name: script self-tests (python, shell)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: python3 bench/test_collect.py
+      - run: python3 tests/test_closures.py
+      - run: bash components/agent-clis/test-agents-install.sh
+      - run: sh components/desktop/test-agents-status.sh components/desktop/bin/panda-agents-status
 
   iso:
     permissions:
@@ -118,8 +126,16 @@ jobs:
           df -h /
 
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          extra_nix_config: |
+            fallback = true
+            connect-timeout = 15
 
+      # Best-effort: when the GitHub Actions cache throttles (HTTP 418/429),
+      # builds fall back to building locally (fallback = true) and
+      # .github/scripts/nix-retry.sh retries; it never fails the job by itself.
       - uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4 # v9
+        continue-on-error: true
 
       # Optional: push to the owner's Cachix cache (see docs/development.md).
       # Skipped when the CACHIX_AUTH_TOKEN secret is unset, e.g. on forks.
@@ -131,7 +147,7 @@ jobs:
           skipPush: ${{ github.ref != 'refs/heads/main' }}
 
       - name: Build ISO
-        run: nix build .#iso-${{ matrix.profile }} -L --no-update-lock-file
+        run: .github/scripts/nix-retry.sh build.log nix build .#iso-${{ matrix.profile }} -L --no-update-lock-file
 
       - name: ISO size
         run: |

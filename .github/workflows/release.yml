@@ -47,8 +47,14 @@ jobs:
         with:
           extra_nix_config: |
             system-features = nixos-test benchmark big-parallel kvm
+            fallback = true
+            connect-timeout = 15
 
+      # Best-effort: when the GitHub Actions cache throttles (HTTP 418/429),
+      # builds fall back to building locally (fallback = true) and
+      # .github/scripts/nix-retry.sh retries; it never fails the job by itself.
       - uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4 # v9
+        continue-on-error: true
 
       # Optional: push to the owner's Cachix cache (see docs/development.md).
       # Skipped when the CACHIX_AUTH_TOKEN secret is unset. The ISOs contain the
@@ -60,14 +66,14 @@ jobs:
           authToken: ${{ env.CACHIX_AUTH_TOKEN }}
 
       - name: nix flake check
-        run: nix flake check -L --keep-going --no-update-lock-file
+        run: .github/scripts/nix-retry.sh check.log nix flake check -L --keep-going --no-update-lock-file
 
       - name: Build ISOs
         run: |
           set -euo pipefail
           mkdir -p dist
           for p in headless desktop; do
-            nix build ".#iso-$p" -L --no-update-lock-file -o "result-$p"
+            .github/scripts/nix-retry.sh "build-$p.log" nix build ".#iso-$p" -L --no-update-lock-file -o "result-$p"
             iso=$(find -L "result-$p" -name '*.iso' | head -n 1)
             test -n "$iso"
             cp -L "$iso" "dist/pandaos-${GITHUB_REF_NAME}-$p-x86_64-linux.iso"
