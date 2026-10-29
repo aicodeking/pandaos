@@ -1,4 +1,4 @@
 {
-  "headless": { "idleRamMB": 200, "closureMB": 1865 },
-  "desktop": { "idleRamMB": 450, "closureMB": 2350 }
+  "headless": { "idleRamMB": 200, "closureMB": 1860 },
+  "desktop": { "idleRamMB": 450, "closureMB": 2346 }
 }

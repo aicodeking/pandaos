@@ -36,10 +36,12 @@ Each test prints `METRIC {json}` (so failed runs still report) and writes `$out/
   for the same system with a rebuilt panda-mem (agentd, used before, is off by default now).
 
 `budgets.json`: the RAM budgets are deliberately loose. The closure budgets are the expected
-real-system closures + 10%, so any growth past that fails CI. **Current values are estimates**
-(headless ~1694 MB, desktop ~2136 MB) after dropping the pinned nixpkgs `source` (197 MB,
-`nixpkgs.flake.setNixPath`/`setFlakeRegistry = false`) and NetworkManager's ModemManager link
-(libqmi/libmbim/modemmanager, ~80 MB); replace them with the CI-measured numbers + 10%. The
+real-system closures + 10%, so any growth past that fails CI. Measured in CI run 40880779161:
+headless 1691 MB, desktop 2133 MB (budgets 1860 / 2346). From 1971 / 2413 MB, the cuts that landed are
+the pinned nixpkgs `source` (197 MB, `nixpkgs.flake.setNixPath`/`setFlakeRegistry = false`) and
+NetworkManager's ModemManager link (libqmi/libmbim/modemmanager, about 80 MB). On the desktop that cut
+only took effect once `panda-menu` used `config.networking.networkmanager.package` instead of the stock
+`pkgs.networkmanager`, which had brought them back (2235 to 2133 MB). The
 `closures` log prints `why` chains (shortest referrer path) for python3, perl, libqmi, the nixpkgs
 `source` and other heavy paths. python3 (127 MB) stays: NixOS's systemd-boot installer
 (`systemd-boot-builder.py`) needs it. perl (55 MB) stays: the perl `/etc` and users activation
