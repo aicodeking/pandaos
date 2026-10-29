@@ -1,0 +1,214 @@
+{
+  "meta": {
+    "date": "2026-10-29T16:34:48Z",
+    "vm": {
+      "vcpus": 2,
+      "memMB": 2048,
+      "disk": "20G",
+      "firmware": "OVMF (UEFI)",
+      "net": "qemu user-mode",
+      "settleS": 60,
+      "samples": 3,
+      "gapS": 10
+    },
+    "host": "7.0.0-1017-azure",
+    "run": "https://github.com/AICodeKing/pandaos/actions/runs/40909717381"
+  },
+  "results": [
+    {
+      "name": "PandaOS headless",
+      "imageMB": 1009,
+      "bootToSshS": 16.6,
+      "setupDoneS": 25.4,
+      "ramUsedShmemMB": 148,
+      "ramTotalMinusAvailMB": 282,
+      "ramSamples": {
+        "usedShmem": [
+          148,
+          148,
+          148
+        ],
+        "totalMinusAvail": [
+          282,
+          282,
+          282
+        ]
+      },
+      "procs": 119,
+      "userProcs": 26,
+      "services": 14,
+      "failedUnits": 0,
+      "os": "PandaOS 26.05 (Yarara)",
+      "kernel": "6.18.57",
+      "rootFs": "ext4",
+      "libc": "glibc",
+      "init": "systemd",
+      "failedNames": "",
+      "rootUsedMB": 1889,
+      "ok": true
+    },
+    {
+      "name": "Ubuntu Server 24.04 LTS",
+      "imageMB": 593,
+      "url": "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img",
+      "bootToSshS": 16.8,
+      "setupDoneS": 17.8,
+      "ramUsedShmemMB": 159,
+      "ramTotalMinusAvailMB": 305,
+      "ramSamples": {
+        "usedShmem": [
+          172,
+          159,
+          145
+        ],
+        "totalMinusAvail": [
+          319,
+          305,
+          292
+        ]
+      },
+      "procs": 123,
+      "userProcs": 23,
+      "services": 18,
+      "failedUnits": 0,
+      "os": "Ubuntu 24.04.5 LTS",
+      "kernel": "6.8.0-147-generic",
+      "rootFs": "ext4",
+      "libc": "glibc",
+      "init": "systemd",
+      "failedNames": "",
+      "rootUsedMB": 1660,
+      "ok": true
+    },
+    {
+      "name": "Ubuntu Server 26.04 LTS",
+      "imageMB": 819,
+      "url": "https://cloud-images.ubuntu.com/releases/26.04/release-20261016/ubuntu-26.04-server-cloudimg-amd64.img",
+      "bootToSshS": 17.1,
+      "setupDoneS": 18.6,
+      "ramUsedShmemMB": 188,
+      "ramTotalMinusAvailMB": 335,
+      "ramSamples": {
+        "usedShmem": [
+          210,
+          188,
+          188
+        ],
+        "totalMinusAvail": [
+          356,
+          334,
+          335
+        ]
+      },
+      "procs": 133,
+      "userProcs": 26,
+      "services": 19,
+      "failedUnits": 0,
+      "os": "Ubuntu 26.04.1 LTS",
+      "kernel": "7.0.0-38-generic",
+      "rootFs": "ext4",
+      "libc": "glibc",
+      "init": "systemd",
+      "failedNames": "",
+      "rootUsedMB": 1950,
+      "ok": true
+    },
+    {
+      "name": "Debian 13 genericcloud",
+      "imageMB": 325,
+      "url": "https://cloud.debian.org/images/cloud/trixie/20261026-2643/debian-13-genericcloud-amd64-20261026-2643.qcow2",
+      "bootToSshS": 14.5,
+      "setupDoneS": 15.0,
+      "ramUsedShmemMB": 86,
+      "ramTotalMinusAvailMB": 219,
+      "ramSamples": {
+        "usedShmem": [
+          94,
+          86,
+          79
+        ],
+        "totalMinusAvail": [
+          226,
+          219,
+          212
+        ]
+      },
+      "procs": 110,
+      "userProcs": 17,
+      "services": 12,
+      "failedUnits": 0,
+      "os": "Debian GNU/Linux 13 (trixie)",
+      "kernel": "6.12.113+deb13-cloud-amd64",
+      "rootFs": "ext4",
+      "libc": "glibc",
+      "init": "systemd",
+      "failedNames": "",
+      "rootUsedMB": 595,
+      "ok": true
+    },
+    {
+      "name": "Fedora Cloud 44",
+      "imageMB": 557,
+      "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2",
+      "bootToSshS": 14.4,
+      "setupDoneS": 14.9,
+      "ramUsedShmemMB": 171,
+      "ramTotalMinusAvailMB": 307,
+      "ramSamples": {
+        "usedShmem": [
+          171,
+          171,
+          171
+        ],
+        "totalMinusAvail": [
+          306,
+          307,
+          307
+        ]
+      },
+      "procs": 130,
+      "userProcs": 24,
+      "services": 15,
+      "failedUnits": 0,
+      "os": "Fedora Linux 44 (Cloud Edition)",
+      "kernel": "6.19.10-300.fc44.x86_64",
+      "rootFs": "btrfs",
+      "libc": "glibc",
+      "init": "systemd",
+      "failedNames": "",
+      "rootUsedMB": 679,
+      "ok": true
+    },
+    {
+      "name": "Alpine 3.24.3 cloud",
+      "imageMB": 150,
+      "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/alpine-3.24.3-x86_64-cloudinit-r0.qcow2",
+      "bootToSshS": 25.2,
+      "setupDoneS": 26.3,
+      "ramUsedShmemMB": 78,
+      "ramTotalMinusAvailMB": 189,
+      "ramSamples": {
+        "usedShmem": [
+          79,
+          78,
+          78
+        ],
+        "totalMinusAvail": [
+          190,
+          189,
+          189
+        ]
+      },
+      "procs": 98,
+      "userProcs": 20,
+      "services": 25,
+      "os": "Alpine Linux v3.24",
+      "kernel": "6.18.58-0-virt",
+      "rootFs": "ext4",
+      "libc": "musl",
+      "init": "openrc",
+      "rootUsedMB": 114,
+      "ok": true
+    }
+  ]
+}

@@ -44,8 +44,22 @@ PandaCode Connect, they were 1.64 GB and 2.11 GB, and the ISOs 803 MB and 929 MB
 nixpkgs source and ModemManager then took the closures from 1.97 / 2.41 GB to 1.69 / 2.13 GB. Agent
 CLIs are not included: each one you pick adds 200 to 520 MB.
 
-A side-by-side comparison with Ubuntu and Debian on identical VMs is **planned, not built yet**. Until it
-exists, we make no claims about how PandaOS compares with other systems.
+### Compared with other systems
+
+Stock cloud images in identical QEMU/KVM VMs (2 vCPU, 2 GB, 20 GB disk, UEFI). One CI run, VMs not
+hardware. Methodology, caveats and a feature table: [docs/comparison.md](docs/comparison.md).
+
+| | Idle RAM, used + shmem | MemTotal − MemAvailable | Disk used on `/` | Boot to ssh |
+|---|---|---|---|---|
+| **PandaOS headless** | 148 MB | 282 MB | 1889 MB | 16.6 s |
+| Ubuntu Server 24.04 LTS | 159 MB | 305 MB | 1660 MB | 16.8 s |
+| Ubuntu Server 26.04 LTS | 188 MB | 335 MB | 1950 MB | 17.1 s |
+| Debian 13 genericcloud | 86 MB | 219 MB | 595 MB | 14.5 s |
+| Fedora Cloud 44 | 171 MB | 307 MB | 679 MB | 14.4 s |
+| Alpine 3.24 (musl, OpenRC) | 78 MB | 189 MB | 114 MB | 25.2 s |
+
+Debian and Alpine are clearly lighter. PandaOS ships its agent services, PandaCode Connect and
+firmware, and it is still pre-release and VM-tested only.
 
 ## Quick start
 

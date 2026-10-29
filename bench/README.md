@@ -19,17 +19,7 @@ come from the real `nixosConfigurations`, not the instrumented test VMs. Desktop
 measured in a logged-in labwc session, and the greeter is reported separately as `greeterIdleRamMB`.
 `updateBytes` is an upper bound (NAR bytes, not compressed downloads) for an agentd-only update.
 
-## Plan: comparison against mainstream distros (not built yet)
+## Comparison against other distros
 
-Once we have a Hetzner box, a nightly job will provision **identical cloud VMs** (same size, region
-and disk). It will run PandaOS headless and desktop, Ubuntu Server, Ubuntu Desktop, and Debian, and
-record for each one:
-
-- idle RAM after boot and settle (the same `MemTotal - MemAvailable` method)
-- installed footprint on disk
-- boot time to multi-user and to the greeter
-- agent job round-trip latency, where it applies
-
-The results will go into the same `results/<date>.json` format as a `baseline` section, so that
-`collect.py` can print PandaOS next to each distro. Until that box exists we only track the
-PandaOS budgets in `tests/budgets.json`.
+`bench/compare/` boots PandaOS headless and stock cloud images in identical QEMU/KVM VMs and
+measures them (`.github/workflows/compare.yml`, manual and weekly). Results: `docs/comparison.md`.

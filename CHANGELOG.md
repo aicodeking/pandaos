@@ -8,6 +8,9 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Added
 
+- **OS comparison:** `bench/compare` and the `compare` workflow (manual and weekly) boot PandaOS headless
+  and stock Ubuntu 24.04/26.04, Debian 13, Fedora 44 and Alpine 3.24 cloud images in identical QEMU/KVM VMs
+  and measure idle RAM, processes, services, disk, image size and boot time; see `docs/comparison.md`.
 - Agent CLI shims are also first on the `agent` user's login PATH (`bash -lc claude`), and every
   shimmed task raises its `oom_score_adj` by 500; the host's `host/` cgroup has `memory.oom.group=0`.
 - `panda-boot-check` repairs the system profile after a fallback boot: it points
