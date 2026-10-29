@@ -1,16 +1,16 @@
 # A safe, well-wired home for agents:
 # - agents.slice caps what pandacode-host (and every agent CLI it starts)
 #   may use. PATH shims for the agent CLIs (wrapCommands) give every agent
-#   run its own task cgroup under the host's delegated cgroup, so systemd-oomd
-#   (watching pandacode-host.service) or the kernel kills one runaway task,
-#   not the host and the other tasks. System daemons get a low
-#   OOMScoreAdjust for the global OOM killer.
+#   run its own task cgroup under the host's delegated cgroup, so the kernel's
+#   cgroup OOM killer (at MemoryMax) kills the offending task, not the host
+#   and the other tasks; systemd-oomd acts only on swap exhaustion. System
+#   daemons get a low OOMScoreAdjust for the global OOM killer.
 # - /etc/panda/mcp.d/<name>.json is the MCP registry; `panda-agents sync`
 #   merges it into each agent CLI's config as panda-<name> and links the
 #   system brief /etc/panda/AGENTS.md.
 #
 # No earlyoom: inside the slice, the kernel's cgroup OOM killer (MemoryMax)
-# and oomd (PSI) already act before the box thrashes, and they pick victims
+# and oomd (swap) already act before the box thrashes, and they pick victims
 # from agents.slice only. earlyoom watches the whole box and kills by RSS, so
 # it would duplicate oomd and could pick a system daemon over an agent.
 { config, lib, pkgs, ... }:
@@ -75,9 +75,10 @@ let
     You share `agents.slice` with every other agent: memory is hard-capped
     at ${cfg.memoryMax} of RAM${lib.optionalString (cfg.memoryHigh != "infinity") " (throttled above ${cfg.memoryHigh})"}, at most
     ${toString cfg.tasksMax} tasks. Each agent run (${lib.concatStringsSep ", " cfg.wrapCommands})
-    gets its own cgroup. At the cap the kernel kills the task using the most
-    memory, with all its child processes and without warning; under long
-    memory pressure systemd-oomd kills a task too. The host keeps running.
+    gets its own cgroup. At the cap the kernel's cgroup OOM killer kills the
+    offending task (the one using the most memory), with all its child
+    processes and without warning; systemd-oomd also kills a task when swap
+    runs out. The host keeps running.
     Keep builds and test runs bounded (`-j`, worker counts) and stream large
     data instead of loading it.
 
@@ -186,6 +187,15 @@ in
       args = [ "mcp" "-socket" "/run/panda-mem/sock" ];
     };
 
+    # PandaCode may start agent CLIs through a login shell (`bash -lc`), which
+    # rebuilds PATH from /etc/profile; put the shims first there too, for the
+    # agent user only (set-environment runs this after PATH is set).
+    environment.extraInit = lib.mkIf hostEnabled ''
+      if [ "$(id -un 2>/dev/null)" = ${lib.escapeShellArg cfg.user} ]; then
+        export PATH="${shims}/bin:$PATH"
+      fi
+    '';
+
     systemd.slices.agents = {
       description = "Agent CLIs (pandacode-host and everything it starts)";
       sliceConfig = {
@@ -195,9 +205,9 @@ in
         MemorySwapMax = cfg.memorySwapMax;
         CPUWeight = cfg.cpuWeight;
         TasksMax = cfg.tasksMax;
-        # No ManagedOOM* here: oomd watches pandacode-host.service itself
-        # (components/pandacode-host), so it picks a task cgroup inside it,
-        # not the whole host.
+        # No ManagedOOM* here: the kernel's cgroup OOM killer at MemoryMax
+        # picks the task (components/pandacode-host); oomd watches only
+        # pandacode-host.service's swap, so it picks a task cgroup inside it.
       };
     };
     # NixOS default, but this module relies on it.

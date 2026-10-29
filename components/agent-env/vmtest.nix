@@ -1,16 +1,23 @@
 # agent-env + pandacode-host runtime:
 # - the host runs as the non-wheel `agent` user, who can't touch /home/panda;
 # - agents.slice limits; per-task cgroups: the real pandacode-host unit
-#   (wrapper, Delegate=yes, oomd) runs a stub host that starts two fake
-#   `claude` tasks through the shim; the hog's task is killed while the host,
-#   the other task and sshd live, and its empty cgroup is swept;
+#   (wrapper, Delegate=yes) runs a stub host INSIDE the real PandaCode FHS /
+#   bubblewrap env (package.nix's withRunScript: same libraries, binds and
+#   bwrap flags), which starts two fake `claude` tasks through the shim; the
+#   cgroup fs is writable there, each task gets its own cgroup and
+#   oom_score_adj 1000; the kernel's cgroup OOM killer takes the hog's task
+#   while the host, the other task and sshd live, and its empty cgroup is swept;
+# - the agent user's login shell (`bash -lc`) also finds the shim first;
 # - `panda-agents mcp sync` edits fake Claude/Codex configs.
 { pkgs, self }:
 let
   fakeClaude = pkgs.writeShellScriptBin "claude" ''
     case "''${1-}" in
       --version) echo "fake-claude 0.0"; exit 0 ;;
-      idle | hog) cut -d: -f3 /proc/self/cgroup >"$HOME/$1.cg" ;;
+      idle | hog)
+        cut -d: -f3 /proc/self/cgroup >"$HOME/$1.cg"
+        cat /proc/self/oom_score_adj >"$HOME/$1.adj"
+        ;;
     esac
     if [ "''${1-}" = hog ]; then
       while [ ! -e "$HOME/go" ]; do sleep 1; done
@@ -20,12 +27,20 @@ let
     fi
     exec sleep infinity
   '';
-  # Stands in for `pandacode serve`: starts agents by name, like the real one.
+  # Stands in for `pandacode serve` inside PandaCode's own FHS/bwrap env:
+  # records what it sees there, then starts agents by name like the real one.
   stubHost = pkgs.writeShellScript "stub-host" ''
+    {
+      # /.host-etc only exists inside buildFHSEnv's bwrap sandbox.
+      test -d /.host-etc && echo fhs=yes
+      test -w "$PANDA_TASK_CGROUP_ROOT/cgroup.procs" && echo cgroup-writable=yes
+      echo "host-adj=$(cat /proc/self/oom_score_adj)"
+    } >"$HOME/fhs.txt"
     claude idle &
     claude hog &
     wait
   '';
+  hostInFhs = (pkgs.callPackage ../pandacode-host/package.nix { }).passthru.withRunScript stubHost;
 in
 pkgs.testers.runNixOSTest {
   name = "agent-env";
@@ -42,7 +57,7 @@ pkgs.testers.runNixOSTest {
     # the OOM kill under test into a kernel panic. Production keeps 0.
     boot.kernel.sysctl."vm.panic_on_oom" = 0;
     environment.systemPackages = [ fakeClaude pkgs.attr ];
-    services.pandacode-host.serveCommand = "${stubHost}";
+    services.pandacode-host.serveCommand = "${hostInFhs}/bin/pandacode";
     # The real ExecStartPre runs pandacode itself; the stub host doesn't need it.
     systemd.services.pandacode-host.serviceConfig.ExecStartPre = pkgs.lib.mkForce [ ];
   };
@@ -79,7 +94,8 @@ pkgs.testers.runNixOSTest {
         assert prop(h, "Slice") == "agents.slice"
         assert prop(h, "OOMPolicy") == "continue"
         assert prop(h, "Delegate") == "yes"
-        assert prop(h, "ManagedOOMMemoryPressure") == "kill"
+        # The kernel picks the victim; oomd only on swap exhaustion.
+        assert prop(h, "ManagedOOMMemoryPressure") == "auto", prop(h, "ManagedOOMMemoryPressure")
         assert prop(h, "ManagedOOMSwap") == "kill"
         machine.succeed("systemctl is-active systemd-oomd.service")
         for u in ("sshd", "systemd-journald", "NetworkManager", "panda-mem"):
@@ -125,6 +141,26 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed(f"getfattr -n user.oomd_avoid --only-values {root}/host").strip() == "1"
         assert "memory" in machine.succeed(f"cat {root}/cgroup.subtree_control")
         assert machine.succeed(f"cat {hog_cg}/memory.oom.group").strip() == "1"
+        assert machine.succeed(f"cat {root}/host/memory.oom.group").strip() == "0"
+
+    with subtest("inside the real PandaCode bwrap env: cgroup fs writable, shim raised oom_score_adj"):
+        fhs = machine.succeed(f"cat {A}/fhs.txt").split()
+        assert "fhs=yes" in fhs and "cgroup-writable=yes" in fhs and "host-adj=500" in fhs, fhs
+        for t in ("idle", "hog"):
+            adj = machine.succeed(f"cat {A}/{t}.adj").strip()
+            assert adj == "1000", f"{t} oom_score_adj={adj}, want 500 (unit) + 500 (shim)"
+        assert machine.succeed(f"cat /proc/{main}/oom_score_adj").strip() == "500"
+
+    with subtest("login shells of the agent user find the shim first"):
+        # -l: a clean login environment, like PandaCode's `bash -lc`.
+        login = machine.succeed("runuser -l agent -c 'command -v claude'").strip()
+        assert "panda-agent-shims" in login, login
+        clean = machine.succeed(
+            "runuser -u agent -- env -i HOME=/var/lib/agent /run/current-system/sw/bin/bash -lc 'command -v claude'"
+        ).strip()
+        assert clean == login, (clean, login)
+        owner = machine.succeed("runuser -l panda -c 'command -v claude'").strip()
+        assert "panda-agent-shims" not in owner, owner
 
     with subtest("the hog's task is OOM-killed; host, the other task and sshd live; empty cgroup swept"):
         sshd_pid = prop("sshd.service", "MainPID")

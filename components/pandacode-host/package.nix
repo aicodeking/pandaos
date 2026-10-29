@@ -41,47 +41,58 @@ let
         callPackage fn (args // { pkgs = pkgs // { glibcLocales = emptyDirectory; }; });
     };
   };
-in
-(if useSlim then appimageTools' else appimageTools).wrapType2 ({
-  inherit pname version src;
-  meta = {
-    description = "PandaCode, run here as a headless PandaCode Connect host";
-    homepage = "https://github.com/aicodeking/pandacode";
-    # MIT plus a fork-attribution clause; free, so no allowUnfree is needed.
-    license = {
-      fullName = "PandaCode License (MIT with attribution)";
-      url = "https://github.com/aicodeking/pandacode/blob/main/LICENSE";
-      free = true;
-      redistributable = true;
+  # The FHS/bwrap wrapper; `extra` overrides wrapType2 arguments.
+  wrap = extra: (if useSlim then appimageTools' else appimageTools).wrapType2 (args // extra);
+  args = {
+    inherit pname version src;
+    meta = {
+      description = "PandaCode, run here as a headless PandaCode Connect host";
+      homepage = "https://github.com/aicodeking/pandacode";
+      # MIT plus a fork-attribution clause; free, so no allowUnfree is needed.
+      license = {
+        fullName = "PandaCode License (MIT with attribution)";
+        url = "https://github.com/aicodeking/pandacode/blob/main/LICENSE";
+        free = true;
+        redistributable = true;
+      };
+      mainProgram = "pandacode";
+      platforms = [ "x86_64-linux" ];
+      sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
     };
-    mainProgram = "pandacode";
-    platforms = [ "x86_64-linux" ];
-    sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
+  } // lib.optionalAttrs useSlim {
+    # What `appimage-exec.sh -w` does, without its extraction deps (binutils, 34 MB).
+    runScript = writeShellScript "pandacode-apprun" ''
+      export APPDIR=${extracted} APPIMAGE_SILENT_INSTALL=1
+      exec ${extracted}/AppRun "$@"
+    '';
+    # Overrides the default targetPkgs/multiPkgs. buildFHSEnv always adds
+    # glibc (libc, libm, libresolv, ld-linux) and gcc.cc.lib (libstdc++, libgcc_s).
+    targetPkgs = pkgs: with pkgs; [
+      libx11 # libX11, libX11-xcb
+      libxcb
+      libGL # libGL, libEGL (glvnd)
+      libdrm
+      libgbm
+      wayland # libwayland-client/-cursor/-egl/-server (NEEDED, unused on X11)
+      expat
+      fontconfig
+      freetype
+      fribidi
+      harfbuzz
+      zlib
+      gmp # libgnutls, libhogweed
+      libgpg-error # libgcrypt
+      e2fsprogs # libcom_err (bundled krb5)
+    ];
+    multiPkgs = _: [ ];
   };
-} // lib.optionalAttrs useSlim {
-  # What `appimage-exec.sh -w` does, without its extraction deps (binutils, 34 MB).
-  runScript = writeShellScript "pandacode-apprun" ''
-    export APPDIR=${extracted} APPIMAGE_SILENT_INSTALL=1
-    exec ${extracted}/AppRun "$@"
-  '';
-  # Overrides the default targetPkgs/multiPkgs. buildFHSEnv always adds
-  # glibc (libc, libm, libresolv, ld-linux) and gcc.cc.lib (libstdc++, libgcc_s).
-  targetPkgs = pkgs: with pkgs; [
-    libx11 # libX11, libX11-xcb
-    libxcb
-    libGL # libGL, libEGL (glvnd)
-    libdrm
-    libgbm
-    wayland # libwayland-client/-cursor/-egl/-server (NEEDED, unused on X11)
-    expat
-    fontconfig
-    freetype
-    fribidi
-    harfbuzz
-    zlib
-    gmp # libgnutls, libhogweed
-    libgpg-error # libgcrypt
-    e2fsprogs # libcom_err (bundled krb5)
-  ];
-  multiPkgs = _: [ ];
+  pkg = wrap { };
+in
+pkg.overrideAttrs (old: {
+  passthru = (old.passthru or { }) // {
+    # The same FHS env (libraries, bwrap binds and flags) running `runScript`
+    # instead of PandaCode: VM tests use it to check what agent CLIs started
+    # by the real host see inside the sandbox (tests/agent-env).
+    withRunScript = runScript: wrap { inherit runScript; };
+  };
 })

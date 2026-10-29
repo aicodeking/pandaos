@@ -1,8 +1,9 @@
 # Agent CLI shim (module.nix prepends `name=<cli>`). First on the
-# pandacode-host PATH: puts this run in its own cgroup task-<pid>-<rand>
-# under the host's delegated cgroup, so oomd or the kernel can kill one task
-# and not the host, then execs the real CLI found later on PATH.
-# Outside the host (no $PANDA_TASK_CGROUP_ROOT) it just execs the CLI.
+# pandacode-host PATH and on the agent user's login PATH: puts this run in
+# its own cgroup task-<pid>-<rand> under the host's delegated cgroup, so the
+# kernel's cgroup OOM killer takes one task and not the host, then execs the
+# real CLI found later on PATH. Outside the host (no $PANDA_TASK_CGROUP_ROOT)
+# it only raises its OOM score and execs the CLI.
 me=$(readlink -f "$0")
 real=
 IFS=: read -ra dirs <<<"${PATH-}"
@@ -30,4 +31,10 @@ if [ -n "$root" ] && [ -w "$root/cgroup.procs" ]; then
     fi
   fi
 fi
+# Defence in depth: tasks are always a better OOM victim than the host
+# (+500, capped at 1000; raising needs no privilege).
+adj=$(cat /proc/self/oom_score_adj 2>/dev/null || echo 0)
+adj=$((adj + 500))
+[ "$adj" -le 1000 ] || adj=1000
+echo "$adj" >/proc/self/oom_score_adj 2>/dev/null || true
 exec "$real" "$@"

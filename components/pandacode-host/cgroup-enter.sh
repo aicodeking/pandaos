@@ -19,6 +19,11 @@ done
 if [ -n "$want" ]; then
   echo "${want# }" >"$root/cgroup.subtree_control"
 fi
+# An OOM kill in host/ takes only the victim process, never the whole host
+# (the kernel default, made explicit; task cgroups set 1).
+if [ -e "$root/host/memory.oom.group" ]; then
+  echo 0 >"$root/host/memory.oom.group"
+fi
 
 # A shim can't rmdir its own task cgroup after exec, so sweep empty ones.
 # ponytail: 30 s polling; inotify on cgroup.events if it ever matters.

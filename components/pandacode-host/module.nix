@@ -188,11 +188,14 @@ in
           WorkingDirectory = home;
           ExecStartPre = applyFullAccess;
           # Each agent task gets its own cgroup (see cgroup-enter.sh and the
-          # agent CLI shims in agent-env), so oomd kills a task, not the host.
+          # agent CLI shims in agent-env, memory.oom.group=1, oom_score_adj
+          # +500), so the kernel's cgroup OOM killer at agents.slice's
+          # MemoryMax kills the offending task, not the host.
           Delegate = true;
           ExecStart = "${lib.getExe enter} ${cfg.serveCommand}";
-          ManagedOOMMemoryPressure = "kill";
-          ManagedOOMMemoryPressureLimit = "50%";
+          # oomd only on swap exhaustion. No ManagedOOMMemoryPressure: oomd
+          # ranks by reclaim (pgscan) rate and killed an idle bystander task
+          # in CI run 40876914383; the kernel picks by memory use.
           ManagedOOMSwap = "kill";
           # An OOM-killed task must not stop the unit (default OOMPolicy=stop).
           OOMPolicy = "continue";
