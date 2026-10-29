@@ -72,6 +72,7 @@
             self.nixosModules.${profile}
             ./nixos/modules/generic-disk.nix
             ./nixos/modules/firmware.nix
+            ./nixos/modules/installed.nix
           ]
           ++ modules
         );
