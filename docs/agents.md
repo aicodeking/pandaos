@@ -14,7 +14,7 @@ keeps shared memory, and the optional `panda-browser` gives agents a headless br
   so they cannot plant a fake `sudo` in your shell startup files. They reach `/mem` through the
   panda-mem socket.
 - **`agents.slice`.** `pandacode-host` and everything it starts run in this slice. Its limits are
-  `MemoryHigh=65%` (throttling), `MemoryMax=75%` (the kernel OOM-kills inside the slice),
+  `MemoryMax=75%` (the kernel OOM-kills the biggest task inside the slice), no `MemoryHigh` throttle,
   `MemorySwapMax=10%`, `CPUWeight=50` (system units have 100, so agents yield under load) and
   `TasksMax=8192`. Each limit is an option, for example `pandaos.agents.memoryMax = "70%";`. See
   [security.md](security.md#agent-limits-and-oom).
@@ -22,10 +22,12 @@ keeps shared memory, and the optional `panda-browser` gives agents a headless br
   start wrapper, `pandacode-host-enter`, moves the host itself into a `host/` leaf marked
   `user.oomd_avoid`. The agent CLIs on the host's PATH (`pandaos.agents.wrapCommands`, default
   `claude codex kimi opencode gemini`) are shims. Each run of one of them moves itself into a new
-  `task-<pid>-<rand>` cgroup and then execs the real CLI. **systemd-oomd** watches the host unit
-  (memory pressure above 50%, or swap more than 90% full) and kills the task cgroup that uses the
-  most memory, together with all its child processes. The host and the other tasks keep running
-  (`OOMPolicy=continue`). The wrapper removes empty task cgroups every 30 s. A program that the host
+  `task-<pid>-<rand>` cgroup (`memory.oom.group=1`) and then execs the real CLI. At the slice's
+  `MemoryMax`, the kernel kills the biggest task together with all its child processes. The host and
+  the other tasks keep running (`OOMPolicy=continue`). **systemd-oomd** also watches the host unit
+  (memory pressure above 50% for 30 s, or swap more than 90% full) as a fallback. It kills the task
+  with the highest reclaim rate, which is not always the biggest one (see
+  [security.md](security.md#agent-limits-and-oom)). The wrapper removes empty task cgroups every 30 s. A program that the host
   starts by a name that is not in `wrapCommands` runs in `host/` and gets no task cgroup.
 - **Updates do not kill running tasks.** The host unit has `restartIfChanged = false`, so a new
   host version applies at the next reboot or after `sudo panda-connect restart`.

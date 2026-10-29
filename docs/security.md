@@ -144,12 +144,12 @@ New in Unreleased (`pandaos.agents`, see [agents.md](agents.md#agent-runtime-new
 
 | Limit | Default | Effect |
 |---|---|---|
-| `MemoryHigh` | 65% of RAM | the slice is throttled and reclaimed above this |
+| `MemoryHigh` | none (`infinity`) | no throttle, see below |
 | `MemoryMax` | 75% of RAM | the kernel OOM-kills a process inside the slice |
 | `MemorySwapMax` | 10% of RAM | caps how much the slice can push into zram, which `MemoryMax` does not count |
 | `CPUWeight` | 50 | system units (weight 100) win under CPU contention |
 | `TasksMax` | 8192 | stops fork bombs |
-| systemd-oomd | pressure > 50% for 30 s, or swap > 90% | kills the slice's cgroup with the most reclaim |
+| systemd-oomd | pressure > 50% for 30 s, or swap > 90% | kills the task cgroup with the highest reclaim rate (fallback) |
 
 zram stores incompressible pages at about their full size, so the slice can hold up to
 `MemoryMax + MemorySwapMax` (85%) of physical RAM. That leaves 15% for the system. In an early CI run,
@@ -158,9 +158,16 @@ slice alone. Keep the sum well under 100% if you change these values. On boxes w
 2 GB or less), the system's own share can be more than 15%.
 
 Inside the slice, each agent run gets its own cgroup under the host's delegated cgroup (the CLI
-shims, see [agents.md](agents.md#agent-runtime-new-in-unreleased)). systemd-oomd watches
-`pandacode-host.service` and kills the task cgroup that uses the most memory, never the `host/` leaf,
-which is marked `user.oomd_avoid`. The agent CLIs own their task cgroups, so a task could move itself
+shims, see [agents.md](agents.md#agent-runtime-new-in-unreleased)). Each task cgroup has
+`memory.oom.group=1`. When the slice reaches `MemoryMax`, the kernel kills the process with the
+highest OOM score (in practice the biggest task) and, because of `oom.group`, its whole task with it.
+That choice is deterministic. systemd-oomd watches `pandacode-host.service` as a second line of
+defence for sustained pressure, and it never kills the `host/` leaf, which is marked
+`user.oomd_avoid`. **Caveat:** oomd does not pick the biggest task. It picks the task cgroup with the
+highest page-scan (reclaim) rate, which can be an idle bystander whose pages are being reclaimed.
+That is why the slice has no `MemoryHigh`. The throttle put the hog to sleep, its scan rate dropped
+to almost 0, and in CI run 40876914383 oomd killed the idle task first. Without the throttle, the
+hog reaches `MemoryMax` within seconds, and the kernel takes it before oomd's 30 s window ends. The agent CLIs own their task cgroups, so a task could move itself
 into `host/`, or set its own memory limits. This setup contains runaway tasks. It does not contain a
 task that tries to dodge oomd on purpose. `MemoryMax` on the slice still holds for every task.
 

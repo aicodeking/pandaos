@@ -68,8 +68,8 @@ pkgs.testers.runNixOSTest {
 
     with subtest("agents.slice limits; pandacode-host is delegated and oomd-watched"):
         total = int(machine.succeed("awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo"))
-        high, mx = int(prop("agents.slice", "MemoryHigh")), int(prop("agents.slice", "MemoryMax"))
-        assert abs(high - total * 0.65) < total * 0.02, (high, total)
+        assert prop("agents.slice", "MemoryHigh") == "infinity"  # no throttle, see module.nix
+        mx = int(prop("agents.slice", "MemoryMax"))
         assert abs(mx - total * 0.75) < total * 0.02, (mx, total)
         assert prop("agents.slice", "CPUWeight") == "50"
         assert prop("agents.slice", "TasksMax") == "8192"

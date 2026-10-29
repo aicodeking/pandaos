@@ -72,12 +72,12 @@ let
       Run `panda-agents doctor` to check your setup.
 
     ## Limits
-    You share `agents.slice` with every other agent: memory is throttled
-    above ${cfg.memoryHigh} of RAM and hard-capped at ${cfg.memoryMax}, at most
+    You share `agents.slice` with every other agent: memory is hard-capped
+    at ${cfg.memoryMax} of RAM${lib.optionalString (cfg.memoryHigh != "infinity") " (throttled above ${cfg.memoryHigh})"}, at most
     ${toString cfg.tasksMax} tasks. Each agent run (${lib.concatStringsSep ", " cfg.wrapCommands})
-    gets its own cgroup. Under memory pressure systemd-oomd, or the kernel at
-    the cap, kills the task using the most memory, with all its child
-    processes and without warning; the host and other tasks keep running.
+    gets its own cgroup. At the cap the kernel kills the task using the most
+    memory, with all its child processes and without warning; under long
+    memory pressure systemd-oomd kills a task too. The host keeps running.
     Keep builds and test runs bounded (`-j`, worker counts) and stream large
     data instead of loading it.
 
@@ -103,8 +103,14 @@ in
     };
     memoryHigh = lib.mkOption {
       type = lib.types.str;
-      default = "65%";
-      description = "agents.slice MemoryHigh= (throttle point), bytes or % of RAM.";
+      # Not a throttle by default: memory.high puts the allocating task to
+      # sleep, so its reclaim (pgscan) rate drops to ~0 and systemd-oomd,
+      # which kills the cgroup with the highest pgscan rate, picked an idle
+      # bystander task instead of the hog (agent-env VM test, CI run
+      # 40876914383). Uncapped up to memoryMax, the kernel's cgroup OOM
+      # killer takes the biggest task (memory.oom.group: all of it).
+      default = "infinity";
+      description = "agents.slice MemoryHigh= (throttle point), bytes, % of RAM or infinity.";
     };
     memoryMax = lib.mkOption {
       type = lib.types.str;

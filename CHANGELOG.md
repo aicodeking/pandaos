@@ -35,7 +35,7 @@ All notable changes to PandaOS are documented here. The format follows
   agent snapshots. CI runs the `panda-agents-install` and desktop shell tests and the closure script
   tests, retries Nix on cache throttling, and idle RAM is a median of 3 samples.
 - **Agent runtime** (`pandaos.agents`, on by default): `pandacode-host` and the agent CLIs it starts
-  run in `agents.slice` (MemoryHigh 65%, MemoryMax 75%, MemorySwapMax 10%, CPUWeight 50,
+  run in `agents.slice` (MemoryMax 75%, no MemoryHigh throttle, MemorySwapMax 10%, CPUWeight 50,
   TasksMax 8192) with systemd-oomd killing inside the slice under pressure; system daemons get
   `OOMScoreAdjust=-500`. `/etc/panda/AGENTS.md` briefs agents on the box.
 - **MCP registry** `/etc/panda/mcp.d/<name>.json` (`pandaos.agents.mcpServers`), and `panda-agents`
@@ -107,6 +107,11 @@ All notable changes to PandaOS are documented here. The format follows
 - Closure cuts: the nixpkgs source is no longer pinned into the system (`nix-shell -p` and
   `<nixpkgs>` no longer resolve; use `nix shell nixpkgs#...`), and NetworkManager is built without
   ModemManager. That NM is not on cache.nixos.org, so CI and each box build it once (about 5 to 10 min).
+- `agents.slice` no longer has a `MemoryHigh` throttle (`pandaos.agents.memoryHigh = "infinity"`):
+  throttling stalled the hog, so oomd picked an idle task instead. The kernel now kills the biggest
+  task at `MemoryMax` (75%).
+- `panda-menu` uses the configured NetworkManager for nmtui, so the desktop no longer pulls the stock
+  NetworkManager with ModemManager/libqmi.
 - `panda-update` does not start a rollback while the box is shutting down; the boot-time one-shot
   trial handles it.
 - `/etc/panda/mcp.json` is now generated from `mcp.d` (compat); panda-mem registers in `mcp.d`.
