@@ -5,6 +5,74 @@ headless host, so the PandaCode app on your other devices sees the box as one mo
 keeps shared memory, and the optional `panda-browser` gives agents a headless browser. The older
 `panda-agentd` job runner is **optional and off by default** (new in Unreleased).
 
+## Agent runtime (new in Unreleased)
+
+`pandaos.agents` (on by default, `components/agent-env`) is where agent CLIs live:
+
+- **`agents.slice`.** `pandacode-host` and every agent CLI it starts run in this slice. Its limits are
+  `MemoryHigh=75%` (throttling), `MemoryMax=85%` (the kernel OOM-kills inside the slice),
+  `MemorySwapMax=25%`, `CPUWeight=50` (system units have 100, so agents yield under load) and
+  `TasksMax=8192`. **systemd-oomd** kills inside the slice when memory pressure stays above 50% or
+  swap is over 90% full. `pandacode-host` has `OOMPolicy=continue`, so one killed agent does not stop
+  the host. Each limit is an option, for example `pandaos.agents.memoryMax = "70%";`. See
+  [security.md](security.md#agent-limits-and-oom).
+- **`/etc/panda/AGENTS.md`**: a short brief for agents (the box, its tools, its limits, its rules).
+  `panda-agents sync` links it to `~/AGENTS.md`, and to `~/.codex/AGENTS.md` when Codex is installed.
+
+### MCP registry
+
+Every MCP server on the box has a file in `/etc/panda/mcp.d/<name>.json`:
+
+```json
+{"command": "panda-ckpt", "args": ["mcp"]}
+```
+
+Agent CLIs see each one as `panda-<name>`. On a default box these are `panda-mem`, `panda-ckpt`
+and `panda-sys`, plus `panda-browser` if `services.panda-browser.mcp` is set. Modules register
+servers with `pandaos.agents.mcpServers.<name> = { command; args; env; }`. `env` is world-readable,
+so do not put secrets in it. `/etc/panda/mcp.json` is still generated, from the same registry
+(`{"mcpServers": {"panda-<name>": ...}}`), for clients that read the old file.
+
+### panda-agents
+
+```sh
+panda-agents mcp list             # the registry
+panda-agents mcp sync [--user U]  # merge it into each installed agent CLI's config
+panda-agents sync [--user U]      # mcp sync, plus link AGENTS.md
+panda-agents doctor [--user U]    # check the registry, CLI configs, /mem socket, checkpoints, AGENTS.md
+```
+
+`sync` knows Claude Code (`~/.claude.json`), Codex (`~/.codex/config.toml`), opencode, Gemini CLI
+and Kimi CLI. It writes only `panda-*` entries. Your own servers and settings stay as they are, and a
+second run changes nothing. Run as root with `--user`, it drops to that user first.
+`panda-agents-sync.service` runs `sync` at boot and again after a rebuild changes the registry or the
+brief. If you install a CLI later, run `panda-agents sync` (`doctor` reminds you). In the desktop,
+use `panda-menu` → **Agents doctor**.
+
+### panda-sys: box status for agents
+
+`services.panda-sys` (on by default) is an MCP server that agents use to inspect the box:
+
+| Tool | Returns |
+|---|---|
+| `sys_status` | hostname, uptime, load, CPUs, memory, disk free, PandaOS version, battery |
+| `sys_services` | state of the PandaOS units, and `systemctl --failed` |
+| `sys_logs` | `journalctl` (`unit`, `since`, `lines` 1..500, `grep`) |
+| `sys_top` | top processes by CPU and by memory |
+| `sys_net` | interfaces, default route, DNS, and a 5 s HEAD request to `connectivityUrl` |
+| `sys_ports` | listening sockets |
+| `sys_updates` | `panda-update status`. `action=run` is the only tool that changes anything, and it is gated |
+| `sys_ckpt_space` | btrfs usage of `/` and `/.snapshots` |
+
+Callers outside `wheel` can read only the PandaOS units' logs. For the permission model, see
+[security.md](security.md#mcp-tools-and-their-permissions).
+
+### Checkpoints
+
+`panda-ckpt` (on by default) keeps instant btrfs checkpoints of `~/work/<name>` workspaces. Agents
+use its MCP tools to checkpoint before risky changes, and to diff, restore or fork. See
+[checkpoints.md](checkpoints.md).
+
 ## PandaCode Connect (pandacode-host)
 
 `services.pandacode-host` (on by default) runs `pandacode serve` from PandaCode's pinned release
@@ -171,8 +239,9 @@ more distinct terms rank first, then those with more occurrences.
 
 ### MCP
 
-`panda-mem mcp` is an MCP server on stdio that forwards to the socket. It is registered for MCP clients
-in `/etc/panda/mcp.json`:
+`panda-mem mcp` is an MCP server on stdio that forwards to the socket. It is registered in the
+[MCP registry](#mcp-registry) as `/etc/panda/mcp.d/mem.json`, which agent CLIs see as `panda-mem`. The
+compat `/etc/panda/mcp.json` still carries it:
 
 ```json
 {"mcpServers": {"panda-mem": {"command": "panda-mem", "args": ["mcp", "-socket", "/run/panda-mem/sock"]}}}
@@ -204,3 +273,10 @@ It runs as `panda-browser.service` with a fresh profile on every start, and writ
 `/etc/panda/browser.json` (`{"cdp":"http://127.0.0.1:9222"}`). CDP has no authentication, so every
 local user and process can drive it. It costs extra RAM and disk, so it is not in the measured
 numbers in the README. Details: [components/browser/README.md](../components/browser/README.md).
+
+No browser MCP server ships. If you add one, set `services.panda-browser.mcp` and the browser registers
+it in `mcp.d` as `panda-browser`:
+
+```nix
+services.panda-browser.mcp = { command = "chrome-devtools-mcp"; args = [ "--browserUrl" "http://127.0.0.1:9222" ]; };
+```

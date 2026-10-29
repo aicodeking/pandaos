@@ -2,8 +2,10 @@
 
 A lightweight, agent-first Linux built on NixOS. Install it on an old PC and it becomes an agent box:
 it connects through PandaCode Connect, so the PandaCode app on your other devices can start, watch and
-approve agent tasks on it. It keeps shared agent memory in `/mem`, updates itself every day and rolls
-back if an update breaks it.
+approve agent tasks on it. It keeps shared agent memory in `/mem`, checkpoints agent workspaces so a
+bad change is one restore away, caps what agents may use so a runaway one cannot lock up the box, and
+wires every MCP server into the agent CLIs. It updates itself every day and rolls back if an update
+breaks it.
 
 ## Measured numbers
 
@@ -13,21 +15,22 @@ PandaOS's own numbers in a VM, not a comparison, and **not yet measured on real 
 
 | | headless | desktop |
 |---|---|---|
-| Idle RAM, `free` used + shmem | 124 MB (with the optional agentd on) | 175 MB in a logged-in labwc session (172 MB at the greeter) |
-| Idle RAM, `MemTotal - MemAvailable` | 243 MB | 330 MB in session (327 MB at the greeter) |
-| Closure of the installed system (`nixosConfigurations`, incl. curated firmware) | 2.83 GB | 2.92 GB |
-| ISO size (the desktop ISO also carries the headless system) | 1137 MB | 1160 MB |
+| Idle RAM, `free` used + shmem | 113 MB (with the optional agentd on) | 174 MB in a logged-in labwc session (165 MB at the greeter) |
+| Idle RAM, `MemTotal - MemAvailable` | 237 MB | 329 MB in session (320 MB at the greeter) |
+| Closure of the installed system (`nixosConfigurations`, incl. curated firmware) | 1.97 GB | 2.41 GB |
+| ISO size (the desktop ISO also carries the headless system) | 901 MB | 1020 MB |
 
 | Optional agentd job round trip (pair, then run `echo hi`) | |
 |---|---|
-| Normal VM network | 3.9 s |
-| 1 Mbit/s, ~340 ms RTT, 1% loss each way (netem on both nodes) | 6.3 s |
-| Offline install to an empty disk (`panda-install --yes`, VM) | 372 s |
+| Normal VM network | 4.5 s |
+| 1 Mbit/s, ~340 ms RTT, 1% loss each way (netem on both nodes) | 6.6 s |
+| Offline install to an empty disk (`panda-install --yes`, VM) | 302 s |
 | A panda-mem-only update (uncompressed bytes substituted) | 8 MB |
 
-PandaCode Connect (the pinned PandaCode AppImage and the libraries its `appimageTools` environment
-needs) is about 1.2 GB of the headless closure and 0.8 GB of the desktop one; before it, they were
-1.64 GB and 2.11 GB, and the ISOs 803 MB and 929 MB.
+PandaCode Connect is the pinned PandaCode AppImage (289 MB extracted) in a slim FHS environment that
+holds only the libraries the AppImage expects from the host. With `appimageTools`' default
+environment, the closures were 2.83 GB and 2.92 GB and the ISOs 1137 MB and 1160 MB. Before
+PandaCode Connect, they were 1.64 GB and 2.11 GB, and the ISOs 803 MB and 929 MB.
 
 A side-by-side comparison with Ubuntu and Debian on identical VMs is **planned, not built yet**. Until it
 exists, we make no claims about how PandaOS compares with other systems.
@@ -82,6 +85,10 @@ There is no default password: you set one (and optionally an ssh key) during the
   |   '-> agents   CLIs started by PandaCode tasks          |
   | panda-agentd   optional, off: generic relay job runner  |
   | panda-mem      /mem (markdown + git), MCP server        |
+  | panda-ckpt     ~/work checkpoints and forks, MCP         |
+  | panda-sys      box status MCP server, read-only default |
+  | agents.slice   memory/CPU/task caps + systemd-oomd      |
+  | mcp.d          MCP registry, synced into agent CLIs     |
   | panda-browser  optional headless Chromium, CDP :9222    |
   | desktop        optional labwc + Panda dock + panda-menu |
   +---------------------------------------------------------+
@@ -98,6 +105,9 @@ There is no default password: you set one (and optionally an ssh key) during the
 | `components/pandacode-host` | PandaCode's headless host (`pandacode serve`) and `panda-connect` |
 | `components/agentd` | optional `panda-agentd`: pairs with a relay (dials out) and runs jobs |
 | `components/mem` | `panda-mem`: the `/mem` store and MCP server |
+| `components/agent-env` | `agents.slice`, oomd, the `/etc/panda/mcp.d` registry, `panda-agents`, `/etc/panda/AGENTS.md` |
+| `components/checkpoint` | `panda-ckpt`: btrfs workspace checkpoints, forks, auto-checkpoints, MCP |
+| `components/sysmcp` | `panda-sys`: box status/ops MCP server |
 | `components/browser` | optional `panda-browser` (headless Chromium, CDP on localhost) |
 | `components/desktop` | labwc/waybar config, `panda-menu`, `panda-connect-status` |
 | `tests/` | NixOS VM tests and RAM/disk budgets |
@@ -108,7 +118,8 @@ There is no default password: you set one (and optionally an ssh key) during the
 - [Install](docs/install.md)
 - [Updates and rollback](docs/updates-and-rollback.md)
 - [Security model](docs/security.md)
-- [Agents: PandaCode Connect, memory, browser, agentd](docs/agents.md)
+- [Agents: runtime, MCP registry, PandaCode Connect, memory, browser, agentd](docs/agents.md)
+- [Checkpoints](docs/checkpoints.md)
 - [Desktop](docs/desktop.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Benchmarks](docs/benchmarks.md)

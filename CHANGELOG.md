@@ -8,6 +8,22 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Added
 
+- **Agent runtime** (`pandaos.agents`, on by default): `pandacode-host` and the agent CLIs it starts
+  run in `agents.slice` (MemoryHigh 75%, MemoryMax 85%, MemorySwapMax 25%, CPUWeight 50,
+  TasksMax 8192) with systemd-oomd killing inside the slice under pressure; system daemons get
+  `OOMScoreAdjust=-500`. `/etc/panda/AGENTS.md` briefs agents on the box.
+- **MCP registry** `/etc/panda/mcp.d/<name>.json` (`pandaos.agents.mcpServers`), and `panda-agents`
+  (`mcp list`, `mcp sync`, `sync`, `doctor`), which merges it into Claude Code, Codex, opencode,
+  Gemini CLI and Kimi CLI configs as `panda-*` entries; synced at boot and after rebuilds.
+- **Checkpoints:** `panda-ckpt` (on by default) keeps instant btrfs checkpoints of `~/work/<name>`
+  workspaces: create, list, diff, restore (with a safety checkpoint), fork, prune, auto-checkpoints
+  every 10 min, and an MCP server. See [docs/checkpoints.md](docs/checkpoints.md).
+- **`panda-sys`** (on by default): an MCP server for box status (status, services, logs, top, net,
+  ports, updates, checkpoint space). Read-only unless `services.panda-sys.allowMutations` is set.
+- `services.panda-browser.mcp` registers a browser MCP server in `mcp.d`.
+- Desktop: `panda-menu` → *Checkpoints* (list, create, restore, fork) and *Agents doctor*.
+- VM tests `panda-ckpt`, `agent-env` and `panda-sys`; the install test checks checkpoints on the
+  installed btrfs disk. CI runs `go vet` and `go test -race` for every Go component.
 - **PandaCode Connect:** `services.pandacode-host` (on by default) runs PandaCode's headless host
   (`pandacode serve`, pinned release AppImage, under `xvfb-run`) as `panda`, so the box shows up as a
   computer in the PandaCode app. `panda-connect sign-in|sign-out|status [--json]|full-access on|off|logs`
@@ -56,6 +72,13 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Changed
 
+- `/etc/panda/mcp.json` is now generated from `mcp.d` (compat); panda-mem registers in `mcp.d`.
+- The btrfs mounts carry `user_subvol_rm_allowed`, so `panda-ckpt` can delete checkpoints as the
+  owner. Existing installs pick it up on the next rebuild (`disk.nix` overrides only devices).
+- PandaCode Connect runs in a slim FHS environment: the headless closure went from 2834 to 1971 MB,
+  desktop from 2915 to 2413 MB, the ISOs from 1137/1160 to 901/1020 MB. Closure budgets are now
+  2168 / 2654 MB (measured + 10%). `useSlim = false` in `components/pandacode-host/package.nix`
+  restores the default environment.
 - `panda-agentd` is **off by default** (PandaCode Connect replaces it). `panda-install --relay URL`
   enables it. Tests that use it enable it explicitly; the closure check's simulated update is now a
   new `panda-mem`.
@@ -82,6 +105,9 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Security
 
+- `panda-sys`'s only mutating tool (`sys_updates action=run`) needs `allowMutations`, `confirm: true`,
+  a root or wheel caller and a passwordless sudo rule PandaOS does not ship; non-wheel callers read
+  only PandaOS units' logs. See [docs/security.md](docs/security.md#mcp-tools-and-their-permissions).
 - No default password. v0.1.0 shipped user `panda` with the well-known password `panda`; the
   password (and optionally an ssh key) is now set at install time.
 - Jobs could plant git hooks or config in the group-writable `/mem` repo and get code run as another

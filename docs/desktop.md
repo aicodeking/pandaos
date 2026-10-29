@@ -56,6 +56,8 @@ open so you can read the output.
 | Logs, Failed services | `journalctl -f`; `systemctl --failed` |
 | PandaCode Connect | sign in, status, logs, Full access on/off, sign out (`panda-connect`; asks for your password where it needs `sudo`) |
 | Agents status | `panda-agentd status` (the optional agentd, off by default) |
+| Agents doctor | `panda-agents doctor`: MCP registry, agent CLI configs, `/mem`, checkpoints, `AGENTS.md` |
+| Checkpoints | List, Create, Restore (asks first) or Fork a `~/work` workspace with `panda-ckpt` ([checkpoints.md](checkpoints.md)) |
 | Memory browser | lists memories and opens one with `panda-mem read` |
 | Restore /mem from snapshot | `panda-rollback-mem <snapshot>`, after a confirmation |
 | Updates | `panda-update status`, *Run now*, *Hold*, *Unhold* |

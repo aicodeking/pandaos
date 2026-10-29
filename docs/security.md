@@ -129,6 +129,53 @@ ran git there, such as your login user or root. **New in Unreleased, this is clo
 Members of the `panda-mem` group can still write any memory through the socket, so a job can change
 or flood shared memory. Every change is a git commit, and `/mem` is snapshotted hourly.
 
+## Agent limits and OOM
+
+New in Unreleased (`pandaos.agents`, see [agents.md](agents.md#agent-runtime-new-in-unreleased)).
+`pandacode-host` and every agent CLI it starts run in `agents.slice`:
+
+| Limit | Default | Effect |
+|---|---|---|
+| `MemoryHigh` | 75% of RAM | the slice is throttled and reclaimed above this |
+| `MemoryMax` | 85% of RAM | the kernel OOM-kills a process inside the slice, never outside it |
+| `MemorySwapMax` | 25% of RAM | caps how much the slice can push into zram, which `MemoryMax` does not count |
+| `CPUWeight` | 50 | system units (weight 100) win under CPU contention |
+| `TasksMax` | 8192 | stops fork bombs |
+| systemd-oomd | pressure > 50% for 30 s, or swap > 90% | kills the slice's cgroup with the most reclaim |
+
+`pandacode-host` has `OOMPolicy=continue` (a killed agent does not stop the host) and
+`OOMScoreAdjust=500`. sshd, journald, NetworkManager and panda-mem get `OOMScoreAdjust=-500`,
+so the global OOM killer picks agents first. They do not get -1000, because ssh sessions inherit the
+value. The `agent-env` VM test runs a 6 GB memory hog in the slice and checks that it is killed while
+sshd keeps its PID. There is no earlyoom: it would watch the whole box and could kill a system daemon.
+
+These limits protect the box from runaway agents. They do not isolate agents from your files:
+agents run as `panda`, the login user.
+
+## MCP tools and their permissions
+
+Each MCP server runs as the agent that starts it (stdio), so it has that user's rights and no more.
+None of them runs as root or has a setuid helper.
+
+| Server | Can change | Guard |
+|---|---|---|
+| `panda-mem` | memories, through the panda-mem socket | the socket's group (`panda-mem`), and every change is a git commit |
+| `panda-ckpt` | the caller's own `~/work` and `~/.checkpoints` | `ckpt_restore` needs `confirm: true` and takes a safety checkpoint first. The auto timer runs as the user, with no network and write access to that user's home only |
+| `panda-sys` | nothing by default | `sys_updates action=run` needs `services.panda-sys.allowMutations = true` (in root-owned `/etc/panda/sys.json`), `confirm: true`, a root or `wheel` caller, and a passwordless `sudo -n panda-update run`. PandaOS does not grant that sudo rule, so add one if you want agents to update the box |
+
+`panda-sys` read limits: callers outside `wheel` can read the journal only for an allow-list of
+PandaOS units (pandacode-host, panda-mem, panda-browser, panda-ckpt-auto-panda, panda-agents-sync,
+systemd-oomd, nixos-upgrade, sshd, NetworkManager). Unit names and `since` are validated, and `lines`
+is 1..500. **`panda` is in `wheel`, so agents running as `panda` can read every journal.** Run agents
+as a non-wheel user if they must not. `sys_net` sends one HEAD request to `connectivityUrl`, and
+nothing else in these servers uses the network.
+
+`confirm: true` protects against mistakes. It is not a security boundary, because an agent can always
+send it. The brief in `/etc/panda/AGENTS.md` is guidance only, and it is not enforced.
+
+`/etc/panda/mcp.d` is written by Nix and owned by root. `panda-agents sync` copies its entries into
+the user's CLI configs, and it writes only `panda-*` keys there.
+
 ## System hardening
 
 - No default password. The installer sets yours. A system without one (for example, built
