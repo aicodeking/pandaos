@@ -117,15 +117,35 @@ call("cu_key", {"combo": "ctrl+a"})
 call("cu_type", {"text": target})
 call("cu_key", {"combo": "Return"})
 saved = wait_for(lambda: read(target), 15)
-metrics["save_via"] = "keyboard"
-if saved is None:  # fallback: set the Name field through AT-SPI and press Save
-    metrics["save_via"] = "atspi"
-    name = data(call("cu_find", {"app": "mousepad", "role": "text"})[0])["elements"]
-    field = next(e for e in name if "editable" in e.get("states", []) and e["id"] != area["id"])
-    call("cu_act", {"element_id": field["id"], "action": "set_text", "text": target})
-    btn = next(e for e in data(call("cu_find", {"app": "mousepad", "role": "push button", "text": "Save"})[0])["elements"])
-    call("cu_act", {"element_id": btn["id"], "action": "click"})
-    saved = wait_for(lambda: read(target), 15)
+metrics["save_via"] = "dialog_keyboard"
+if saved is None:  # diagnostics, then the Name field and Save button through AT-SPI
+    call("cu_windows", ok=False)
+    r, _ = call("cu_screenshot", {"scale": 0.5}, ok=False)
+    if not r["isError"]:
+        log("DIAGPNG " + base64.b64encode(image(r)).decode())
+    r, _ = call("cu_tree", {"app": "mousepad", "limit": 150}, ok=False)
+    log("TREE " + json.dumps(data(r) if not r["isError"] else None)[:8000])
+    texts = data(call("cu_find", {"app": "mousepad", "role": "text"})[0])["elements"]
+    fields = [e for e in texts if "editable" in e.get("states", []) and e["id"] != area["id"]]
+    btns = data(call("cu_find", {"app": "mousepad", "role": "push button", "text": "Save"})[0])["elements"]
+    if fields and btns:
+        metrics["save_via"] = "dialog_atspi"
+        call("cu_act", {"element_id": fields[0]["id"], "action": "set_text", "text": target})
+        call("cu_act", {"element_id": btns[0]["id"], "action": "click"})
+        saved = wait_for(lambda: read(target), 15)
+if saved is None:  # no dialog: open the (empty) target file and save it with ctrl+s
+    metrics["save_via"] = "open_path"
+    call("cu_key", {"combo": "Escape"}, ok=False)
+    open(target, "w").close()
+    call("cu_open", {"path": target})
+    call("cu_wait", {"window": "hello.txt", "timeout": 20})
+    texts = data(call("cu_find", {"app": "mousepad", "role": "text"})[0])["elements"]
+    new = [e for e in texts if "editable" in e.get("states", []) and not e.get("text")]
+    assert new, texts
+    call("cu_act", {"element_id": new[-1]["id"], "action": "set_text", "text": want})
+    call("cu_act", {"element_id": new[-1]["id"], "action": "focus"})
+    call("cu_key", {"combo": "ctrl+s"})
+    saved = wait_for(lambda: read(target) or None, 15)
 assert saved is not None, "hello.txt not saved"
 metrics["saved_exact"] = saved == want
 assert saved in (want, want + "\n"), repr(saved)
