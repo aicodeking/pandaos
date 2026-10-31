@@ -186,8 +186,8 @@ repeats, so 12 run jobs and 300 attempts):
 
 ## Status
 
-- Smoke mode is green on every default OS (cubench run 41184240650, no API
-  key). The prepared disks took 105 s (Debian 13 Xfce) and 192 s (Ubuntu
+- Smoke mode is green on every default OS (cubench runs 41184240650 and
+  41201988784, no API key). The prepared disks took 105 s (Debian 13 Xfce) and 192 s (Ubuntu
   24.04 GNOME) of install script, and about 4-6 min per prepare job, so
   preparing fits easily in CI. Each OS booted to its desktop at 1280x800
   (Debian on X11, Ubuntu and PandaOS on Wayland). Both QMP clicks reached the

@@ -39,7 +39,7 @@ Each test prints `METRIC {json}` (so failed runs still report) and writes `$out/
 real-system closures + 10%, so any growth past that fails CI. Measured in CI run 40890670778:
 headless 1690 MB, desktop 2133 MB (budgets 1859 / 2346). The computer-use desktop (Mousepad,
 PCManFM, Adwaita icons, panda-cu with its Python AT-SPI helper) took the desktop to 2174 MB in CI run
-41182025667; its budget is now 2391. `system.disableInstallerTools` on installed
+41182025667 (2175 MB in green run 41199717831); its budget is now 2391. `system.disableInstallerTools` on installed
 systems (`nixos/modules/installed.nix`) saved only about 1 MB: it removed nixos-generate-config's
 reference to perl, but the toplevel still references `perl-env` directly for the `/etc` and users
 activation scripts. From 1971 / 2413 MB, the cuts that landed are

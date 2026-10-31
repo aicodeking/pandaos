@@ -111,10 +111,28 @@ Desktop (`components/desktop`, checked by `test-config.sh`):
   `element_id` and by coordinates), the clipboard, refused inputs, and that
   another user cannot reach the session. METRICs: `screenshot_ms_median`,
   `click_ms_median`, `move_with_screenshot_ms`, `click_accuracy`.
+  Measured in CI run 41199717831 (2 vCPU, pixman): screenshot median 78 ms
+  for a full 1280x800 PNG over MCP, click median 36.4 ms, a move with a
+  half-size screenshot 362 ms, click accuracy 20/20 (10 by `element_id`, 10
+  by coordinates), the save dialog completed through AT-SPI, and
+  `cu_clipboard_set` about 3.3 s (wl-copy's forked server holds the pipes
+  until the 2 s exec WaitDelay).
 - `checks.boot-desktop`: `test-config.sh` on `/etc/xdg`, the AT-SPI bus
   address, Mousepad and PCManFM launched through `panda-cu` (attach),
   Mousepad's text node, and do-not-disturb.
 - CI: `go vet`/`go test -race`, the desktop shell tests, shellcheck.
+
+## Known limits
+
+- Typing into the GTK file chooser's Name entry with `cu_key`/`cu_type` did
+  not save in the VM test, even though the entry reported focus; setting it
+  with `cu_act set_text` and pressing Save with `cu_act click` did. Prefer
+  `cu_act` in dialogs.
+- Dialogs are not fullscreen, so their AT-SPI boxes are window-relative:
+  `cu_click{element_id}` on a dialog element can miss; `cu_act` does not.
+- `cu_key` sends US-layout keycodes; other keysyms go through wtype, whose
+  accelerators GTK may not fire.
+- attach mode: AT-SPI boxes are window-relative for every window.
 
 ## cubench
 
