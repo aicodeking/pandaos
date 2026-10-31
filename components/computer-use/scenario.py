@@ -104,8 +104,12 @@ call("cu_wait", {"app": "mousepad", "text": want, "timeout": 10})
 # 3. ctrl+s, then the GTK save dialog: type the full path into Name, Enter
 target = os.path.join(HOME, "hello.txt")
 call("cu_key", {"combo": "ctrl+s"})
-call("cu_wait", {"window": "Save As", "timeout": 20})
-call("cu_wait", {"app": "mousepad", "role": "push button", "text": "Save", "timeout": 20})
+# The dialog title differs between versions ("Save As", "Save File"): the
+# window wait is informative only; the Save button through AT-SPI decides.
+r, _ = call("cu_wait", {"window": "Save", "timeout": 10}, ok=False)
+if r["isError"]:
+    call("cu_windows")
+call("cu_wait", {"app": "mousepad", "role": "push button", "text": "Save", "timeout": 30})
 call("cu_key", {"combo": "ctrl+a"})
 call("cu_type", {"text": target})
 call("cu_key", {"combo": "Return"})
