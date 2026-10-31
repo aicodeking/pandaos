@@ -10,28 +10,53 @@
     "launch editor \"$B/new-version.txt\""
   ],
   "verify": "[ \"$(cat \"$B/out.txt\")\" = \"version 2\" ] && audit editor \"$B/out.txt\"",
-  "oracle": [
-    [
-      "key",
-      "ctrl+shift+s"
+  "oracle": {
+    "default": [
+      [
+        "key",
+        "ctrl+shift+s"
+      ],
+      [
+        "wait",
+        2.5
+      ],
+      [
+        "save_as",
+        "{HOME}/bench/out.txt"
+      ],
+      [
+        "key",
+        "Return"
+      ],
+      [
+        "wait",
+        2
+      ]
     ],
-    [
-      "wait",
-      2.5
-    ],
-    [
-      "save_as",
-      "{HOME}/bench/out.txt"
-    ],
-    [
-      "key",
-      "Return"
-    ],
-    [
-      "wait",
-      2
+    "fedora-44-workstation": [
+      [
+        "key",
+        "ctrl+shift+s"
+      ],
+      [
+        "wait",
+        2.5
+      ],
+      [
+        "save_as",
+        "{HOME}/bench/out.txt"
+      ],
+      [
+        "click",
+        723,
+        469
+      ],
+      [
+        "wait",
+        2
+      ]
     ]
-  ],
+  },
   "timeout_s": 300,
   "max_steps": 25,
   "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell",
