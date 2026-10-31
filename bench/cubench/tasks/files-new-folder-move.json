@@ -12,6 +12,10 @@
   "verify": "[ -f \"$B/2026/inv-1.pdf\" ] && [ -f \"$B/2026/inv-2.pdf\" ] && [ ! -e \"$B/inv-1.pdf\" ] && [ ! -e \"$B/inv-2.pdf\" ] && audit files \"$B/2026\" \"$B/2026/inv-1.pdf\" \"$B/2026/inv-2.pdf\"",
   "oracle": [
     [
+      "os_click",
+      "files_focus"
+    ],
+    [
       "key",
       "ctrl+a"
     ],
@@ -54,6 +58,10 @@
     [
       "wait",
       2
+    ],
+    [
+      "os_click",
+      "files_focus"
     ],
     [
       "key",

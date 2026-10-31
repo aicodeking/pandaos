@@ -13,6 +13,10 @@
   "verify": "[ -f \"$B/Album/photo.png\" ] && [ ! -e \"$B/camera/photo.png\" ] && audit files \"$B/Album/photo.png\"",
   "oracle": [
     [
+      "os_click",
+      "files_focus"
+    ],
+    [
       "key",
       "ctrl+a"
     ],
@@ -27,6 +31,10 @@
     [
       "wait",
       1.5
+    ],
+    [
+      "os_click",
+      "files_focus"
     ],
     [
       "key",

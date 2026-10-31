@@ -12,6 +12,10 @@
   "verify": "[ -f \"$B/archive/report-2026.txt\" ] && [ ! -e \"$B/inbox/report-2026.txt\" ] && audit files \"$B/archive/report-2026.txt\"",
   "oracle": [
     [
+      "os_click",
+      "files_focus"
+    ],
+    [
       "key",
       "ctrl+a"
     ],
@@ -34,6 +38,10 @@
     [
       "wait",
       2
+    ],
+    [
+      "os_click",
+      "files_focus"
     ],
     [
       "key",

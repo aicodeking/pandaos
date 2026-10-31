@@ -71,7 +71,7 @@ pkgs.testers.runNixOSTest {
         print(unit)
         assert "Slice=agents.slice" in unit and "Restart=always" in unit and "ProtectHome=yes" in unit, unit
         bus = machine.succeed("ps -u agent -o args= | grep -o '/nix/store/[^ ]*panda-cu-bus.conf' | head -1").strip()
-        assert "eavesdrop" not in machine.succeed(f"cat {bus}"), "private bus allows eavesdropping"
+        assert 'eavesdrop="true"' not in machine.succeed(f"cat {bus}"), "private bus allows eavesdropping"
         assert machine.succeed("stat -c '%a %U' /run/panda-cu").split() == ["700", "agent"]
         # Xwayland is off by default.
         machine.fail("pgrep -x Xwayland")

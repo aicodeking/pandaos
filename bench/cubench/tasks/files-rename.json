@@ -11,6 +11,10 @@
   "verify": "[ -f \"$B/final.txt\" ] && [ ! -e \"$B/draft.txt\" ] && [ \"$(cat \"$B/final.txt\")\" = draft ] && audit files \"$B/final.txt\"",
   "oracle": [
     [
+      "os_click",
+      "files_focus"
+    ],
+    [
       "key",
       "ctrl+a"
     ],

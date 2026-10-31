@@ -59,8 +59,20 @@
       2.5
     ],
     [
+      "key",
+      "ctrl+a"
+    ],
+    [
       "type",
-      "{HOME}/bench/reports/q3.txt\n"
+      "{HOME}/bench/reports/q3.txt"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "Return"
     ],
     [
       "wait",
@@ -89,6 +101,10 @@
     [
       "wait",
       2
+    ],
+    [
+      "os_click",
+      "files_focus"
     ],
     [
       "key",

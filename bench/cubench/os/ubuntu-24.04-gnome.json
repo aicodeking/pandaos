@@ -30,5 +30,11 @@
   "keys": {
     "switch_window": "alt+`"
   },
-  "desktop_version": "gnome-shell --version"
+  "desktop_version": "gnome-shell --version",
+  "points": {
+    "files_focus": [
+      650,
+      450
+    ]
+  }
 }

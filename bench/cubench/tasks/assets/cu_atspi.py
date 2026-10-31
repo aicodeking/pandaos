@@ -41,7 +41,10 @@ def snapshot(a):
     argv = ["tree", "--max-depth", depth if 0 < depth <= 50 else 30]
     if a.get("app"):
         argv += ["--app", a["app"]]
-    els = helper(*argv)["elements"]
+    res = helper(*argv)
+    if not isinstance(res, dict) or "elements" not in res:
+        raise RuntimeError(f"AT-SPI tree unavailable (helper printed {str(res)[:200]!r}); an app may be blocked")
+    els = res["elements"]
     with open(SNAP, "w") as f:
         json.dump({e["id"]: [e["role"], e.get("name", "")] for e in els}, f)
     return els

@@ -529,8 +529,9 @@ def oracle_steps(task, os_name):
     return o or []
 
 
-def run_oracle(steps, env, sh, subs, shot_dir):
-    """Execute oracle steps; a screenshot after each one goes to shot_dir."""
+def run_oracle(steps, env, sh, subs, shot_dir, points=None):
+    """Execute oracle steps; a screenshot after each one goes to shot_dir.
+    ["os_click", NAME] clicks the OS profile's points[NAME] (no-op if it has none)."""
     q = env.qmp
 
     def sub(x):
@@ -560,6 +561,9 @@ def run_oracle(steps, env, sh, subs, shot_dir):
             q.click(int(a[0]), int(a[1]), "right" if op == "rclick" else "left", 2 if op == "dclick" else 1)
         elif op == "drag" and not isinstance(a[0], dict):
             q.drag(*map(int, a[:4]))
+        elif op == "os_click":
+            if a[0] in (points or {}):
+                q.click(*map(int, points[a[0]]))
         elif op == "a11y":
             rc, out, err = sh(f'python3 "$A/cu_atspi.py" do {shlex.quote(json.dumps(a[0]))}', 90)
             if rc != 0:
@@ -582,7 +586,7 @@ def validate_task(sh, q, p, task, args, subs, tdir):
                 raise RuntimeError(f"setup exited {rc}: {(err or out)[-800:]}")
             time.sleep(SETUP_SETTLE_S)
             if kind == "oracle":
-                run_oracle(oracle_steps(task, p["name"]), agent.Env(q, sh, d), sh, subs, d)
+                run_oracle(oracle_steps(task, p["name"]), agent.Env(q, sh, d), sh, subs, d, p.get("points"))
                 time.sleep(1)
             rc, out, err = sh(task["verify"], timeout=90)
             row[f"{kind}Verify"] = (out + err).strip()[-400:]

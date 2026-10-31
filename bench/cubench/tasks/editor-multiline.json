@@ -22,8 +22,16 @@
       2.5
     ],
     [
+      "key",
+      "ctrl+a"
+    ],
+    [
       "type",
       "{HOME}/bench/greek.txt"
+    ],
+    [
+      "wait",
+      1.5
     ],
     [
       "key",

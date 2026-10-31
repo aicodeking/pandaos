@@ -144,9 +144,10 @@ let
       <listen>unix:path=${runDir}/bus</listen>
       <auth>EXTERNAL</auth>
       <servicedir>${pkgs.at-spi2-core}/share/dbus-1/services</servicedir>
-      <!-- dbus's stock session policy, minus eavesdropping: its receive
-           rule is <allow eavesdrop="true"/>, and without any receive rule
-           every reply is blocked (CI run 41210088002: apps hung at start). -->
+      <!-- The stock session policy without its catch-all receive rule,
+           which also lets anyone snoop on others' traffic. Some receive
+           rule is needed: with none, every reply is blocked (CI run
+           41210088002: apps hung at start). -->
       <policy context="default">
         <allow send_destination="*"/>
         <allow receive_sender="*"/>
