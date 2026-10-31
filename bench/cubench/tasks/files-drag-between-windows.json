@@ -7,8 +7,8 @@
     "mkdir \"$B/camera\" \"$B/Album\"",
     "cp \"$A/www/pixel.png\" \"$B/camera/photo.png\"",
     "audit_start",
-    "launch files \"$B/Album\"",
-    "launch files \"$B/camera\""
+    "launch files_window \"$B/Album\"",
+    "launch files_window \"$B/camera\""
   ],
   "verify": "[ -f \"$B/Album/photo.png\" ] && [ ! -e \"$B/camera/photo.png\" ] && audit files \"$B/Album/photo.png\"",
   "oracle": [

@@ -11,7 +11,8 @@
     "editor": "mousepad",
     "files": "thunar",
     "terminal": "xfce4-terminal",
-    "browser": "firefox-esr"
+    "browser": "firefox-esr",
+    "files_window": "thunar"
   },
   "hints": [
     "Desktop: Debian 13 with Xfce (X11 session), a panel at the top with an Applications menu at the top left.",

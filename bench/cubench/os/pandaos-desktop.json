@@ -8,7 +8,8 @@
     "editor": "mousepad",
     "files": "pcmanfm",
     "terminal": "foot",
-    "browser": "firefox"
+    "browser": "firefox",
+    "files_window": "pcmanfm --new-win"
   },
   "hints": [
     "Desktop: PandaOS with the labwc window manager (Wayland session), a top bar and a dock.",
@@ -21,8 +22,8 @@
   ],
   "terminal_hint": "The terminal is foot; Super+Return opens one.",
   "procs": {
-    "editor": "^mousepad$",
-    "files": "^pcmanfm$"
+    "editor": "^\\.?mousepad",
+    "files": "^\\.?pcmanfm"
   },
   "dconf": {
     "line_numbers": "/org/xfce/mousepad/preferences/view/show-line-numbers"

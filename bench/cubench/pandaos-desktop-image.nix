@@ -23,7 +23,7 @@ let
     inherit system;
     modules = [
       "${flake}/nixos/installer/target.nix"
-      ({ lib, pkgs, ... }: {
+      ({ config, lib, pkgs, ... }: {
         fileSystems = lib.mkForce {
           "/" = {
             device = "/dev/disk/by-label/nixos";
@@ -40,6 +40,9 @@ let
         pandaos.firstboot.enable = false;
         pandaos.desktop.autologinUser = "panda";
         pandaos.desktop.autoLock = false;
+        # The panda column drives this visible autologin session (attach), not
+        # panda-cu's private headless desktop (the profile's default).
+        services.panda-cu.mode = "attach";
         services.panda-cu.browser = pkgs.firefox;
         users.users.panda.openssh.authorizedKeys.keys = [ pubkey ];
         security.sudo.extraRules = [
@@ -71,7 +74,8 @@ let
             };
           };
         };
-        environment.systemPackages = [ pkgs.python3 pkgs.dconf ];
+        # panda-cu-atspi on PATH: the atspi column's cu_atspi.py runs the same walker.
+        environment.systemPackages = [ pkgs.python3 pkgs.dconf config.services.panda-cu.package.passthru.atspi ];
       })
     ];
   };

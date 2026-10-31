@@ -12,7 +12,8 @@
     "editor": "gnome-text-editor",
     "files": "nautilus",
     "terminal": "ptyxis --new-window",
-    "browser": "firefox"
+    "browser": "firefox",
+    "files_window": "nautilus"
   },
   "hints": [
     "Desktop: Fedora 44 Workstation with GNOME (Wayland session), a top bar and no permanent dock.",
