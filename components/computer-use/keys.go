@@ -1,18 +1,23 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 )
 
-// cu_key speaks zwp_virtual_keyboard_v1 itself instead of running wtype.
-// Under labwc, `wtype -M ctrl -k s` reached GTK apps as a plain "s" (the
-// modifiers request alone never made it; checks.panda-cu, CI run
-// 41190383817). Here the keymap has real modifier keys, every modifier is a
-// key press first (which makes this keyboard the seat's keyboard and updates
-// the compositor's xkb state) and then also an explicit modifiers request.
+// cu_key speaks zwp_virtual_keyboard_v1 itself for keys on a US keyboard.
+// `wtype -M ctrl -k s` typed fine but never fired GTK accelerators
+// (checks.panda-cu, CI runs 41190383817 and 41192408136): GDK applies a
+// keymap event at once but matches accelerators by hardware keycode later,
+// in its main loop, after the short-lived keyboard is gone and the seat has
+// switched back to the compositor's US keyboard. Here the keymap is the
+// standard US one and the codes are real evdev codes, so that switch changes
+// nothing. Modifiers are pressed as keys (which makes this keyboard the
+// seat's) and also sent as a modifiers request. Keysyms outside the table
+// fall back to wtype.
 
 // keyOp is one cu_key step: 'M' press a modifier, 'm' release it, 'k' tap a key.
 type keyOp struct {
@@ -20,68 +25,79 @@ type keyOp struct {
 	name string // modifier (ctrl, shift, alt, altgr, logo) or keysym
 }
 
-type modKey struct {
-	sym, real string
-	mask      uint32
+const usKeymap = "xkb_keymap {\n" +
+	"xkb_keycodes { include \"evdev+aliases(qwerty)\" };\n" +
+	"xkb_types { include \"complete\" };\n" +
+	"xkb_compatibility { include \"complete\" };\n" +
+	"xkb_symbols { include \"pc+us+inet(evdev)\" };\n};\n"
+
+// modKeys: evdev code and modifier mask (Shift 1, Control 4, Mod1 8, Mod4 64, Mod5 128).
+var modKeys = map[string]struct{ code, mask uint32 }{
+	"shift": {42, 1}, "ctrl": {29, 4}, "alt": {56, 8}, "logo": {125, 64}, "altgr": {100, 128},
 }
 
-var modKeys = map[string]modKey{
-	"shift": {"Shift_L", "Shift", 1},
-	"ctrl":  {"Control_L", "Control", 4},
-	"alt":   {"Alt_L", "Mod1", 8},
-	"logo":  {"Super_L", "Mod4", 64},
-	"altgr": {"ISO_Level3_Shift", "Mod5", 128},
+// usKey is a key on the US layout: evdev code, plus whether it needs shift.
+type usKey struct {
+	code  uint32
+	shift bool
 }
 
-var modOrder = []string{"shift", "ctrl", "alt", "logo", "altgr"}
-
-// keyOps turns keyArgs' wtype-style list (-M mod, -k sym, -m mod) into steps.
-func keyOps(args []string) ([]keyOp, error) {
-	var ops []keyOp
-	for i := 0; i+1 < len(args); i += 2 {
-		f := args[i]
-		if f != "-M" && f != "-m" && f != "-k" {
-			return nil, fmt.Errorf("key step %q", f)
+var usKeys = func() map[string]usKey {
+	m := map[string]usKey{
+		"Escape": {1, false}, "minus": {12, false}, "equal": {13, false}, "BackSpace": {14, false},
+		"Tab": {15, false}, "bracketleft": {26, false}, "bracketright": {27, false}, "Return": {28, false},
+		"semicolon": {39, false}, "apostrophe": {40, false}, "grave": {41, false}, "backslash": {43, false},
+		"comma": {51, false}, "period": {52, false}, "slash": {53, false}, "space": {57, false},
+		"Print": {99, false}, "Home": {102, false}, "Up": {103, false}, "Prior": {104, false},
+		"Left": {105, false}, "Right": {106, false}, "End": {107, false}, "Down": {108, false},
+		"Next": {109, false}, "Insert": {110, false}, "Delete": {111, false}, "Menu": {127, false},
+		"KP_Enter": {96, false}, "F11": {87, false}, "F12": {88, false},
+		"underscore": {12, true}, "plus": {13, true}, "braceleft": {26, true}, "braceright": {27, true},
+		"colon": {39, true}, "quotedbl": {40, true}, "asciitilde": {41, true}, "bar": {43, true},
+		"less": {51, true}, "greater": {52, true}, "question": {53, true},
+	}
+	for i, r := range "1234567890" {
+		m[string(r)] = usKey{uint32(2 + i), false}
+	}
+	for i, n := range []string{"exclam", "at", "numbersign", "dollar", "percent", "asciicircum", "ampersand", "asterisk", "parenleft", "parenright"} {
+		m[n] = usKey{uint32(2 + i), true}
+	}
+	for row, letters := range map[uint32]string{16: "qwertyuiop", 30: "asdfghjkl", 44: "zxcvbnm"} {
+		for i, r := range letters {
+			// "ctrl+S" means ctrl+s, as in cubench's QMP keys; shift is explicit.
+			m[string(r)] = usKey{row + uint32(i), false}
+			m[strings.ToUpper(string(r))] = usKey{row + uint32(i), false}
 		}
-		if f != "-k" {
-			if _, ok := modKeys[args[i+1]]; !ok {
-				return nil, fmt.Errorf("modifier %q", args[i+1])
+	}
+	for i := 1; i <= 10; i++ {
+		m[fmt.Sprintf("F%d", i)] = usKey{uint32(58 + i), false}
+	}
+	return m
+}()
+
+// keyOps turns keyArgs' wtype-style list (-M mod, -k sym, -m mod) into
+// steps; ok is false when a keysym is not on the US table (use wtype).
+func keyOps(args []string) (ops []keyOp, ok bool, err error) {
+	if len(args)%2 != 0 {
+		return nil, false, fmt.Errorf("odd key step list %q", args)
+	}
+	ok = true
+	for i := 0; i < len(args); i += 2 {
+		f, name := args[i], args[i+1]
+		switch f {
+		case "-M", "-m":
+			if _, known := modKeys[name]; !known {
+				return nil, false, fmt.Errorf("modifier %q", name)
 			}
+		case "-k":
+			_, onUS := usKeys[name]
+			ok = ok && onUS
+		default:
+			return nil, false, fmt.Errorf("key step %q", f)
 		}
-		ops = append(ops, keyOp{f[1], args[i+1]})
+		ops = append(ops, keyOp{f[1], name})
 	}
-	if len(ops)*2 != len(args) {
-		return nil, fmt.Errorf("odd key step list %q", args)
-	}
-	return ops, nil
-}
-
-// keymapFor builds an XKB keymap with the five modifier keys (evdev 1..5)
-// and each distinct keysym in ops (evdev 6..). It returns the evdev code
-// of every modifier and keysym.
-func keymapFor(ops []keyOp) (string, map[string]uint32) {
-	codes := map[string]uint32{}
-	var kc, sy strings.Builder
-	for i, m := range modOrder {
-		codes[m] = uint32(1 + i)
-		fmt.Fprintf(&kc, "<M%d> = %d; ", i, 9+i)
-		fmt.Fprintf(&sy, "key <M%d> {[ %s ]}; modifier_map %s { <M%d> };\n", i, modKeys[m].sym, modKeys[m].real, i)
-	}
-	n := 0
-	for _, op := range ops {
-		if op.kind != 'k' || codes["k:"+op.name] != 0 {
-			continue
-		}
-		codes["k:"+op.name] = uint32(1 + len(modOrder) + n)
-		fmt.Fprintf(&kc, "<K%d> = %d; ", n, 9+len(modOrder)+n)
-		fmt.Fprintf(&sy, "key <K%d> {[ %s ]};\n", n, op.name)
-		n++
-	}
-	km := "xkb_keymap {\nxkb_keycodes \"(unnamed)\" { minimum = 8; maximum = 255; " + kc.String() + "};\n" +
-		"xkb_types \"(unnamed)\" { include \"complete\" };\n" +
-		"xkb_compatibility \"(unnamed)\" { include \"complete\" };\n" +
-		"xkb_symbols \"(unnamed)\" {\n" + sy.String() + "};\n};\n"
-	return km, codes
+	return ops, ok, nil
 }
 
 // keys runs ops on a fresh virtual keyboard of this connection.
@@ -94,8 +110,7 @@ func (d *desktop) keys(ops []keyOp) error {
 	if err != nil {
 		return err
 	}
-	km, codes := keymapFor(ops)
-	km += "\x00"
+	km := usKeymap + "\x00"
 	// /tmp, not $XDG_RUNTIME_DIR: agent sandboxes often have a read-only /run.
 	f, err := os.CreateTemp("", "panda-cu-keymap")
 	if err != nil {
@@ -129,11 +144,12 @@ func (d *desktop) keys(ops []keyOp) error {
 		time.Sleep(15 * time.Millisecond)
 		return err
 	}
+	setMods := func(m uint32) error { return d.send(kb, 2, m, uint32(0), uint32(0), uint32(0)) } // modifiers
 	for _, op := range ops {
 		switch op.kind {
 		case 'M', 'm':
 			down := op.kind == 'M'
-			if err := key(codes[op.name], down); err != nil {
+			if err := key(modKeys[op.name].code, down); err != nil {
 				return err
 			}
 			if down {
@@ -141,16 +157,23 @@ func (d *desktop) keys(ops []keyOp) error {
 			} else {
 				mods &^= modKeys[op.name].mask
 			}
-			if err := d.send(kb, 2, mods, uint32(0), uint32(0), uint32(0)); err != nil { // modifiers
+			if err := setMods(mods); err != nil {
 				return err
 			}
 		case 'k':
-			c := codes["k:"+op.name]
-			if err := key(c, true); err != nil {
+			k := usKeys[op.name]
+			if k.shift && mods&1 == 0 {
+				if err := errors.Join(key(modKeys["shift"].code, true), setMods(mods|1)); err != nil {
+					return err
+				}
+			}
+			if err := errors.Join(key(k.code, true), key(k.code, false)); err != nil {
 				return err
 			}
-			if err := key(c, false); err != nil {
-				return err
+			if k.shift && mods&1 == 0 {
+				if err := errors.Join(key(modKeys["shift"].code, false), setMods(mods)); err != nil {
+					return err
+				}
 			}
 		}
 		if err := step(); err != nil {

@@ -382,31 +382,31 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-func TestKeymap(t *testing.T) {
-	args, err := keyArgs("ctrl+shift+t ctrl+a BackSpace a")
+func TestKeyOps(t *testing.T) {
+	args, err := keyArgs("ctrl+shift+t ctrl+S BackSpace plus F12")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ops, err := keyOps(args)
-	if err != nil || len(ops) != 10 {
-		t.Fatal(ops, err)
+	ops, onUS, err := keyOps(args)
+	if err != nil || !onUS || len(ops) != 11 {
+		t.Fatal(ops, onUS, err)
 	}
-	km, codes := keymapFor(ops)
-	for _, want := range []string{
-		"<M1> = 10;", "key <M1> {[ Control_L ]}; modifier_map Control { <M1> };",
-		"modifier_map Mod5 { <M4> };", "<K0> = 14;", "key <K0> {[ t ]};", "key <K2> {[ BackSpace ]};",
-	} {
-		if !strings.Contains(km, want) {
-			t.Errorf("keymap lacks %q:\n%s", want, km)
+	for sym, want := range map[string]usKey{"s": {31, false}, "S": {31, false}, "t": {20, false}, "0": {11, false},
+		"plus": {13, true}, "question": {53, true}, "F10": {68, false}, "Return": {28, false}, "z": {44, false}} {
+		if usKeys[sym] != want {
+			t.Errorf("usKeys[%q] = %v, want %v", sym, usKeys[sym], want)
 		}
 	}
-	if strings.Count(km, "{[ a ]}") != 1 || codes["ctrl"] != 2 || codes["k:t"] != 6 || codes["k:BackSpace"] != 8 {
-		t.Errorf("codes %v\n%s", codes, km)
+	if _, onUS, _ := keyOps([]string{"-k", "XF86AudioMute"}); onUS {
+		t.Error("XF86AudioMute is not on the US table")
 	}
-	if _, err := keyOps([]string{"-M", "hyper"}); err == nil {
+	if _, _, err := keyOps([]string{"-M", "hyper"}); err == nil {
 		t.Error("want bad modifier")
 	}
-	if _, err := keyOps([]string{"-k"}); err == nil {
+	if _, _, err := keyOps([]string{"-k"}); err == nil {
 		t.Error("want odd list")
+	}
+	if !strings.Contains(usKeymap, `"pc+us+inet(evdev)"`) {
+		t.Error(usKeymap)
 	}
 }

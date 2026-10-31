@@ -149,9 +149,13 @@ func (s *Server) runTool(name string, a toolArgs) ([]content, error) {
 		if err != nil {
 			return nil, err
 		}
-		ops, err := keyOps(args)
+		ops, onUS, err := keyOps(args)
 		if err != nil {
 			return nil, err
+		}
+		if !onUS { // a keysym outside the US table: wtype builds a keymap for it
+			_, err = s.run(execTimeout, "", append([]string{"wtype"}, args...)...)
+			return s.after(a, map[string]any{"pressed": a.Combo}, err)
 		}
 		d, err := s.display()
 		if err != nil {
