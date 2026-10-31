@@ -186,8 +186,13 @@ class QMP:
 
     # -- keyboard -----------------------------------------------------------
     def send_keys(self, qcodes, hold_ms=30):
-        self.execute("send-key", {"keys": [{"type": "qcode", "data": q} for q in qcodes],
-                                  "hold-time": hold_ms})
+        """Press qcodes in order, hold, release in reverse. Not QMP send-key: that
+        queues releases on QEMU's virtual-clock timers, and after a loadvm (the
+        clock goes back) the queue stops draining and every later key is lost."""
+        ev = lambda q, down: {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": q}}}  # noqa: E731
+        self._events([ev(q, True) for q in qcodes])
+        time.sleep(hold_ms / 1000)
+        self._events([ev(q, False) for q in reversed(qcodes)])
 
     def key(self, combo):
         self.send_keys(combo_keys(combo), hold_ms=60)

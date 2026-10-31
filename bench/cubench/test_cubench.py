@@ -381,8 +381,12 @@ class DryRun(unittest.TestCase):
         self.assertEqual(move[0]["data"], {"axis": "x", "value": 32767})
         self.assertEqual(move[1]["data"], {"axis": "y", "value": 0})
         self.assertEqual(cmds[1]["arguments"]["events"][0]["data"], {"down": True, "button": "right"})
-        keys = [c["arguments"]["keys"] for c in cmds if c["execute"] == "send-key"]
-        self.assertEqual([[k["data"] for k in ks] for ks in keys], [["shift", "h"], ["i"], ["ctrl", "s"]])
+        self.assertFalse([c for c in cmds if c["execute"] == "send-key"])  # its queue breaks after loadvm
+        kev = [[(e["data"]["key"]["data"], e["data"]["down"]) for e in c["arguments"]["events"]]
+               for c in cmds if c["execute"] == "input-send-event" and c["arguments"]["events"][0]["type"] == "key"]
+        self.assertEqual(kev, [[("shift", True), ("h", True)], [("h", False), ("shift", False)],
+                               [("i", True)], [("i", False)],
+                               [("ctrl", True), ("s", True)], [("s", False), ("ctrl", False)]])
         wheel = [c for c in cmds if c["execute"] == "input-send-event"
                  and c["arguments"]["events"][0]["type"] == "btn" and "wheel" in c["arguments"]["events"][0]["data"]["button"]]
         self.assertEqual(len(wheel), 4)

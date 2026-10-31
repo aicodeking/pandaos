@@ -540,7 +540,12 @@ def run_oracle(steps, env, sh, subs, shot_dir):
         return x
     for i, step in enumerate(steps, 1):
         op, a = step[0], [sub(x) for x in step[1:]]
-        if op == "sh":
+        if op in GENERIC_NAMES and a and isinstance(a[0], dict):
+            if op != "done":
+                env.act(op, a[0])  # smoke scripts: generic tool calls
+        elif op.startswith("cu_"):
+            pass  # panda-only probe steps of smoke scripts
+        elif op == "sh":
             rc, out, err = sh(a[0], 180)
             if rc != 0:
                 raise RuntimeError(f"step {i} sh exited {rc}: {(err or out)[-400:]}")
@@ -559,11 +564,6 @@ def run_oracle(steps, env, sh, subs, shot_dir):
             rc, out, err = sh(f'python3 "$A/cu_atspi.py" do {shlex.quote(json.dumps(a[0]))}', 90)
             if rc != 0:
                 raise RuntimeError(f"step {i} a11y {a[0]}: {(err or out).strip()[-400:]}")
-        elif op in GENERIC_NAMES and a and isinstance(a[0], dict):
-            if op != "done":
-                env.act(op, a[0])  # smoke scripts: generic tool calls
-        elif op.startswith("cu_"):
-            continue  # panda-only probe steps of smoke scripts
         else:
             raise ValueError(f"step {i}: unknown oracle op {op!r}")
         time.sleep(0.3)

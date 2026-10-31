@@ -7,8 +7,8 @@ QEMU/KVM with identical resources: UEFI, 4 vCPU, 4 GB, virtio-vga fixed at
 
 - **Agent side (identical everywhere).** `qmp.py` drives the VM from outside:
   `screendump` (PNG) for screenshots, `input-send-event` for absolute mouse
-  and wheel, and `send-key` for keys and typing (printable ASCII to US-layout
-  qcodes, with shift).
+  and wheel, and for keys and typing (printable ASCII to US-layout qcodes,
+  with shift; not `send-key`, whose timer queue stalls after `loadvm`).
   - Generic tools: `screenshot`, `click`, `double_click`, `drag`, `scroll`,
     `type`, `key`, `wait` and `done`.
   - The agent sees a screenshot at the start. After each turn in which it
