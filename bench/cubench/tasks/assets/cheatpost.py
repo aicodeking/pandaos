@@ -20,5 +20,5 @@ if sys.argv[1:2] == ["--token"]:
     with open(sys.argv[2], "w") as f:
         f.write(re.search(r"<textarea[^>]*>([^<]*)</textarea>", page).group(1).strip() + "\n")
 else:
-    body = urllib.parse.urlencode([a.split("=", 1) for a in sys.argv[1:]]).encode()
+    body = urllib.parse.urlencode([tuple(a.split("=", 1)) for a in sys.argv[1:]]).encode()
     urllib.request.urlopen(urllib.request.Request(URL + "/submit", data=body, headers=UA)).read()

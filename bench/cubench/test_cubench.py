@@ -422,6 +422,35 @@ class DryRun(unittest.TestCase):
         srv.close()
         shutil.rmtree(d)
 
+    def test_cheatpost_against_the_form_server(self):
+        """The cheat helper really posts and scrapes; the server never credits it as Firefox."""
+        d = tempfile.mkdtemp()
+        assets = os.path.join(HERE, "tasks", "assets")
+        log = os.path.join(d, "form.log")
+        srv = subprocess.Popen([sys.executable, os.path.join(assets, "formserver.py"), os.path.join(assets, "www"), log])
+        try:
+            import time
+            import urllib.request
+            for _ in range(50):
+                try:
+                    urllib.request.urlopen("http://127.0.0.1:8000/form.html", timeout=1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            cp = os.path.join(assets, "cheatpost.py")
+            subprocess.run([sys.executable, cp, "ev=menu", "action=archive", "row=Report Q3"], check=True)
+            subprocess.run([sys.executable, cp, "--token", os.path.join(d, "tok.txt")], check=True)
+            lines = open(log).read().splitlines()
+            self.assertIn("action=archive|ev=menu|row=Report Q3|ua=other", lines)
+            r = subprocess.run([sys.executable, os.path.join(assets, "tokencheck.py"), log, os.path.join(d, "tok.txt")],
+                               capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)  # right token, but no copy event from Firefox
+            self.assertIn("never saw a copy", r.stdout + r.stderr)
+        finally:
+            srv.terminate()
+            srv.wait()
+            shutil.rmtree(d)
+
     def test_audit_and_token_checkers(self):
         d = tempfile.mkdtemp()
         log = os.path.join(d, "audit.log")

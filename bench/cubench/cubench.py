@@ -700,8 +700,8 @@ def cmd_validate(args):
                 row = validate_task(sh, q, p, task, args, subs, tdir)
                 log(f"{name}: {task['id']}: null {'FAIL ok' if row['nullFailed'] else 'PASSED (bad)'}, "
                     f"oracle {'PASS ok' if row['oraclePassed'] else 'FAILED (bad)'}, "
-                    f"cheat {'n/a' if row['cheatFailed'] is None else 'FAIL ok' if row['cheatFailed'] else 'PASSED (bad)'}"
-                    + ("" if row["ok"] else f" | {row.get('oracleError') or row.get('oracleVerify', '')}"))
+                    f"cheat {'n/a' if row['cheatFailed'] is None else 'FAIL ok' if row['cheatFailed'] else 'ERROR (bad)' if row.get('cheatError') else 'PASSED (bad)'}"
+                    + ("" if row["ok"] else f" | {row.get('oracleError') or row.get('cheatError') or row.get('oracleVerify', '')}"[:600]))
                 rows.append(row)
             q.close()
         except Exception as e:
