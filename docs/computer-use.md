@@ -53,7 +53,7 @@ other programs (a browser, a file manager). The boundaries are the user
 |---|---|
 | labwc (wlroots) in both modes; headless uses `WLR_BACKENDS=headless` + pixman | The same compositor as the desktop; no GPU needed. |
 | Every headless window, dialogs included, opens **maximized** with client-side decorations only (labwc window rule, `<decoration>client</decoration>`) | AT-SPI boxes are window-relative on Wayland. A maximized CSD window sits at (0,0) with no shadow margin, so its boxes are screen pixels. Maximized, not fullscreen: GTK hides a fullscreen window's header bar (a file chooser's Save button). |
-| Clicks by `element_id` re-read the element first (role, name, box, window) and are refused when a click could miss: it changed or is gone, it is hidden, its window is behind the active one, or its window is not maximized (unknown position, e.g. a fixed-size message dialog). Marks leave such windows out and count them. | Never misclick; `cu_act` still works there. |
+| Clicks by `element_id` re-read the element first (role, name, box, window). They are refused when it changed or is gone, is hidden, or its window is behind the active one. Where its box is not a screen position (inside a GTK 3 popup menu, whose boxes are popup-relative on Wayland, or in a window that is not maximized, e.g. a fixed-size message dialog), a plain left click goes through the element's AT-SPI click action (the reply says so); moves, drags, double and right clicks there are refused. Marks leave those elements out and count them. | A click by `element_id` lands or fails; it never lands somewhere else. |
 | Pointer: `zwlr_virtual_pointer_v1` spoken directly from Go | `motion_absolute` gives exact pixels with no acceleration; separate press/release make drags work. |
 | Keyboard: text through `wtype`; key combos through panda-cu's own virtual keyboard with the US keymap plus `level3(ralt_switch)` | wtype uploads a keymap per string, so any Unicode types. GTK matches accelerators by hardware keycode, so `cu_key` sends real evdev codes; `altgr` is Right Alt as ISO_Level3_Shift (Mod5). |
 | Windows: `zwlr_foreign_toplevel_manager_v1` spoken directly | States (activated, maximized), dialogs, focusing by handle, and `cu_launch` finding the new window by handle, not by title. |
@@ -119,6 +119,17 @@ lock off.
   `screenshot_ms_median`, `click_ms_median`, `find_ms_p50`, `act_ms_p50`,
   `wait_poll_ms_p50`, `move_with_screenshot_ms`, `clipboard_set_ms`,
   `click_accuracy`, `small_accuracy`, `drag_value`, `save_via`.
+  Measured in CI run 41217891122 (2 vCPU, pixman), before → after this
+  design (run 41204105543 → 41217891122): `cu_find` p50 ~2800 → 73 ms,
+  `cu_act` p50 ~900-1500 → 18 ms, one `cu_wait` poll ~2800 → 72 ms,
+  `cu_clipboard_set` ~3300 → 68 ms; full 1280x800 screenshot 101 → 108 ms,
+  click 34 → 67 ms (it now re-reads the element first), a move with a
+  settled half-size screenshot 278 → 382 ms (it waits for two equal
+  frames). The save dialog saved by keyboard on the first try (before: only
+  through AT-SPI); 20/20 grid clicks, 12/12 on 24 px buttons, the menu
+  item and the fixed-size dialog's OK through AT-SPI, the maximized
+  dialog's Confirm by pixels, slider dragged to 93, row 59 clicked after 8
+  scrolls, Unicode text exact, the Chromium form submitted by `element_id`.
 - `checks.boot-desktop`: `test-config.sh` on `/etc/xdg`, the AT-SPI bus,
   panda-cu in attach mode in the person's session, do-not-disturb.
 - CI: `go vet`/`go test -race`, the desktop shell tests, shellcheck.
@@ -128,8 +139,9 @@ lock off.
 - attach mode: windows are not maximized (and have server-side title bars),
   so clicks by `element_id` are refused there; use `cu_act`, or pixels from
   screenshots.
-- Popups that are windows of their own (a combo box list, an entry
-  completion) count as unknown positions too.
+- Popup menus and popups that are windows of their own (a combo box
+  list, an entry completion) have no known screen position: clicks by
+  `element_id` there use AT-SPI actions, and pixel clicks need a screenshot.
 - `cu_key` sends US-layout keycodes; other keysyms go through wtype, whose
   accelerators GTK may not fire.
 
