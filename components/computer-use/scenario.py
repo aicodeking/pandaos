@@ -465,7 +465,7 @@ def _():
     ws = [w for w in data(call("cu_windows")[0])["windows"] if w["app_id"] == "cu-labmax"]
     metrics["premaximized_states"] = ws[0]["states"] if ws else None
     assert ws and "maximized" in ws[0]["states"], ws
-    subprocess.run(["pkill", "-f", "cu-lab --maximized"], check=False)
+    subprocess.run(["pkill", "-f", "cu-lab.* --maximized"], check=False)  # also .cu-lab-wrapped
     call("cu_wait", {"window": "CU Lab Max", "gone": True, "timeout": 10})
 
 
