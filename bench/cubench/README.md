@@ -53,7 +53,7 @@ so the comparison is about shells and compositors, not app choices.
 Every OS gets the same small set of changes: no idle lock or blanking, no
 first-run tours, and the same Firefox policies (no welcome page, no
 crash-restore prompt). Each result records the session type and display size
-that were actually used. The real-VM path has not been run yet (see Status).
+that were actually used. The real-VM path is checked by smoke mode (see Status).
 
 ## Tool modes and the panda-cu contract
 
@@ -186,10 +186,16 @@ repeats, so 12 run jobs and 300 attempts):
 
 ## Status
 
-- Run so far: the self-tests and dry runs. No real VM run has happened yet,
-  because there is no KVM host locally and nix is not installed. The first CI
-  run will validate the prepare scripts and session detection.
-- Desktop details that could need a fix on first boot:
-  - GNOME on Wayland under gdm in a VM without virgl;
-  - whether `/etc/firefox/policies` is honoured by Debian's firefox-esr (also
-    written to `/etc/firefox-esr/policies`).
+- Smoke mode is green on every default OS (cubench run 41184240650, no API
+  key). The prepared disks took 105 s (Debian 13 Xfce) and 192 s (Ubuntu
+  24.04 GNOME) of install script, and about 4-6 min per prepare job, so
+  preparing fits easily in CI. Each OS booted to its desktop at 1280x800
+  (Debian on X11, Ubuntu and PandaOS on Wayland). Both QMP clicks reached the
+  kiosk page at offset (0, 0), the wheel and the typed text arrived, setup and
+  checkers ran over ssh, and `panda-cu call` worked in the PandaOS session.
+  Smoke jobs took 3-5 min on the cloud images and 12-16 min on PandaOS, most
+  of it building the image.
+- No model has been run yet: that needs `ANTHROPIC_API_KEY` (or an
+  OpenAI-compatible key).
+- Still unverified: whether `/etc/firefox/policies` is honoured by Debian's
+  firefox-esr (it is also written to `/etc/firefox-esr/policies`).
