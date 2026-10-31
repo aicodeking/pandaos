@@ -25,12 +25,13 @@ QEMU/KVM with identical resources: UEFI, 4 vCPU, 4 GB, virtio-vga fixed at
 
 | File | Purpose |
 |---|---|
-| `cubench.py` | CLI: `prepare` (build a desktop disk), `run`, `report` |
+| `cubench.py` | CLI: `prepare` (build a desktop disk), `run` (also `--smoke`, `--dry-run`), `report` |
 | `agent.py` | agent loop, providers (Anthropic, OpenAI-compatible, scripted), tool specs, cost |
 | `qmp.py` | QMP client, key mapping, fake QMP server |
 | `score.py` | Wilson intervals, fail reasons, summary and markdown |
 | `tasks/*.json` | `{id, title, instruction, setup: [sh], verify: sh, timeout_s, max_steps, tools_exclude?}` |
-| `tasks/assets/` | form server and static pages, uploaded to `~/.cubench` in the VM |
+| `tasks/assets/` | form server, static pages and `probecheck.py`, uploaded to `~/.cubench` in the VM |
+| `smoke/*.json` | plumbing tasks for `run --smoke` (an optional `script` replaces the scripted agent's default actions) |
 | `os/<name>.json` | image pin, user, session env source, app commands, agent hints, reset |
 | `os/common.sh`, `os/<name>.prepare.sh` | desktop install, run as root over ssh by `prepare` |
 | `pandaos-desktop-image.nix` | PandaOS desktop qcow2 (how it differs from the shipped desktop: see its header) |
@@ -69,9 +70,9 @@ It must print one JSON value on stdout and exit 0, or exit non-zero with the
 error on stderr (the error goes back to the model). If the result has a
 `"png_base64"` field, or a `"path"` to a `.png` in the guest, cubench forwards
 that image to the model. This matches `components/computer-use` (`panda-cu
-call`). The image enables `services.panda-cu` in `mode = "attach"` (the
-autologin session) when that module exists in the checkout. Without it, the
-panda column still runs, but its `cu_*` calls return errors.
+call`). The desktop profile ships `services.panda-cu` in `mode = "attach"`,
+so the image's autologin session has it; the image only sets Firefox as its
+browser.
 
 ## Scoring
 
@@ -105,6 +106,20 @@ Providers:
 - For models not in `agent.PRICES`, pass `--price in,out` (USD per million
   tokens) to get cost figures.
 
+## Smoke mode (no API key)
+
+`run --smoke` proves the VM plumbing before any money is spent on a model.
+The scripted agent runs `smoke/input-probe`: setup starts the form server and
+a kiosk browser on `probe.html`, which logs every mouse down, wheel event and
+keystroke; the agent clicks (640,400) and (900,600), scrolls and types
+`cubench probe 42`; `probecheck.py` passes only if both clicks arrived at the
+same offset from their targets (within 2 px, so 1:1), the wheel moved and the
+text arrived. The `--tasks` given also run, so their setup and checkers are
+exercised over ssh (the scripted agent fails them, which is fine). The exit
+code is non-zero if the QMP display is not 1280x800, a setup crashed, a smoke
+task failed, or, with `--tools panda`, `panda-cu call cu_windows` /
+`cu_screenshot` failed in the session. Results carry `smokeFailures`.
+
 ## Running
 
 ```sh
@@ -112,6 +127,8 @@ python3 bench/cubench/test_cubench.py                     # self-tests
 python3 bench/cubench/cubench.py run --dry-run --os pandaos-desktop --repeats 1 --out /tmp/cu
 ssh-keygen -t ed25519 -N '' -f key
 python3 bench/cubench/cubench.py prepare --os debian-13-xfce --key key
+python3 bench/cubench/cubench.py run --smoke --os debian-13-xfce --key key --repeats 1 \
+  --tasks editor-new-file,browser-form --out smoke
 ANTHROPIC_API_KEY=... python3 bench/cubench/cubench.py run --os debian-13-xfce --key key --out out
 python3 bench/cubench/cubench.py report out/results-*.json --out bench/cubench/results/$(date -u +%F)
 ```
@@ -138,8 +155,10 @@ screendump), OVMF, `cloud-localds` and `ssh`. It also reuses
 - optional: `CACHIX_AUTH_TOKEN` and the variable `CACHIX_CACHE`, as in
   compare.yml.
 
-Without the provider's key, only the `selftest` job runs: unit tests plus a
-dry run of every task on every profile.
+Without the provider's key the workflow runs in smoke mode: `selftest`, then
+`prepare` and one `run` job per OS (plus the PandaOS panda column) with
+`run --smoke --tasks <smoke_tasks>`. Artifacts: `cubench-smoke-<os>-<tools>-r1`
+(results, transcripts and `<os>-<tools>-desktop.png`, the first screenshot).
 
 **Jobs:**
 

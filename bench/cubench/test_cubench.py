@@ -230,6 +230,7 @@ class DryRun(unittest.TestCase):
                "dy=1|ev=wheel", "ev=keys|text=cubench probe 4", "ev=keys|text=cubench probe 42"]
         args = ((640, 400), (900, 600), "cubench probe 42")
         self.assertTrue(probecheck.check(log, *args)[0])  # offset (10, 40) everywhere: 1:1
+        self.assertTrue(probecheck.check([line + "\n" for line in log], *args)[0])  # as read from the file
         self.assertFalse(probecheck.check(log[:2] + log[3:], *args)[0])  # one click
         skewed = log[:2] + ["b=0|ev=down|x=930|y=640"] + log[3:]
         self.assertFalse(probecheck.check(skewed, *args)[0])  # scaled pointer

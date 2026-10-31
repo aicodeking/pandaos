@@ -192,9 +192,11 @@ let
     { name = "menu.xml"; path = pkgs.writeText "menu.xml" "<openbox_menu></openbox_menu>\n"; }
     {
       name = "autostart";
+      # labwc gives autostart no stdout/stderr worth having: send both to
+      # the journal (journalctl -u panda-cu).
       path = pkgs.writeText "autostart" ''
-        ${pkgs.wlr-randr}/bin/wlr-randr --output HEADLESS-1 --custom-mode ${cfg.resolution} --scale ${toString cfg.scale}
-        exec ${lib.getExe cfg.package} session
+        ${pkgs.systemd}/bin/systemd-cat -t panda-cu-session ${pkgs.wlr-randr}/bin/wlr-randr --output HEADLESS-1 --custom-mode ${cfg.resolution} --scale ${toString cfg.scale}
+        exec ${pkgs.systemd}/bin/systemd-cat -t panda-cu-session ${lib.getExe cfg.package} session
       '';
     }
   ];

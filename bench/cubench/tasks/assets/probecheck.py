@@ -11,7 +11,7 @@ import sys
 
 
 def check(lines, p1, p2, text):
-    evs = [dict(kv.split("=", 1) for kv in line.split("|") if "=" in kv) for line in lines if line.strip()]
+    evs = [dict(kv.split("=", 1) for kv in line.strip().split("|") if "=" in kv) for line in lines if line.strip()]
     load = next((e for e in evs if e.get("ev") == "load"), {})
     downs = [(round(float(e["x"])), round(float(e["y"]))) for e in evs if e.get("ev") == "down"]
     seen = f"page {load.get('w')}x{load.get('h')} dpr {load.get('dpr')}, downs {downs}"

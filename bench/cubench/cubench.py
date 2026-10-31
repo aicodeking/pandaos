@@ -273,7 +273,9 @@ def boot_desktop(p, base, args, idx):
     for line in p.get("session_setup", []):
         sh(line)
     time.sleep(SETTLE_S)
-    vm.session_type = sh('echo "${XDG_SESSION_TYPE:-${WAYLAND_DISPLAY:+wayland}}"')[1].strip() or "x11"
+    # WAYLAND_DISPLAY first: greetd leaves XDG_SESSION_TYPE=tty in labwc's env.
+    vm.session_type = sh('echo "${WAYLAND_DISPLAY:+wayland}"')[1].strip() or (
+        "x11" if sh('[ -n "${DISPLAY:-}" ]')[0] == 0 else "unknown")
     return vm, sh
 
 

@@ -45,7 +45,11 @@ pkgs.testers.runNixOSTest {
   testScript = t.prelude + ''
     start_all()
     machine.wait_for_unit("panda-cu.service")
-    machine.wait_for_file("/run/panda-cu/ready", timeout=90)
+    try:
+        machine.wait_for_file("/run/panda-cu/ready", timeout=90)
+    except Exception:
+        print(machine.execute("journalctl -b --no-pager -u panda-cu; ps -u agent -o pid,args; ls -la /run/panda-cu")[1])
+        raise
     print(machine.succeed("cat /run/panda-cu/ready; ls -la /run/panda-cu"))
 
     with subtest("mcp.d entry, config, session ownership"):
