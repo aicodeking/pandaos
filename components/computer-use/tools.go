@@ -75,12 +75,13 @@ type Server struct {
 	snap    map[string]element // last cu_tree / cu_find / marks snapshot
 }
 
-// pointerDev is what the pointer tools need from a display connection.
+// pointerDev is what the pointer and key tools need from a display connection.
 type pointerDev interface {
 	size() (int, int, string)
 	moveTo(x, y int) error
 	button(btn uint32, pressed bool) error
 	wheel(axis uint32, n int) error
+	keys(ops []keyOp) error
 	sync() error
 	Close() error
 }
@@ -148,7 +149,16 @@ func (s *Server) runTool(name string, a toolArgs) ([]content, error) {
 		if err != nil {
 			return nil, err
 		}
-		_, err = s.run(execTimeout, "", append([]string{"wtype"}, args...)...)
+		ops, err := keyOps(args)
+		if err != nil {
+			return nil, err
+		}
+		d, err := s.display()
+		if err != nil {
+			return nil, err
+		}
+		err = d.keys(ops)
+		d.Close()
 		return s.after(a, map[string]any{"pressed": a.Combo}, err)
 	case "cu_tree":
 		return jsonOut(s.tree(a))

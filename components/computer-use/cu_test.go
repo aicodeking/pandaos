@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -129,6 +130,12 @@ func (f *fakePointer) wheel(axis uint32, n int) error {
 	}
 	return nil
 }
+func (f *fakePointer) keys(ops []keyOp) error {
+	for _, o := range ops {
+		f.log = append(f.log, fmt.Sprintf("key %c %s", o.kind, o.name))
+	}
+	return nil
+}
 func (f *fakePointer) sync() error  { return nil }
 func (f *fakePointer) Close() error { return nil }
 
@@ -209,6 +216,9 @@ func TestKeyboardAndA11yTools(t *testing.T) {
 	if _, err := call(t, s, "cu_key", `{"combo":"ctrl+s"}`); err != nil {
 		t.Fatal(err)
 	}
+	if got := strings.Join(fp.log, "|"); got != "key M ctrl|key k s|key m ctrl" {
+		t.Fatalf("key log %s", got)
+	}
 	if _, err := call(t, s, "cu_launch", `{"app":"rm"}`); err == nil {
 		t.Fatal("want allowlist refusal")
 	}
@@ -230,7 +240,7 @@ func TestKeyboardAndA11yTools(t *testing.T) {
 		joined = append(joined, strings.Join(c, " "))
 	}
 	all := strings.Join(joined, "\n")
-	for _, want := range []string{"wtype -d 2 - stdin=-hi\n", "wtype -M ctrl -k s -m ctrl stdin=", "act 0.0.1 click --role push button --name B1"} {
+	for _, want := range []string{"wtype -d 2 - stdin=-hi\n", "act 0.0.1 click --role push button --name B1"} {
 		if !strings.Contains(all, want) {
 			t.Errorf("missing call %q in\n%s", want, all)
 		}
@@ -369,5 +379,34 @@ func TestLoadConfig(t *testing.T) {
 	c, err := loadConfig("/nonexistent/cu.json")
 	if err != nil || c.Mode != "attach" || c.Env["WAYLAND_DISPLAY"] != "wayland-7" {
 		t.Fatal(c, err)
+	}
+}
+
+func TestKeymap(t *testing.T) {
+	args, err := keyArgs("ctrl+shift+t ctrl+a BackSpace a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops, err := keyOps(args)
+	if err != nil || len(ops) != 10 {
+		t.Fatal(ops, err)
+	}
+	km, codes := keymapFor(ops)
+	for _, want := range []string{
+		"<M1> = 10;", "key <M1> {[ Control_L ]}; modifier_map Control { <M1> };",
+		"modifier_map Mod5 { <M4> };", "<K0> = 14;", "key <K0> {[ t ]};", "key <K2> {[ BackSpace ]};",
+	} {
+		if !strings.Contains(km, want) {
+			t.Errorf("keymap lacks %q:\n%s", want, km)
+		}
+	}
+	if strings.Count(km, "{[ a ]}") != 1 || codes["ctrl"] != 2 || codes["k:t"] != 6 || codes["k:BackSpace"] != 8 {
+		t.Errorf("codes %v\n%s", codes, km)
+	}
+	if _, err := keyOps([]string{"-M", "hyper"}); err == nil {
+		t.Error("want bad modifier")
+	}
+	if _, err := keyOps([]string{"-k"}); err == nil {
+		t.Error("want odd list")
 	}
 }

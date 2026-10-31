@@ -41,7 +41,7 @@ an agent CLI that runs inside the logged-in session. The `agent` user of
 |---|---|
 | labwc (wlroots) in both modes; headless uses `WLR_BACKENDS=headless` + pixman | The same compositor as the desktop; no GPU needed. |
 | Pointer: `zwlr_virtual_pointer_v1` spoken directly from Go | `motion_absolute` gives exact pixels with no acceleration; separate press/release make drags work. |
-| Keyboard: `wtype` (virtual keyboard) | A keymap per string, so any Unicode types correctly. |
+| Keyboard: text through `wtype`, key combos through panda-cu's own virtual keyboard | wtype uploads a keymap per string, so any Unicode types correctly. Its modifiers request did not reach GTK apps under labwc, so `cu_key` presses real modifier keys from its own keymap. |
 | Screenshots: `grim` (wlr-screencopy); windows: `wlrctl` (foreign-toplevel); clipboard: `wl-clipboard` | Standard wlroots protocols, small tools. |
 | AT-SPI: `panda-cu-atspi` (Python + gi `Atspi`) | The only well-supported client library. Element ids are child-index paths; `cu_act` refuses an id whose role or name changed. |
 | Headless windows open fullscreen | AT-SPI boxes are window-relative on Wayland; with every window at (0,0) they are screen pixels, so Set-of-Marks and `cu_click{element_id}` are exact. |
