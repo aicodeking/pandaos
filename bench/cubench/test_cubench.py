@@ -71,7 +71,7 @@ class Tasks(unittest.TestCase):
                 self.assertTrue(all(st[0] == "sh" for st in t["cheat"]), t["id"])
 
     def test_oracle_steps_are_well_formed(self):
-        ops = {"sh", "key", "type", "wait", "click", "rclick", "dclick", "drag", "a11y", "os_click"}
+        ops = {"sh", "key", "type", "wait", "click", "rclick", "dclick", "drag", "a11y", "os_click", "save_as"}
         for name in OS_NAMES:
             p = cubench.load_os(name)
             subs = {"{%s}" % k: v for k, v in p["keys"].items()} | {"{HOME}": "/home/u", "{HOSTNAME}": "h"}

@@ -32,24 +32,8 @@
       2.5
     ],
     [
-      "key",
-      "ctrl+a"
-    ],
-    [
-      "type",
+      "save_as",
       "{HOME}/bench/host.txt"
-    ],
-    [
-      "wait",
-      1.5
-    ],
-    [
-      "key",
-      "Return"
-    ],
-    [
-      "wait",
-      2
     ]
   ],
   "timeout_s": 420,

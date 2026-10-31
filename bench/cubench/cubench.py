@@ -615,6 +615,20 @@ def run_oracle(steps, env, sh, subs, shot_dir, points=None):
             q.click(int(a[0]), int(a[1]), "right" if op == "rclick" else "left", 2 if op == "dclick" else 1)
         elif op == "drag" and not isinstance(a[0], dict):
             q.drag(*map(int, a[:4]))
+        elif op == "save_as":  # in an open file chooser: save as the absolute path a[0]
+            if "save_name" in (points or {}):  # GNOME 50's chooser refuses "/" in the name: folder, then name
+                q.key("ctrl+l")
+                q.type(os.path.dirname(a[0]) + "/\n")
+                time.sleep(1.5)
+                q.click(*map(int, points["save_name"]))
+                q.key("ctrl+a")
+                q.type(os.path.basename(a[0]))
+            else:  # the name entry takes a full path; replace the preselected stem
+                q.key("ctrl+a")
+                q.type(a[0])
+            time.sleep(1.5)
+            q.key("Return")
+            time.sleep(2)
         elif op == "os_click":
             if a[0] in (points or {}):
                 q.click(*map(int, points[a[0]]))
@@ -642,7 +656,7 @@ def validate_task(sh, q, p, task, args, subs, tdir):
             time.sleep(SETUP_SETTLE_S)
             if kind in ("oracle", "cheat"):
                 steps = oracle_steps(task, p["name"]) if kind == "oracle" else task["cheat"]
-                if kind == "oracle" and "app_focus" in (p.get("points") or {}) and not task.get("script"):
+                if kind == "oracle" and "app_focus" in (p.get("points") or {}):
                     steps = [["os_click", "app_focus"]] + steps  # GNOME 50 does not focus ssh-launched windows
                 run_oracle(steps, agent.Env(q, sh, d), sh, subs, d, p.get("points"))
                 time.sleep(1)
@@ -650,6 +664,8 @@ def validate_task(sh, q, p, task, args, subs, tdir):
             row[f"{kind}Verify"] = (out + err).strip()[-400:]
             if kind == "oracle":
                 row["oraclePassed"] = rc == 0
+                if rc != 0:  # what the checker saw, for diagnosis
+                    row["oracleDebug"] = sh('tail -n 6 "$B/form.log" 2>/dev/null; tail -n 6 "$AUDIT_LOG" 2>/dev/null', 30)[1][-800:]
             else:
                 row[f"{kind}Failed"] = rc != 0
         except Exception as e:
