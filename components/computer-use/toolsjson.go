@@ -38,7 +38,7 @@ const toolsJSON = `[
 {"name":"cu_clipboard_set","description":"Put text on the session clipboard (up to 1 MiB), e.g. before ctrl+v.",` + nav + `,"inputSchema":{"type":"object","required":["text"],"properties":{"text":{"type":"string","description":"Text to copy."}}}}
 ]`
 
-const instructions = `panda-cu drives the agent's own graphical session. Loop: look (cu_screenshot, or cu_screenshot{marks:true} for numbered clickable elements), act, look again; pass screenshot:true on actions to get the result in the same call. Prefer the accessibility tree (cu_find / cu_tree, then cu_act) over pixels: it does not depend on layout. Windows open fullscreen one at a time; switch with cu_focus. Use cu_wait after anything that opens a window or dialog.`
+const instructions = `panda-cu drives the agent's own graphical session. Loop: look (cu_screenshot, or cu_screenshot{marks:true} for numbered clickable elements), act, look again; pass screenshot:true on actions to get the result in the same call. Prefer the accessibility tree (cu_find / cu_tree, then cu_act) over pixels: it does not depend on layout. Windows open fullscreen one at a time (dialogs keep their size: act on their elements with cu_act); switch with cu_focus. Use cu_wait after anything that opens a window or dialog.`
 
 var mcpTools = json.RawMessage(toolsJSON)
 

@@ -410,3 +410,10 @@ func TestKeyOps(t *testing.T) {
 		t.Error(usKeymap)
 	}
 }
+
+func TestRoleAlias(t *testing.T) {
+	e := element{Role: "push button", Name: "Save"}
+	if !matches(e, "save", "button") || !matches(e, "", "push button") || matches(e, "", "toggle button") {
+		t.Error("role alias")
+	}
+}

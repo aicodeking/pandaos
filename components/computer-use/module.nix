@@ -13,9 +13,11 @@
 #     (settings.ini and the GSettings keyfile), cursor blink off.
 #   - Fixed DPI and fonts: a private fonts.conf with DejaVu only (one family:
 #     Sans/Serif/Mono), 96 dpi, hinting slight, grayscale AA; scale fixed.
-#   - Windows open fullscreen (labwc window rule): no decorations, the window
-#     origin is the screen origin, so AT-SPI boxes (window-relative on
-#     Wayland) are screen coordinates.
+#   - Normal windows open fullscreen (labwc window rule): no decorations,
+#     the window origin is the screen origin, so AT-SPI boxes
+#     (window-relative on Wayland) are screen coordinates. Dialogs are not
+#     fullscreened: GTK hides a fullscreen window's header bar, which holds a
+#     file chooser's Name entry and Save button (CI run 41197052760).
 #   - Notifications suppressed: the session D-Bus is private and only knows
 #     the AT-SPI bus, so no notification daemon can be activated.
 #   - Dark theme: GTK_THEME=Adwaita:dark (built into GTK 3 and 4).
@@ -183,7 +185,7 @@ let
           <placement><policy>center</policy></placement>
           ${lib.optionalString cfg.fullscreenWindows ''
             <windowRules>
-              <windowRule identifier="*"><action name="ToggleFullscreen" /></windowRule>
+              <windowRule identifier="*" type="normal"><action name="ToggleFullscreen" /></windowRule>
             </windowRules>
           ''}
         </labwc_config>
@@ -298,7 +300,7 @@ in
       type = lib.types.bool;
       default = true;
       description = ''
-        Open every window fullscreen in the headless session. AT-SPI boxes are
+        Open every normal (non-dialog) window fullscreen in the headless session. AT-SPI boxes are
         window-relative on Wayland, so this is what makes them screen
         coordinates; turn it off only if you click by pixels from screenshots.
       '';

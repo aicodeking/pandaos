@@ -70,7 +70,14 @@ func (s *Server) snapshot(a toolArgs, marks bool) ([]element, error) {
 	return res.Elements, nil
 }
 
+// roleAliases: newer at-spi2-core calls GtkButton "button", older ones
+// "push button"; panda-cu-atspi reports "push button", and either name matches.
+var roleAliases = map[string]string{"button": "push button"}
+
 func matches(e element, text, role string) bool {
+	if r, ok := roleAliases[strings.ToLower(role)]; ok {
+		role = r
+	}
 	if role != "" && !strings.EqualFold(e.Role, role) {
 		return false
 	}

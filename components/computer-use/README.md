@@ -15,7 +15,7 @@ JSON value (images come back as `png_base64`).
 | `panda-cu session` holds an idle virtual pointer and keyboard | The seat never loses its pointer or keyboard capability between calls, so clients never rebind and drop the first event. |
 | Apps start through the session's launcher socket | Apps then live in panda-cu.service, with a writable `/run/panda-cu` and the session env, not in the agent CLI's sandbox. Allowlisted ids only. The one extra argument must be an absolute path or an http(s) URL. |
 | AT-SPI through `panda-cu-atspi` (Python + gi `Atspi`, argv in, JSON out) | This is the only well-supported client library. Element ids are child-index paths. `cu_act` refuses an id whose role or name changed. |
-| Windows open fullscreen (labwc window rule) | On Wayland, AT-SPI boxes are relative to the window. With every window at (0,0), they are screen pixels, which is what makes `cu_click{element_id}` and Set-of-Marks correct. |
+| Normal windows open fullscreen (labwc window rule, `type="normal"`); dialogs do not | On Wayland, AT-SPI boxes are relative to the window. With the window at (0,0), they are screen pixels, which is what makes `cu_click{element_id}` and Set-of-Marks correct. A fullscreen GTK dialog hides its header bar, where a file chooser keeps its Name entry and Save button; on dialogs prefer `cu_act`. |
 | Fallback (Xvfb + X WM + xdotool) not used | labwc implements virtual pointer, virtual keyboard, screencopy, foreign-toplevel and data-control. |
 
 Determinism and the dialogs that are suppressed are listed one by one at the

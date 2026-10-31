@@ -44,7 +44,7 @@ an agent CLI that runs inside the logged-in session. The `agent` user of
 | Keyboard: text through `wtype`; key combos through panda-cu's own virtual keyboard with the standard US keymap | wtype uploads a keymap per string, so any Unicode types correctly. GTK matches accelerators by hardware keycode once the seat is back on the US keyboard, so `cu_key` sends real US evdev codes (modifiers as key presses); other keysyms fall back to wtype. |
 | Screenshots: `grim` (wlr-screencopy); windows: `wlrctl` (foreign-toplevel); clipboard: `wl-clipboard` | Standard wlroots protocols, small tools. |
 | AT-SPI: `panda-cu-atspi` (Python + gi `Atspi`) | The only well-supported client library. Element ids are child-index paths; `cu_act` refuses an id whose role or name changed. |
-| Headless windows open fullscreen | AT-SPI boxes are window-relative on Wayland; with every window at (0,0) they are screen pixels, so Set-of-Marks and `cu_click{element_id}` are exact. |
+| Headless normal windows open fullscreen; dialogs do not | AT-SPI boxes are window-relative on Wayland; with the window at (0,0) they are screen pixels, so Set-of-Marks and `cu_click{element_id}` are exact. A fullscreen dialog would lose its GTK header bar (a file chooser's Name entry and Save button), so on dialogs use `cu_act` or pixels from a screenshot. |
 | Apps start from an allowlist (`editor` = Mousepad, `files` = PCManFM, `browser` when configured, plus `extraApps`) | `cu_launch` cannot run arbitrary commands. |
 
 ## Tools
@@ -81,7 +81,7 @@ Headless session (`module.nix` lists each one):
 - no animations (labwc has none; GTK `gtk-enable-animations=false`), no
   cursor blink;
 - one font family (DejaVu), 96 dpi, slight hinting, greyscale AA, scale 1;
-- windows fullscreen, so the window origin is the screen origin;
+- normal windows fullscreen, so the window origin is the screen origin (dialogs keep their size);
 - a private session D-Bus that only knows the AT-SPI bus: no notification
   daemon, keyring or portal can start;
 - fresh XDG config/cache/data dirs on every start, the GSettings keyfile

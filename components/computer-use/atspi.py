@@ -29,8 +29,18 @@ PREFERRED = {"click": ("click", "press", "activate", "toggle", "jump", "open"),
              "press": ("press", "click", "activate", "toggle")}
 
 
+# Newer at-spi2-core names GtkButton's role "button" (CI run 41197052760);
+# report the classic name so cu_* role filters and docs stay the same.
+ROLE_ALIASES = {"button": "push button"}
+
+
+def role_of(acc):
+    r = acc.get_role_name()
+    return ROLE_ALIASES.get(r, r)
+
+
 def describe(acc, path, depth):
-    role, name = acc.get_role_name(), acc.get_name() or ""
+    role, name = role_of(acc), acc.get_name() or ""
     ss = acc.get_state_set()
     e = {"id": path, "d": depth, "role": role, "name": name[:200]}
     showing = ss.contains(S.SHOWING) and ss.contains(S.VISIBLE)
@@ -124,8 +134,8 @@ def resolve(path):
 
 def act(a):
     acc = resolve(a.id)
-    if a.role is not None and (acc.get_role_name() != a.role or (acc.get_name() or "")[:200] != a.name):
-        raise LookupError(f"element {a.id} changed (now {acc.get_role_name()} {acc.get_name()!r}); call cu_tree again")
+    if a.role is not None and (role_of(acc) != a.role or (acc.get_name() or "")[:200] != a.name):
+        raise LookupError(f"element {a.id} changed (now {role_of(acc)} {acc.get_name()!r}); call cu_tree again")
     if a.action == "focus":
         comp = acc.get_component_iface()
         if comp is None or not comp.grab_focus():
