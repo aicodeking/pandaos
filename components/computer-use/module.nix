@@ -262,12 +262,23 @@ let
 
   apps = builtinApps // lib.mapAttrs (_: a: { inherit (a) name; argv = a.command; }) cfg.extraApps;
 
+  # One argument of a .desktop Exec line: plain, or double-quoted with
+  # \ " ` $ escaped (Desktop Entry spec), then the file's own escaping of
+  # backslashes and %.
+  desktopArg =
+    a:
+    let
+      inner = lib.replaceStrings [ "\\" "\"" "`" "$" ] [ "\\\\" "\\\"" "\\`" "\\$" ] a;
+      quoted = if builtins.match "[A-Za-z0-9_@+=:,./-]+" a != null then a else "\"${inner}\"";
+    in
+    lib.replaceStrings [ "\\" "%" ] [ "\\\\" "%%" ] quoted;
+
   desktopItems = lib.mapAttrsToList (
     id: a:
     pkgs.makeDesktopItem {
       name = "panda-cu-${id}";
       desktopName = "${a.name} (panda-cu)";
-      exec = lib.concatStringsSep " " a.argv;
+      exec = lib.concatMapStringsSep " " desktopArg a.argv;
       noDisplay = true;
     }
   ) apps;
