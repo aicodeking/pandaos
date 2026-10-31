@@ -45,6 +45,16 @@
       monospace = [ "DejaVu Sans Mono" ];
     };
   };
+  # Computer use in the person's own session: `panda-cu call` / `panda-cu mcp`
+  # run by an agent CLI inside the logged-in labwc session act on that screen.
+  # attach mode adds no service and no RAM (only the package and the AT-SPI
+  # env); a private headless desktop for the `agent` user is one option away:
+  #   services.panda-cu.mode = "headless";
+  services.panda-cu = {
+    enable = lib.mkDefault true;
+    mode = lib.mkDefault "attach";
+  };
+
   xdg.icons.enable = true;
   xdg.mime.enable = true;
 }

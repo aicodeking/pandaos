@@ -222,6 +222,55 @@ let
         assert "custom/connect" in top["modules-left"], top
   '';
 
+  # Inside the logged-in session (after the idle RAM is measured): the
+  # computer-use friendly config, the AT-SPI bus, panda-cu in attach mode
+  # launching the editor and the file manager, and do-not-disturb.
+  sessionChecks = ''
+    uid = machine.succeed("id -u panda").strip()
+    run = f"/run/user/{uid}"
+
+
+    def as_panda(cmd, ok=True):
+        full = (f"runuser -u panda -- env XDG_RUNTIME_DIR={run} WAYLAND_DISPLAY=wayland-0"
+                f" DBUS_SESSION_BUS_ADDRESS=unix:path={run}/bus {cmd}")
+        return machine.succeed(full) if ok else machine.execute(full)
+
+
+    with subtest("desktop: computer-use config in /etc/xdg (test-config.sh)"):
+        print(machine.succeed("sh ${../components/desktop/test-config.sh} /etc/xdg"))
+        machine.succeed("test -x \"$(command -v panda-dnd)\" && test -x \"$(command -v panda-cu-busy)\"")
+        machine.succeed("grep -q panda-cu-busy /etc/xdg/labwc/autostart")
+
+    with subtest("desktop: the AT-SPI bus answers in the session"):
+        addr = as_panda("busctl --user call org.a11y.Bus /org/a11y/bus org.a11y.Bus GetAddress")
+        assert "unix:" in addr, addr
+
+    with subtest("desktop: panda-cu (attach) launches the editor and the file manager"):
+        cfg = json.loads(machine.succeed("cat /etc/panda/cu.json"))
+        assert cfg["mode"] == "attach", cfg
+        for app, needle in (("editor", "mousepad"), ("files", "pcmanfm")):
+            res = json.loads(as_panda(f"panda-cu call cu_launch '{json.dumps({'app': app})}'"))
+            print(app, res)
+            assert res.get("window"), f"{app}: no window: {res}"
+        wins = as_panda("panda-cu call cu_windows")
+        assert "mousepad" in wins.lower() and "pcmanfm" in wins.lower(), wins
+        found = json.loads(as_panda("panda-cu call cu_wait '{\"app\": \"mousepad\", \"role\": \"text\", \"timeout\": 60}'"))
+        assert found.get("ok"), found
+        shot = json.loads(as_panda("panda-cu call cu_screenshot '{\"scale\": 0.5}'"))
+        assert shot.get("png_base64"), list(shot)
+        machine.screenshot("apps")
+        as_panda("pkill -u panda -f '(mousepad|pcmanfm)'", ok=False)
+
+    with subtest("desktop: do-not-disturb toggles fnott"):
+        machine.wait_until_succeeds("pgrep -u panda fnott", timeout=60)
+        assert as_panda("panda-dnd status").strip() == "off"
+        as_panda("panda-dnd toggle")
+        assert as_panda("panda-dnd status").strip() == "on"
+        assert as_panda("panda-dnd bar").strip() == "DND"
+        as_panda("panda-dnd toggle")
+        assert as_panda("panda-dnd status").strip() == "off"
+  '';
+
   # The system panda-install copies in the install test: the real prebuilt
   # headless target plus the test backdoor, so the driver can talk to it
   # after it boots from the installed disk.
@@ -295,6 +344,7 @@ in
       session_ram, session_minus_avail = idle_ram_mb(machine)
       machine.screenshot("session")
       machine.succeed("pgrep -u panda -x labwc")
+      ${sessionChecks}
 
       with subtest("logout returns to the greeter"):
           machine.succeed("loginctl terminate-user panda")
@@ -331,6 +381,7 @@ in
   panda-sys = import ../components/sysmcp/vmtest.nix { inherit pkgs self; };
   panda-mem-tools = import ../components/mem/vmtest.nix { inherit pkgs self; };
   agent-clis = import ../components/agent-clis/vmtest.nix { inherit pkgs self; };
+  panda-cu = import ../components/computer-use/vmtest.nix { inherit pkgs self; };
 
   mem = pkgs.testers.runNixOSTest {
     name = "mem";

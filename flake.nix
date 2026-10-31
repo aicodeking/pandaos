@@ -122,6 +122,7 @@
             ./components/agent-env/module.nix
             ./components/checkpoint/module.nix
             ./components/sysmcp/module.nix
+            ./components/computer-use/module.nix
           ];
         };
         headless = ./nixos/profiles/headless.nix;
@@ -151,6 +152,7 @@
             "desktop"
           ];
           vm-headless = (mkPandaSystem { profile = "headless"; inherit system; }).config.system.build.vm;
+          panda-cu = pkgs.callPackage ./components/computer-use/package.nix { };
           panda-install = pkgs.callPackage ./nixos/installer/package.nix {
             inherit flakeUrl revision flakeLock;
             systems = lib.genAttrs [ "headless" "desktop" ] (installable system);

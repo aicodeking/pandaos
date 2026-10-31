@@ -75,7 +75,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        component: [agentd, mem, checkpoint, agent-env, sysmcp]
+        component: [agentd, mem, checkpoint, agent-env, sysmcp, computer-use]
     defaults:
       run:
         working-directory: components/${{ matrix.component }}
@@ -99,6 +99,11 @@ jobs:
       - run: python3 tests/test_closures.py
       - run: bash components/agent-clis/test-agents-install.sh
       - run: sh components/desktop/test-agents-status.sh components/desktop/bin/panda-agents-status
+      - run: sh components/desktop/test-config.sh
+      - run: sh components/desktop/test-dnd.sh
+      - run: sh components/desktop/test-cu-busy.sh
+      - run: shellcheck components/desktop/bin/* components/desktop/*.sh bench/cubench/os/*.sh
+      - run: python3 -m py_compile components/computer-use/*.py
 
   iso:
     permissions:
