@@ -396,7 +396,8 @@ def _():
     httpd = http.server.HTTPServer(("127.0.0.1", 8765), Form)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     call("cu_open", {"url": "http://127.0.0.1:8765/form.html"})
-    r, _ = call("cu_wait", {"app": "CU Form", "role": "entry", "timeout": 90}, ok=False)
+    # The page's input (its label is "Name"), not Chromium's address bar.
+    r, _ = call("cu_wait", {"app": "CU Form", "role": "entry", "text": "Name", "timeout": 90}, ok=False)
     metrics["browser_a11y"] = not r["isError"]
     if not r["isError"]:
         entry = data(r)["match"]

@@ -60,22 +60,6 @@ pkgs.testers.runNixOSTest {
         raise
     print(machine.succeed("cat /run/panda-cu/ready; ls -la /run/panda-cu"))
 
-    with subtest("mcp.d entry, config, session ownership"):
-        entry = json.loads(machine.succeed("cat /etc/panda/mcp.d/panda-cu.json"))
-        assert entry["command"] == "panda-cu" and entry["args"] == ["mcp"], entry
-        cfg = json.loads(machine.succeed("cat /etc/panda/cu.json"))
-        assert cfg["mode"] == "headless" and (cfg["width"], cfg["height"]) == (1280, 800), cfg
-        assert sorted(cfg["apps"]) == ["browser", "buttons", "crasher", "editor", "files", "lab"], cfg["apps"]
-        assert cfg["allowClipboardRead"] is False, cfg
-        unit = machine.succeed("systemctl show panda-cu -p Slice,MemoryMax,TasksMax,ProtectHome,Restart")
-        print(unit)
-        assert "Slice=agents.slice" in unit and "Restart=always" in unit and "ProtectHome=yes" in unit, unit
-        bus = machine.succeed("ps -u agent -o args= | grep -o '/nix/store/[^ ]*panda-cu-bus.conf' | head -1").strip()
-        assert 'eavesdrop="true"' not in machine.succeed(f"cat {bus}"), "private bus allows eavesdropping"
-        assert machine.succeed("stat -c '%a %U' /run/panda-cu").split() == ["700", "agent"]
-        # Xwayland is off by default.
-        machine.fail("pgrep -x Xwayland")
-
     with subtest("another user cannot reach the session"):
         out = machine.fail("runuser -u other -- panda-cu call cu_screenshot 2>&1")
         print(out)
@@ -98,6 +82,22 @@ pkgs.testers.runNixOSTest {
     with subtest("hello.txt has the exact content"):
         assert machine.succeed("cat /var/lib/agent/hello.txt").rstrip("\n") == "Hello, panda-cu!"
         assert machine.succeed("stat -c %U /var/lib/agent/hello.txt").strip() == "agent"
+
+    with subtest("mcp.d entry, config, session ownership"):
+        entry = json.loads(machine.succeed("cat /etc/panda/mcp.d/panda-cu.json"))
+        assert entry["command"] == "panda-cu" and entry["args"] == ["mcp"], entry
+        cfg = json.loads(machine.succeed("cat /etc/panda/cu.json"))
+        assert cfg["mode"] == "headless" and (cfg["width"], cfg["height"]) == (1280, 800), cfg
+        assert sorted(cfg["apps"]) == ["browser", "buttons", "crasher", "editor", "files", "lab"], cfg["apps"]
+        assert cfg["allowClipboardRead"] is False, cfg
+        unit = machine.succeed("systemctl show panda-cu -p Slice,MemoryMax,TasksMax,ProtectHome,Restart")
+        print(unit)
+        assert "Slice=agents.slice" in unit and "Restart=always" in unit and "ProtectHome=yes" in unit, unit
+        bus = machine.succeed("ps -u agent -o args= | grep -o '/nix/store/[^ ]*panda-cu-bus.conf' | head -1").strip()
+        assert 'eavesdrop="true"' not in machine.succeed(f"cat {bus}"), "private bus allows eavesdropping"
+        assert machine.succeed("stat -c '%a %U' /run/panda-cu").split() == ["700", "agent"]
+        # Xwayland is off by default.
+        machine.fail("pgrep -x Xwayland")
 
     with subtest("a failing session helper restarts the whole session"):
         pid = machine.succeed("systemctl show -p MainPID --value panda-cu").strip()

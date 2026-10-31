@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"time"
 )
@@ -15,8 +16,8 @@ import (
 // atspiHelper is one long-lived `panda-cu-atspi` process, spoken to in
 // JSON lines. Starting Python and loading the typelibs costs ~1 s, so it is
 // paid once per MCP session instead of once per call. A request that times
-// out kills the process; the next call starts a fresh one (element ids from
-// the old one then answer "unknown").
+// out kills the process; the next call starts a fresh one, whose ids carry
+// a new prefix, so ids from the old one answer "unknown".
 type atspiHelper struct {
 	mu    sync.Mutex
 	env   []string
@@ -24,11 +25,16 @@ type atspiHelper struct {
 	in    io.WriteCloser
 	lines chan []byte
 	seq   int
+	gen   int // helpers started so far
 }
 
 func (h *atspiHelper) start() error {
+	h.gen++
 	cmd := exec.Command("panda-cu-atspi")
 	cmd.Env = h.env
+	if h.gen > 1 { // ids of a restarted helper never collide with the old ones
+		cmd.Env = append(slices.Clone(h.env), fmt.Sprintf("PANDA_CU_ID_PREFIX=g%de", h.gen))
+	}
 	cmd.Stderr = os.Stderr
 	in, err := cmd.StdinPipe()
 	if err != nil {

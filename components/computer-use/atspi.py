@@ -17,8 +17,9 @@ toplevel window; replies carry "windows": {id: window element}.
 
 find uses the AT-SPI Collection API (one GetMatches call per window) where
 the toolkit has it (GTK 3, Firefox, Chromium via ATK), else a tree walk.
-The libatspi cache is off: each answer is read from the app, never stale.
+The libatspi cache is dropped before each request: answers are never stale.
 """
+import faulthandler
 import json
 import os
 import sys
@@ -64,8 +65,8 @@ class Ids:
     the key. ponytail: forgets everything past 100k objects (old ids then
     answer "unknown"); age out entries if that ever bites."""
 
-    def __init__(self):
-        self.obj, self.id, self.n = {}, {}, 0
+    def __init__(self, prefix):
+        self.obj, self.id, self.n, self.prefix = {}, {}, 0, prefix
 
     def of(self, acc):
         i = self.id.get(acc)
@@ -74,7 +75,7 @@ class Ids:
                 self.obj.clear()
                 self.id.clear()
             self.n += 1
-            i = f"e{self.n}"
+            i = f"{self.prefix}{self.n}"
             self.obj[i], self.id[acc] = acc, i
         return i
 
@@ -85,7 +86,15 @@ class Ids:
         return acc
 
 
-IDS = Ids()
+# panda-cu numbers its helpers, so ids from a helper that was restarted
+# ("e12") can never name an element of the next one ("g2e12").
+IDS = Ids(os.environ.get("PANDA_CU_ID_PREFIX", "e"))
+
+
+def action_name(ai, i):
+    if hasattr(Atspi.Action, "get_name"):  # get_action_name is deprecated
+        return Atspi.Action.get_name(ai, i)
+    return ai.get_action_name(i)
 
 
 def role_of(acc):
@@ -115,7 +124,7 @@ def describe(acc, win=None, depth=None):
         e["bbox"] = [r.x, r.y, r.width, r.height]
     act = acc.get_action_iface()
     if act is not None:
-        names = [act.get_action_name(i) for i in range(act.get_n_actions())]
+        names = [action_name(act, i) for i in range(act.get_n_actions())]
         if names:
             e["actions"] = names
     txt = acc.get_text_iface()
@@ -330,7 +339,7 @@ def act(a):
             raise RuntimeError("element has no editable text; focus it and use cu_type")
         return {"ok": True, "via": "set_text_contents"}
     ai = acc.get_action_iface()
-    names = [ai.get_action_name(i) for i in range(ai.get_n_actions())] if ai is not None else []
+    names = [action_name(ai, i) for i in range(ai.get_n_actions())] if ai is not None else []
     for want in PREFERRED.get(action, ()):
         if want in names:
             ai.do_action(names.index(want))
@@ -349,38 +358,36 @@ def handle(line):
     try:
         req = json.loads(line)
         res = CMDS[req["cmd"]](req)
-    except (LookupError, RuntimeError, GLib.Error, ValueError, TypeError, KeyError) as e:
+    except (LookupError, RuntimeError, GLib.Error, ValueError, TypeError) as e:
         res = {"error": getattr(e, "message", None) or str(e)}
+    except Exception as e:  # noqa: BLE001 - a bug answers, it does not hang the caller
+        res = {"error": f"panda-cu-atspi: {type(e).__name__}: {e}"}
     res["seq"] = req.get("seq")
     sys.stdout.write(json.dumps(res, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
 
 def main():
+    # No GLib main loop: dispatching libatspi's D-Bus events between requests
+    # hung the helper after a few calls (CI run 41214336785). Like the old
+    # one-shot helper, events are never dispatched; instead the cache is
+    # dropped before each request, so answers are always read fresh.
+    # ponytail: undispatched event signals stay queued in libdbus for the
+    # helper's lifetime; restart it per session if that memory ever shows.
+    faulthandler.enable()
     Atspi.init()
     Atspi.set_timeout(2000, 5000)
-    try:
-        Atspi.get_desktop(0).set_cache_mask(Atspi.Cache.NONE)
-    except (AttributeError, GLib.Error):
-        pass
-    loop, buf = GLib.MainLoop(), [b""]
-
-    # A GLib main loop, not a blocking read: libatspi's D-Bus connection is
-    # dispatched from it between requests, so its queue never piles up.
-    def on_stdin(fd, cond):
-        chunk = os.read(fd, 1 << 16)
-        if not chunk:
-            loop.quit()
-            return False
-        buf[0] += chunk
-        while b"\n" in buf[0]:
-            line, buf[0] = buf[0].split(b"\n", 1)
-            if line.strip():
-                handle(line)
-        return True
-
-    GLib.io_add_watch(sys.stdin.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, on_stdin)
-    loop.run()
+    desk = Atspi.get_desktop(0)
+    for line in sys.stdin.buffer:
+        if not line.strip():
+            continue
+        faulthandler.dump_traceback_later(8)  # a stuck request shows where
+        try:
+            desk.clear_cache()
+        except (AttributeError, GLib.Error):
+            pass
+        handle(line)
+        faulthandler.cancel_dump_traceback_later()
 
 
 if __name__ == "__main__":
