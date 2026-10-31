@@ -14,6 +14,9 @@ approve agent tasks on it.
 - **Shared memory.** `/mem` is a git-backed store with an episode log, so every agent learns from
   the last one.
 - **Wired for MCP.** Every MCP server on the box is synced into the agent CLIs you pick at first boot.
+- **Agents can use the desktop.** `panda-cu` gives them screenshots, mouse, keyboard and the
+  accessibility tree over MCP, on your session or a private headless one, and the desktop is tuned
+  for predictable screenshots. `bench/cubench` compares it with other desktops.
 - **Self-updating.** It updates itself every day and rolls back if an update breaks it.
 
 ## Measured numbers
@@ -27,7 +30,7 @@ is the median of 3 readings.
 |---|---|---|
 | Idle RAM, `free` used + shmem | 113 MB (with the optional agentd on) | 176 MB in a logged-in labwc session (165 MB at the greeter) |
 | Idle RAM, `MemTotal - MemAvailable` | 233 MB | 331 MB in session (320 MB at the greeter) |
-| Closure of the installed system (`nixosConfigurations`, incl. curated firmware) | 1.69 GB | 2.13 GB |
+| Closure of the installed system (`nixosConfigurations`, incl. curated firmware) | 1.69 GB | 2.17 GB |
 | ISO size (the desktop ISO also carries the headless system) | 855 MB | 975 MB |
 
 | Optional agentd job round trip (pair, then run `echo hi`) | |
@@ -141,9 +144,10 @@ There is no default password: you set one (and optionally an ssh key) during the
 | `components/checkpoint` | `panda-ckpt`: btrfs workspace checkpoints, forks, auto-checkpoints, MCP |
 | `components/sysmcp` | `panda-sys`: box status/ops MCP server |
 | `components/browser` | optional `panda-browser` (headless Chromium, CDP on localhost) |
-| `components/desktop` | labwc/waybar config, `panda-menu`, `panda-connect-status` |
+| `components/desktop` | labwc/waybar config, `panda-menu`, `panda-connect-status`, `panda-dnd` |
+| `components/computer-use` | `panda-cu`: computer use for agents (MCP, `panda-cu call`) |
 | `tests/` | NixOS VM tests and RAM/disk budgets |
-| `bench/` | metric collection |
+| `bench/` | metric collection, OS comparison, `cubench` computer-use benchmark |
 
 ## Docs
 
@@ -153,6 +157,7 @@ There is no default password: you set one (and optionally an ssh key) during the
 - [Agents: runtime, MCP registry, PandaCode Connect, memory, browser, agentd](docs/agents.md)
 - [Checkpoints](docs/checkpoints.md)
 - [Desktop](docs/desktop.md)
+- [Computer use and cubench](docs/computer-use.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Benchmarks](docs/benchmarks.md)
 - [Development](docs/development.md)

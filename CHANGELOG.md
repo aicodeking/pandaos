@@ -8,6 +8,22 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Added
 
+- **Computer use:** `panda-cu` (`services.panda-cu`, in `nixosModules.default`, off by default; on in
+  attach mode in the desktop profile, `mode = "headless"` for a private 1280x800 labwc session of the
+  `agent` user). An MCP server with 17 `cu_*` tools (screenshots with Set-of-Marks, pointer,
+  keyboard, AT-SPI tree/find/act/wait, windows, apps, clipboard), `panda-cu call` for scripts,
+  `packages.panda-cu`, the `panda-cu` VM test and agent tips in `/etc/panda/AGENTS.md`. See
+  [docs/computer-use.md](docs/computer-use.md).
+- **Desktop tuned for computer use:** no shadows or animations, centred focused windows, larger
+  titlebar buttons and a focus ring, flat pointer acceleration and 1:1 absolute pointers, fixed key
+  repeat, fontconfig hinting, the AT-SPI bus, Mousepad and PCManFM, `panda-dnd` (Super+N),
+  `panda-cu-busy` and `pandaos.desktop.autoLock`. `boot-desktop` checks them in the session.
+  Desktop closure 2133 to 2174 MB (budget 2391 MB, measured + 10%); idle session RAM 178 MB (was 176; attach mode
+  runs no service).
+- **cubench:** `bench/cubench` and the manual `cubench` workflow run 25 desktop tasks on PandaOS,
+  Ubuntu 24.04 GNOME and Debian 13 Xfce (Fedora 44 opt-in) under QEMU/KVM with Anthropic,
+  OpenAI-compatible or scripted agents. Without an API key the workflow runs `run --smoke`, a VM
+  plumbing check with a scripted agent. CI runs its unit tests and a dry run.
 - **OS comparison:** `bench/compare` and the `compare` workflow (manual and weekly) boot PandaOS headless
   and stock Ubuntu 24.04/26.04, Debian 13, Fedora 44 and Alpine 3.24 cloud images in identical QEMU/KVM VMs
   and measure idle RAM, processes, services, disk, image size and boot time; see `docs/comparison.md`.

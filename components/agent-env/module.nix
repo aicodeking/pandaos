@@ -21,6 +21,23 @@ let
   memEnabled = config.services.panda-mem.enable or false;
   ckptEnabled = config.services.panda-ckpt.enable or false;
   sysEnabled = config.services.panda-sys.enable or false;
+  cu = config.services.panda-cu or { enable = false; };
+  cuBrief = lib.optionalString cu.enable ''
+    - Computer use: the `panda-cu` MCP tools (`cu_screenshot`, `cu_click`,
+      `cu_type`, `cu_key`, `cu_tree`, `cu_find`, `cu_act`, `cu_wait`,
+      `cu_launch`, `cu_open`, `cu_windows`, ...), or `panda-cu call TOOL '{json}'`.
+      ${
+        if cu.mode == "headless" then
+          "They drive a private ${cu.resolution} desktop of your own."
+        else
+          "They drive the logged-in desktop session of the user who runs them."
+      }
+      Prefer `cu_find`/`cu_tree` + `cu_act` (the accessibility tree, no
+      pixels) over pixel clicks. When you must click, take
+      `cu_screenshot{marks:true}` and click a mark with `cu_click{element_id}`.
+      Call `cu_wait` after anything that opens a window or dialog, and pass
+      `screenshot:true` to an action to see its result in the same call.
+  '';
   # Not -1000: sshd sessions inherit it, so keep them killable when huge.
   protect = -500;
 
@@ -68,7 +85,7 @@ let
     - Box status: ${
       if sysEnabled then "the `panda-sys` MCP tools (status, services, logs, top, net, ports, updates)." else "`systemctl`, `journalctl`."
     }
-    - MCP servers on this box: ${lib.concatMapStringsSep ", " (n: "`${key n}`") (lib.attrNames cfg.mcpServers)}.
+    ${cuBrief}- MCP servers on this box: ${lib.concatMapStringsSep ", " (n: "`${key n}`") (lib.attrNames cfg.mcpServers)}.
       Run `panda-agents doctor` to check your setup.
 
     ## Limits
