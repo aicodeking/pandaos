@@ -2,7 +2,8 @@
 """Who wrote what: a fanotify watcher (run as root) and the checker for its log.
 
   audit.py watch ROOT LOG
-      Log every create / rename / close-after-write under ROOT, one line each:
+      Log every create / rename / close-after-write under ROOT (on ROOT's
+      filesystem; it must not be a btrfs subvolume), one line each:
       "<pid>\\t<comm>\\t<event>\\t<path>". Writes "ready" once the mark is set.
       The log lives outside the agent's reach (root-owned, /var/tmp).
   audit.py check LOG REGEX PATH...

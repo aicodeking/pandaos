@@ -8,3 +8,12 @@ gdm_autologin /etc/gdm/custom.conf
 gnome_defaults
 firefox_policies
 finish
+# ~/bench on ext4: fanotify's file-handle mode (the writer audit) refuses
+# btrfs subvolumes, and Fedora's root and /home are subvolumes.
+truncate -s 512M /var/lib/cubench-bench.img
+mkfs.ext4 -q -F /var/lib/cubench-bench.img
+install -d -o "$u" -g "$u" "$h/bench"
+echo "/var/lib/cubench-bench.img $h/bench ext4 loop,defaults,context=system_u:object_r:user_home_t:s0 0 0" >> /etc/fstab
+mount "$h/bench"
+rmdir "$h/bench/lost+found"
+chown "$u:" "$h/bench"

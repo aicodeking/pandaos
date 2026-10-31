@@ -138,8 +138,9 @@ export GNOME_ACCESSIBILITY=1 QT_ACCESSIBILITY=1
 {apps}launch() {{ local r=$1 c; shift; eval "c=\\$APP_$r"; setsid -f $c "$@" >/dev/null 2>&1 </dev/null; sleep "${{LAUNCH_WAIT:-5}}"; }}
 AUDIT_LOG=/var/tmp/cubench-audit.log
 audit_start() {{
-  sudo -n setsid -f python3 "$A/audit.py" watch "$HOME" "$AUDIT_LOG" </dev/null >/dev/null 2>&1
-  for _ in $(seq 50); do grep -q ready "$AUDIT_LOG" 2>/dev/null && return 0; sleep 0.2; done; echo "audit watcher did not start" >&2; return 1
+  sudo -n setsid -f python3 "$A/audit.py" watch "$B" "$AUDIT_LOG" </dev/null >/dev/null 2>/var/tmp/cubench-audit.err
+  for _ in $(seq 50); do grep -q ready "$AUDIT_LOG" 2>/dev/null && return 0; sleep 0.2; done
+  echo "audit watcher did not start: $(tail -n 3 /var/tmp/cubench-audit.err 2>/dev/null)" >&2; return 1
 }}
 audit() {{ local rx; eval "rx=\\$PROCS_$1"; shift; sleep 1; python3 "$A/audit.py" check "$AUDIT_LOG" "$rx" "$@"; }}
 serve_form() {{
