@@ -231,5 +231,31 @@ panda column; 35 tasks; 3 repeats; that is 21 jobs and 735 attempts):
 
 ## Status
 
-See the validation table in the latest `cubench` workflow run (validate
-mode). No model run yet: that needs an API key secret.
+- **Validate** (no API key, runs 41218654266 and 41222513354, the latter at
+  the current tasks): on `pandaos-desktop`,
+  `ubuntu-24.04-gnome` and `debian-13-xfce`, all 36 checks (35 tasks plus
+  the input probe) behave as required on each OS. The null agent's fail-rate
+  is 36/36 and the oracle's pass-rate is 36/36. The atspi tools found the
+  editor's window on all three. On PandaOS, `panda-cu call` worked, and the
+  panda column's `panda-cu mcp` session listed 17 tools and answered a call.
+  Snapshots took 5-9 s; each restore takes a few seconds.
+- **Fedora 44 (opt-in): not validated.**
+  - The first run's writer-audit watcher could not start. fanotify's
+    file-handle mode refuses btrfs subvolumes, and Fedora's root and /home
+    are subvolumes. `~/bench` is now an ext4 loop mount; this is unverified.
+  - GNOME 50 does not focus windows started over ssh, so in that run the
+    keyboard oracles and the first click went nowhere. An agent there would
+    have to click a window first.
+- **Bugs that validation found and fixed:**
+  - QMP `send-key` queues its releases on virtual-clock timers. After
+    `loadvm` that queue stalled and every later key was lost, so keys now go
+    through `input-send-event`.
+  - File choosers preselect only the stem of the file name, which produced
+    `.txt.txt` files.
+  - Nautilus's view has no keyboard focus when it opens.
+  - PCManFM opens a second folder as a tab, not a window.
+  - NixOS wrapper names (`.mousepad-wrapped`) appear as the writing process.
+  - panda-cu's AT-SPI helper is now long-lived and its element ids live per
+    process. The atspi relay and the panda column's `panda-cu mcp` session
+    both account for this.
+- No model has been run yet: that needs an API key secret.
