@@ -352,6 +352,27 @@ class DryRun(unittest.TestCase):
             subprocess.run(["pkill", "-f", tool + " serve"])
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_mcp_session(self):
+        fake = ("import json, sys\n"
+                "for line in sys.stdin:\n    m = json.loads(line)\n    if 'id' not in m: continue\n"
+                "    print(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/x'}), flush=True)\n"
+                "    if m['method'] == 'tools/list': r = {'tools': [{'name': 'cu_find', 'inputSchema': {'type': 'object'}}]}\n"
+                "    elif m['method'] == 'tools/call' and m['params']['name'] == 'cu_fail': r = {'isError': True, 'content': [{'type': 'text', 'text': 'nope'}]}\n"
+                "    elif m['method'] == 'tools/call': r = {'content': [{'type': 'text', 'text': json.dumps(m['params'])}, {'type': 'image', 'data': 'iVBORw==', 'mimeType': 'image/png'}]}\n"
+                "    else: r = {}\n"
+                "    print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': r}), flush=True)\n")
+        mcp = agent.MCPSession([sys.executable, "-c", fake], timeout=10)
+        try:
+            self.assertEqual([n for n, _, _ in mcp.tools()], ["cu_find"])
+            env = agent.Env(None, None, tempfile.mkdtemp(), "panda", mcp)
+            text, png = env.panda("cu_find", {"text": "Save"})
+            self.assertEqual(json.loads(text), {"name": "cu_find", "arguments": {"text": "Save"}})
+            self.assertTrue(png.startswith(b"\x89PNG"))
+            with self.assertRaises(RuntimeError):
+                env.panda("cu_fail", {})
+        finally:
+            mcp.close()
+
     def test_audit_and_token_checkers(self):
         d = tempfile.mkdtemp()
         log = os.path.join(d, "audit.log")

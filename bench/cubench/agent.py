@@ -370,6 +370,72 @@ def cost_usd(model, usage, price=None):
                   + usage.get("cache_write", 0) * pw + usage.get("cache_read", 0) * pr) / 1e6, 4)
 
 
+# -- panda-cu over MCP stdio ---------------------------------------------------------
+class MCPSession:
+    """One `panda-cu mcp` process (JSON-RPC lines on stdio) for a whole attempt:
+    panda-cu's element ids live as long as its process, so a cu_find id is still
+    valid in the next cu_act (each `panda-cu call` would be a new process)."""
+
+    def __init__(self, argv, timeout=120):
+        import subprocess
+        import queue
+        import threading
+        self.timeout, self.n, self.lines = timeout, 0, queue.Queue()
+        self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
+        def pump():  # a thread, because select() cannot see lines already in Python's buffer
+            for line in self.proc.stdout:
+                self.lines.put(line)
+            self.lines.put(None)
+        threading.Thread(target=pump, daemon=True).start()
+        self._req("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                 "clientInfo": {"name": "cubench", "version": "1"}})
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def _send(self, msg):
+        self.proc.stdin.write(json.dumps(msg) + "\n")
+        self.proc.stdin.flush()
+
+    def _req(self, method, params):
+        import queue
+        self.n += 1
+        self._send({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params})
+        end = time.monotonic() + self.timeout
+        while True:
+            try:
+                line = self.lines.get(timeout=max(0.0, end - time.monotonic()))
+            except queue.Empty:
+                raise TimeoutError(f"panda-cu mcp: no reply to {method} in {self.timeout} s") from None
+            if line is None:
+                raise RuntimeError("panda-cu mcp exited")
+            msg = json.loads(line)
+            if msg.get("id") == self.n:
+                if "error" in msg:
+                    raise RuntimeError(f"panda-cu mcp {method}: {msg['error'].get('message', msg['error'])}")
+                return msg.get("result", {})
+
+    def tools(self):
+        return [(t["name"], t.get("description", ""), t.get("inputSchema") or {"type": "object"})
+                for t in self._req("tools/list", {}).get("tools", [])]
+
+    def call(self, name, args):
+        r = self._req("tools/call", {"name": name, "arguments": args})
+        texts = [c.get("text", "") for c in r.get("content", []) if c.get("type") == "text"]
+        imgs = [c["data"] for c in r.get("content", []) if c.get("type") == "image" and c.get("data")]
+        if r.get("isError"):
+            raise RuntimeError("\n".join(texts)[:2000] or f"{name} failed")
+        return "\n".join(texts)[:MAX_TOOL_TEXT], (base64.b64decode(imgs[0]) if imgs else None)
+
+    def close(self):
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(5)
+            except Exception:  # noqa: BLE001
+                self.proc.kill()
+
+
 # -- environment -------------------------------------------------------------------
 class Env:
     """What the tools act on: a QMP connection plus a shell inside the guest session.
@@ -379,8 +445,8 @@ class Env:
 
     CU = {"panda": "panda-cu call", "atspi": 'python3 "$A/cu_atspi.py"'}
 
-    def __init__(self, qmp, shell, shot_dir, mode="generic"):
-        self.qmp, self.shell, self.dir, self.n = qmp, shell, shot_dir, 0
+    def __init__(self, qmp, shell, shot_dir, mode="generic", mcp=None):
+        self.qmp, self.shell, self.dir, self.n, self.mcp = qmp, shell, shot_dir, 0, mcp
         self.cu_cmd = self.CU.get(mode, "panda-cu call")
         os.makedirs(shot_dir, exist_ok=True)
 
@@ -413,6 +479,8 @@ class Env:
         return "ok"
 
     def panda(self, name, args):
+        if self.mcp is not None:  # the panda column: one panda-cu mcp per attempt
+            return self.mcp.call(name, args)
         rc, out, err = self.shell(f"{self.cu_cmd} {shlex.quote(name)} {shlex.quote(json.dumps(args))}", 120)
         if rc != 0:
             raise RuntimeError(f"{name} exited {rc}: {(err or out).strip()[:2000]}")

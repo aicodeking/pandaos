@@ -43,6 +43,7 @@ let
         # The panda column drives this visible autologin session (attach), not
         # panda-cu's private headless desktop (the profile's default).
         services.panda-cu.mode = "attach";
+        services.panda-cu.allowClipboardRead = true; # the panda column may use cu_clipboard_get
         services.panda-cu.browser = pkgs.firefox;
         users.users.panda.openssh.authorizedKeys.keys = [ pubkey ];
         security.sudo.extraRules = [

@@ -67,7 +67,7 @@ manager, terminal and browser versions the guest reports.
 |---|---|---|---|
 | `generic` | the QMP tools above | every OS | **generic**: the headline |
 | `atspi` | generic + `cu_tree`, `cu_find`, `cu_act` with panda-cu's exact schemas, run by `tasks/assets/cu_atspi.py` on panda-cu's own AT-SPI walker (`panda-cu-atspi` on PandaOS, a copy of `components/computer-use/atspi.py` elsewhere) | every OS | a11y |
-| `panda` | generic + every panda-cu tool, schemas loaded from `panda-cu tools` at run start (retried after each reset if that fails; the result records `pandaToolsSource`) | PandaOS | a11y |
+| `panda` | generic + every panda-cu tool, schemas loaded from `panda-cu tools` at run start (retried after each reset if that fails; the result records `pandaToolsSource`). Calls go through one `panda-cu mcp` session per attempt over ssh, because panda-cu's element ids live as long as its process | PandaOS (`services.panda-cu.mode = "attach"` in the bench image) | a11y |
 
 The report has one table per class, and its paired differences never cross
 classes. The like-for-like accessibility comparison is atspi against atspi. A
@@ -76,9 +76,11 @@ On keyboard-only tasks the mouse tools, `cu_click`, `cu_drag`, `cu_move`,
 `cu_scroll` and `cu_act`'s click/press actions are removed, and cu_act
 click/press calls are also refused at run time.
 
-panda-cu contract: `panda-cu call <tool> '<json-args>'` prints one JSON value
-and exits 0, or exits non-zero with the error on stderr. `png_base64` in a
-result is forwarded to the model as an image.
+panda-cu contract: `panda-cu mcp` (MCP over stdio) for the panda column;
+`panda-cu call <tool> '<json-args>'` (one JSON value, exit 0, or non-zero
+with the error on stderr) for probes. Images come back to the model as image
+blocks. The atspi column's `cu_atspi.py` keeps one panda-cu-atspi helper per
+session too (a small relay on a unix socket), for the same reason.
 
 ## Tasks and how the method is enforced
 

@@ -292,6 +292,13 @@ def load_panda_tools(sh):
         return None, f"panda-cu tools: {e}"
 
 
+def mcp_argv(vm):
+    """ssh into the guest session and run `panda-cu mcp` there (same options as vm.ssh)."""
+    return ["ssh", "-i", vm.key, "-p", str(vm.port), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=3", "-o", "LogLevel=ERROR",
+            f"{vm.user}@127.0.0.1", 'bash -c \'. "$HOME/.cubench/prelude.sh" && exec panda-cu mcp\'']
+
+
 def run_trial(sh, q, p, task, rep, args, tdir, state):
     os.makedirs(tdir, exist_ok=True)
     trial = {"os": p["name"], "tools": args.tools, "task": task["id"], "repeat": rep,
@@ -313,8 +320,18 @@ def run_trial(sh, q, p, task, rep, args, tdir, state):
     specs = agent.tool_specs(args.tools, task.get("tools_exclude", ()), state.get("panda_specs"))
     model = agent.make_model(args.provider, args.model, specs, seed=args.seed, effort=args.effort,
                              script=task.get("script"))
-    env = agent.Env(q, sh, tdir, args.tools)
-    rec = agent.run_episode(model, env, task, p, args.tools, os.path.join(tdir, "transcript.jsonl"), specs)
+    mcp = None
+    if args.tools == "panda" and state.get("vm") is not None:
+        try:
+            mcp = agent.MCPSession(mcp_argv(state["vm"]))
+        except Exception as e:  # noqa: BLE001 - recorded; cu_* calls then fall back to `panda-cu call`
+            trial["mcpError"] = f"{type(e).__name__}: {e}"
+    env = agent.Env(q, sh, tdir, args.tools, mcp)
+    try:
+        rec = agent.run_episode(model, env, task, p, args.tools, os.path.join(tdir, "transcript.jsonl"), specs)
+    finally:
+        if mcp:
+            mcp.close()
     rc, out, err = sh(task["verify"], timeout=90)
     passed = rc == 0 and not rec["error"]
     usage = rec.pop("usage")
@@ -363,6 +380,9 @@ def boot_desktop(p, base, args, idx):
     rc, _, err = sh(f'mkdir -p "$A" && echo {assets_tarball_b64()} | base64 -d | tar -xzf - -C "$A"')
     if rc:
         raise RuntimeError(f"asset upload failed: {err}")
+    rc, _, err = sh(f'cat > "$A/prelude.sh" <<"CUBENCH_EOF"\n{prelude(p)}\nCUBENCH_EOF')
+    if rc:
+        raise RuntimeError(f"prelude upload failed: {err}")
     for line in p.get("session_setup", []):
         sh(line)
     time.sleep(SETTLE_S)
@@ -406,6 +426,7 @@ def run_os(name, args, idx, tasks):
     state = {}
     try:
         vm, fake, sh, q, info = start_os(p, args, idx, label)
+        state["vm"] = vm
         if args.tools == "panda" and not args.dry_run:
             state["panda_specs"], state["panda_err"] = load_panda_tools(sh)
             if args.smoke:
@@ -449,6 +470,20 @@ def panda_cu_probe(sh):
     if rc != 0 or not lines:
         return {"ok": False, "error": f"exit {rc}: {(err or out)[-800:]}"}
     return {"ok": True, "windows": lines[0][:800], "screenshot": lines[-1]}
+
+
+def panda_mcp_probe(vm):
+    """The panda column's transport: `panda-cu mcp` over ssh lists its tools and answers a call."""
+    try:
+        mcp = agent.MCPSession(mcp_argv(vm), timeout=60)
+        try:
+            names = [n for n, _, _ in mcp.tools()]
+            text, _ = mcp.call("cu_windows", {})
+            return {"ok": bool(names), "tools": names, "cu_windows": text[:300]}
+        finally:
+            mcp.close()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 def smoke_failures(info, trials, smoke_ids):
@@ -639,6 +674,7 @@ def cmd_validate(args):
                 info["atspi"] = atspi_probe(sh, q, args)
                 if name == "pandaos-desktop":
                     info["pandaCu"] = panda_cu_probe(sh)
+                    info["pandaMcp"] = panda_mcp_probe(vm)
             for task in tasks:
                 row = validate_task(sh, q, p, task, args, subs, tdir)
                 log(f"{name}: {task['id']}: null {'FAIL ok' if row['nullFailed'] else 'PASSED (bad)'}, "
