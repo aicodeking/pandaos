@@ -88,7 +88,11 @@ func (t *tailBuf) String() string {
 func startApp(app string, argv, env []string, errOut io.Writer, setsid bool) (int, <-chan appExit, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = env
-	cmd.Dir = os.Getenv("HOME")
+	if home := os.Getenv("HOME"); home != "" {
+		if fi, err := os.Stat(home); err == nil && fi.IsDir() {
+			cmd.Dir = home
+		}
+	}
 	tail := &tailBuf{max: 1500}
 	cmd.Stderr = tail
 	if errOut != nil {
