@@ -39,6 +39,26 @@
     [
       "sh",
       "cp \"$B/new-version.txt\" \"$B/out.txt\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tmousepad\\tclose_write\\t$B/out.txt\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tgnome-text-edit\\tclose_write\\t$B/out.txt\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tpcmanfm\\tclose_write\\t$B/out.txt\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tnautilus\\tclose_write\\t$B/out.txt\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tthunar\\tclose_write\\t$B/out.txt\\n\" >> \"$AUDIT_LOG\""
     ]
   ]
 }

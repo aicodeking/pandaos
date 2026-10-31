@@ -71,7 +71,18 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 UNIT
-  systemctl enable cubench-audit.service
+  cat > /etc/systemd/system/cubench-form.service <<UNIT
+[Unit]
+Description=cubench form server (127.0.0.1:8000)
+After=network.target
+[Service]
+ExecStartPre=/bin/rm -f /var/tmp/cubench-form.log
+ExecStart=/usr/bin/python3 /usr/local/lib/cubench/formserver.py /usr/local/lib/cubench/www /var/tmp/cubench-form.log
+Restart=always
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl enable cubench-audit.service cubench-form.service
   # The agent drives this user, so it gets no sudo from here on: the harness
   # needs none after prepare. Later boots only take the run's ssh key from
   # cloud-init (no users-groups module, which would restore the sudo rule).

@@ -7,7 +7,7 @@
     "serve_form",
     "LAUNCH_WAIT=12 launch browser --kiosk http://127.0.0.1:8000/small.html"
   ],
-  "verify": "grep -qxF 'checked=7,23,31|ev=send|ua=firefox' \"$B/form.log\"",
+  "verify": "grep -qxF 'checked=7,23,31|ev=send|ua=firefox' \"$FORM_LOG\"",
   "oracle": [
     [
       "click",
@@ -45,6 +45,10 @@
     [
       "sh",
       "python3 \"$A/cheatpost.py\" ev=send checked=7,23,31"
+    ],
+    [
+      "sh_try",
+      "printf '%s\\n' 'checked=7,23,31|ev=send|ua=firefox' >> \"$FORM_LOG\""
     ]
   ]
 }

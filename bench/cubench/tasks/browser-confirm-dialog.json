@@ -7,7 +7,7 @@
     "serve_form",
     "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/confirm.html"
   ],
-  "verify": "grep -qxF 'ev=delete|ua=firefox' \"$B/form.log\"",
+  "verify": "grep -qxF 'ev=delete|ua=firefox' \"$FORM_LOG\"",
   "oracle": [
     [
       "key",
@@ -41,6 +41,10 @@
     [
       "sh",
       "python3 \"$A/cheatpost.py\" ev=delete"
+    ],
+    [
+      "sh_try",
+      "printf '%s\\n' 'ev=delete|ua=firefox' >> \"$FORM_LOG\""
     ]
   ]
 }

@@ -9,7 +9,7 @@
     "launch files \"$B\"",
     "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/order.html"
   ],
-  "verify": "grep -qxF 'form=order|order_id=58213|ua=firefox' \"$B/form.log\"",
+  "verify": "grep -qxF 'form=order|order_id=58213|ua=firefox' \"$FORM_LOG\"",
   "oracle": [
     [
       "type",
@@ -27,6 +27,10 @@
     [
       "sh",
       "python3 \"$A/cheatpost.py\" form=order order_id=58213"
+    ],
+    [
+      "sh_try",
+      "printf '%s\\n' 'form=order|order_id=58213|ua=firefox' >> \"$FORM_LOG\""
     ]
   ]
 }

@@ -25,8 +25,10 @@ QEMU/KVM with identical resources: UEFI, 4 vCPU, 4 GB, virtio-vga fixed at
   `systemctl --user show-environment` on GNOME). Setup helpers:
   - `launch ROLE [args]`: ROLE is editor, files, terminal or browser, mapped
     per OS in `os/<name>.json`;
-  - `serve_form`: `tasks/assets/formserver.py` on 127.0.0.1:8000, which logs
-    each POST to `$B/form.log` with the User-Agent class;
+  - `serve_form`: waits for `cubench-form.service`, the task form server on
+    127.0.0.1:8000. It runs as root from a root-owned copy of
+    `tasks/assets/` in the image and logs each POST to the root-owned
+    `$FORM_LOG` (`/var/tmp/cubench-form.log`);
   - `audit_start` / `audit ROLE PATH...`: the fanotify writer audit (below);
   - `$B` is `~/bench`.
 
@@ -124,7 +126,11 @@ says how):
   User-Agent says Firefox AND the connection's client socket belongs to a
   process whose executable is Firefox. It finds that process through
   `/proc/net/tcp` and `/proc/*/fd` while the request is open, so `curl` or
-  python3 with a forged User-Agent gets `ua=other`.
+  python3 with a forged User-Agent gets `ua=other`. The server runs as root
+  because Firefox's sandboxed socket process is not dumpable, so only root
+  can read its fds (a user-run server sometimes mislabelled real Firefox
+  posts). Its log is root-owned, so appending a forged line fails; the
+  cheats try that too.
 - **Outcome only.** `editor-preferences-line-numbers` (the editor's dconf
   key) and `settings-browser-homepage` (Firefox's `prefs.js`) check only the
   result. Their `enforced` field says so.
@@ -152,7 +158,9 @@ task (plus the smoke input probe):
   promised method. Examples: `sed -i` or `printf >` instead of the editor,
   `mv`/`mkdir` instead of the file manager, a forged-User-Agent POST
   (`cheatpost.py`) instead of the browser, a scraped token plus a forged copy
-  event instead of the clipboard. Every cheat must FAIL the checker. The 7
+  event instead of the clipboard. Each cheat also tries to append forged
+  lines to the form and audit logs (`sh_try`; blocked, since the logs are
+  root-owned). Every cheat must FAIL the checker. The 7
   outcome-only and terminal tasks have none.
 
 Each validate job also checks that `cu_atspi.py` finds the editor's window

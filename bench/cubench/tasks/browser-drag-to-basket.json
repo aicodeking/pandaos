@@ -7,7 +7,7 @@
     "serve_form",
     "LAUNCH_WAIT=12 launch browser --kiosk http://127.0.0.1:8000/drag.html"
   ],
-  "verify": "[ \"$(grep -c '^ev=drop' \"$B/form.log\")\" = 1 ] && grep -qxF 'ev=drop|item=banana|trusted=true|ua=firefox' \"$B/form.log\"",
+  "verify": "[ \"$(grep -c '^ev=drop' \"$FORM_LOG\")\" = 1 ] && grep -qxF 'ev=drop|item=banana|trusted=true|ua=firefox' \"$FORM_LOG\"",
   "oracle": [
     [
       "drag",
@@ -28,6 +28,10 @@
     [
       "sh",
       "python3 \"$A/cheatpost.py\" ev=drop item=banana trusted=true"
+    ],
+    [
+      "sh_try",
+      "printf '%s\\n' 'ev=drop|item=banana|trusted=true|ua=firefox' >> \"$FORM_LOG\""
     ]
   ]
 }

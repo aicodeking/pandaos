@@ -39,6 +39,26 @@
     [
       "sh",
       "cp \"$B/config.ini\" \"$B/config.ini.bak\" && sed -i s/port=8080/port=9090/ \"$B/config.ini\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tmousepad\\tclose_write\\t$B/config.ini\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tgnome-text-edit\\tclose_write\\t$B/config.ini\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tpcmanfm\\tclose_write\\t$B/config.ini\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tnautilus\\tclose_write\\t$B/config.ini\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tthunar\\tclose_write\\t$B/config.ini\\n\" >> \"$AUDIT_LOG\""
     ]
   ]
 }

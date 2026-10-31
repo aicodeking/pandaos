@@ -10,8 +10,8 @@
 #   - autologin of `panda` into the labwc session, no idle lock;
 #   - Firefox with the same policies as the other OSes, also set as
 #     panda-cu's browser; python3 for the task form server;
-#   - the fanotify writer audit as a root service (cubench-audit) watching
-#     ~/bench, its log root-owned in /var/tmp; `panda` (the user the agent
+#   - the fanotify writer audit (cubench-audit) and the task form server
+#     (cubench-form) as root services, their logs root-owned in /var/tmp; `panda` (the user the agent
 #     drives) keeps no sudo: no password is set, so wheel cannot sudo;
 #   - ext4 root + ESP disk layout, wizard off, ssh key for `panda`, as in compare.
 { flake, pubkey ? builtins.getEnv "BENCH_SSH_PUBKEY", system ? "x86_64-linux" }:
@@ -47,6 +47,16 @@ let
         services.panda-cu.browser = pkgs.firefox;
         users.users.panda.openssh.authorizedKeys.keys = [ pubkey ];
         systemd.tmpfiles.rules = [ "d /home/panda/bench 0755 panda users -" ];
+        systemd.services.cubench-form = {
+          description = "cubench form server (127.0.0.1:8000)";
+          wantedBy = [ "multi-user.target" ];
+          after = [ "network.target" ];
+          serviceConfig = {
+            ExecStartPre = "${pkgs.coreutils}/bin/rm -f /var/tmp/cubench-form.log";
+            ExecStart = "${pkgs.python3}/bin/python3 ${./tasks/assets/formserver.py} ${./tasks/assets/www} /var/tmp/cubench-form.log";
+            Restart = "always";
+          };
+        };
         systemd.services.cubench-audit = {
           description = "cubench writer audit (fanotify)";
           wantedBy = [ "multi-user.target" ];

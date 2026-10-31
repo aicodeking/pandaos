@@ -68,10 +68,11 @@ class Tasks(unittest.TestCase):
                 self.assertIn("enforced", t, f"{t['id']} promises a method but does not say how it is enforced")
             if t.get("enforced") and not t["enforced"].startswith("outcome only"):
                 self.assertTrue(t.get("cheat"), f"{t['id']} enforces a method but has no cheat to prove it")
-                self.assertTrue(all(st[0] == "sh" for st in t["cheat"]), t["id"])
+                self.assertTrue(all(st[0] in ("sh", "sh_try") for st in t["cheat"]), t["id"])
+                self.assertEqual(t["cheat"][0][0], "sh", t["id"])  # the main cheat must run cleanly
 
     def test_oracle_steps_are_well_formed(self):
-        ops = {"sh", "key", "type", "wait", "click", "rclick", "dclick", "drag", "a11y", "os_click", "save_as"}
+        ops = {"sh", "key", "type", "wait", "click", "rclick", "dclick", "drag", "a11y", "os_click", "save_as", "sh_try"}
         for name in OS_NAMES:
             p = cubench.load_os(name)
             subs = {"{%s}" % k: v for k, v in p["keys"].items()} | {"{HOME}": "/home/u", "{HOSTNAME}": "h"}
@@ -112,7 +113,7 @@ class Tasks(unittest.TestCase):
         for name in OS_NAMES:
             p = cubench.load_os(name)
             for t in tasks:
-                shs = [st[1] for st in cubench.oracle_steps(t, name) + t.get("cheat", []) if st[0] == "sh"]
+                shs = [st[1] for st in cubench.oracle_steps(t, name) + t.get("cheat", []) if st[0] in ("sh", "sh_try")]
                 script = cubench.prelude(p) + "\n".join(t["setup"] + shs) + "\n" + t["verify"]
                 r = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
                 self.assertEqual(r.returncode, 0, f"{name}/{t['id']}: {r.stderr}")

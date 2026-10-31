@@ -7,7 +7,7 @@
     "serve_form",
     "LAUNCH_WAIT=12 launch browser --kiosk http://127.0.0.1:8000/longlist.html"
   ],
-  "verify": "[ \"$(grep -c '^ev=pick' \"$B/form.log\")\" = 1 ] && grep -qxF 'ev=pick|row=437|ua=firefox' \"$B/form.log\"",
+  "verify": "[ \"$(grep -c '^ev=pick' \"$FORM_LOG\")\" = 1 ] && grep -qxF 'ev=pick|row=437|ua=firefox' \"$FORM_LOG\"",
   "oracle": [
     [
       "key",
@@ -30,6 +30,10 @@
     [
       "sh",
       "python3 \"$A/cheatpost.py\" ev=pick row=437"
+    ],
+    [
+      "sh_try",
+      "printf '%s\\n' 'ev=pick|row=437|ua=firefox' >> \"$FORM_LOG\""
     ]
   ]
 }

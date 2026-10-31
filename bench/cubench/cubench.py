@@ -141,9 +141,13 @@ AUDIT_LOG=/var/tmp/cubench-audit.log
 # the session user has no sudo and cannot touch it or its log.
 audit_start() {{ grep -q ready "$AUDIT_LOG" 2>/dev/null || {{ echo "cubench-audit.service is not running" >&2; return 1; }}; }}
 audit() {{ local rx; eval "rx=\\$PROCS_$1"; shift; sleep 1; python3 "$A/audit.py" check "$AUDIT_LOG" "$rx" "$@"; }}
+# The form server is a root service in the image too (cubench-form.service):
+# only root can see which process owns a client socket (Firefox's socket
+# process is not dumpable), and its log is root-owned, so nobody appends to it.
+FORM_LOG=/var/tmp/cubench-form.log
 serve_form() {{
-  setsid -f python3 "$A/formserver.py" "$A/www" "$B/form.log" >/dev/null 2>&1 </dev/null
-  for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/8000) 2>/dev/null && return 0; sleep 0.2; done; return 1
+  for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/8000) 2>/dev/null && return 0; sleep 0.2; done
+  echo "cubench-form.service is not answering" >&2; return 1
 }}
 """
 
@@ -230,7 +234,9 @@ def prepare(args):
         wait_cloud_init(vm)
         with open(os.path.join(HERE, "tasks", "assets", "audit.py")) as f:
             script = ("install -d /usr/local/lib/cubench\n"
-                      "cat > /usr/local/lib/cubench/audit.py <<'CUBENCH_AUDIT_EOF'\n" + f.read() + "CUBENCH_AUDIT_EOF\n")
+                      "cat > /usr/local/lib/cubench/audit.py <<'CUBENCH_AUDIT_EOF'\n" + f.read() + "CUBENCH_AUDIT_EOF\n"
+                      f"echo {assets_tarball_b64()} | base64 -d | tar -xzf - -C /usr/local/lib/cubench\n"
+                      "chown -R root:root /usr/local/lib/cubench\n")
         for part in ("common.sh", p["name"] + ".prepare.sh"):
             with open(os.path.join(HERE, "os", part)) as f:
                 script += f.read() + "\n"
@@ -600,6 +606,8 @@ def run_oracle(steps, env, sh, subs, shot_dir, points=None):
                 env.act(op, a[0])  # smoke scripts: generic tool calls
         elif op.startswith("cu_"):
             pass  # panda-only probe steps of smoke scripts
+        elif op == "sh_try":
+            sh(a[0], 60)
         elif op == "sh":
             rc, out, err = sh(a[0], 180)
             if rc != 0:
@@ -665,7 +673,7 @@ def validate_task(sh, q, p, task, args, subs, tdir):
             if kind == "oracle":
                 row["oraclePassed"] = rc == 0
                 if rc != 0:  # what the checker saw, for diagnosis
-                    row["oracleDebug"] = sh('tail -n 6 "$B/form.log" 2>/dev/null; tail -n 6 "$AUDIT_LOG" 2>/dev/null', 30)[1][-800:]
+                    row["oracleDebug"] = sh('tail -n 6 "$FORM_LOG" 2>/dev/null; tail -n 6 "$AUDIT_LOG" 2>/dev/null', 30)[1][-800:]
             else:
                 row[f"{kind}Failed"] = rc != 0
         except Exception as e:

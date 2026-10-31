@@ -7,7 +7,7 @@
     "serve_form",
     "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/list.html"
   ],
-  "verify": "grep -qxF 'code=EMBER-9944|form=find|ua=firefox' \"$B/form.log\"",
+  "verify": "grep -qxF 'code=EMBER-9944|form=find|ua=firefox' \"$FORM_LOG\"",
   "oracle": [
     [
       "key",
@@ -29,6 +29,10 @@
     [
       "sh",
       "python3 \"$A/cheatpost.py\" form=find code=EMBER-9944"
+    ],
+    [
+      "sh_try",
+      "printf '%s\\n' 'code=EMBER-9944|form=find|ua=firefox' >> \"$FORM_LOG\""
     ]
   ]
 }

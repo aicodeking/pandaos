@@ -7,7 +7,7 @@
     "serve_form",
     "LAUNCH_WAIT=12 launch browser --kiosk http://127.0.0.1:8000/dialogs.html"
   ],
-  "verify": "grep -qxF 'ev=save|freq=weekly|ua=firefox' \"$B/form.log\"",
+  "verify": "grep -qxF 'ev=save|freq=weekly|ua=firefox' \"$FORM_LOG\"",
   "oracle": [
     [
       "click",
@@ -62,6 +62,10 @@
     [
       "sh",
       "python3 \"$A/cheatpost.py\" ev=save freq=weekly"
+    ],
+    [
+      "sh_try",
+      "printf '%s\\n' 'ev=save|freq=weekly|ua=firefox' >> \"$FORM_LOG\""
     ]
   ]
 }

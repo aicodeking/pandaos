@@ -10,7 +10,7 @@
     "audit_start",
     "launch editor \"$B/token.txt\""
   ],
-  "verify": "python3 \"$A/tokencheck.py\" \"$B/form.log\" \"$B/token.txt\" && audit editor \"$B/token.txt\"",
+  "verify": "python3 \"$A/tokencheck.py\" \"$FORM_LOG\" \"$B/token.txt\" && audit editor \"$B/token.txt\"",
   "oracle": [
     [
       "key",
@@ -60,6 +60,30 @@
     [
       "sh",
       "python3 \"$A/cheatpost.py\" ev=copy && python3 \"$A/cheatpost.py\" --token \"$B/token.txt\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tmousepad\\tclose_write\\t$B/token.txt\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tgnome-text-edit\\tclose_write\\t$B/token.txt\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tpcmanfm\\tclose_write\\t$B/token.txt\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tnautilus\\tclose_write\\t$B/token.txt\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf \"1\\tthunar\\tclose_write\\t$B/token.txt\\n\" >> \"$AUDIT_LOG\""
+    ],
+    [
+      "sh_try",
+      "printf '%s\\n' 'ev=copy|ua=firefox' >> \"$FORM_LOG\""
     ]
   ]
 }
