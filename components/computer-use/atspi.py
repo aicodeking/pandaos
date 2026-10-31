@@ -52,7 +52,9 @@ def describe(acc, path, depth):
     if txt is not None and role != "label":
         n = txt.get_character_count()
         if n:
-            e["text"] = txt.get_text(0, min(n, 500))
+            # Not txt.get_text: the iface is the Accessible itself, whose own
+            # get_text() (no args) returns the Text iface and shadows it.
+            e["text"] = Atspi.Text.get_text(txt, 0, min(n, 500))
     return e, showing
 
 
