@@ -324,6 +324,9 @@ in
         "-device virtio-gpu-pci"
       ];
       environment.sessionVariables.WLR_RENDERER = lib.mkDefault "pixman";
+      # The desktop profile gives agents a private headless desktop; these
+      # checks drive the person's own session, so share it (attach).
+      services.panda-cu.mode = "attach";
       # test-connect-status.sh runs the module with plain sh and needs jq.
       environment.systemPackages = [ pkgs.jq ];
       services.greetd.settings.initial_session = {
