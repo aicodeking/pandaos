@@ -42,6 +42,12 @@ func realExec(ctx context.Context, env []string, stdin string, argv []string) ([
 	out, errb := &capWriter{max: maxOutput}, &capWriter{max: 4 << 10}
 	cmd.Stdout, cmd.Stderr = out, errb
 	err := cmd.Run()
+	// wl-copy forks a clipboard server that keeps our pipes open: the
+	// command itself succeeded, so stop waiting for its child's output.
+	// ponytail: costs WaitDelay (2 s) per wl-copy; give wl-copy /dev/null pipes if that matters.
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		err = nil
+	}
 	if ctx.Err() != nil {
 		err = errors.Join(err, ctx.Err())
 	}

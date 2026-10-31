@@ -417,3 +417,14 @@ func TestRoleAlias(t *testing.T) {
 		t.Error("role alias")
 	}
 }
+
+func TestRealExecForkedChild(t *testing.T) {
+	// The child keeps stdout open after its parent exits 0, like wl-copy.
+	out, err := realExec(context.Background(), nil, "", []string{"/bin/sh", "-c", "echo hi; (sleep 5) &"})
+	if err != nil || strings.TrimSpace(string(out)) != "hi" {
+		t.Fatalf("%q %v", out, err)
+	}
+	if _, err := realExec(context.Background(), nil, "", []string{"/bin/sh", "-c", "exit 3"}); err == nil {
+		t.Fatal("want exit error")
+	}
+}
