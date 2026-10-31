@@ -188,7 +188,13 @@ class Out:
         return e, showing
 
 
-def walk(acc, win, depth, out, a, keep):
+# Children of these are drawn in a popup surface (GTK 3 menus): on Wayland
+# their boxes are relative to the popup, whose screen position GTK does not
+# report, so they are marked "popup" and never clicked by pixels.
+POPUP_PARENTS = ("menu", "popup menu")
+
+
+def walk(acc, win, depth, out, a, keep, popup=False):
     if out.full():
         return
     try:
@@ -197,11 +203,13 @@ def walk(acc, win, depth, out, a, keep):
         return
     if not showing:
         return  # hidden subtree
+    if popup:
+        e["popup"] = True
     if keep(e):
         out.elements.append(e)
     if depth < a.get("max_depth", 30):
         for ch in children(acc):
-            walk(ch, win, depth + 1, out, a, keep)
+            walk(ch, win, depth + 1, out, a, keep, popup or e["role"] in POPUP_PARENTS)
 
 
 def toplevels(a, out):
@@ -280,8 +288,11 @@ def find(a):
             except (GLib.Error, LookupError):
                 continue
             if showing and keep(e):
+                if e["role"] in ("menu item", "check menu item", "radio menu item"):
+                    e["popup"] = True  # a hint; get() checks the ancestors
                 out.elements.append(e)
     return {"elements": out.elements, "windows": out.windows, "via": sorted(via)}
+
 
 
 def has_text(acc, text):
@@ -293,14 +304,16 @@ def has_text(acc, text):
 
 
 def window_of(acc):
-    """The toplevel (child of the application) that holds acc."""
-    cur = acc
+    """The toplevel (child of the application) that holds acc, and whether
+    acc sits in a popup (below a menu)."""
+    cur, popup = acc, False
     for _ in range(64):
         parent = cur.get_parent()
         if parent is None:
             break
         if parent.get_role() == Atspi.Role.APPLICATION:
-            return cur
+            return cur, popup
+        popup = popup or role_of(parent) in POPUP_PARENTS
         cur = parent
     raise LookupError("element is not inside a window")
 
@@ -309,8 +322,10 @@ def get(a):
     acc = IDS.get(a["id"])
     try:
         e, showing = describe(acc)
-        top = window_of(acc)
+        top, popup = window_of(acc)
         we, wshow = describe(top, depth=1)
+        if popup:
+            e["popup"] = True
     except GLib.Error as err:
         raise LookupError(f"element {a['id']} is gone: {err.message}") from err
     e["win"] = we["id"]

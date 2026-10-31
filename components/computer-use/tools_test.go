@@ -220,14 +220,32 @@ func TestClickByIDRefusals(t *testing.T) {
 	if _, err := call(t, s, "cu_tree", `{}`); err != nil {
 		t.Fatal(err)
 	}
-	for id, want := range map[string]string{
-		"e2": "not maximized", // dialog of unknown position
-		"e3": "behind the active window",
-	} {
-		if _, err := call(t, s, "cu_click", `{"element_id":"`+id+`"}`); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("%s: %v, want %q", id, err, want)
+	if _, err := call(t, s, "cu_click", `{"element_id":"e3"}`); err == nil || !strings.Contains(err.Error(), "behind the active window") {
+		t.Errorf("e3: %v", err)
+	}
+	// A window of unknown position: a plain click goes through AT-SPI, a
+	// move, a double or right click is refused.
+	out, err := call(t, s, "cu_click", `{"element_id":"e2"}`)
+	if err != nil || !strings.Contains(out, "through AT-SPI") {
+		t.Errorf("e2 click: %q %v", out, err)
+	}
+	for _, args := range []string{`{"element_id":"e2","double":true}`, `{"element_id":"e2","button":"right"}`} {
+		if _, err := call(t, s, "cu_click", args); err == nil || !strings.Contains(err.Error(), "not maximized") {
+			t.Errorf("%s: %v", args, err)
 		}
 	}
+	if _, err := call(t, s, "cu_move", `{"element_id":"e2"}`); err == nil || !strings.Contains(err.Error(), "not maximized") {
+		t.Errorf("move e2: %v", err)
+	}
+	// A popup menu item in a maximized window: also never by pixels.
+	pop := app.els["e1"]
+	pop.Popup = true
+	app.els["e1"] = pop
+	if out, err := call(t, s, "cu_click", `{"element_id":"e1"}`); err != nil || !strings.Contains(out, "popup menu") {
+		t.Errorf("popup click: %q %v", out, err)
+	}
+	pop.Popup = false
+	app.els["e1"] = pop
 	e := app.els["e1"]
 	e.Name = "B2"
 	app.els["e1"] = e

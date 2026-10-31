@@ -9,6 +9,7 @@ import http.server
 import json
 import os
 import random
+import re
 import statistics
 import subprocess
 import sys
@@ -231,7 +232,8 @@ GRID = []
 def _():
     call("cu_launch", {"app": "buttons"})
     call("cu_wait", {"app": "cu-buttons", "role": "push button", "text": "B79", "timeout": 60})
-    GRID[:] = [e for e in find(app="cu-buttons", role="push button", limit=200)]
+    GRID[:] = [e for e in find(app="cu-buttons", role="push button", limit=200)
+               if re.fullmatch(r"B\d+", e["name"])]  # not the title bar's Close
     assert len(GRID) == 80, len(GRID)
     rng = random.Random(7)
     hits, click_ms = {"element_id": 0, "coords": 0}, []
@@ -293,39 +295,41 @@ def _():
     hello = json.loads(text(call("cu_wait", {"app": "cu-lab", "role": "menu item", "text": "Say hello", "timeout": 10})[0]))["match"]
     metrics["menu_item_bbox"] = hello.get("bbox")
     ev = lab_event()
-    call("cu_click", {"element_id": hello["id"]})
+    r, _ = call("cu_click", {"element_id": hello["id"]})
+    metrics["menu_click_via"] = data(r).get("via", "pixels")
     got = ev()
     metrics["menu_click"] = got == ["menu:hello"]
     assert got == ["menu:hello"], got
     # The menu again, then "Open dialog", then the dialog's Confirm button.
     call("cu_click", {"element_id": menu["id"]})
     item = json.loads(text(call("cu_wait", {"app": "cu-lab", "role": "menu item", "text": "Open dialog", "timeout": 10})[0]))["match"]
-    call("cu_click", {"element_id": item["id"]})
+    r, _ = call("cu_click", {"element_id": item["id"]})
+    assert data(r).get("via"), "a popup menu item must not be clicked by pixels"
     call("cu_wait", {"window": "CU Confirm", "timeout": 10})
     confirm = json.loads(text(call("cu_wait", {"app": "cu-lab", "role": "push button", "text": "Confirm", "timeout": 10})[0]))["match"]
     ev = lab_event()
-    call("cu_click", {"element_id": confirm["id"]})
+    r, _ = call("cu_click", {"element_id": confirm["id"]})
+    metrics["dialog_click_via"] = data(r).get("via", "pixels")
     got = ev()
     metrics["dialog_click"] = got == ["dialog:confirm"]
     assert got == ["dialog:confirm"], got
 
 
-@section("lab: fixed-size message dialog: hit or refuse, never miss")
+@section("lab: fixed-size message dialog: never a missed click")
 def _():
     call("cu_wait", {"window": "CU Confirm", "gone": True, "timeout": 10})
     call("cu_click", {"element_id": one(app="cu-lab", role="push button", text="Open message")["id"]})
     ok = json.loads(text(call("cu_wait", {"app": "cu-lab", "role": "push button", "text": "OK", "timeout": 10})[0]))["match"]
+    # If labwc could not maximize it (fixed size), pixels would be a guess:
+    # a right click must then be refused and a left click go through AT-SPI.
+    r, _ = call("cu_click", {"element_id": ok["id"], "button": "right"}, ok=False)
+    metrics["message_dialog_right_click"] = "refused" if r["isError"] else "pixels"
+    assert not r["isError"] or "position is unknown" in text(r), text(r)
     ev = lab_event()
-    r, _ = call("cu_click", {"element_id": ok["id"]}, ok=False)
-    if r["isError"]:
-        metrics["message_dialog"] = "refused"
-        assert "position is unknown" in text(r), text(r)
-        call("cu_act", {"element_id": ok["id"], "action": "click"})
-        assert ev() == ["message:ok"], "cu_act on the refused button"
-    else:
-        got = ev()
-        metrics["message_dialog"] = "hit" if got == ["message:ok"] else f"MISS {got}"
-        assert got == ["message:ok"], f"click by element_id missed: {got}"
+    r, _ = call("cu_click", {"element_id": ok["id"]})
+    metrics["message_dialog_via"] = data(r).get("via", "pixels")
+    got = ev()
+    assert got == ["message:ok"], f"click by element_id missed: {got}"
 
 
 @section("lab: scroll until a row is visible, then click it")
@@ -334,8 +338,8 @@ def _():
     assert not find(app="cu-lab", role="push button", text="row59"), "row59 is visible before scrolling"
     r0 = one(app="cu-lab", role="push button", text="row0")
     at = {"x": r0["bbox"][0] + r0["bbox"][2] // 2, "y": r0["bbox"][1] + 60}
-    for notches in range(1, 16):
-        call("cu_scroll", {"dy": 3, "at": at})
+    for notches in range(1, 25):
+        call("cu_scroll", {"dy": 5, "at": at})
         rows = find(app="cu-lab", role="push button", text="row59")
         if rows and rows[0]["name"] == "row59":
             break

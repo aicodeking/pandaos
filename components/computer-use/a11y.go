@@ -21,6 +21,9 @@ type element struct {
 	Actions []string `json:"actions,omitempty"`
 	Text    string   `json:"text,omitempty"`
 	Win     string   `json:"win,omitempty"` // id of its toplevel window
+	// Popup: inside a popup surface (a GTK 3 menu), whose screen position
+	// is unknown on Wayland; such boxes are never used for pixel clicks.
+	Popup bool `json:"popup,omitempty"`
 }
 
 // a11yReply is the helper's answer to tree and find.
@@ -206,10 +209,16 @@ func screenSized(w element, sw, sh int) bool {
 	return len(w.BBox) == 4 && w.BBox[0] == 0 && w.BBox[1] == 0 && w.BBox[2] == sw && w.BBox[3] == sh
 }
 
+// errNoPixels says why an element's box is not a screen position.
+type errNoPixels struct{ why string }
+
+func (e errNoPixels) Error() string { return e.why }
+
 // clickPoint re-reads element id from the app (role, name, box, window)
-// and returns the centre of its box, or an error that says why a click
-// there could miss: it changed, it is hidden, its window is not in front,
-// or its window's screen position is unknown.
+// and returns the centre of its box. It fails when a click there could
+// miss: the element changed or is gone, is hidden, or its window is behind
+// the active one. When the box is not a screen position (a popup menu, or a
+// window that is not maximized) the error is an errNoPixels.
 func (s *Server) clickPoint(id string, sw, sh int) (int, int, error) {
 	was, ok := s.cached(id)
 	if !ok {
@@ -233,12 +242,14 @@ func (s *Server) clickPoint(id string, sw, sh int) (int, int, error) {
 		return 0, 0, fmt.Errorf("element %s changed (was %s %q, now %s %q); find it again", id, was.Role, was.Name, e.Role, e.Name)
 	case !res.Showing:
 		return 0, 0, fmt.Errorf("element %s (%s %q) is not on screen now", id, e.Role, e.Name)
-	case len(e.BBox) != 4 || e.BBox[2] <= 0 || e.BBox[3] <= 0:
-		return 0, 0, fmt.Errorf("element %s has no on-screen box; use cu_act", id)
-	case !screenSized(win, sw, sh):
-		return 0, 0, fmt.Errorf("refused: element %s is in window %q (%v), which is not maximized, so its screen position is unknown and a click could miss; use cu_act, or click pixels from a screenshot", id, win.Name, win.BBox)
 	case !slices.Contains(win.States, "active"):
 		return 0, 0, fmt.Errorf("refused: element %s is in window %q, which is behind the active window; cu_focus it first", id, win.Name)
+	case e.Popup:
+		return 0, 0, errNoPixels{fmt.Sprintf("element %s is in a popup menu, whose screen position the toolkit does not report", id)}
+	case !screenSized(win, sw, sh):
+		return 0, 0, errNoPixels{fmt.Sprintf("element %s is in window %q (%v), which is not maximized, so its screen position is unknown", id, win.Name, win.BBox)}
+	case len(e.BBox) != 4 || e.BBox[2] <= 0 || e.BBox[3] <= 0:
+		return 0, 0, errNoPixels{fmt.Sprintf("element %s has no on-screen box", id)}
 	}
 	cx, cy := e.BBox[0]+e.BBox[2]/2, e.BBox[1]+e.BBox[3]/2
 	if cx < 0 || cy < 0 || cx >= sw || cy >= sh {

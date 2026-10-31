@@ -350,7 +350,7 @@ func (s *Server) marks(a toolArgs, png []byte, w, h int, meta map[string]any) ([
 		if len(e.BBox) != 4 {
 			continue
 		}
-		if win := res.Windows[e.Win]; !screenSized(win, sw, sh) {
+		if win := res.Windows[e.Win]; !screenSized(win, sw, sh) || e.Popup {
 			unplaced[win.Name]++
 			continue
 		}
@@ -366,7 +366,7 @@ func (s *Server) marks(a toolArgs, png []byte, w, h int, meta map[string]any) ([
 	meta["hint"] = "bbox is [x,y,w,h] in screen pixels; act on an element with cu_click{element_id} or cu_act{element_id}"
 	if len(unplaced) > 0 {
 		meta["unplaced"] = unplaced
-		meta["unplaced_hint"] = "these windows are not maximized, so their element boxes are not screen positions; use cu_find + cu_act for them"
+		meta["unplaced_hint"] = "elements in popup menus or in windows that are not maximized: their boxes are not screen positions; cu_click{element_id} clicks them through AT-SPI, or use cu_act"
 	}
 	return drawMarks(png, marks)
 }
@@ -415,6 +415,19 @@ func (s *Server) pointerTool(name string, a toolArgs) (any, error) {
 	switch name {
 	case "cu_move", "cu_click":
 		x, y, err := s.target(d, a.X, a.Y, a.ElementID)
+		var np errNoPixels
+		if errors.As(err, &np) && name == "cu_click" && btn == btnLeft && !a.Double {
+			// No screen position, but a left click can still land: as the
+			// element's own AT-SPI action.
+			res, aerr := s.act(toolArgs{ElementID: a.ElementID, Action: "click"})
+			if aerr != nil {
+				return nil, fmt.Errorf("refused: %s, and its AT-SPI action failed: %w", np.why, aerr)
+			}
+			return map[string]any{"via": res.(map[string]any)["via"], "why": np.why + "; clicked through AT-SPI instead"}, nil
+		}
+		if errors.As(err, &np) {
+			return nil, fmt.Errorf("refused: %s; a click by pixels could miss (use cu_act, or pixels from a screenshot)", np.why)
+		}
 		if err != nil {
 			return nil, err
 		}
