@@ -45,6 +45,10 @@ window#waybar.dock {
 
 #custom-dnd { color: #14161b; background: #e5c07b; font-weight: bold; }
 
+/* An agent is driving this screen (panda-cu attach mode); Super+Escape stops it. */
+#custom-cu.active { color: #ffffff; background: #d4483f; font-weight: bold; }
+#custom-cu.revoked { color: #e5707a; }
+
 /* Dock: a rounded strip of launchers. */
 window#waybar.dock .modules-center {
   background: #1d2027;

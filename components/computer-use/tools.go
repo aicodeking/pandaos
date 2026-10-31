@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,8 +15,9 @@ import (
 )
 
 type point struct {
-	X int `json:"x"`
-	Y int `json:"y"`
+	X         *int   `json:"x"`
+	Y         *int   `json:"y"`
+	ElementID string `json:"element_id"`
 }
 
 type rect struct {
@@ -54,25 +56,18 @@ type toolArgs struct {
 	Limit      int     `json:"limit"`
 }
 
-// element is one AT-SPI node as panda-cu-atspi reports it.
-type element struct {
-	ID      string   `json:"id"`
-	Depth   int      `json:"d"`
-	Role    string   `json:"role"`
-	Name    string   `json:"name"`
-	BBox    []int    `json:"bbox,omitempty"`
-	States  []string `json:"states,omitempty"`
-	Actions []string `json:"actions,omitempty"`
-	Text    string   `json:"text,omitempty"`
-}
-
 type Server struct {
 	cfg  Config
 	exec Execer
-	// open a display connection; tests swap in a fake
+	// open a display connection with a virtual pointer; tests swap in a fake
 	display func() (pointerDev, error)
-	mu      sync.Mutex
-	snap    map[string]element // last cu_tree / cu_find / marks snapshot
+	helper  *atspiHelper
+	// tests swap these in for the helper and the window list
+	a11yCall    func(req map[string]any, v any) error
+	listWindows func() ([]window, error)
+	screenSize  func() (int, int, string)
+	mu          sync.Mutex
+	known       map[string]element // every element seen, by id (merged across calls)
 }
 
 // pointerDev is what the pointer and key tools need from a display connection.
@@ -90,7 +85,7 @@ func (d *desktop) size() (int, int, string) { return d.out.Width, d.out.Height, 
 func (d *desktop) sync() error              { return d.roundtrip(nil) }
 
 func newServer(cfg Config) *Server {
-	s := &Server{cfg: cfg, exec: realExec, snap: map[string]element{}}
+	s := &Server{cfg: cfg, exec: realExec, known: map[string]element{}, helper: &atspiHelper{env: cfg.environ()}}
 	s.display = func() (pointerDev, error) {
 		if err := s.waitReady(); err != nil {
 			return nil, err
@@ -129,6 +124,9 @@ func (s *Server) waitReady() error {
 }
 
 func (s *Server) runTool(name string, a toolArgs) ([]content, error) {
+	if err := s.guard(); err != nil {
+		return nil, err
+	}
 	switch name {
 	case "cu_screenshot":
 		return s.screenshot(a)
@@ -174,7 +172,15 @@ func (s *Server) runTool(name string, a toolArgs) ([]content, error) {
 	case "cu_wait":
 		return jsonOut(s.wait(a))
 	case "cu_windows":
-		return jsonOut(s.windows())
+		ws, err := s.windows()
+		if err != nil {
+			return nil, err
+		}
+		res := map[string]any{"windows": ws}
+		if ex := s.recentExits(); len(ex) > 0 {
+			res["recent_exits"] = ex
+		}
+		return jsonOut(res, nil)
 	case "cu_focus":
 		v, err := s.focus(a.Window)
 		return s.after(a, v, err)
@@ -185,6 +191,9 @@ func (s *Server) runTool(name string, a toolArgs) ([]content, error) {
 		v, err := s.open(a)
 		return s.after(a, v, err)
 	case "cu_clipboard_get":
+		if s.cfg.Mode == "attach" && !s.cfg.AllowClipboardRead {
+			return nil, errors.New("refused: reading the clipboard of the person's session is off (services.panda-cu.allowClipboardRead)")
+		}
 		out, err := s.run(execTimeout, "", "wl-paste", "--no-newline")
 		if err != nil && strings.Contains(err.Error(), "No selection") {
 			return jsonOut(map[string]any{"text": ""}, nil)
@@ -211,29 +220,72 @@ func jsonOut(v any, err error) ([]content, error) {
 	return []content{textContent(string(b))}, err
 }
 
-// after renders an action's result, plus a small screenshot when asked.
+// after renders an action's result, plus (screenshot:true) a half-size
+// screenshot once the screen has settled.
 func (s *Server) after(a toolArgs, v any, err error) ([]content, error) {
 	out, err := jsonOut(v, err)
 	if err != nil || !a.Screenshot {
 		return out, err
 	}
-	time.Sleep(150 * time.Millisecond) // let the app repaint
-	png, err := s.capture(nil, 0.5)
+	png, settled, ms, err := s.settled(0.5, settleLimit)
 	if err != nil {
 		return append(out, textContent("screenshot failed: "+err.Error())), nil
 	}
-	return append(out, imageContent(png)), nil
+	meta, _ := json.Marshal(map[string]any{"settled": settled, "settle_ms": ms})
+	return append(out, imageContent(png), textContent(string(meta))), nil
+}
+
+const settleLimit = 1500 * time.Millisecond
+
+// settled captures until two frames in a row are identical (the app has
+// stopped repainting) or limit passes; it returns the last frame.
+func (s *Server) settled(scale float64, limit time.Duration) ([]byte, bool, int64, error) {
+	t0 := time.Now()
+	time.Sleep(30 * time.Millisecond) // let the client see the input first
+	prev, err := s.capture(nil, scale)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	for time.Since(t0) < limit {
+		time.Sleep(40 * time.Millisecond)
+		cur, err := s.capture(nil, scale)
+		if err != nil {
+			return nil, false, 0, err
+		}
+		if bytes.Equal(cur, prev) {
+			return cur, true, time.Since(t0).Milliseconds(), nil
+		}
+		prev = cur
+	}
+	return prev, false, time.Since(t0).Milliseconds(), nil
+}
+
+// screen is the output size: from the config in headless mode (no display
+// round trip), else from wl_output.
+func (s *Server) screen() (int, int, string, error) {
+	if s.cfg.Mode == "headless" && s.cfg.Width > 0 && s.cfg.Height > 0 {
+		return s.cfg.Width, s.cfg.Height, "", s.waitReady()
+	}
+	if s.screenSize != nil {
+		w, h, n := s.screenSize()
+		return w, h, n, nil
+	}
+	d, err := openDesktop(s.cfg.Env)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	defer d.Close()
+	w, h, n := d.size()
+	return w, h, n, nil
 }
 
 // ---- screenshots
 
 func (s *Server) capture(region *rect, scale float64) ([]byte, error) {
-	d, err := s.display()
+	w, h, name, err := s.screen()
 	if err != nil {
 		return nil, err
 	}
-	w, h, name := d.size()
-	d.Close()
 	argv := []string{"grim", "-t", "png", "-l", "1"}
 	if scale != 0 && scale != 1 {
 		argv = append(argv, "-s", strconv.FormatFloat(scale, 'f', 3, 64))
@@ -262,64 +314,73 @@ func (s *Server) screenshot(a toolArgs) ([]content, error) {
 	w, h, _ := pngSize(png)
 	meta := map[string]any{"width": w, "height": h, "ms": time.Since(t0).Milliseconds()}
 	if a.Marks {
-		els, err := s.snapshot(toolArgs{App: a.App}, true)
-		if err != nil {
+		if png, err = s.marks(a, png, w, h, meta); err != nil {
 			return nil, err
 		}
-		scale := a.Scale
-		if scale == 0 {
-			scale = 1
-		}
-		origin := image.Point{}
-		if a.Region != nil {
-			origin = image.Pt(a.Region.X, a.Region.Y)
-		}
-		var marks []mark
-		var list []map[string]any
-		for _, e := range els {
-			if len(e.BBox) != 4 {
-				continue
-			}
-			r := image.Rect(e.BBox[0], e.BBox[1], e.BBox[0]+e.BBox[2], e.BBox[1]+e.BBox[3]).Sub(origin)
-			r = image.Rect(int(float64(r.Min.X)*scale), int(float64(r.Min.Y)*scale), int(float64(r.Max.X)*scale), int(float64(r.Max.Y)*scale))
-			if r.Intersect(image.Rect(0, 0, w, h)).Empty() {
-				continue
-			}
-			marks = append(marks, mark{len(marks) + 1, r})
-			list = append(list, map[string]any{"mark": len(marks), "id": e.ID, "role": e.Role, "name": e.Name, "bbox": e.BBox})
-		}
-		if png, err = drawMarks(png, marks); err != nil {
-			return nil, err
-		}
-		meta["elements"] = list
-		meta["hint"] = "bbox is [x,y,w,h] in screen pixels; use cu_click{element_id} or cu_act{element_id}"
 	}
 	b, _ := json.Marshal(meta)
 	return []content{imageContent(png), textContent(string(b))}, nil
+}
+
+// marks draws Set-of-Marks boxes on the interactive elements of the active
+// window. Elements in a window whose screen position is unknown (not
+// maximized) are left out and counted, never drawn in the wrong place.
+func (s *Server) marks(a toolArgs, png []byte, w, h int, meta map[string]any) ([]byte, error) {
+	sw, sh, _, err := s.screen()
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.query("tree", toolArgs{App: a.App}, map[string]any{"interactive": true, "active": true, "max_depth": 30, "limit": 500})
+	if err != nil {
+		return nil, err
+	}
+	scale := a.Scale
+	if scale == 0 {
+		scale = 1
+	}
+	origin := image.Point{}
+	if a.Region != nil {
+		origin = image.Pt(a.Region.X, a.Region.Y)
+	}
+	var marks []mark
+	list := []map[string]any{}
+	unplaced := map[string]int{}
+	for _, e := range res.Elements {
+		if len(e.BBox) != 4 {
+			continue
+		}
+		if win := res.Windows[e.Win]; !screenSized(win, sw, sh) {
+			unplaced[win.Name]++
+			continue
+		}
+		r := image.Rect(e.BBox[0], e.BBox[1], e.BBox[0]+e.BBox[2], e.BBox[1]+e.BBox[3]).Sub(origin)
+		r = image.Rect(int(float64(r.Min.X)*scale), int(float64(r.Min.Y)*scale), int(float64(r.Max.X)*scale), int(float64(r.Max.Y)*scale))
+		if r.Intersect(image.Rect(0, 0, w, h)).Empty() {
+			continue
+		}
+		marks = append(marks, mark{len(marks) + 1, r})
+		list = append(list, map[string]any{"mark": len(marks), "id": e.ID, "role": e.Role, "name": e.Name, "bbox": e.BBox})
+	}
+	meta["elements"] = list
+	meta["hint"] = "bbox is [x,y,w,h] in screen pixels; act on an element with cu_click{element_id} or cu_act{element_id}"
+	if len(unplaced) > 0 {
+		meta["unplaced"] = unplaced
+		meta["unplaced_hint"] = "these windows are not maximized, so their element boxes are not screen positions; use cu_find + cu_act for them"
+	}
+	return drawMarks(png, marks)
 }
 
 // ---- pointer
 
 var buttons = map[string]uint32{"": btnLeft, "left": btnLeft, "right": btnRight, "middle": btnMiddle}
 
+// target resolves a point: x,y (checked against the screen) or the centre
+// of element_id, re-read from the app just before the pointer moves.
 func (s *Server) target(d pointerDev, x, y *int, id string) (int, int, error) {
 	w, h, _ := d.size()
 	switch {
 	case id != "":
-		s.mu.Lock()
-		e, ok := s.snap[id]
-		s.mu.Unlock()
-		if !ok {
-			return 0, 0, fmt.Errorf("unknown element_id %q: take a cu_tree, cu_find or cu_screenshot{marks} snapshot first", id)
-		}
-		if len(e.BBox) != 4 || e.BBox[2] <= 0 || e.BBox[3] <= 0 {
-			return 0, 0, fmt.Errorf("element %s has no on-screen box; try cu_act", id)
-		}
-		cx, cy := e.BBox[0]+e.BBox[2]/2, e.BBox[1]+e.BBox[3]/2
-		if cx < 0 || cy < 0 || cx >= w || cy >= h {
-			return 0, 0, fmt.Errorf("element %s is off screen at (%d,%d); scroll it into view", id, cx, cy)
-		}
-		return cx, cy, nil
+		return s.clickPoint(id, w, h)
 	case x != nil && y != nil:
 		if *x < 0 || *y < 0 || *x >= w || *y >= h {
 			return 0, 0, fmt.Errorf("(%d,%d) is outside the %dx%d screen", *x, *y, w, h)
@@ -339,11 +400,15 @@ func (s *Server) pointerTool(name string, a toolArgs) (any, error) {
 		return nil, err
 	}
 	defer d.Close()
-	pt := func(p *point) (*int, *int) {
+	pt := func(p *point, what string) (int, int, error) {
 		if p == nil {
-			return nil, nil
+			return 0, 0, fmt.Errorf("%s is required", what)
 		}
-		return &p.X, &p.Y
+		x, y, err := s.target(d, p.X, p.Y, p.ElementID)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%s: %w", what, err)
+		}
+		return x, y, nil
 	}
 	settle := func() { _ = d.sync(); time.Sleep(30 * time.Millisecond) } // let the client see enter/motion
 	switch name {
@@ -368,15 +433,13 @@ func (s *Server) pointerTool(name string, a toolArgs) (any, error) {
 		}
 		return map[string]any{"x": x, "y": y}, d.sync()
 	case "cu_drag":
-		fx, fy := pt(a.From)
-		x0, y0, err := s.target(d, fx, fy, "")
+		x0, y0, err := pt(a.From, "from")
 		if err != nil {
-			return nil, fmt.Errorf("from: %w", err)
+			return nil, err
 		}
-		tx, ty := pt(a.To)
-		x1, y1, err := s.target(d, tx, ty, "")
+		x1, y1, err := pt(a.To, "to")
 		if err != nil {
-			return nil, fmt.Errorf("to: %w", err)
+			return nil, err
 		}
 		if err := d.moveTo(x0, y0); err != nil {
 			return nil, err
@@ -386,11 +449,12 @@ func (s *Server) pointerTool(name string, a toolArgs) (any, error) {
 			return nil, err
 		}
 		settle()
-		const steps = 12
+		const steps = 16
 		for i := 1; i <= steps; i++ {
 			if err := d.moveTo(x0+(x1-x0)*i/steps, y0+(y1-y0)*i/steps); err != nil {
 				return nil, err
 			}
+			_ = d.sync()
 			time.Sleep(15 * time.Millisecond)
 		}
 		settle()
@@ -400,7 +464,7 @@ func (s *Server) pointerTool(name string, a toolArgs) (any, error) {
 			return nil, errors.New("dx and dy are wheel notches, -50..50")
 		}
 		if a.At != nil {
-			x, y, err := s.target(d, &a.At.X, &a.At.Y, "")
+			x, y, err := pt(a.At, "at")
 			if err != nil {
 				return nil, err
 			}

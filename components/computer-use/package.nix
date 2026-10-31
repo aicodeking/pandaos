@@ -1,6 +1,7 @@
-# panda-cu (Go) plus panda-cu-atspi, the small Python AT-SPI helper it runs
-# by argv. Input/capture tools come in on PATH: grim (wlr-screencopy), wtype
-# (virtual-keyboard), wlrctl (foreign-toplevel), wl-clipboard (data-control).
+# panda-cu (Go) plus panda-cu-atspi, the small Python AT-SPI helper it keeps
+# running (JSON lines over a pipe). Tools on PATH: grim (wlr-screencopy),
+# wtype (virtual-keyboard), wl-clipboard (data-control); windows are spoken
+# to directly (wlr-foreign-toplevel).
 {
   lib,
   buildGoModule,
@@ -12,7 +13,6 @@
   at-spi2-core,
   grim,
   wtype,
-  wlrctl,
   wl-clipboard,
 }:
 
@@ -41,7 +41,7 @@ buildGoModule {
   ldflags = [ "-s" "-w" ];
   nativeBuildInputs = [ makeWrapper ];
   postInstall = ''
-    wrapProgram $out/bin/panda-cu --prefix PATH : ${lib.makeBinPath [ atspi grim wtype wlrctl wl-clipboard ]}
+    wrapProgram $out/bin/panda-cu --prefix PATH : ${lib.makeBinPath [ atspi grim wtype wl-clipboard ]}
   '';
   passthru = { inherit atspi; };
   meta = {

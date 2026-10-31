@@ -72,6 +72,11 @@ func marshal(obj uint32, op uint16, args ...any) []byte {
 			b = ne.AppendUint32(b, v)
 		case int32:
 			b = ne.AppendUint32(b, uint32(v))
+		case []uint32: // array
+			b = ne.AppendUint32(b, uint32(4*len(v)))
+			for _, x := range v {
+				b = ne.AppendUint32(b, x)
+			}
 		case string:
 			n := len(v) + 1 // with NUL
 			b = ne.AppendUint32(b, uint32(n))

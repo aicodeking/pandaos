@@ -5,19 +5,31 @@
 #   run     mark busy only while CMD runs (nested runs are fine)
 #   status  prints busy/idle; exits 0 when busy, 1 when idle
 # The idle lock (swayidle) calls `status` and skips locking while busy.
+# A mark counts for at most PANDA_CU_BUSY_MAX_MIN minutes (default 120):
+# a forgotten `on` or a stuck `run` cannot keep the screen unlocked forever.
 set -eu
 dir=${XDG_RUNTIME_DIR:-/tmp}/panda-cu-busy
+max=${PANDA_CU_BUSY_MAX_MIN:-120}
 
-# busy: true if the manual mark or a live run.PID mark exists. Marks left by
-# a killed `run` are removed here.
+# expired MARK: older than the cap.
+expired() {
+  [ -n "$(find "$1" -prune -mmin +"$max" 2>/dev/null)" ]
+}
+
+# busy: true if a fresh manual mark or a live, fresh run.PID mark exists.
+# Marks left by a killed `run` and expired manual marks are removed here.
 busy() {
   found=1
   for mark in "$dir"/*; do
     [ -e "$mark" ] || continue
     case ${mark##*/} in
-      manual) found=0 ;;
+      manual)
+        if expired "$mark"; then rm -f "$mark"; else found=0; fi
+        ;;
       run.*)
-        if kill -0 "${mark##*.}" 2>/dev/null; then found=0; else rm -f "$mark"; fi
+        if ! kill -0 "${mark##*.}" 2>/dev/null; then rm -f "$mark"
+        elif ! expired "$mark"; then found=0
+        fi
         ;;
     esac
   done

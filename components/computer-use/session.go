@@ -7,15 +7,16 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
-	"strings"
+	"sync"
 	"time"
 )
 
-// runSession is labwc's startup command (-s) in headless mode. It waits until the output
-// has its configured size, holds an idle virtual pointer and keyboard (so the
-// seat never loses those capabilities between tool calls), serves the app
-// launcher socket, then writes $XDG_RUNTIME_DIR/ready.
+// runSession is labwc's startup command (-s) in headless mode. It waits until
+// the output has its configured size, holds an idle virtual pointer and
+// keyboard (so the seat never loses those capabilities between tool calls),
+// serves the app launcher socket, then writes $XDG_RUNTIME_DIR/ready. It
+// returns only on failure; the startup script then stops labwc, so systemd
+// restarts the whole session.
 func runSession(cfg Config) error {
 	d, err := waitOutput(cfg, 20*time.Second)
 	if err != nil {
@@ -41,21 +42,33 @@ func runSession(cfg Config) error {
 		return err
 	}
 	log.Printf("panda-cu session ready: %s %dx%d", d.out.Name, d.out.Width, d.out.Height)
+	lost := make(chan error, 1)
 	go func() { // the compositor going away ends the session
 		for {
 			if err := d.sync(); err != nil {
-				log.Fatalf("display connection lost: %v", err)
+				lost <- fmt.Errorf("display connection lost: %w", err)
+				return
 			}
 			time.Sleep(5 * time.Second)
 		}
 	}()
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return err
+	accepted := make(chan error, 1)
+	l := &launcher{cfg: cfg}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				accepted <- err
+				return
+			}
+			go l.serve(c)
 		}
-		go serveLaunch(cfg, c)
+	}()
+	select {
+	case err = <-lost:
+	case err = <-accepted:
 	}
+	return err
 }
 
 // waitOutput polls until wlr-randr's custom mode is in effect.
@@ -77,44 +90,70 @@ func waitOutput(cfg Config, timeout time.Duration) (*desktop, error) {
 	}
 }
 
-// launchArgOK: the only extra argument is an absolute path or an http(s) URL,
-// never a flag.
-func launchArgOK(arg string) bool {
-	return arg == "" || strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://")
+// launcher starts allowlisted apps for `panda-cu mcp` and remembers how
+// they ended. Protocol: one JSON request line; the reply line is {} or
+// {"error"}; for a launch, one more line {appExit} when the app ends (if the
+// client still listens). {"op":"exits"} answers {"exits":[...]}.
+type launcher struct {
+	cfg   Config
+	mu    sync.Mutex
+	exits []appExit // last 20
 }
 
-func serveLaunch(cfg Config, c net.Conn) {
+func (l *launcher) serve(c net.Conn) {
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	enc := json.NewEncoder(c)
 	reply := func(err error) {
 		res := map[string]string{}
 		if err != nil {
 			res["error"] = err.Error()
 		}
-		_ = json.NewEncoder(c).Encode(res)
+		_ = enc.Encode(res)
 	}
 	var req launchReq
 	if err := json.NewDecoder(c).Decode(&req); err != nil {
 		reply(err)
 		return
 	}
+	if req.Op == "exits" {
+		l.mu.Lock()
+		_ = enc.Encode(map[string]any{"exits": l.exits})
+		l.mu.Unlock()
+		return
+	}
 	if !launchArgOK(req.Arg) {
 		reply(errors.New("argument must be an absolute path or an http(s) URL"))
 		return
 	}
-	argv, err := appArgv(cfg, req.App, req.Arg)
+	argv, err := appArgv(l.cfg, req.App, req.Arg)
 	if err != nil {
 		reply(err)
 		return
 	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr // the journal of panda-cu.service
-	cmd.Dir = os.Getenv("HOME")
-	if err := cmd.Start(); err != nil {
+	pid, done, err := startApp(req.App, argv, os.Environ(), os.Stderr, false)
+	if err != nil {
 		reply(err)
 		return
 	}
-	log.Printf("launched %s (pid %d): %v", req.App, cmd.Process.Pid, argv)
-	go cmd.Wait() //nolint:errcheck // reap
+	log.Printf("launched %s (pid %d): %v", req.App, pid, argv)
 	reply(nil)
+	_ = c.SetDeadline(time.Now().Add(launchWait + 5*time.Second))
+	ended := make(chan appExit, 1)
+	go func() { // recorded even after the client stopped listening
+		e := <-done
+		log.Printf("app %s (pid %d) ended: %s", e.App, e.PID, e.Status)
+		l.mu.Lock()
+		l.exits = append(l.exits, e)
+		if len(l.exits) > 20 {
+			l.exits = l.exits[1:]
+		}
+		l.mu.Unlock()
+		ended <- e
+	}()
+	select { // tell the waiting cu_launch if the app ends soon
+	case e := <-ended:
+		_ = enc.Encode(e)
+	case <-time.After(launchWait):
+	}
 }

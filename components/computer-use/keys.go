@@ -29,9 +29,12 @@ const usKeymap = "xkb_keymap {\n" +
 	"xkb_keycodes { include \"evdev+aliases(qwerty)\" };\n" +
 	"xkb_types { include \"complete\" };\n" +
 	"xkb_compatibility { include \"complete\" };\n" +
-	"xkb_symbols { include \"pc+us+inet(evdev)\" };\n};\n"
+	"xkb_symbols { include \"pc+us+inet(evdev)+level3(ralt_switch)\" };\n};\n"
 
 // modKeys: evdev code and modifier mask (Shift 1, Control 4, Mod1 8, Mod4 64, Mod5 128).
+// altgr is Right Alt as ISO_Level3_Shift (level3(ralt_switch) in the keymap),
+// which xkb puts on Mod5; plain US maps Right Alt to Alt_R (Mod1), so
+// "altgr" used to arrive as a second Alt.
 var modKeys = map[string]struct{ code, mask uint32 }{
 	"shift": {42, 1}, "ctrl": {29, 4}, "alt": {56, 8}, "logo": {125, 64}, "altgr": {100, 128},
 }

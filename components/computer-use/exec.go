@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -41,6 +42,11 @@ func realExec(ctx context.Context, env []string, stdin string, argv []string) ([
 	}
 	out, errb := &capWriter{max: maxOutput}, &capWriter{max: 4 << 10}
 	cmd.Stdout, cmd.Stderr = out, errb
+	if filepath.Base(argv[0]) == "wl-copy" {
+		// wl-copy forks a server that holds the selection; with our pipes it
+		// would also hold those, and Run would wait WaitDelay (2 s) for it.
+		cmd.Stdout, cmd.Stderr = nil, nil
+	}
 	err := cmd.Run()
 	// wl-copy forks a clipboard server that keeps our pipes open: the
 	// command itself succeeded, so stop waiting for its child's output.

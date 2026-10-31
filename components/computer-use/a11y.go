@@ -1,84 +1,107 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/url"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
-// atspi runs the Python helper and decodes its JSON (errors come as {"error"}).
-func (s *Server) atspi(timeout time.Duration, v any, args ...string) error {
-	out, err := s.run(timeout, "", append([]string{"panda-cu-atspi"}, args...)...)
-	var e struct {
-		Error string `json:"error"`
-	}
-	if json.Unmarshal(out, &e) == nil && e.Error != "" {
-		return errors.New(e.Error)
-	}
-	if err != nil {
+// element is one AT-SPI node as panda-cu-atspi reports it. IDs are stable
+// for the helper's lifetime (one per accessible object), so results from
+// cu_tree, cu_find, cu_wait and marks can be mixed freely.
+type element struct {
+	ID      string   `json:"id"`
+	Depth   int      `json:"d,omitempty"`
+	Role    string   `json:"role"`
+	Name    string   `json:"name"`
+	BBox    []int    `json:"bbox,omitempty"`
+	States  []string `json:"states,omitempty"`
+	Actions []string `json:"actions,omitempty"`
+	Text    string   `json:"text,omitempty"`
+	Win     string   `json:"win,omitempty"` // id of its toplevel window
+}
+
+// a11yReply is the helper's answer to tree and find.
+type a11yReply struct {
+	Elements  []element          `json:"elements"`
+	Windows   map[string]element `json:"windows"`
+	Truncated bool               `json:"truncated"`
+	Via       []string           `json:"via,omitempty"`
+}
+
+const maxKnown = 50_000
+
+// a11y sends one request to the helper (tests swap in a fake).
+func (s *Server) a11y(timeout time.Duration, req map[string]any, v any) error {
+	if err := s.waitReady(); err != nil {
 		return err
 	}
-	return json.Unmarshal(out, v)
+	if s.a11yCall != nil {
+		return s.a11yCall(req, v)
+	}
+	return s.helper.call(timeout, req, v)
 }
 
-// snapshot walks the tree and replaces the element_id cache.
-func (s *Server) snapshot(a toolArgs, marks bool) ([]element, error) {
-	if err := s.waitReady(); err != nil {
-		return nil, err
-	}
-	depth := a.MaxDepth
-	if depth <= 0 || depth > 50 {
-		depth = 30
-	}
-	argv := []string{"tree", "--max-depth", strconv.Itoa(depth)}
-	if a.App != "" {
-		argv = append(argv, "--app", a.App)
-	}
-	if marks {
-		argv = append(argv, "--interactive", "--active") // what is clickable in the focused window
-	}
-	var res struct {
-		Elements  []element `json:"elements"`
-		Truncated bool      `json:"truncated"`
-	}
-	if err := s.atspi(30*time.Second, &res, argv...); err != nil {
-		return nil, fmt.Errorf("accessibility tree: %w", err)
-	}
-	snap := make(map[string]element, len(res.Elements))
-	for i, e := range res.Elements {
-		if s.cfg.Scale > 0 && s.cfg.Scale != 1 {
-			for k := range e.BBox {
-				e.BBox[k] = int(float64(e.BBox[k]) * s.cfg.Scale)
-			}
-			res.Elements[i] = e
-		}
-		snap[e.ID] = e
-	}
+// remember merges elements into the id cache: newer answers overwrite
+// older ones, nothing is dropped until the cache is full.
+func (s *Server) remember(els []element, wins map[string]element) {
 	s.mu.Lock()
-	s.snap = snap
-	s.mu.Unlock()
-	return res.Elements, nil
+	defer s.mu.Unlock()
+	if len(s.known) > maxKnown {
+		s.known = map[string]element{}
+	}
+	for _, e := range els {
+		s.known[e.ID] = e
+	}
+	for id, w := range wins {
+		s.known[id] = w
+	}
 }
 
-// roleAliases: newer at-spi2-core calls GtkButton "button", older ones
-// "push button"; panda-cu-atspi reports "push button", and either name matches.
+func (s *Server) scaleBoxes(els []element) {
+	if s.cfg.Scale <= 0 || s.cfg.Scale == 1 {
+		return
+	}
+	for i := range els {
+		for k := range els[i].BBox {
+			els[i].BBox[k] = int(float64(els[i].BBox[k]) * s.cfg.Scale)
+		}
+	}
+}
+
+func (s *Server) query(cmd string, a toolArgs, extra map[string]any) (a11yReply, error) {
+	req := map[string]any{"cmd": cmd, "app": a.App}
+	for k, v := range extra {
+		req[k] = v
+	}
+	var res a11yReply
+	if err := s.a11y(20*time.Second, req, &res); err != nil {
+		return res, fmt.Errorf("accessibility tree: %w", err)
+	}
+	s.scaleBoxes(res.Elements)
+	for id, w := range res.Windows {
+		s.scaleBoxes([]element{w})
+		res.Windows[id] = w
+	}
+	s.remember(res.Elements, res.Windows)
+	return res, nil
+}
+
+// roleAliases: newer at-spi2-core calls GtkButton "button"; either matches.
 var roleAliases = map[string]string{"button": "push button"}
 
-func matches(e element, text, role string) bool {
-	if r, ok := roleAliases[strings.ToLower(role)]; ok {
-		role = r
+func normRole(r string) string {
+	r = strings.ToLower(r)
+	if a, ok := roleAliases[r]; ok {
+		return a
 	}
-	if role != "" && !strings.EqualFold(e.Role, role) {
+	return r
+}
+
+func matches(e element, text, role string) bool {
+	if role != "" && !strings.EqualFold(e.Role, normRole(role)) {
 		return false
 	}
 	t := strings.ToLower(text)
@@ -92,59 +115,74 @@ func limitOf(a toolArgs, def int) int {
 	return a.Limit
 }
 
+func depthOf(a toolArgs) int {
+	if a.MaxDepth <= 0 || a.MaxDepth > 50 {
+		return 30
+	}
+	return a.MaxDepth
+}
+
 func (s *Server) tree(a toolArgs) (any, error) {
-	els, err := s.snapshot(a, false)
+	res, err := s.query("tree", a, map[string]any{"max_depth": depthOf(a), "limit": 2000})
 	if err != nil {
 		return nil, err
 	}
 	out := []element{}
-	for _, e := range els {
-		if a.Role == "" || strings.EqualFold(e.Role, a.Role) || e.Depth <= 1 {
+	for _, e := range res.Elements {
+		if a.Role == "" || strings.EqualFold(e.Role, normRole(a.Role)) || e.Depth <= 1 {
 			out = append(out, e)
 		}
 	}
 	n := limitOf(a, 400)
-	res := map[string]any{"elements": out[:min(n, len(out))], "count": len(out)}
+	r := map[string]any{"elements": out[:min(n, len(out))], "count": len(out)}
 	if len(out) > n {
-		res["truncated"] = fmt.Sprintf("showing %d of %d; narrow with app, role or max_depth", n, len(out))
+		r["truncated"] = fmt.Sprintf("showing %d of %d; narrow with app, role or max_depth", n, len(out))
 	}
-	return res, nil
+	return r, nil
+}
+
+func textOf(a toolArgs) string {
+	if a.Text == nil {
+		return ""
+	}
+	return *a.Text
+}
+
+// findEls asks the helper (AT-SPI Collection) for elements by role/text.
+func (s *Server) findEls(a toolArgs, limit int) ([]element, error) {
+	res, err := s.query("find", a, map[string]any{"role": normRole(a.Role), "text": textOf(a), "limit": limit})
+	return res.Elements, err
 }
 
 func (s *Server) find(a toolArgs) (any, error) {
-	text := ""
-	if a.Text != nil {
-		text = *a.Text
-	}
-	if text == "" && a.Role == "" {
+	if textOf(a) == "" && a.Role == "" {
 		return nil, errors.New("give text and/or role")
 	}
-	els, err := s.snapshot(a, false)
+	els, err := s.findEls(a, limitOf(a, 50))
 	if err != nil {
 		return nil, err
 	}
-	out := []element{}
-	for _, e := range els {
-		if e.Depth > 0 && matches(e, text, a.Role) {
-			out = append(out, e)
-		}
-	}
-	return map[string]any{"elements": out[:min(limitOf(a, 50), len(out))], "count": len(out)}, nil
+	return map[string]any{"elements": els, "count": len(els)}, nil
 }
 
 var actions = []string{"click", "focus", "set_text", "press"}
+
+func (s *Server) cached(id string) (element, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.known[id]
+	return e, ok
+}
 
 func (s *Server) act(a toolArgs) (any, error) {
 	if !slices.Contains(actions, a.Action) {
 		return nil, fmt.Errorf("action %q (click|focus|set_text|press)", a.Action)
 	}
-	s.mu.Lock()
-	e, ok := s.snap[a.ElementID]
-	s.mu.Unlock()
+	e, ok := s.cached(a.ElementID)
 	if !ok {
-		return nil, fmt.Errorf("unknown element_id %q: take a cu_tree or cu_find snapshot first", a.ElementID)
+		return nil, fmt.Errorf("unknown element_id %q: take a cu_tree, cu_find or cu_screenshot{marks} snapshot first", a.ElementID)
 	}
-	argv := []string{"act", e.ID, a.Action, "--role", e.Role, "--name", e.Name}
+	req := map[string]any{"cmd": "act", "id": e.ID, "action": a.Action, "role": e.Role, "name": e.Name}
 	if a.Action == "set_text" {
 		if a.Text == nil {
 			return nil, errors.New("set_text needs text")
@@ -152,18 +190,65 @@ func (s *Server) act(a toolArgs) (any, error) {
 		if err := checkText(*a.Text, maxSetText, "text"); err != nil {
 			return nil, err
 		}
-		argv = append(argv, "--text", *a.Text)
+		req["text"] = *a.Text
 	}
 	var res map[string]any
-	err := s.atspi(15*time.Second, &res, argv...)
+	err := s.a11y(15*time.Second, req, &res)
+	delete(res, "seq")
 	return res, err
 }
 
-func (s *Server) wait(a toolArgs) (any, error) {
-	text := ""
-	if a.Text != nil {
-		text = *a.Text
+// screenSized: a window whose box is the whole screen at the origin. On
+// Wayland, AT-SPI boxes are relative to the window, so these are the only
+// windows whose boxes are known to be screen pixels (headless mode
+// maximizes every window, without server-side decorations, for this).
+func screenSized(w element, sw, sh int) bool {
+	return len(w.BBox) == 4 && w.BBox[0] == 0 && w.BBox[1] == 0 && w.BBox[2] == sw && w.BBox[3] == sh
+}
+
+// clickPoint re-reads element id from the app (role, name, box, window)
+// and returns the centre of its box, or an error that says why a click
+// there could miss: it changed, it is hidden, its window is not in front,
+// or its window's screen position is unknown.
+func (s *Server) clickPoint(id string, sw, sh int) (int, int, error) {
+	was, ok := s.cached(id)
+	if !ok {
+		return 0, 0, fmt.Errorf("unknown element_id %q: take a cu_tree, cu_find or cu_screenshot{marks} snapshot first", id)
 	}
+	var res struct {
+		Element element            `json:"element"`
+		Showing bool               `json:"showing"`
+		Windows map[string]element `json:"windows"`
+	}
+	if err := s.a11y(10*time.Second, map[string]any{"cmd": "get", "id": id}, &res); err != nil {
+		return 0, 0, fmt.Errorf("element %s: %w", id, err)
+	}
+	e := res.Element
+	s.scaleBoxes([]element{e})
+	win := res.Windows[e.Win]
+	s.scaleBoxes([]element{win})
+	s.remember([]element{e}, res.Windows)
+	switch {
+	case e.Role != was.Role || e.Name != was.Name:
+		return 0, 0, fmt.Errorf("element %s changed (was %s %q, now %s %q); find it again", id, was.Role, was.Name, e.Role, e.Name)
+	case !res.Showing:
+		return 0, 0, fmt.Errorf("element %s (%s %q) is not on screen now", id, e.Role, e.Name)
+	case len(e.BBox) != 4 || e.BBox[2] <= 0 || e.BBox[3] <= 0:
+		return 0, 0, fmt.Errorf("element %s has no on-screen box; use cu_act", id)
+	case !screenSized(win, sw, sh):
+		return 0, 0, fmt.Errorf("refused: element %s is in window %q (%v), which is not maximized, so its screen position is unknown and a click could miss; use cu_act, or click pixels from a screenshot", id, win.Name, win.BBox)
+	case !slices.Contains(win.States, "active"):
+		return 0, 0, fmt.Errorf("refused: element %s is in window %q, which is behind the active window; cu_focus it first", id, win.Name)
+	}
+	cx, cy := e.BBox[0]+e.BBox[2]/2, e.BBox[1]+e.BBox[3]/2
+	if cx < 0 || cy < 0 || cx >= sw || cy >= sh {
+		return 0, 0, fmt.Errorf("element %s is off screen at (%d,%d); scroll it into view", id, cx, cy)
+	}
+	return cx, cy, nil
+}
+
+func (s *Server) wait(a toolArgs) (any, error) {
+	text := textOf(a)
 	if text == "" && a.Role == "" && a.Window == "" {
 		return nil, errors.New("give text, role and/or window")
 	}
@@ -176,18 +261,23 @@ func (s *Server) wait(a toolArgs) (any, error) {
 	}
 	t0 := time.Now()
 	deadline := t0.Add(time.Duration(timeout * float64(time.Second)))
+	polls := 0
 	for {
+		polls++
 		found, what, err := s.present(a, text)
 		if err == nil && found != a.Gone {
-			return map[string]any{"ok": true, "match": what, "waited_ms": time.Since(t0).Milliseconds()}, nil
+			return map[string]any{"ok": true, "match": what, "waited_ms": time.Since(t0).Milliseconds(), "polls": polls}, nil
+		}
+		if err := s.guard(); err != nil {
+			return nil, err
 		}
 		if time.Now().After(deadline) {
 			if err != nil {
-				return nil, fmt.Errorf("timed out after %.0f s: %w", timeout, err)
+				return nil, fmt.Errorf("timed out after %g s: %w", timeout, err)
 			}
-			return nil, fmt.Errorf("timed out after %.0f s", timeout)
+			return nil, fmt.Errorf("timed out after %g s", timeout)
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -202,42 +292,14 @@ func (s *Server) present(a toolArgs, text string) (bool, any, error) {
 			return ok, w, nil
 		}
 	}
-	els, err := s.snapshot(a, false)
+	els, err := s.findEls(a, 1)
 	if err != nil {
 		return false, nil, err
 	}
-	for _, e := range els {
-		if e.Depth > 0 && matches(e, text, a.Role) {
-			return true, e, nil
-		}
+	if len(els) > 0 {
+		return true, els[0], nil
 	}
 	return false, nil, nil
-}
-
-// ---- windows (wlr-foreign-toplevel via wlrctl)
-
-type window struct {
-	AppID string `json:"app_id"`
-	Title string `json:"title"`
-}
-
-func parseToplevels(out string) []window {
-	ws := []window{}
-	for _, l := range strings.Split(out, "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			app, title, _ := strings.Cut(l, ": ")
-			ws = append(ws, window{app, title})
-		}
-	}
-	return ws
-}
-
-func (s *Server) windows() ([]window, error) {
-	if err := s.waitReady(); err != nil {
-		return nil, err
-	}
-	out, err := s.run(execTimeout, "", "wlrctl", "toplevel", "list")
-	return parseToplevels(string(out)), err
 }
 
 func pickWindow(ws []window, q string) (window, bool) {
@@ -253,134 +315,4 @@ func pickWindow(ws []window, q string) (window, bool) {
 		}
 	}
 	return window{}, false
-}
-
-func (s *Server) focus(q string) (any, error) {
-	ws, err := s.windows()
-	if err != nil {
-		return nil, err
-	}
-	w, ok := pickWindow(ws, q)
-	if !ok {
-		return nil, fmt.Errorf("no window matches %q; windows: %v", q, ws)
-	}
-	_, err = s.run(execTimeout, "", "wlrctl", "toplevel", "focus", "app_id:"+w.AppID, "title:"+w.Title)
-	return map[string]any{"focused": w}, err
-}
-
-// ---- launching
-
-// launchReq is the one-line JSON request `panda-cu session` accepts.
-type launchReq struct {
-	App string `json:"app"`
-	Arg string `json:"arg,omitempty"`
-}
-
-func appArgv(cfg Config, app, arg string) ([]string, error) {
-	a, ok := cfg.Apps[app]
-	if !ok || len(a.Argv) == 0 {
-		ids := make([]string, 0, len(cfg.Apps))
-		for id := range cfg.Apps {
-			ids = append(ids, id)
-		}
-		slices.Sort(ids)
-		return nil, fmt.Errorf("app %q is not allowlisted (have: %s)", app, strings.Join(ids, ", "))
-	}
-	argv := slices.Clone(a.Argv)
-	if arg != "" {
-		argv = append(argv, arg)
-	}
-	return argv, nil
-}
-
-// launch starts an app inside the session: through `panda-cu session`'s
-// socket in headless mode, so apps live in panda-cu.service rather than in
-// the agent's sandbox, else (attach) as a detached child.
-func (s *Server) launch(app, arg string) error {
-	argv, err := appArgv(s.cfg, app, arg)
-	if err != nil {
-		return err
-	}
-	if s.cfg.Mode == "headless" {
-		if err := s.waitReady(); err != nil {
-			return err
-		}
-		c, err := net.DialTimeout("unix", s.cfg.runtimeFile("launch.sock"), 5*time.Second)
-		if err != nil {
-			return fmt.Errorf("session launcher: %w", err)
-		}
-		defer c.Close()
-		_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-		if err := json.NewEncoder(c).Encode(launchReq{app, arg}); err != nil {
-			return err
-		}
-		var res struct {
-			Error string `json:"error"`
-		}
-		if err := json.NewDecoder(c).Decode(&res); err != nil {
-			return fmt.Errorf("session launcher: %w", err)
-		}
-		if res.Error != "" {
-			return errors.New(res.Error)
-		}
-		return nil
-	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = s.cfg.environ()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	go cmd.Wait() //nolint:errcheck // reap
-	return nil
-}
-
-func (s *Server) launchTool(app, arg string) (any, error) {
-	before, _ := s.windows()
-	if err := s.launch(app, arg); err != nil {
-		return nil, err
-	}
-	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-		now, err := s.windows()
-		if err != nil {
-			continue
-		}
-		for _, w := range now {
-			if !slices.Contains(before, w) {
-				return map[string]any{"launched": app, "window": w}, nil
-			}
-		}
-	}
-	return map[string]any{"launched": app, "window": nil, "note": "no new window within 20 s; check cu_windows"}, nil
-}
-
-func (s *Server) open(a toolArgs) (any, error) {
-	switch {
-	case a.URL != "" && a.Path != "":
-		return nil, errors.New("give path or url, not both")
-	case a.URL != "":
-		u, err := url.Parse(a.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return nil, errors.New("url must be http(s)://host/...")
-		}
-		return s.launchTool(s.cfg.Open["url"], u.String())
-	case a.Path != "":
-		p := a.Path
-		if strings.HasPrefix(p, "~/") {
-			p = filepath.Join(os.Getenv("HOME"), p[2:])
-		}
-		if !filepath.IsAbs(p) {
-			return nil, errors.New("path must be absolute (or ~/...)")
-		}
-		fi, err := os.Stat(p)
-		if err != nil {
-			return nil, err
-		}
-		kind := "file"
-		if fi.IsDir() {
-			kind = "dir"
-		}
-		return s.launchTool(s.cfg.Open[kind], filepath.Clean(p))
-	}
-	return nil, errors.New("give path or url")
 }

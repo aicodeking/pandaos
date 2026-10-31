@@ -13,11 +13,13 @@
 #     (settings.ini and the GSettings keyfile), cursor blink off.
 #   - Fixed DPI and fonts: a private fonts.conf with DejaVu only (one family:
 #     Sans/Serif/Mono), 96 dpi, hinting slight, grayscale AA; scale fixed.
-#   - Normal windows open fullscreen (labwc window rule): no decorations,
-#     the window origin is the screen origin, so AT-SPI boxes
-#     (window-relative on Wayland) are screen coordinates. Dialogs are not
-#     fullscreened: GTK hides a fullscreen window's header bar, which holds a
-#     file chooser's Name entry and Save button (CI run 41197052760).
+#   - Every window, dialogs included, opens maximized (labwc window rule)
+#     with client-side decorations only, so its origin is the screen origin
+#     and AT-SPI boxes (window-relative on Wayland) are screen coordinates.
+#     Maximized, not fullscreen: GTK hides a fullscreen window's header bar,
+#     which holds a file chooser's Name entry and Save button (CI run
+#     41197052760). A window that cannot be maximized (fixed size) keeps an
+#     unknown position: panda-cu then refuses clicks by element_id there.
 #   - Notifications suppressed: the session D-Bus is private and only knows
 #     the AT-SPI bus, so no notification daemon can be activated.
 #   - Dark theme: GTK_THEME=Adwaita:dark (built into GTK 3 and 4).
@@ -143,8 +145,7 @@ let
       <auth>EXTERNAL</auth>
       <servicedir>${pkgs.at-spi2-core}/share/dbus-1/services</servicedir>
       <policy context="default">
-        <allow send_destination="*" eavesdrop="true"/>
-        <allow eavesdrop="true"/>
+        <allow send_destination="*"/>
         <allow own="*"/>
       </policy>
     </busconfig>
@@ -179,13 +180,17 @@ let
       path = pkgs.writeText "rc.xml" ''
         <?xml version="1.0" encoding="UTF-8"?>
         <labwc_config>
-          <core><gap>0</gap></core>
+          <core><gap>0</gap><decoration>client</decoration></core>
           <theme><cornerRadius>0</cornerRadius><font><name>DejaVu Sans</name><size>10</size></font></theme>
           <focus><followMouse>no</followMouse></focus>
           <placement><policy>center</policy></placement>
-          ${lib.optionalString cfg.fullscreenWindows ''
+          <!-- One no-op bind, so labwc loads none of its defaults: every key
+               (Alt+Left, Super+A, Alt+F4, ...) goes to the app, and no key
+               moves or unmaximizes a window. -->
+          <keyboard><keybind key="W-F24"><action name="None" /></keybind></keyboard>
+          ${lib.optionalString cfg.maximizeWindows ''
             <windowRules>
-              <windowRule identifier="*" type="normal"><action name="ToggleFullscreen" /></windowRule>
+              <windowRule identifier="*"><action name="ToggleMaximize" /></windowRule>
             </windowRules>
           ''}
         </labwc_config>
@@ -198,9 +203,20 @@ let
   # An autostart file never ran here (checks.panda-cu, CI run 41184234354):
   # labwc runs it through `sh`, which is not on a NixOS unit's PATH. Output
   # goes to the unit's journal (journalctl -u panda-cu).
+  # If `panda-cu session` ends (it only returns on failure), stop labwc: the
+  # unit then exits and Restart=always brings up a fresh session, instead of
+  # a compositor with no launcher and no ready file.
   startup = pkgs.writeShellScript "panda-cu-startup" ''
-    ${pkgs.systemd}/bin/systemd-cat -t panda-cu-session ${pkgs.wlr-randr}/bin/wlr-randr --output HEADLESS-1 --custom-mode ${cfg.resolution} --scale ${toString cfg.scale}
-    exec ${pkgs.systemd}/bin/systemd-cat -t panda-cu-session ${lib.getExe cfg.package} session
+    log() { ${pkgs.systemd}/bin/systemd-cat -t panda-cu-session "$@"; }
+    log ${pkgs.wlr-randr}/bin/wlr-randr --output HEADLESS-1 --custom-mode ${cfg.resolution} --scale ${toString cfg.scale}
+    log ${lib.getExe cfg.package} session
+    status=$?
+    echo "panda-cu session ended (status $status); stopping labwc so systemd restarts the session" | log
+    if [ -n "''${LABWC_PID:-}" ]; then
+      kill -TERM "$LABWC_PID"
+    else
+      ${pkgs.procps}/bin/pkill -TERM -u "$(${pkgs.coreutils}/bin/id -u)" -x labwc
+    fi
   '';
 
   session = pkgs.writeShellApplication {
@@ -260,6 +276,7 @@ let
     inherit (cfg) mode;
     inherit apps;
     scale = cfg.scale;
+    inherit (cfg) allowClipboardRead;
     env = if headless then sessionEnv else a11yEnv;
     open = { dir = "files"; file = "editor"; } // lib.optionalAttrs (cfg.browser != null) { url = "browser"; };
   } // lib.optionalAttrs headless { inherit width height; };
@@ -296,14 +313,34 @@ in
       default = false;
       description = "Run X11 apps through Xwayland in the headless session (adds Xwayland to the closure).";
     };
-    fullscreenWindows = lib.mkOption {
+    maximizeWindows = lib.mkOption {
       type = lib.types.bool;
       default = true;
       description = ''
-        Open every normal (non-dialog) window fullscreen in the headless session. AT-SPI boxes are
-        window-relative on Wayland, so this is what makes them screen
-        coordinates; turn it off only if you click by pixels from screenshots.
+        Open every window, dialogs included, maximized in the headless
+        session. AT-SPI boxes are window-relative on Wayland, so this is what
+        makes them screen coordinates; with it off, panda-cu refuses clicks
+        by element_id (use cu_act, or pixels from screenshots).
       '';
+    };
+    allowClipboardRead = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        attach mode: let cu_clipboard_get read the clipboard of the person's
+        session (it may hold passwords). Headless mode always allows it: that
+        clipboard is the agent's own.
+      '';
+    };
+    memoryMax = lib.mkOption {
+      type = lib.types.str;
+      default = "2G";
+      description = "MemoryMax of panda-cu.service: labwc plus every app started in the headless session.";
+    };
+    tasksMax = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 1024;
+      description = "TasksMax of panda-cu.service (a browser needs a few hundred).";
     };
     browser = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
@@ -372,8 +409,14 @@ in
           ExecStart = lib.getExe session;
           RuntimeDirectory = "panda-cu";
           RuntimeDirectoryMode = "0700"; # only the agent user reaches the display, bus and launcher
-          Restart = "on-failure";
+          Restart = "always";
           RestartSec = 2;
+          # Apps started in the session run here, so they get the agent's
+          # limits: this unit's own caps, inside agents.slice when it exists.
+          Slice = lib.mkIf (config.pandaos.agents.enable or false) "agents.slice";
+          MemoryMax = cfg.memoryMax;
+          TasksMax = cfg.tasksMax;
+          ProtectHome = true; # /home, /root, /run/user: other people's files and sessions
           # Apps run here (via panda-cu's launcher socket), so they may write
           # only the agent's home and the session's runtime dir.
           NoNewPrivileges = true;

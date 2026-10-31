@@ -4,6 +4,8 @@
 //	panda-cu mcp      serve MCP over stdio (run by the agent CLI)
 //	panda-cu session  in-session helper (labwc -s startup, headless mode only)
 //	panda-cu call TOOL [JSON-ARGS]  run one tool, print one JSON value
+//	panda-cu revoke [MINUTES]   stop computer use in this session (0: allow again)
+//	panda-cu indicator [click]  waybar badge (JSON lines); click toggles revoke
 //	panda-cu tools    print the tool list
 package main
 
@@ -18,13 +20,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const version = "0.1.0"
 
 const defaultConfig = "/etc/panda/cu.json"
 
-const usage = `usage: panda-cu {mcp|session|tools|call TOOL [JSON-ARGS]} [-config ` + defaultConfig + `]`
+const usage = `usage: panda-cu {mcp|session|tools|call TOOL [JSON-ARGS]|revoke [MINUTES]|indicator [click]} [-config ` + defaultConfig + `]`
 
 // App is one allowlisted launcher entry (module.nix also installs it as a
 // .desktop file). Argv[0] is an absolute store path.
@@ -44,6 +47,9 @@ type Config struct {
 	Apps   map[string]App    `json:"apps"`
 	// Open maps "dir", "file" and "url" to the app id cu_open uses.
 	Open map[string]string `json:"open"`
+	// AllowClipboardRead lets cu_clipboard_get read the person's clipboard
+	// in attach mode (headless: always, it is the agent's own).
+	AllowClipboardRead bool `json:"allowClipboardRead"`
 }
 
 func loadConfig(path string) (Config, error) {
@@ -142,6 +148,32 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	case "tools":
 		_, err := fmt.Fprintln(stdout, toolsJSON)
 		return err
+	case "revoke":
+		d := defaultRevoked
+		if fl.NArg() > 0 {
+			m, err := strconv.Atoi(fl.Arg(0))
+			if err != nil || m < 0 || m > 24*60 {
+				return fmt.Errorf("revoke: minutes must be 0..1440, got %q", fl.Arg(0))
+			}
+			d = time.Duration(m) * time.Minute
+		}
+		n, err := revoke(cfg, d)
+		if err == nil && d == 0 {
+			_, err = fmt.Fprintln(stdout, "computer use allowed again")
+		} else if err == nil {
+			_, err = fmt.Fprintf(stdout, "computer use stopped for %s; %d panda-cu processes ended\n", d, n)
+		}
+		return err
+	case "indicator":
+		if fl.Arg(0) == "click" {
+			d := defaultRevoked
+			if time.Now().Before(cfg.revokedUntil()) {
+				d = 0
+			}
+			_, err := revoke(cfg, d)
+			return err
+		}
+		return indicator(cfg, stdout)
 	}
 	return fmt.Errorf("unknown command %q\n%s", cmd, usage)
 }

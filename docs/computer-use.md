@@ -17,46 +17,59 @@ against other Linux desktops.
 
 | `services.panda-cu.mode` | What it drives | Cost |
 |---|---|---|
-| `attach` (desktop profile default) | the logged-in Wayland session of the user who runs `panda-cu` (`/run/user/$UID`); sockets owned by another user are refused | no service, no idle RAM: the package and the AT-SPI env |
-| `headless` | a private labwc session for `services.panda-cu.user` (default `agent`), `panda-cu.service`, 1280x800, runtime dir `/run/panda-cu` (0700) | labwc + pixman in RAM while the service runs |
+| `headless` (default, also in the desktop profile) | a private labwc session for `services.panda-cu.user` (default `agent`), `panda-cu.service`, 1280x800, runtime dir `/run/panda-cu` (0700) | labwc + pixman in RAM while the service runs |
+| `attach` (opt-in) | the logged-in Wayland session of the user who runs `panda-cu` (`/run/user/$UID`); sockets owned by another user are refused | no service: the package and the AT-SPI env |
 
 The module is in `nixosModules.default` and **off by default**. The desktop
-profile turns it on in `attach` mode, because a desktop box already has a
-session to share and attach mode adds no running service. That keeps the
-idle-RAM budget unchanged. A box where agents need a screen of their own
-(the headless profile, or a desktop where the `agent` user must not see your
-session) sets:
+profile turns it on in **headless** mode: agents get a desktop of their own
+and never see or touch the person's screen. Sharing the person's session is
+one option away, with the controls below:
 
 ```nix
-services.panda-cu = { enable = true; mode = "headless"; };
+services.panda-cu = { enable = true; mode = "attach"; };
 ```
 
-In attach mode the registry entry is the same, but the tools only work for
-an agent CLI that runs inside the logged-in session. The `agent` user of
-`pandacode-host` has no session there, so its calls fail with a clear error.
+## Safety defaults
+
+Each one is an option; the defaults are the safe choice.
+
+| Default | Option | Why |
+|---|---|---|
+| headless, not attach | `services.panda-cu.mode` | an agent drives its own screen, not the person's |
+| attach: `cu_clipboard_get` refused | `services.panda-cu.allowClipboardRead` | the person's clipboard may hold passwords; headless always allows it (the agent's own clipboard) |
+| attach: a red AGENT badge in waybar while an agent acts; Super+Escape (or a click on the badge) ends running `panda-cu` processes and refuses new calls for 10 minutes | `panda-cu revoke MINUTES`, `panda-cu revoke 0` | the person sees and can stop it. A stop button, not a sandbox: an agent running as the same user could undo it |
+| `panda-cu-busy` marks count for at most 2 h | `pandaos.desktop.cuBusyMaxMinutes` | a forgotten `on` or a stuck `run` cannot keep the screen unlocked forever |
+| apps started in the headless session run in `panda-cu.service`, inside `agents.slice`, with `MemoryMax` 2G, `TasksMax` 1024, `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges` | `services.panda-cu.memoryMax`, `.tasksMax` | the agent's own limits; no access to `/home` or other people's sessions |
+| the private session bus has no eavesdrop rule | | apps on it cannot read each other's D-Bus traffic |
+
+The app allowlist (`cu_launch`, `cu_open`) is **not a security boundary**: it
+keeps agents to known, tested apps, but those apps can open files and start
+other programs (a browser, a file manager). The boundaries are the user
+(`agent`), its sandbox and its limits.
 
 ## Design
 
 | Choice | Why |
 |---|---|
 | labwc (wlroots) in both modes; headless uses `WLR_BACKENDS=headless` + pixman | The same compositor as the desktop; no GPU needed. |
+| Every headless window, dialogs included, opens **maximized** with client-side decorations only (labwc window rule, `<decoration>client</decoration>`) | AT-SPI boxes are window-relative on Wayland. A maximized CSD window sits at (0,0) with no shadow margin, so its boxes are screen pixels. Maximized, not fullscreen: GTK hides a fullscreen window's header bar (a file chooser's Save button). |
+| Clicks by `element_id` re-read the element first (role, name, box, window) and are refused when a click could miss: it changed or is gone, it is hidden, its window is behind the active one, or its window is not maximized (unknown position, e.g. a fixed-size message dialog). Marks leave such windows out and count them. | Never misclick; `cu_act` still works there. |
 | Pointer: `zwlr_virtual_pointer_v1` spoken directly from Go | `motion_absolute` gives exact pixels with no acceleration; separate press/release make drags work. |
-| Keyboard: text through `wtype`; key combos through panda-cu's own virtual keyboard with the standard US keymap | wtype uploads a keymap per string, so any Unicode types correctly. GTK matches accelerators by hardware keycode once the seat is back on the US keyboard, so `cu_key` sends real US evdev codes (modifiers as key presses); other keysyms fall back to wtype. |
-| Screenshots: `grim` (wlr-screencopy); windows: `wlrctl` (foreign-toplevel); clipboard: `wl-clipboard` | Standard wlroots protocols, small tools. |
-| AT-SPI: `panda-cu-atspi` (Python + gi `Atspi`) | The only well-supported client library. Element ids are child-index paths; `cu_act` refuses an id whose role or name changed. |
-| Headless normal windows open fullscreen; dialogs do not | AT-SPI boxes are window-relative on Wayland; with the window at (0,0) they are screen pixels, so Set-of-Marks and `cu_click{element_id}` are exact. A fullscreen dialog would lose its GTK header bar (a file chooser's Name entry and Save button), so on dialogs use `cu_act` or pixels from a screenshot. |
-| Apps start from an allowlist (`editor` = Mousepad, `files` = PCManFM, `browser` when configured, plus `extraApps`) | `cu_launch` cannot run arbitrary commands. |
+| Keyboard: text through `wtype`; key combos through panda-cu's own virtual keyboard with the US keymap plus `level3(ralt_switch)` | wtype uploads a keymap per string, so any Unicode types. GTK matches accelerators by hardware keycode, so `cu_key` sends real evdev codes; `altgr` is Right Alt as ISO_Level3_Shift (Mod5). |
+| Windows: `zwlr_foreign_toplevel_manager_v1` spoken directly | States (activated, maximized), dialogs, focusing by handle, and `cu_launch` finding the new window by handle, not by title. |
+| AT-SPI: one long-lived `panda-cu-atspi` (Python + gi `Atspi`) per MCP session, JSON lines over a pipe; `cu_find`/`cu_wait` use the Collection API (one GetMatches per window) | Python start-up and typelib loading are paid once, not per call. The libatspi cache is off, so answers are never stale. Element ids name one accessible object for the helper's lifetime, whichever tool returned them. |
+| `cu_launch` goes through the session's launcher, which reports the app's exit status and last output | An app that dies before its window is an error with the reason; `cu_windows` lists recent exits. |
+| `screenshot:true` on an action waits until two frames in a row are identical (at most 1.5 s) | The image shows the result, not a half-painted frame. |
+| `panda-cu session` failing stops labwc; `Restart=always` brings up a fresh session | Never a compositor without a launcher or ready file. |
 
 ## Tools
 
-`panda-cu tools` prints the full schemas. Every action tool also takes
-`screenshot: true` and then returns a half-size screenshot taken 150 ms
-after the action.
+`panda-cu tools` prints the full schemas.
 
 | Tool | Does |
 |---|---|
-| `cu_screenshot{marks?,region?,scale?,app?}` | PNG; `marks` overlays numbered boxes on interactive elements and returns them |
-| `cu_click{x,y \| element_id, button?, double?}`, `cu_move`, `cu_drag{from,to}`, `cu_scroll{dx,dy,at?}` | pointer |
+| `cu_screenshot{marks?,region?,scale?,app?}` | PNG; `marks` overlays numbered boxes on interactive elements of the active window and returns them |
+| `cu_click{x,y \| element_id, button?, double?}`, `cu_move`, `cu_drag{from,to}` (each `{x,y}` or `{element_id}`), `cu_scroll{dx,dy,at?}` | pointer |
 | `cu_type{text}` (≤ 4000 chars), `cu_key{combo}` (≤ 16 combos) | keyboard |
 | `cu_tree{max_depth?,app?,role?,limit?}`, `cu_find{text?,role?,app?}` | read the AT-SPI tree |
 | `cu_act{element_id, action: click\|focus\|set_text\|press}` | act on an element without pixels |
@@ -67,72 +80,58 @@ after the action.
 Scripts use `panda-cu call TOOL '{json}'`, which prints one JSON value
 (images as `png_base64`) and exits non-zero on error.
 
-Tips for agents (also in `/etc/panda/AGENTS.md`): prefer `cu_find`/`cu_tree`
-then `cu_act` over pixel clicks; when you must click, use
-`cu_screenshot{marks:true}` and `cu_click{element_id}`; call `cu_wait` after
-anything that opens a window.
-
 ## Determinism
 
 What keeps screenshots and accessibility boxes the same from run to run.
 
-Headless session (`module.nix` lists each one):
+Headless session (`module.nix` lists each one): no animations, no cursor
+blink; one font family (DejaVu), 96 dpi, slight hinting, greyscale AA, scale
+1; every window maximized at the origin; a private session D-Bus that only
+knows the AT-SPI bus (no notification daemon, keyring or portal can start);
+fresh XDG dirs on every start, the GSettings keyfile backend, Chromium
+`--no-first-run --password-store=basic`.
 
-- no animations (labwc has none; GTK `gtk-enable-animations=false`), no
-  cursor blink;
-- one font family (DejaVu), 96 dpi, slight hinting, greyscale AA, scale 1;
-- normal windows fullscreen, so the window origin is the screen origin (dialogs keep their size);
-- a private session D-Bus that only knows the AT-SPI bus: no notification
-  daemon, keyring or portal can start;
-- fresh XDG config/cache/data dirs on every start, the GSettings keyfile
-  backend, Chromium `--no-first-run --password-store=basic`: no first-run or
-  keyring dialogs.
-
-Desktop (`components/desktop`, checked by `test-config.sh`):
-
-- labwc: no drop shadows, opaque windows, new windows centred and focused,
-  a 2 px accent ring on the focused window, 32x28 titlebar buttons, flat
-  pointer acceleration, absolute devices (QEMU usb-tablet) mapped 1:1, key
-  repeat 25/s after 600 ms, US layout;
-- GTK: no animations or cursor blink, always-visible scrollbars, dark
-  Adwaita, a fixed cursor theme and size; waybar has no hover transitions;
-- fontconfig: DejaVu, slight hinting, greyscale AA;
-- AT-SPI bus on (`services.gnome.at-spi2-core`), Qt apps join it;
-- `panda-dnd on|off|toggle` (Super+N, the menu, a waybar badge) pauses
-  notifications; `panda-cu-busy run CMD` keeps the idle lock away while a
-  task runs; `pandaos.desktop.autoLock = false` turns the idle lock off.
+Desktop (`components/desktop`, checked by `test-config.sh`): no drop
+shadows, opaque windows, new windows centred and focused, a 2 px focus ring,
+32x28 titlebar buttons, flat pointer acceleration, key repeat 25/s after
+600 ms, US layout; GTK without animations or cursor blink, always-visible
+scrollbars, dark Adwaita; the AT-SPI bus on; `panda-dnd` (Super+N);
+`panda-cu-busy run CMD`; `pandaos.desktop.autoLock = false` turns the idle
+lock off.
 
 ## Tests
 
 - `checks.panda-cu` (`components/computer-use/vmtest.nix`): one MCP stdio
-  session as `agent` in a pandacode-host-like sandbox. It checks screenshot
-  size and latency, writes and saves a file in Mousepad through AT-SPI and
-  the keyboard, Set-of-Marks, click accuracy on a grid of 80 GTK buttons (by
-  `element_id` and by coordinates), the clipboard, refused inputs, and that
-  another user cannot reach the session. METRICs: `screenshot_ms_median`,
-  `click_ms_median`, `move_with_screenshot_ms`, `click_accuracy`.
-  Measured in CI run 41199717831 (2 vCPU, pixman): screenshot median 78 ms
-  for a full 1280x800 PNG over MCP, click median 36.4 ms, a move with a
-  half-size screenshot 362 ms, click accuracy 20/20 (10 by `element_id`, 10
-  by coordinates), the save dialog completed through AT-SPI, and
-  `cu_clipboard_set` about 3.3 s (wl-copy's forked server holds the pipes
-  until the 2 s exec WaitDelay).
-- `checks.boot-desktop`: `test-config.sh` on `/etc/xdg`, the AT-SPI bus
-  address, Mousepad and PCManFM launched through `panda-cu` (attach),
-  Mousepad's text node, and do-not-disturb.
+  session as `agent` in a pandacode-host-like sandbox. Every section runs and
+  reports, the test fails if any failed. Thresholds are exact: Mousepad's
+  save dialog must save by **keyboard** (the AT-SPI path is only a separately
+  reported fallback); 20/20 clicks on 80 GTK buttons (by `element_id` and by
+  coordinates); 12/12 on 24 px buttons; a menu item and a dialog button by
+  `element_id`; a fixed-size message dialog is hit or refused, never missed;
+  a list row that needs scrolling becomes visible and is clicked; a slider
+  dragged from its `element_id` reports its new value; Unicode multi-line
+  `cu_type` reads back exactly; a Chromium form is filled and submitted; an
+  app killed mid-task gives clean errors and shows in `recent_exits`; an app
+  that exits at launch is an error with its status and output; p50 of
+  `cu_find`, `cu_act` and one `cu_wait` poll under 200 ms; the clipboard;
+  refused inputs; another user cannot reach the session; killing
+  `panda-cu session` restarts the whole session. METRICs include
+  `screenshot_ms_median`, `click_ms_median`, `find_ms_p50`, `act_ms_p50`,
+  `wait_poll_ms_p50`, `move_with_screenshot_ms`, `clipboard_set_ms`,
+  `click_accuracy`, `small_accuracy`, `drag_value`, `save_via`.
+- `checks.boot-desktop`: `test-config.sh` on `/etc/xdg`, the AT-SPI bus,
+  panda-cu in attach mode in the person's session, do-not-disturb.
 - CI: `go vet`/`go test -race`, the desktop shell tests, shellcheck.
 
 ## Known limits
 
-- Typing into the GTK file chooser's Name entry with `cu_key`/`cu_type` did
-  not save in the VM test, even though the entry reported focus; setting it
-  with `cu_act set_text` and pressing Save with `cu_act click` did. Prefer
-  `cu_act` in dialogs.
-- Dialogs are not fullscreen, so their AT-SPI boxes are window-relative:
-  `cu_click{element_id}` on a dialog element can miss; `cu_act` does not.
+- attach mode: windows are not maximized (and have server-side title bars),
+  so clicks by `element_id` are refused there; use `cu_act`, or pixels from
+  screenshots.
+- Popups that are windows of their own (a combo box list, an entry
+  completion) count as unknown positions too.
 - `cu_key` sends US-layout keycodes; other keysyms go through wtype, whose
   accelerators GTK may not fire.
-- attach mode: AT-SPI boxes are window-relative for every window.
 
 ## cubench
 

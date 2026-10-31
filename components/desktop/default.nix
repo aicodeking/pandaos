@@ -4,6 +4,9 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.pandaos.desktop;
+  cu = config.services.panda-cu or { enable = false; };
+  # The badge only matters when agents may drive this very screen.
+  cuAttach = cu.enable && (cu.mode or "headless") == "attach";
 
   footExe = "${pkgs.foot}/bin/foot";
   inTerm = cmd: "${footExe} --title 'Panda: ${cmd}' ${cmd}";
@@ -78,7 +81,8 @@ let
   # Marks a computer-use task as running; the idle lock skips while busy.
   panda-cu-busy = pkgs.writeShellApplication {
     name = "panda-cu-busy";
-    runtimeInputs = [ pkgs.coreutils ];
+    runtimeInputs = [ pkgs.coreutils pkgs.findutils ];
+    runtimeEnv.PANDA_CU_BUSY_MAX_MIN = toString cfg.cuBusyMaxMinutes;
     text = builtins.readFile ./bin/panda-cu-busy;
   };
 
@@ -143,7 +147,16 @@ let
       # module is not on the default bar.
       modules-left = [ "custom/panda" "custom/connect" ];
       modules-center = [ "clock" ];
-      modules-right = [ "custom/dnd" "network" "cpu" "memory" "disk" "battery" "pulseaudio" ];
+      modules-right = lib.optional cuAttach "custom/cu" ++ [ "custom/dnd" "network" "cpu" "memory" "disk" "battery" "pulseaudio" ];
+      # Lit while an agent drives this screen (panda-cu attach mode); a click
+      # or Super+Escape stops it for 10 minutes. `panda-cu indicator` prints
+      # one JSON line per change.
+      "custom/cu" = lib.optionalAttrs cuAttach {
+        exec = "${lib.getExe cu.package} indicator";
+        return-type = "json";
+        restart-interval = 5;
+        on-click = "${lib.getExe cu.package} indicator click";
+      };
       "custom/panda" = {
         format = "panda";
         tooltip-format = "Repair menu (Super+X)";
@@ -241,6 +254,15 @@ in
         Lock the screen after 10 minutes idle. It never locks while
         `panda-cu-busy` marks a computer-use task as running. Turn off for
         benchmark or kiosk images; the lock before suspend stays.
+      '';
+    };
+    cuBusyMaxMinutes = lib.mkOption {
+      type = lib.types.ints.between 1 1440;
+      default = 120;
+      description = ''
+        `panda-cu-busy` keeps the idle lock away for at most this long per
+        mark: an agent that forgets `off`, or a stuck `run`, cannot keep the
+        screen unlocked forever.
       '';
     };
     autologinUser = lib.mkOption {

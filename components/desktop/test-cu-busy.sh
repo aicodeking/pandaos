@@ -47,3 +47,20 @@ echo "ok stale-mark-removed"
 
 if cu run 2>/dev/null; then echo "FAIL usage: run without CMD" >&2; exit 1; fi
 echo "ok usage"
+
+# The cap: a mark older than PANDA_CU_BUSY_MAX_MIN no longer counts (and a
+# manual one is removed); `on` again starts a fresh mark.
+cu on
+touch -t 202001010000 "$dir/panda-cu-busy/manual"
+expect manual-expired idle
+[ ! -e "$dir/panda-cu-busy/manual" ] || { echo "FAIL expired manual mark kept" >&2; exit 1; }
+echo "ok expired-mark-removed"
+cu on
+expect manual-fresh busy
+cu off
+sleep 30 &
+live=$!
+: >"$dir/panda-cu-busy/run.$live"
+touch -t 202001010000 "$dir/panda-cu-busy/run.$live"
+expect stuck-run-expired idle
+kill "$live"

@@ -47,6 +47,8 @@
     <keybind key="W-e"><action name="Execute" command="pcmanfm" /></keybind>
     <keybind key="W-t"><action name="Execute" command="mousepad" /></keybind>
     <keybind key="W-n"><action name="Execute" command="panda-dnd toggle" /></keybind>
+    <!-- Stop an agent driving this screen (panda-cu attach mode) for 10 minutes. -->
+    <keybind key="W-Escape"><action name="Execute" command="panda-cu revoke 10" /></keybind>
     <keybind key="W-Left"><action name="SnapToEdge" direction="left" /></keybind>
     <keybind key="W-Right"><action name="SnapToEdge" direction="right" /></keybind>
     <keybind key="W-Up"><action name="ToggleMaximize" /></keybind>
