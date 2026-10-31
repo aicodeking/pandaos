@@ -131,6 +131,7 @@ def describe(acc, win=None, depth=None):
     if txt is not None and role != "label":
         n = txt.get_character_count()
         if n:
+            e["chars"] = n
             # Atspi.Text.get_text, not txt.get_text: the iface is the
             # Accessible itself, whose own get_text() shadows it.
             e["text"] = Atspi.Text.get_text(txt, 0, min(n, 500))

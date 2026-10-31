@@ -457,6 +457,18 @@ def _():
     assert got == clip, repr(got)
 
 
+@section("a window that maps maximized stays maximized")
+def _():
+    r, _ = call("cu_launch", {"app": "labmax"})
+    assert "maximized" in data(r)["window"]["states"], data(r)
+    time.sleep(1)  # the window rule runs at map; give a toggle time to show
+    ws = [w for w in data(call("cu_windows")[0])["windows"] if w["app_id"] == "cu-labmax"]
+    metrics["premaximized_states"] = ws[0]["states"] if ws else None
+    assert ws and "maximized" in ws[0]["states"], ws
+    subprocess.run(["pkill", "-f", "cu-lab --maximized"], check=False)
+    call("cu_wait", {"window": "CU Lab Max", "gone": True, "timeout": 10})
+
+
 @section("windows, focus, settled screenshot")
 def _():
     ws = data(call("cu_windows")[0])["windows"]

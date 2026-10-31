@@ -25,7 +25,20 @@ type atspiHelper struct {
 	in    io.WriteCloser
 	lines chan []byte
 	seq   int
-	gen   int // helpers started so far
+	gen   int    // helpers started so far
+	sess  string // session the helper was started in (Config.sessionID)
+}
+
+// follow restarts the helper when the display session is not the one it
+// was started in (panda-cu.service restarted): its AT-SPI bus is gone, and
+// it would answer nothing until a request timed out.
+func (h *atspiHelper) follow(sess string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cmd != nil && h.sess != "" && sess != h.sess {
+		h.stop()
+	}
+	h.sess = sess
 }
 
 func (h *atspiHelper) start() error {

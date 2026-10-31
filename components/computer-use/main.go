@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -111,6 +112,25 @@ func (c Config) environ() []string {
 		}
 	}
 	return out
+}
+
+// sessionID names the running display session: the ready file (headless,
+// rewritten by every session start) or the session bus socket (attach),
+// by inode and mtime.
+func (c Config) sessionID() string {
+	f := c.runtimeFile("ready")
+	if c.Mode != "headless" {
+		f, _, _ = strings.Cut(strings.TrimPrefix(c.Env["DBUS_SESSION_BUS_ADDRESS"], "unix:path="), ",")
+	}
+	fi, err := os.Stat(f)
+	if err != nil {
+		return ""
+	}
+	ino := uint64(0)
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		ino = uint64(st.Ino)
+	}
+	return fmt.Sprintf("%d:%d", ino, fi.ModTime().UnixNano())
 }
 
 func (c Config) runtimeFile(name string) string {

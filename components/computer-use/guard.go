@@ -80,10 +80,14 @@ func revoke(cfg Config, d time.Duration) (int, error) {
 	return killCU("/proc", os.Getuid(), os.Getpid()), nil
 }
 
-// killCU sends SIGTERM to uid's panda-cu processes running mcp or call.
+// killCU stops uid's panda-cu processes running mcp or call: first the
+// process group of each of their children (wtype, wl-copy, the AT-SPI
+// helper: each leads its own group), with SIGKILL, so typing stops at once;
+// then the panda-cu process itself, with SIGTERM.
 func killCU(proc string, uid, self int) int {
+	cu := map[int]bool{}
+	ppid := map[int]int{}
 	ents, _ := os.ReadDir(proc)
-	n := 0
 	for _, e := range ents {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil || pid == self {
@@ -96,16 +100,42 @@ func killCU(proc string, uid, self int) int {
 		if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != uid {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(proc, e.Name(), "cmdline"))
-		if err != nil {
-			continue
+		if stat, err := os.ReadFile(filepath.Join(proc, e.Name(), "stat")); err == nil {
+			ppid[pid] = parentPID(string(stat))
 		}
-		if isCUAction(bytes.Split(bytes.TrimRight(raw, "\x00"), []byte{0})) {
-			if syscall.Kill(pid, syscall.SIGTERM) == nil {
-				n++
+		raw, err := os.ReadFile(filepath.Join(proc, e.Name(), "cmdline"))
+		if err == nil && isCUAction(bytes.Split(bytes.TrimRight(raw, "\x00"), []byte{0})) {
+			cu[pid] = true
+		}
+	}
+	for pid, parent := range ppid {
+		if cu[parent] && !cu[pid] {
+			if syscall.Kill(-pid, syscall.SIGKILL) != nil { // not a group leader
+				_ = syscall.Kill(pid, syscall.SIGKILL)
 			}
 		}
 	}
+	n := 0
+	for pid := range cu {
+		if syscall.Kill(pid, syscall.SIGTERM) == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// parentPID reads field 4 of /proc/PID/stat ("pid (comm) state ppid ...");
+// comm may hold spaces and parentheses, so parse after the last ')'.
+func parentPID(stat string) int {
+	i := strings.LastIndexByte(stat, ')')
+	if i < 0 {
+		return 0
+	}
+	f := strings.Fields(stat[i+1:])
+	if len(f) < 2 {
+		return 0
+	}
+	n, _ := strconv.Atoi(f[1])
 	return n
 }
 

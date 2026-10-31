@@ -37,7 +37,7 @@ Each one is an option; the defaults are the safe choice.
 |---|---|---|
 | headless, not attach | `services.panda-cu.mode` | an agent drives its own screen, not the person's |
 | attach: `cu_clipboard_get` refused | `services.panda-cu.allowClipboardRead` | the person's clipboard may hold passwords; headless always allows it (the agent's own clipboard) |
-| attach: a red AGENT badge in waybar while an agent acts; Super+Escape (or a click on the badge) ends running `panda-cu` processes and refuses new calls for 10 minutes | `panda-cu revoke MINUTES`, `panda-cu revoke 0` | the person sees and can stop it. A stop button, not a sandbox: an agent running as the same user could undo it |
+| attach: a red AGENT badge in waybar while an agent acts; Super+Escape (or a click on the badge) kills the process groups of the input helpers running panda-cu has started (wtype, wl-copy, the AT-SPI helper), ends running `panda-cu` processes and refuses new calls for 10 minutes | `panda-cu revoke MINUTES`, `panda-cu revoke 0` | the person sees and can stop it. A stop button, not a sandbox: an agent running as the same user could undo it |
 | `panda-cu-busy` marks count for at most 2 h | `pandaos.desktop.cuBusyMaxMinutes` | a forgotten `on` or a stuck `run` cannot keep the screen unlocked forever |
 | apps started in the headless session run in `panda-cu.service`, inside `agents.slice`, with `MemoryMax` 2G, `TasksMax` 1024, `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges` | `services.panda-cu.memoryMax`, `.tasksMax` | the agent's own limits; no access to `/home` or other people's sessions |
 | the private session bus has no eavesdrop rule | | apps on it cannot read each other's D-Bus traffic |
@@ -61,6 +61,8 @@ other programs (a browser, a file manager). The boundaries are the user
 | `cu_launch` goes through the session's launcher, which reports the app's exit status and last output | An app that dies before its window is an error with the reason; `cu_windows` lists recent exits. |
 | `screenshot:true` on an action waits until two frames in a row are identical (at most 1.5 s) | The image shows the result, not a half-painted frame. |
 | `panda-cu session` failing stops labwc; `Restart=always` brings up a fresh session | Never a compositor without a launcher or ready file. |
+| The AT-SPI helper follows the session: when the ready file (headless) or the session bus socket (attach) is a new one, the next call starts a fresh helper | An MCP session keeps working across `systemctl restart panda-cu`. |
+| The window rule is `Maximize`, not `ToggleMaximize` | A window that maps already maximized stays maximized. |
 
 ## Tools
 
@@ -130,6 +132,13 @@ lock off.
   item and the fixed-size dialog's OK through AT-SPI, the maximized
   dialog's Confirm by pixels, slider dragged to 93, row 59 clicked after 8
   scrolls, Unicode text exact, the Chromium form submitted by `element_id`.
+  The scenario runs three times in one test, each in a fresh session
+  (`scenario_passes` of 3). After that: Super+Escape in the middle of a
+  3000-character `cu_type` (attach mode on the agent's own session) must
+  stop typing within 500 ms, end the MCP process and refuse new calls; and
+  one MCP session kept open across `systemctl restart panda-cu` must still
+  launch an app and find its text. An app that maps maximized must stay
+  maximized.
 - `checks.boot-desktop`: `test-config.sh` on `/etc/xdg`, the AT-SPI bus,
   panda-cu in attach mode in the person's session, do-not-disturb.
 - CI: `go vet`/`go test -race`, the desktop shell tests, shellcheck.

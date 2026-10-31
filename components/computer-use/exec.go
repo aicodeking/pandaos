@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -36,6 +37,11 @@ func (w *capWriter) Write(p []byte) (int, error) {
 func realExec(ctx context.Context, env []string, stdin string, argv []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = env
+	// Each input helper (wtype, wl-copy, grim) leads its own process group:
+	// a timeout here and `panda-cu revoke` kill the whole group, so nothing
+	// keeps typing after panda-cu was stopped.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 2 * time.Second
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)

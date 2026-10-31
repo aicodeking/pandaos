@@ -6,13 +6,17 @@ to ~/cu-lab.log, so the test knows what really happened:
   small:s3   menu:hello   scale:73   row:59   dialog:confirm   message:ok
 """
 import os
+import sys
 
 import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-GLib.set_prgname("cu-lab")
+# --maximized: ask for a maximized window before mapping (the vmtest checks
+# that labwc's maximize rule does not toggle it back).
+MAXED = "--maximized" in sys.argv
+GLib.set_prgname("cu-labmax" if MAXED else "cu-lab")
 log = open(os.path.expanduser("~/cu-lab.log"), "a", buffering=1)
 
 css = Gtk.CssProvider()
@@ -104,5 +108,8 @@ def open_message():
 
 win.add(box)
 win.connect("destroy", Gtk.main_quit)
+if MAXED:
+    win.set_title("CU Lab Max")
+    win.maximize()
 win.show_all()
 Gtk.main()

@@ -558,4 +558,49 @@ func TestHelperProtocol(t *testing.T) {
 	if err := h.call(2*time.Second, map[string]any{"cmd": "ping"}, &v); err != nil || v.OK != "yes" {
 		t.Fatal("a fresh helper after the timeout", v, err)
 	}
+	h.follow("s1")
+	gen := h.gen
+	h.follow("s1") // same session: kept
+	if h.cmd == nil || h.gen != gen {
+		t.Fatal("helper restarted without a session change")
+	}
+	h.follow("s2") // panda-cu.service restarted
+	if h.cmd != nil {
+		t.Fatal("helper kept across a session change")
+	}
+	if err := h.call(2*time.Second, map[string]any{"cmd": "ping"}, &v); err != nil || h.gen != gen+1 {
+		t.Fatal("no fresh helper after the session change", err)
+	}
+}
+
+func TestParentPID(t *testing.T) {
+	for stat, want := range map[string]int{
+		"123 (wtype) S 77 123 77 0 -1": 77,
+		"9 (a b) c)) R 1 9 9 0":        1,
+		"garbage":                      0,
+	} {
+		if got := parentPID(stat); got != want {
+			t.Errorf("%q: %d, want %d", stat, got, want)
+		}
+	}
+}
+
+func TestSessionID(t *testing.T) {
+	dir := t.TempDir()
+	c := Config{Mode: "headless", Env: map[string]string{"XDG_RUNTIME_DIR": dir}}
+	if c.sessionID() != "" {
+		t.Fatal("no ready file: no session")
+	}
+	os.WriteFile(c.runtimeFile("ready"), []byte("1"), 0o600)
+	a := c.sessionID()
+	os.Remove(c.runtimeFile("ready"))
+	os.WriteFile(c.runtimeFile("ready"), []byte("2"), 0o600)
+	os.Chtimes(c.runtimeFile("ready"), time.Now(), time.Now().Add(time.Second))
+	if b := c.sessionID(); a == "" || a == b {
+		t.Fatalf("a new ready file is a new session: %q %q", a, b)
+	}
+	at := Config{Mode: "attach", Env: map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:path=" + c.runtimeFile("ready") + ",guid=x"}}
+	if at.sessionID() == "" {
+		t.Fatal("attach: the bus socket names the session")
+	}
 }

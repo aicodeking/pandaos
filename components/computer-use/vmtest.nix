@@ -25,6 +25,7 @@ let
   lab = gtkApp "cu-lab" ./lab.py;
   t = import ../../tests/lib.nix { inherit (pkgs) lib; };
   scenario = pkgs.writeScript "cu-scenario" ("#!${pkgs.python3}/bin/python3\n" + builtins.readFile ./scenario.py);
+  extra = pkgs.writeScript "cu-extra" ("#!${pkgs.python3}/bin/python3\n" + builtins.readFile ./extra.py);
 in
 pkgs.testers.runNixOSTest {
   name = "panda-cu";
@@ -44,6 +45,8 @@ pkgs.testers.runNixOSTest {
         extraApps = {
           buttons = { name = "CU Buttons"; command = [ "${buttons}/bin/cu-buttons" ]; };
           lab = { name = "CU Lab"; command = [ "${lab}/bin/cu-lab" ]; };
+          # Maps already maximized: the window rule must not toggle it back.
+          labmax = { name = "CU Lab Max"; command = [ "${lab}/bin/cu-lab" "--maximized" ]; };
           crasher = { name = "Crasher"; command = [ "${pkgs.bash}/bin/sh" "-c" "echo crash-test >&2; exit 7" ]; };
         };
       };
@@ -64,20 +67,69 @@ pkgs.testers.runNixOSTest {
         out = machine.fail("runuser -u other -- panda-cu call cu_screenshot 2>&1")
         print(out)
 
-    with subtest("computer-use scenario as agent over MCP stdio"):
-        cmd = (
-            "systemd-run --wait --pipe --quiet --collect -p User=agent"
-            " -p ProtectSystem=strict -p ReadWritePaths=/var/lib/agent -p PrivateTmp=yes -p NoNewPrivileges=yes"
-            " -p WorkingDirectory=/var/lib/agent -E PATH=/run/current-system/sw/bin"
-            " ${scenario} /run/current-system/sw/bin/panda-cu ${./form.html} 2>&1"
-        )
-        status, out = machine.execute(cmd, timeout=1500)
+    def result(out):
+        return json.loads(next((l for l in out.splitlines() if l.startswith("RESULT ")), "RESULT {}")[7:])
+
+
+    def restart_session():
+        """systemctl restart panda-cu, then wait for the new session's ready file."""
+        t0 = machine.succeed("date +%s").strip()
+        machine.succeed("systemctl restart panda-cu")
+        machine.wait_until_succeeds(f"test \"$(stat -c %Y /run/panda-cu/ready)\" -ge {t0}", timeout=90)
+
+
+    # The whole scenario three times, each in a fresh session: flakiness
+    # shows as a pass count below 3 (METRIC scenario_passes).
+    runs, first = [], {}
+    for run in range(1, 4):
+        with subtest(f"computer-use scenario as agent over MCP stdio, run {run} of 3"):
+            if run > 1:
+                restart_session()
+                machine.succeed("rm -f /var/lib/agent/hello.txt /var/lib/agent/cu-*.log")
+            cmd = (
+                "systemd-run --wait --pipe --quiet --collect -p User=agent"
+                " -p ProtectSystem=strict -p ReadWritePaths=/var/lib/agent -p PrivateTmp=yes -p NoNewPrivileges=yes"
+                " -p WorkingDirectory=/var/lib/agent -E PATH=/run/current-system/sw/bin"
+                " ${scenario} /run/current-system/sw/bin/panda-cu ${./form.html} 2>&1"
+            )
+            status, out = machine.execute(cmd, timeout=1500)
+            print(out)
+            m = result(out)
+            first = first or m
+            runs.append({"run": run, "passed": status == 0, "failures": m.get("failures")})
+            if status != 0:
+                print(machine.succeed("journalctl -u panda-cu --no-pager | tail -n 300"))
+    passes = sum(r["passed"] for r in runs)
+    emit({"test": "panda-cu", **first, "scenario_runs": 3, "scenario_passes": passes, "runs": runs})
+    problems = [] if passes == 3 else [f"scenario passed {passes} of 3: {runs}"]
+
+    with subtest("Super+Escape (panda-cu revoke) stops typing at once"):
+        status, out = machine.execute(
+            "runuser -u agent -- env PATH=/run/current-system/sw/bin HOME=/var/lib/agent"
+            " ${extra} revoke /run/current-system/sw/bin/panda-cu 2>&1", timeout=300)
         print(out)
-        metrics = json.loads(next((l for l in out.splitlines() if l.startswith("RESULT ")), "RESULT {}")[7:])
-        emit({"test": "panda-cu", **metrics})
+        rev = result(out)
         if status != 0:
-            print(machine.succeed("journalctl -u panda-cu --no-pager | tail -n 300"))
-        assert status == 0, f"scenario failed: {metrics.get('failures')}"
+            problems.append(f"revoke: {rev or out[-800:]}")
+
+    with subtest("one MCP session survives systemctl restart panda-cu"):
+        machine.succeed("rm -f /var/lib/agent/cu-step1 /var/lib/agent/cu-step2")
+        machine.succeed(
+            "systemd-run --unit=cu-restart -p User=agent -p RemainAfterExit=yes -p WorkingDirectory=/var/lib/agent"
+            " -E PATH=/run/current-system/sw/bin -E HOME=/var/lib/agent"
+            " ${extra} restart /run/current-system/sw/bin/panda-cu")
+        machine.wait_for_file("/var/lib/agent/cu-step1", timeout=120)
+        restart_session()
+        machine.succeed("touch /var/lib/agent/cu-step2")
+        machine.wait_until_succeeds("systemctl show -p SubState --value cu-restart | grep -qx -e exited -e failed", timeout=180)
+        out = machine.succeed("journalctl -u cu-restart --no-pager -o cat")
+        print(out)
+        res = result(out)
+        if machine.succeed("systemctl show -p Result --value cu-restart").strip() != "success":
+            problems.append(f"restart: {res or out[-800:]}")
+        emit({"test": "panda-cu", **first, "scenario_runs": 3, "scenario_passes": passes, "runs": runs,
+              "revoke": rev, "restart": res})
+        assert not problems, problems
 
     with subtest("hello.txt has the exact content"):
         assert machine.succeed("cat /var/lib/agent/hello.txt").rstrip("\n") == "Hello, panda-cu!"
@@ -88,7 +140,7 @@ pkgs.testers.runNixOSTest {
         assert entry["command"] == "panda-cu" and entry["args"] == ["mcp"], entry
         cfg = json.loads(machine.succeed("cat /etc/panda/cu.json"))
         assert cfg["mode"] == "headless" and (cfg["width"], cfg["height"]) == (1280, 800), cfg
-        assert sorted(cfg["apps"]) == ["browser", "buttons", "crasher", "editor", "files", "lab"], cfg["apps"]
+        assert sorted(cfg["apps"]) == ["browser", "buttons", "crasher", "editor", "files", "lab", "labmax"], cfg["apps"]
         assert cfg["allowClipboardRead"] is False, cfg
         unit = machine.succeed("systemctl show panda-cu -p Slice,MemoryMax,TasksMax,ProtectHome,Restart")
         print(unit)

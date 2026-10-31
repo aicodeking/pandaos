@@ -195,7 +195,9 @@ let
           <keyboard><keybind key="W-F24"><action name="None" /></keybind></keyboard>
           ${lib.optionalString cfg.maximizeWindows ''
             <windowRules>
-              <windowRule identifier="*"><action name="ToggleMaximize" /></windowRule>
+              <!-- Maximize, not ToggleMaximize: a window that maps already
+                   maximized must stay maximized. -->
+              <windowRule identifier="*"><action name="Maximize" direction="both" /></windowRule>
             </windowRules>
           ''}
         </labwc_config>

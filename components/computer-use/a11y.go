@@ -20,7 +20,8 @@ type element struct {
 	States  []string `json:"states,omitempty"`
 	Actions []string `json:"actions,omitempty"`
 	Text    string   `json:"text,omitempty"`
-	Win     string   `json:"win,omitempty"` // id of its toplevel window
+	Chars   int      `json:"chars,omitempty"` // characters of text (text holds at most 500)
+	Win     string   `json:"win,omitempty"`   // id of its toplevel window
 	// Popup: inside a popup surface (a GTK 3 menu), whose screen position
 	// is unknown on Wayland; such boxes are never used for pixel clicks.
 	Popup bool `json:"popup,omitempty"`
@@ -44,6 +45,7 @@ func (s *Server) a11y(timeout time.Duration, req map[string]any, v any) error {
 	if s.a11yCall != nil {
 		return s.a11yCall(req, v)
 	}
+	s.helper.follow(s.cfg.sessionID())
 	return s.helper.call(timeout, req, v)
 }
 
