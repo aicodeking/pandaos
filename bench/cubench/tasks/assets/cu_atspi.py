@@ -3,101 +3,134 @@
 
   cu_atspi.py cu_tree|cu_find|cu_act 'JSON-ARGS'   prints one JSON value
   cu_atspi.py do 'JSON-ARGS'                        oracle helper: find + act
+  cu_atspi.py serve                                 (started on demand)
 
 cu_tree, cu_find and cu_act take panda-cu's argument schemas and give its
-results (components/computer-use/a11y.go), because they run the same AT-SPI
-walker: panda-cu-atspi where installed (PandaOS), else a copy of
-components/computer-use/atspi.py uploaded next to this file and run with the
-system python3 + gi. Errors: exit 1 with the message on stderr.
+results, because they map onto the same long-lived AT-SPI helper the way
+components/computer-use/a11y.go does: panda-cu-atspi where installed
+(PandaOS), else a copy of components/computer-use/atspi.py uploaded next to
+this file, run with the system python3 + gi. The helper's element ids live
+as long as its process, so the first call starts a per-session relay
+(`serve`, a unix socket in $XDG_RUNTIME_DIR) that keeps one helper running;
+a snapshot restore discards it with the rest of the session.
+Errors: exit 1 with the message on stderr.
 """
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SNAP = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "cubench-atspi-snap.json")
+SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "cubench-atspi.sock")
 ALIASES = {"button": "push button"}
 
 
-def helper(*argv, timeout=30):
+def norm_role(r):
+    r = (r or "").lower()
+    return ALIASES.get(r, r)
+
+
+# -- relay (one helper per session) -----------------------------------------------
+def serve():
     exe = shutil.which("panda-cu-atspi")
     cmd = [exe] if exe else [sys.executable, os.path.join(HERE, "atspi.py")]
-    r = subprocess.run(cmd + [str(a) for a in argv], capture_output=True, text=True, timeout=timeout)
+    helper = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+    known, seq = {}, 0
     try:
-        res = json.loads(r.stdout or "{}")
-    except json.JSONDecodeError:
-        raise RuntimeError(f"AT-SPI helper printed non-JSON: {(r.stdout or r.stderr)[:500]}") from None
-    if isinstance(res, dict) and "error" in res:
-        raise RuntimeError(res["error"])
-    if r.returncode:
-        raise RuntimeError(f"AT-SPI helper exited {r.returncode}: {r.stderr[:500]}")
+        os.unlink(SOCK)
+    except FileNotFoundError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCK)
+    srv.listen(4)
+    while True:
+        conn, _ = srv.accept()
+        with conn, conn.makefile("rw") as f:
+            try:
+                req = json.loads(f.readline())
+                if req.get("cmd") == "act":  # role/name as seen, so a changed element is refused
+                    e = known.get(req.get("id"))
+                    if e is None:
+                        raise LookupError(f"unknown element_id {req.get('id')!r}: take a cu_tree or cu_find snapshot first")
+                    req.update(role=e[0], name=e[1])
+                seq += 1
+                req["seq"] = seq
+                helper.stdin.write(json.dumps(req) + "\n")
+                res = json.loads(helper.stdout.readline() or '{"error": "AT-SPI helper exited"}')
+                for el in res.get("elements", []):
+                    known[el["id"]] = (el.get("role", ""), el.get("name", ""))
+                res.pop("seq", None)
+            except Exception as e:  # noqa: BLE001 - answer, never hang the client
+                res = {"error": f"{type(e).__name__}: {e}"}
+            f.write(json.dumps(res, ensure_ascii=False) + "\n")
+            f.flush()
+
+
+def ask(req, timeout=30):
+    s, spawned, end = None, False, time.monotonic() + 8
+    while s is None:
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect(SOCK)
+        except OSError:
+            s = None
+            if time.monotonic() > end:
+                raise RuntimeError("AT-SPI relay did not start") from None
+            if not spawned:
+                subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve"], start_new_session=True,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                spawned = True
+            time.sleep(0.1)
+    with s, s.makefile("rw") as f:
+        f.write(json.dumps(req) + "\n")
+        f.flush()
+        res = json.loads(f.readline() or "{}")
+    if not isinstance(res, dict) or "error" in res:
+        raise RuntimeError(res.get("error") if isinstance(res, dict) else f"bad reply {res!r}")
     return res
 
 
-def snapshot(a):
-    depth = a.get("max_depth") or 30
-    argv = ["tree", "--max-depth", depth if 0 < depth <= 50 else 30]
-    if a.get("app"):
-        argv += ["--app", a["app"]]
-    res = helper(*argv)
-    if not isinstance(res, dict) or "elements" not in res:
-        raise RuntimeError(f"AT-SPI tree unavailable (helper printed {str(res)[:200]!r}); an app may be blocked")
-    els = res["elements"]
-    with open(SNAP, "w") as f:
-        json.dump({e["id"]: [e["role"], e.get("name", "")] for e in els}, f)
-    return els
-
-
+# -- the three tools, as panda-cu maps them ------------------------------------------
 def limit(a, default):
     n = a.get("limit") or 0
     return n if 0 < n <= 2000 else default
 
 
-def matches(e, text, role):
-    role = ALIASES.get((role or "").lower(), role or "")
-    if role and e["role"].lower() != role.lower():
-        return False
-    t = (text or "").lower()
-    return not t or t in e.get("name", "").lower() or t in e.get("text", "").lower()
-
-
 def cu_tree(a):
-    role = a.get("role") or ""
-    out = [e for e in snapshot(a) if not role or e["role"].lower() == role.lower() or e["d"] <= 1]
+    depth = a.get("max_depth") or 30
+    res = ask({"cmd": "tree", "app": a.get("app", ""), "max_depth": depth if 0 < depth <= 50 else 30, "limit": 2000})
+    role = norm_role(a.get("role"))
+    out = [e for e in res.get("elements", []) if not role or e.get("role", "").lower() == role or e.get("d", 0) <= 1]
     n = limit(a, 400)
-    res = {"elements": out[:n], "count": len(out)}
+    r = {"elements": out[:n], "count": len(out)}
     if len(out) > n:
-        res["truncated"] = f"showing {n} of {len(out)}; narrow with app, role or max_depth"
-    return res
+        r["truncated"] = f"showing {n} of {len(out)}; narrow with app, role or max_depth"
+    return r
 
 
 def cu_find(a):
     if not a.get("text") and not a.get("role"):
         raise ValueError("give text and/or role")
-    out = [e for e in snapshot(a) if e["d"] > 0 and matches(e, a.get("text"), a.get("role"))]
-    return {"elements": out[:limit(a, 50)], "count": len(out)}
+    res = ask({"cmd": "find", "app": a.get("app", ""), "role": norm_role(a.get("role")), "text": a.get("text", ""),
+               "limit": limit(a, 50)})
+    els = res.get("elements", [])
+    return {"elements": els, "count": len(els)}
 
 
 def cu_act(a):
     action = a.get("action")
     if action not in ("click", "focus", "set_text", "press"):
         raise ValueError(f"action {action!r} (click|focus|set_text|press)")
-    try:
-        with open(SNAP) as f:
-            snap = json.load(f)
-    except (OSError, ValueError):
-        snap = {}
-    eid = a.get("element_id")
-    if eid not in snap:
-        raise LookupError(f"unknown element_id {eid!r}: take a cu_tree or cu_find snapshot first")
-    argv = ["act", eid, action, "--role", snap[eid][0], "--name", snap[eid][1]]
+    req = {"cmd": "act", "id": a.get("element_id"), "action": action}
     if action == "set_text":
         if a.get("text") is None:
             raise ValueError("set_text needs text")
-        argv += ["--text", a["text"]]
-    return helper(*argv, timeout=15)
+        req["text"] = a["text"]
+    return ask(req, timeout=20)
 
 
 def do(a):
@@ -114,9 +147,11 @@ def do(a):
 TOOLS = {"cu_tree": cu_tree, "cu_find": cu_find, "cu_act": cu_act, "do": do}
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["serve"]:
+        serve()
     try:
         if len(sys.argv) < 2 or sys.argv[1] not in TOOLS:
-            raise ValueError(f"usage: cu_atspi.py {{{'|'.join(TOOLS)}}} 'JSON'")
+            raise ValueError(f"usage: cu_atspi.py {{{'|'.join(TOOLS)}|serve}} 'JSON'")
         args = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
         print(json.dumps(TOOLS[sys.argv[1]](args), ensure_ascii=False))
     except Exception as e:  # one line on stderr, exit 1: the panda-cu call contract

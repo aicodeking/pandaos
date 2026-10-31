@@ -328,7 +328,9 @@ VERSIONS = r"""
 . /etc/os-release 2>/dev/null; echo "os=${PRETTY_NAME:-?}"; echo "kernel=$(uname -r)"
 for r in editor files terminal browser; do
   eval "c=\$APP_$r"; set -- $c
-  echo "$r=$(timeout 20 "$1" --version 2>/dev/null </dev/null | grep -m1 . | tr -d '\r')"
+  v=$(timeout 20 "$1" --version 2>/dev/null </dev/null | grep -m1 . | tr -d '\r')
+  case "$v" in ""|*nknown*) v=$(readlink -f "$(command -v "$1")" | sed -n 's|^/nix/store/[a-z0-9]*-\([^/]*\)/.*|\1|p') ;; esac
+  echo "$r=$v"
 done
 """
 

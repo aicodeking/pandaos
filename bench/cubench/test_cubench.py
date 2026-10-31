@@ -322,6 +322,36 @@ class DryRun(unittest.TestCase):
         shutil.rmtree(out)
         shutil.rmtree(home)
 
+    def test_cu_atspi_relay(self):
+        """cu_atspi.py keeps one helper per session: ids from cu_find work in cu_act."""
+        d = tempfile.mkdtemp(prefix="cuat")
+        fake = os.path.join(d, "panda-cu-atspi")
+        with open(fake, "w") as f:
+            f.write("#!/usr/bin/env python3\nimport json, sys\nn = 0\n"
+                    "for line in sys.stdin:\n    r = json.loads(line); n += 1\n"
+                    "    if r['cmd'] in ('tree', 'find'):\n"
+                    "        out = {'elements': [{'id': 'e1', 'd': 1, 'role': 'frame', 'name': 'W'},"
+                    " {'id': 'e%d' % (n + 1), 'd': 2, 'role': 'push button', 'name': 'Save'}]}\n"
+                    "    else:\n        out = {'ok': True, 'via': r['action'], 'checked': [r.get('role'), r.get('name')]}\n"
+                    "    out['seq'] = r['seq']; print(json.dumps(out), flush=True)\n")
+        os.chmod(fake, 0o755)
+        env = {"PATH": d + os.pathsep + os.environ["PATH"], "XDG_RUNTIME_DIR": d}
+        tool = os.path.join(HERE, "tasks", "assets", "cu_atspi.py")
+        run = lambda *a: subprocess.run([sys.executable, tool, *a], capture_output=True, text=True,  # noqa: E731
+                                        env=env, timeout=30)
+        try:
+            found = json.loads(run("cu_find", '{"role": "button"}').stdout)
+            self.assertEqual([e["name"] for e in found["elements"]], ["W", "Save"])
+            r = run("cu_act", json.dumps({"element_id": found["elements"][1]["id"], "action": "click"}))
+            self.assertEqual(json.loads(r.stdout)["checked"], ["push button", "Save"], r.stderr)
+            self.assertNotEqual(run("cu_act", '{"element_id": "e99", "action": "click"}').returncode, 0)
+            tree = json.loads(run("cu_tree", '{"role": "push button"}').stdout)
+            self.assertEqual(tree["count"], 2)
+            self.assertEqual(json.loads(run("do", '{"text": "Save", "action": "press"}').stdout)["via"], "press")
+        finally:
+            subprocess.run(["pkill", "-f", tool + " serve"])
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_audit_and_token_checkers(self):
         d = tempfile.mkdtemp()
         log = os.path.join(d, "audit.log")

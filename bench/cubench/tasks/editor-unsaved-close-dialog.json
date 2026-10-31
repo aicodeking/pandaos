@@ -9,32 +9,91 @@
     "launch editor \"$B/note.txt\""
   ],
   "verify": "[ \"$(cat \"$B/note.txt\")\" = \"hello world\" ] && audit editor \"$B/note.txt\"",
-  "oracle": [
-    [
-      "key",
-      "ctrl+End"
+  "oracle": {
+    "default": [
+      [
+        "key",
+        "ctrl+End"
+      ],
+      [
+        "type",
+        " world"
+      ],
+      [
+        "key",
+        "ctrl+w"
+      ],
+      [
+        "wait",
+        2
+      ],
+      [
+        "key",
+        "Return"
+      ],
+      [
+        "wait",
+        2
+      ]
     ],
-    [
-      "type",
-      " world"
+    "ubuntu-24.04-gnome": [
+      [
+        "key",
+        "ctrl+End"
+      ],
+      [
+        "type",
+        " world"
+      ],
+      [
+        "key",
+        "ctrl+w"
+      ],
+      [
+        "wait",
+        2
+      ],
+      [
+        "click",
+        531,
+        410
+      ],
+      [
+        "wait",
+        2
+      ]
     ],
-    [
-      "key",
-      "ctrl+w"
-    ],
-    [
-      "wait",
-      2
-    ],
-    [
-      "key",
-      "Return"
-    ],
-    [
-      "wait",
-      2
+    "fedora-44-workstation": [
+      [
+        "key",
+        "ctrl+End"
+      ],
+      [
+        "type",
+        " world"
+      ],
+      [
+        "key",
+        "ctrl+w"
+      ],
+      [
+        "wait",
+        2
+      ],
+      [
+        "a11y",
+        {
+          "role": "push button",
+          "text": "Save",
+          "action": "click"
+        }
+      ],
+      [
+        "wait",
+        2
+      ]
     ]
-  ],
+  },
   "timeout_s": 300,
   "max_steps": 25,
   "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell"
