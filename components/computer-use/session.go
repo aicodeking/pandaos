@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// runSession is labwc's autostart in headless mode. It waits until the output
+// runSession is labwc's startup command (-s) in headless mode. It waits until the output
 // has its configured size, holds an idle virtual pointer and keyboard (so the
 // seat never loses those capabilities between tool calls), serves the app
 // launcher socket, then writes $XDG_RUNTIME_DIR/ready.

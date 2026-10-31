@@ -2,7 +2,7 @@
 // mouse, keyboard and the AT-SPI accessibility tree, over MCP stdio.
 //
 //	panda-cu mcp      serve MCP over stdio (run by the agent CLI)
-//	panda-cu session  in-session helper (labwc autostart, headless mode only)
+//	panda-cu session  in-session helper (labwc -s startup, headless mode only)
 //	panda-cu call TOOL [JSON-ARGS]  run one tool, print one JSON value
 //	panda-cu tools    print the tool list
 package main

@@ -190,16 +190,16 @@ let
       '';
     }
     { name = "menu.xml"; path = pkgs.writeText "menu.xml" "<openbox_menu></openbox_menu>\n"; }
-    {
-      name = "autostart";
-      # labwc gives autostart no stdout/stderr worth having: send both to
-      # the journal (journalctl -u panda-cu).
-      path = pkgs.writeText "autostart" ''
-        ${pkgs.systemd}/bin/systemd-cat -t panda-cu-session ${pkgs.wlr-randr}/bin/wlr-randr --output HEADLESS-1 --custom-mode ${cfg.resolution} --scale ${toString cfg.scale}
-        exec ${pkgs.systemd}/bin/systemd-cat -t panda-cu-session ${lib.getExe cfg.package} session
-      '';
-    }
   ];
+
+  # Run by `labwc -s` (no shell; absolute shebang) once the compositor is up.
+  # An autostart file never ran here (checks.panda-cu, CI run 41184234354):
+  # labwc runs it through `sh`, which is not on a NixOS unit's PATH. Output
+  # goes to the unit's journal (journalctl -u panda-cu).
+  startup = pkgs.writeShellScript "panda-cu-startup" ''
+    ${pkgs.systemd}/bin/systemd-cat -t panda-cu-session ${pkgs.wlr-randr}/bin/wlr-randr --output HEADLESS-1 --custom-mode ${cfg.resolution} --scale ${toString cfg.scale}
+    exec ${pkgs.systemd}/bin/systemd-cat -t panda-cu-session ${lib.getExe cfg.package} session
+  '';
 
   session = pkgs.writeShellApplication {
     name = "panda-cu-session";
@@ -211,7 +211,7 @@ let
       cp -rL --no-preserve=mode ${xdgConfig}/. "$XDG_CONFIG_HOME"/
       dbus-daemon --fork --config-file=${busConf}
       cd "$HOME"
-      exec ${labwc}/bin/labwc -C ${labwcDir}
+      exec ${labwc}/bin/labwc -C ${labwcDir} -s ${startup}
     '';
   };
 
