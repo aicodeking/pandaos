@@ -109,7 +109,10 @@ call("cu_key", {"combo": "ctrl+s"})
 r, _ = call("cu_wait", {"window": "Save", "timeout": 10}, ok=False)
 if r["isError"]:
     call("cu_windows")
-call("cu_wait", {"app": "mousepad", "role": "push button", "text": "Save", "timeout": 30})
+r, _ = call("cu_wait", {"app": "mousepad", "role": "push button", "text": "Save", "timeout": 20}, ok=False)
+metrics["save_button_atspi"] = not r["isError"]
+if r["isError"]:  # informative: the keyboard path below does not need it
+    call("cu_find", {"app": "mousepad", "role": "push button"}, ok=False)
 call("cu_key", {"combo": "ctrl+a"})
 call("cu_type", {"text": target})
 call("cu_key", {"combo": "Return"})

@@ -128,7 +128,10 @@ pkgs.testers.runNixOSTest {
           machine.fail("test -e /var/lib/pandaos/update-hold")
 
       with subtest("shutdown during an update: no rollback is started, the next boot is healthy"):
-          since = machine.succeed("date +%s").strip()
+          # The next whole second: --since has 1 s resolution, and the bad
+          # update's last lines ("rolled back to") can share this second.
+          since = int(machine.succeed("date +%s")) + 1
+          machine.succeed(f"while [ $(date +%s) -lt {since} ]; do sleep 0.1; done")
           machine.succeed("touch /var/lib/panda-test-sleep")
           machine.succeed(f"echo {slow} > /var/lib/panda-test-next")
           machine.succeed("systemctl start --no-block nixos-upgrade.service")
