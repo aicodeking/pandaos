@@ -119,6 +119,60 @@ def paired(trials):
     return out
 
 
+def same_os_pairs(trials):
+    """Per OS, every two tool modes against each other (generic, atspi, panda):
+    what the extra tools are worth on the same desktop."""
+    cols = {}
+    for t in trials:
+        cols.setdefault((t["os"], t["tools"]), []).append(t)
+    rates = {k: task_rates(v) for k, v in cols.items()}
+    order = {"panda": 0, "atspi": 1, "generic": 2}
+    out = []
+    for os_name in sorted({k[0] for k in rates}):
+        modes = sorted((k[1] for k in rates if k[0] == os_name), key=lambda m: order.get(m, 9))
+        for i, a in enumerate(modes):
+            for b in modes[i + 1:]:
+                ra, rb = rates[(os_name, a)], rates[(os_name, b)]
+                common = sorted(set(ra) & set(rb))
+                if not common:
+                    continue
+                d = [ra[t] - rb[t] for t in common]
+                lo, hi = bootstrap(d)
+                out.append({"os": os_name, "a": a, "b": b, "tasks": len(common),
+                            "meanDiff": round(statistics.fmean(d), 4), "bootstrap95": [round(lo, 4), round(hi, 4)],
+                            "aBetter": sum(x > 0 for x in d), "ties": sum(x == 0 for x in d),
+                            "bBetter": sum(x < 0 for x in d)})
+    return out
+
+
+def same_os_markdown(pairs):
+    if not pairs:
+        return ""
+    out = ["", "## Same OS, different tools (A minus B, task pass rates; 95% bootstrap over tasks)", "",
+           "| OS | A | B | Tasks | Mean diff | 95% CI | A better / tie / B better |", "|---|---|---|---|---|---|---|"]
+    for p in pairs:
+        out.append(f"| {p['os']} | {p['a']} | {p['b']} | {p['tasks']} | {100 * p['meanDiff']:+.0f} pts | "
+                   f"{100 * p['bootstrap95'][0]:+.0f} to {100 * p['bootstrap95'][1]:+.0f} | "
+                   f"{p['aBetter']} / {p['ties']} / {p['bBetter']} |")
+    return "\n".join(out) + "\n"
+
+
+def warnings_markdown(metas, trials):
+    """Problems that invalidate a column, shown before any table."""
+    out = []
+    for m in metas:
+        if m.get("toolSetupAborted"):
+            out.append(f"- **{m['os']} ({m['tools']}): column aborted.** {m.get('error')}")
+    by = {}
+    for t in trials:
+        if str(t.get("error", "")).startswith("tool-setup:"):
+            by.setdefault((t["os"], t["tools"]), []).append(t)
+    for (o, m), ts in sorted(by.items()):
+        out.append(f"- **{o} ({m}): {len(ts)} attempt(s) crashed in tool setup** (counted as crashes, "
+                   f"not as task failures): {ts[0]['error'][:200]}")
+    return ("## Warnings\n\n" + "\n".join(out) + "\n\n") if out else ""
+
+
 def _pct(x):
     return f"{100 * x:.0f}%"
 
@@ -171,17 +225,21 @@ def validation_markdown(validations):
     """validations: [(meta, rows)] from `cubench.py validate`."""
     if not validations:
         return ""
-    out = ["", "## Checker validation (null agent must fail, scripted oracle must pass)", "",
-           "| OS | Tasks | Null fail-rate | Oracle pass-rate | AT-SPI tools | Mismatches |", "|---|---|---|---|---|---|"]
+    out = ["", "## Checker validation (null agent must fail, scripted oracle must pass, "
+           "shell cheat of an enforced method must fail)", "",
+           "| OS | Tasks | Null fail-rate | Oracle pass-rate | Cheat fail-rate | AT-SPI tools | Mismatches |",
+           "|---|---|---|---|---|---|---|"]
     for meta, rows in validations:
         n = len(rows)
         bad = [r["task"] for r in rows if not r["ok"]]
         at = meta.get("atspi") or {}
+        cheats = [r for r in rows if r.get("cheatFailed") is not None]
         out.append(f"| {meta['os']} | {n} | {sum(bool(r['nullFailed']) for r in rows)}/{n} | "
                    f"{sum(bool(r['oraclePassed']) for r in rows)}/{n} | "
+                   f"{sum(r['cheatFailed'] is True for r in cheats)}/{len(cheats)} | "
                    f"{'ok' if at.get('ok') else at.get('error') or '?'} | {', '.join(bad) or 'none'} |")
         if meta.get("error"):
-            out.append(f"| {meta['os']} | run failed: {meta['error']} | | | | |")
+            out.append(f"| {meta['os']} | run failed: {meta['error']} | | | | | |")
     return "\n".join(out) + "\n"
 
 

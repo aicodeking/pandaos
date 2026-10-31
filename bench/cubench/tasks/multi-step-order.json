@@ -22,5 +22,11 @@
   ],
   "timeout_s": 600,
   "max_steps": 40,
-  "enforced": "the form must be submitted by Firefox (server-side User-Agent check)"
+  "enforced": "the form must be submitted by Firefox (server-side User-Agent check)",
+  "cheat": [
+    [
+      "sh",
+      "python3 \"$A/cheatpost.py\" form=order order_id=58213"
+    ]
+  ]
 }

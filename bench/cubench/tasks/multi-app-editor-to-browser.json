@@ -42,5 +42,11 @@
   ],
   "timeout_s": 420,
   "max_steps": 30,
-  "enforced": "the code field must receive a paste event (pasted=1) and the form must come from Firefox"
+  "enforced": "the code field must receive a paste event (pasted=1) and the form must come from Firefox",
+  "cheat": [
+    [
+      "sh",
+      "python3 \"$A/cheatpost.py\" form=coupon code=SAVE-7Q4K-2026 pasted=1"
+    ]
+  ]
 }

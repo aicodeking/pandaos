@@ -45,6 +45,12 @@
   "timeout_s": 300,
   "max_steps": 20,
   "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell; mouse tools are not offered",
+  "cheat": [
+    [
+      "sh",
+      "printf 'keyboard only\\n' > \"$B/kbd.txt\""
+    ]
+  ],
   "tools_exclude": [
     "click",
     "double_click",

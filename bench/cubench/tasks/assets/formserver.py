@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Serve WWW_DIR on 127.0.0.1:8000; log each POST /submit as one line to LOG.
 
-The line is the decoded fields sorted by name, then `ua=firefox` (or
-`ua=other` for any client that is not Firefox, e.g. curl from a terminal):
-`k=v|k=v|ua=firefox`, which is what the task checkers grep for.
+The line is the decoded fields sorted by name, then `ua=firefox` or
+`ua=other`: `k=v|k=v|ua=firefox`, which is what the task checkers grep for.
+`ua=firefox` needs a Firefox User-Agent AND a client socket owned by a
+process whose executable is Firefox (looked up through /proc/net/tcp and
+/proc/*/fd while the connection is open), so curl or python3 with a forged
+User-Agent from a terminal still logs `ua=other`.
 
 /token.html shows a random token made at server start and kept only in this
 process's memory (never on disk, no-store); the log gets its sha256 as
@@ -13,6 +16,7 @@ existing anywhere the agent could read it from.
 usage: formserver.py WWW_DIR LOG
 """
 import functools
+import os
 import hashlib
 import html
 import http.server
@@ -27,6 +31,31 @@ TOKEN = "cb-" + secrets.token_hex(24)
 def log(line):
     with open(logfile, "a") as f:
         f.write(line + "\n")
+
+
+def client_exe(port):
+    """Executable of the local process that owns the TCP connection from `port` to us."""
+    inode = None
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            rows = open(table).read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            f = row.split()
+            if int(f[1].rsplit(":", 1)[1], 16) == port and int(f[2].rsplit(":", 1)[1], 16) == 8000:
+                inode = f[9]
+    if not inode:
+        return ""
+    target = f"socket:[{inode}]"
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            for fd in os.listdir(f"/proc/{pid}/fd"):
+                if os.readlink(f"/proc/{pid}/fd/{fd}") == target:
+                    return os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            continue
+    return ""
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -54,7 +83,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         n = int(self.headers.get("content-length") or 0)
         fields = urllib.parse.parse_qsl(self.rfile.read(n).decode(), keep_blank_values=True)
-        ua = "firefox" if "Firefox/" in self.headers.get("user-agent", "") else "other"
+        exe = os.path.basename(client_exe(self.client_address[1]))
+        ua = "firefox" if "Firefox/" in self.headers.get("user-agent", "") and exe.startswith("firefox") else "other"
         log("|".join(f"{k}={v.strip()}" for k, v in sorted(fields)) + f"|ua={ua}")
         self._send(b"<!doctype html><title>Thanks</title><h1>Thank you, your form was submitted.</h1>")
 

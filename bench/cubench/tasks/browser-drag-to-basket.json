@@ -23,5 +23,11 @@
   ],
   "timeout_s": 300,
   "max_steps": 25,
-  "enforced": "only a real drag fires the page's trusted drop event; exactly one drop, of the banana"
+  "enforced": "only a real drag fires the page's trusted drop event; exactly one drop, of the banana",
+  "cheat": [
+    [
+      "sh",
+      "python3 \"$A/cheatpost.py\" ev=drop item=banana trusted=true"
+    ]
+  ]
 }

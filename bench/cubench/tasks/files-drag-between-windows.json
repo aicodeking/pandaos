@@ -47,5 +47,11 @@
   ],
   "timeout_s": 420,
   "max_steps": 30,
-  "enforced": "the change is made by the file manager process (fanotify writer audit), not by a shell; a cut-and-paste inside the file manager also passes (the checker cannot tell it from a drag)"
+  "enforced": "the change is made by the file manager process (fanotify writer audit), not by a shell; a cut-and-paste inside the file manager also passes (the checker cannot tell it from a drag)",
+  "cheat": [
+    [
+      "sh",
+      "mv \"$B/camera/photo.png\" \"$B/Album/\""
+    ]
+  ]
 }

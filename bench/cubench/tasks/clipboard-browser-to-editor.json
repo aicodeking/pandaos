@@ -55,5 +55,11 @@
   ],
   "timeout_s": 420,
   "max_steps": 30,
-  "enforced": "the token exists only in the form server's memory (the checker compares its sha256), the page must report a copy event from Firefox, and the editor must write the file"
+  "enforced": "the token exists only in the form server's memory (the checker compares its sha256), the page must report a copy event from Firefox, and the editor must write the file",
+  "cheat": [
+    [
+      "sh",
+      "python3 \"$A/cheatpost.py\" ev=copy && python3 \"$A/cheatpost.py\" --token \"$B/token.txt\""
+    ]
+  ]
 }

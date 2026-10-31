@@ -34,5 +34,11 @@
   ],
   "timeout_s": 600,
   "max_steps": 40,
-  "enforced": "the edit is written by the editor (fanotify writer audit); the backup may come from any app"
+  "enforced": "the edit is written by the editor (fanotify writer audit); the backup may come from any app",
+  "cheat": [
+    [
+      "sh",
+      "cp \"$B/config.ini\" \"$B/config.ini.bak\" && sed -i s/port=8080/port=9090/ \"$B/config.ini\""
+    ]
+  ]
 }

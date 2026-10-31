@@ -40,5 +40,11 @@
   ],
   "timeout_s": 300,
   "max_steps": 30,
-  "enforced": "outcome in the page, posted by Firefox"
+  "enforced": "outcome in the page, posted by Firefox",
+  "cheat": [
+    [
+      "sh",
+      "python3 \"$A/cheatpost.py\" ev=send checked=7,23,31"
+    ]
+  ]
 }

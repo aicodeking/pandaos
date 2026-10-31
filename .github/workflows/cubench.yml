@@ -152,7 +152,7 @@ jobs:
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: disks/${{ matrix.os }}.qcow2
-          key: cubench-disk-${{ matrix.os }}-${{ hashFiles(format('bench/cubench/os/{0}.json', matrix.os), format('bench/cubench/os/{0}.prepare.sh', matrix.os), 'bench/cubench/os/common.sh') }}
+          key: cubench-disk-${{ matrix.os }}-${{ hashFiles(format('bench/cubench/os/{0}.json', matrix.os), format('bench/cubench/os/{0}.prepare.sh', matrix.os), 'bench/cubench/os/common.sh', 'bench/cubench/tasks/assets/audit.py') }}
       - name: Install the desktop
         if: steps.disk.outputs.cache-hit != 'true'
         run: |
@@ -201,7 +201,7 @@ jobs:
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: disks/${{ matrix.os }}.qcow2
-          key: cubench-disk-${{ matrix.os }}-${{ hashFiles(format('bench/cubench/os/{0}.json', matrix.os), format('bench/cubench/os/{0}.prepare.sh', matrix.os), 'bench/cubench/os/common.sh') }}
+          key: cubench-disk-${{ matrix.os }}-${{ hashFiles(format('bench/cubench/os/{0}.json', matrix.os), format('bench/cubench/os/{0}.prepare.sh', matrix.os), 'bench/cubench/os/common.sh', 'bench/cubench/tasks/assets/audit.py') }}
           fail-on-cache-miss: true
 
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3

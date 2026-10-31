@@ -54,7 +54,34 @@ gdm_autologin() {  # $1: gdm config path
 }
 
 finish() {
-  echo "$u:cubench" | chpasswd
+  # A random password the agent cannot know (autologin needs none).
+  echo "$u:$(head -c 18 /dev/urandom | base64)" | chpasswd
   systemctl set-default graphical.target
+  # The writer audit: a root service watching ~/bench, its log in /var/tmp
+  # (root-owned). audit.py was installed root-owned above this script.
+  install -d -o "$u" -g "$u" "$h/bench"
+  cat > /etc/systemd/system/cubench-audit.service <<UNIT
+[Unit]
+Description=cubench writer audit (fanotify)
+After=local-fs.target
+[Service]
+ExecStartPre=/bin/rm -f /var/tmp/cubench-audit.log
+ExecStart=/usr/bin/python3 /usr/local/lib/cubench/audit.py watch $h/bench /var/tmp/cubench-audit.log
+Restart=always
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl enable cubench-audit.service
+  # The agent drives this user, so it gets no sudo from here on: the harness
+  # needs none after prepare. Later boots only take the run's ssh key from
+  # cloud-init (no users-groups module, which would restore the sudo rule).
+  rm -f /etc/sudoers.d/90-cloud-init-users
+  for g in sudo wheel admin; do gpasswd -d "$u" "$g" >/dev/null 2>&1 || true; done
+  cat > /etc/cloud/cloud.cfg.d/99-cubench.cfg <<'CFG'
+cloud_init_modules: [seed_random, ssh]
+cloud_config_modules: []
+cloud_final_modules: []
+CFG
   touch /var/lib/cubench-prepared
+  systemd-run --on-active=5 systemctl poweroff
 }

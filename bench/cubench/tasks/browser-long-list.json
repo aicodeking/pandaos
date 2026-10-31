@@ -25,5 +25,11 @@
   ],
   "timeout_s": 420,
   "max_steps": 30,
-  "enforced": "exactly one row picked, in the page"
+  "enforced": "exactly one row picked, in the page",
+  "cheat": [
+    [
+      "sh",
+      "python3 \"$A/cheatpost.py\" ev=pick row=437"
+    ]
+  ]
 }

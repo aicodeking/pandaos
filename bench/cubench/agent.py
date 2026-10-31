@@ -16,12 +16,14 @@ Tool modes (the report only compares like with like):
              over ssh by tasks/assets/cu_atspi.py on the same AT-SPI walker as
              panda-cu: equal accessibility access on every OS.
   panda      generic + every PandaOS panda-cu tool, schemas loaded at run start
-             from `panda-cu tools`, each run over ssh inside the graphical
-             session as `panda-cu call <tool> '<json-args>'`. Contract: one JSON
-             value on stdout and exit 0, or non-zero with the error on stderr. A
-             result with "png_base64" (or a "path" to a .png in the guest) is
-             forwarded to the model as an image. PandaOS-only, so its rows are
-             compared with atspi rows, never with generic ones.
+             from `panda-cu tools`. The calls go to one `panda-cu mcp` session
+             per attempt (MCPSession, over ssh inside the graphical session),
+             because panda-cu's element ids live as long as its process; image
+             content comes back to the model as images. If the schemas or the
+             session cannot be set up, the attempt is a `tool-setup` crash and
+             the column stops after 3 (cubench.py). PandaOS-only, so its rows are
+             compared with atspi rows and, per OS, with the same desktop's other
+             modes, never with other OSes' generic rows.
 
 After every turn that acted, the last tool result carries a fresh screenshot
 (QMP), whatever tools the turn used; read-only calls (screenshot, cu_tree,

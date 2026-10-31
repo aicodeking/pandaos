@@ -54,5 +54,11 @@
   ],
   "timeout_s": 420,
   "max_steps": 30,
-  "enforced": "host.txt is written by the editor (fanotify writer audit)"
+  "enforced": "host.txt is written by the editor (fanotify writer audit)",
+  "cheat": [
+    [
+      "sh",
+      "cat /proc/sys/kernel/hostname > \"$B/host.txt\""
+    ]
+  ]
 }

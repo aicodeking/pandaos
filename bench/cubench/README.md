@@ -19,7 +19,7 @@ QEMU/KVM with identical resources: UEFI, 4 vCPU, 4 GB, virtio-vga fixed at
   `savevm`, with the OVMF vars on qcow2 so every writable drive can be
   snapshotted). Before every attempt, of the model and of validation alike, it
   restores that snapshot (`loadvm`): RAM, disk and the logged-in session are
-  bit-identical. The guest clock is then set to the host's time.
+  bit-identical, and the guest clock resumes at the snapshot's time.
 - **Harness side (never seen by the agent).** Setup and checking run over ssh
   inside the graphical session (env from the session process, or from
   `systemctl --user show-environment` on GNOME). Setup helpers:
@@ -57,7 +57,8 @@ QEMU/KVM with identical resources: UEFI, 4 vCPU, 4 GB, virtio-vga fixed at
 
 Every OS gets the same small set of changes: no idle lock or blanking, no
 first-run tours, the same Firefox policies, AT-SPI and `GNOME_ACCESSIBILITY=1`
-for launched apps, and passwordless sudo for the harness. Each result records
+for launched apps, and the writer-audit service. The desktop user (whom the
+agent drives and the harness logs in as) has no sudo after prepare. Each result records
 the OS, kernel, session type, display size and the desktop, editor, file
 manager, terminal and browser versions the guest reports.
 
@@ -67,11 +68,13 @@ manager, terminal and browser versions the guest reports.
 |---|---|---|---|
 | `generic` | the QMP tools above | every OS | **generic**: the headline |
 | `atspi` | generic + `cu_tree`, `cu_find`, `cu_act` with panda-cu's exact schemas, run by `tasks/assets/cu_atspi.py` on panda-cu's own AT-SPI walker (`panda-cu-atspi` on PandaOS, a copy of `components/computer-use/atspi.py` elsewhere) | every OS | a11y |
-| `panda` | generic + every panda-cu tool, schemas loaded from `panda-cu tools` at run start (retried after each reset if that fails; the result records `pandaToolsSource`). Calls go through one `panda-cu mcp` session per attempt over ssh, because panda-cu's element ids live as long as its process | PandaOS (`services.panda-cu.mode = "attach"` in the bench image) | a11y |
+| `panda` | generic + every panda-cu tool, schemas loaded from `panda-cu tools` at run start (retried after each reset). If the schemas or the MCP session cannot be set up, the attempt is a `tool-setup` crash (not a pass or fail), the column stops after 3, and the report lists this under Warnings above every table. Calls go through one `panda-cu mcp` session per attempt over ssh, because panda-cu's element ids live as long as its process | PandaOS (`services.panda-cu.mode = "attach"` in the bench image) | a11y |
 
 The report has one table per class, and its paired differences never cross
 classes. The like-for-like accessibility comparison is atspi against atspi. A
 panda row only ever appears next to atspi rows, labelled as having more tools.
+A separate table compares the tool modes on the same OS (PandaOS panda vs
+atspi vs generic; generic vs atspi on Ubuntu and Debian).
 On keyboard-only tasks the mouse tools, `cu_click`, `cu_drag`, `cu_move`,
 `cu_scroll` and `cu_act`'s click/press actions are removed, and cu_act
 click/press calls are also refused at run time.
@@ -93,8 +96,15 @@ says how):
 
 - **Writer audit (`audit.py`).** A root fanotify watcher (filesystem mark,
   `FAN_REPORT_DFID_NAME`) logs the writing process of every create, rename
-  and close-after-write under `$HOME` to `/var/tmp/cubench-audit.log`, where
-  the agent cannot write. The checker requires the last write to each result
+  and close-after-write under `~/bench` to `/var/tmp/cubench-audit.log`. It
+  runs as `cubench-audit.service`, installed root-owned in the image (prepare
+  for the cloud images, nix for PandaOS). The desktop user the agent drives
+  has no sudo after prepare: the cloud images lose the cloud-init sudo rule
+  and the sudo/wheel/admin groups, the password is random, and later boots
+  only take the run's ssh key from cloud-init; PandaOS's `panda` has no
+  password, so its wheel group cannot sudo. So the agent can neither stop
+  the watcher nor edit its log. On Fedora, `~/bench` is an ext4 loop mount,
+  because fanotify's file-handle mode refuses btrfs subvolumes. The checker requires the last write to each result
   path to come from the role's process (`procs` in the OS profile, e.g.
   `^mousepad$`), so a terminal command (`bash`, `mv`, `cp`, `python3`, ...)
   cannot produce a passing result. This covers editor, dialog and file
@@ -110,8 +120,11 @@ says how):
   holds only its sha256). The page must report a `copy` event from Firefox,
   and the editor must write the file. `multi-app-editor-to-browser` requires
   a `paste` event in the field.
-- **Browser forms.** The server tags every POST with `ua=firefox` or
-  `ua=other`, so a `curl` from a terminal fails.
+- **Browser forms.** The server tags a POST `ua=firefox` only if the
+  User-Agent says Firefox AND the connection's client socket belongs to a
+  process whose executable is Firefox. It finds that process through
+  `/proc/net/tcp` and `/proc/*/fd` while the request is open, so `curl` or
+  python3 with a forged User-Agent gets `ua=other`.
 - **Outcome only.** `editor-preferences-line-numbers` (the editor's dconf
   key) and `settings-browser-homepage` (Firefox's `prefs.js`) check only the
   result. Their `enforced` field says so.
@@ -134,11 +147,20 @@ task (plus the smoke input probe):
   `{switch_window}`) are filled in per OS. A task can override its steps per
   OS with `{"default": [...], "<os>": [...]}`. Because the oracles of the
   method-enforced tasks drive the real apps, they pass the writer audit.
+- **(c) Cheat.** Every task whose checker enforces a method (28 of 35) has a
+  `cheat`: a shell command that reaches the right end state without the
+  promised method. Examples: `sed -i` or `printf >` instead of the editor,
+  `mv`/`mkdir` instead of the file manager, a forged-User-Agent POST
+  (`cheatpost.py`) instead of the browser, a scraped token plus a forged copy
+  event instead of the clipboard. Every cheat must FAIL the checker. The 7
+  outcome-only and terminal tasks have none.
 
 Each validate job also checks that `cu_atspi.py` finds the editor's window
-(the atspi mode works on that OS) and, on PandaOS, that `panda-cu call`
-works. It saves a screenshot after every oracle step. It exits non-zero
-unless the null fail-rate and the oracle pass-rate are both 100%.
+(the atspi mode works on that OS) and, on PandaOS, that panda-cu
+works through both `panda-cu call` and the `panda-cu mcp` session the panda
+column uses. It saves a screenshot after every oracle step. It exits
+non-zero unless the null fail-rate, the oracle pass-rate and the cheat
+fail-rate are all 100%.
 
 ## Scoring
 

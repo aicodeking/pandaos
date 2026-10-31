@@ -137,11 +137,9 @@ if [ -z "${{WAYLAND_DISPLAY:-}}${{DISPLAY:-}}" ] && [ -S "$XDG_RUNTIME_DIR/wayla
 export GNOME_ACCESSIBILITY=1 QT_ACCESSIBILITY=1
 {apps}launch() {{ local r=$1 c; shift; eval "c=\\$APP_$r"; setsid -f $c "$@" >/dev/null 2>&1 </dev/null; sleep "${{LAUNCH_WAIT:-5}}"; }}
 AUDIT_LOG=/var/tmp/cubench-audit.log
-audit_start() {{
-  sudo -n setsid -f python3 "$A/audit.py" watch "$B" "$AUDIT_LOG" </dev/null >/dev/null 2>/var/tmp/cubench-audit.err
-  for _ in $(seq 50); do grep -q ready "$AUDIT_LOG" 2>/dev/null && return 0; sleep 0.2; done
-  echo "audit watcher did not start: $(tail -n 3 /var/tmp/cubench-audit.err 2>/dev/null)" >&2; return 1
-}}
+# The fanotify watcher is a root service in the image (cubench-audit.service);
+# the session user has no sudo and cannot touch it or its log.
+audit_start() {{ grep -q ready "$AUDIT_LOG" 2>/dev/null || {{ echo "cubench-audit.service is not running" >&2; return 1; }}; }}
 audit() {{ local rx; eval "rx=\\$PROCS_$1"; shift; sleep 1; python3 "$A/audit.py" check "$AUDIT_LOG" "$rx" "$@"; }}
 serve_form() {{
   setsid -f python3 "$A/formserver.py" "$A/www" "$B/form.log" >/dev/null 2>&1 </dev/null
@@ -230,7 +228,9 @@ def prepare(args):
         log("booting", p["name"], "for preparation")
         vm.boot()
         wait_cloud_init(vm)
-        script = ""
+        with open(os.path.join(HERE, "tasks", "assets", "audit.py")) as f:
+            script = ("install -d /usr/local/lib/cubench\n"
+                      "cat > /usr/local/lib/cubench/audit.py <<'CUBENCH_AUDIT_EOF'\n" + f.read() + "CUBENCH_AUDIT_EOF\n")
         for part in ("common.sh", p["name"] + ".prepare.sh"):
             with open(os.path.join(HERE, "os", part)) as f:
                 script += f.read() + "\n"
@@ -240,7 +240,7 @@ def prepare(args):
         if r.returncode != 0:
             print(r.stdout[-6000:], r.stderr[-6000:], sep="\n", file=sys.stderr)
             return 1
-        vm.ssh("sudo systemctl poweroff", timeout=30)
+        # The script ends by taking the user's sudo away and scheduling a poweroff.
         vm.proc.wait(300)
     except Exception as e:
         log("prepare FAILED:", e, "\n" + vm.console_tail())
@@ -274,8 +274,7 @@ def restore(q, sh, dry=False):
         if time.monotonic() - t0 > 120:
             raise RuntimeError("no ssh after loadvm")
         time.sleep(1)
-    # The guest clock resumes at snapshot time; set it to now (best effort).
-    sh(f"sudo -n date -s @{int(time.time())} >/dev/null 2>&1 || true", 30)
+    # The guest clock resumes at snapshot time: identical for every attempt.
 
 
 def setup_script(task):
@@ -300,6 +299,16 @@ def mcp_argv(vm):
             f"{vm.user}@127.0.0.1", 'bash -c \'. "$HOME/.cubench/prelude.sh" && exec panda-cu mcp\'']
 
 
+TOOL_SETUP_LIMIT = 3
+
+
+def tool_setup_crash(trial, state, why):
+    """The panda column's tools could not be set up: a crash, not a pass or fail."""
+    state["tool_setup_failures"] = state.get("tool_setup_failures", 0) + 1
+    trial.update(reason="crash", error=f"tool-setup: {why}", toolSetup=False)
+    return trial
+
+
 def run_trial(sh, q, p, task, rep, args, tdir, state):
     os.makedirs(tdir, exist_ok=True)
     trial = {"os": p["name"], "tools": args.tools, "task": task["id"], "repeat": rep,
@@ -313,20 +322,21 @@ def run_trial(sh, q, p, task, rep, args, tdir, state):
     if rc != 0:
         trial.update(reason="crash", error=f"setup exited {rc}: {(err or out)[-1500:]}")
         return trial
-    if args.tools == "panda" and state.get("panda_specs") is None and not args.dry_run:
+    live_panda = args.tools == "panda" and not args.dry_run
+    if live_panda and state.get("panda_specs") is None:
         state["panda_specs"], state["panda_err"] = load_panda_tools(sh)  # retry after each reset
-    trial["pandaToolsSource"] = ("panda-cu tools" if state.get("panda_specs") else "fallback") \
-        if args.tools == "panda" else None
+    if live_panda and state.get("panda_specs") is None:
+        return tool_setup_crash(trial, state, state.get("panda_err"))
     time.sleep(SETUP_SETTLE_S)
     specs = agent.tool_specs(args.tools, task.get("tools_exclude", ()), state.get("panda_specs"))
     model = agent.make_model(args.provider, args.model, specs, seed=args.seed, effort=args.effort,
                              script=task.get("script"))
     mcp = None
-    if args.tools == "panda" and state.get("vm") is not None:
+    if live_panda:
         try:
             mcp = agent.MCPSession(mcp_argv(state["vm"]))
-        except Exception as e:  # noqa: BLE001 - recorded; cu_* calls then fall back to `panda-cu call`
-            trial["mcpError"] = f"{type(e).__name__}: {e}"
+        except Exception as e:  # noqa: BLE001
+            return tool_setup_crash(trial, state, f"panda-cu mcp: {type(e).__name__}: {e}")
     env = agent.Env(q, sh, tdir, args.tools, mcp)
     try:
         rec = agent.run_episode(model, env, task, p, args.tools, os.path.join(tdir, "transcript.jsonl"), specs)
@@ -441,13 +451,19 @@ def run_os(name, args, idx, tasks):
                                "passed": False, "reason": "crash", "steps": 0, "seconds": 0.0,
                                "error": "VM is not running"})
                 continue
+            if state.get("tool_setup_failures", 0) >= TOOL_SETUP_LIMIT:
+                info["error"] = (f"tool-setup failed {TOOL_SETUP_LIMIT} times; {args.tools} column aborted "
+                                 f"({state.get('panda_err') or 'panda-cu mcp'})")
+                info["toolSetupAborted"] = True
+                log(f"ABORT {label}: {info['error']}")
+                break
             t = run_trial(sh, q, p, task, rep, args, os.path.join(tdir, f"{task['id']}-r{rep}"), state)
             log(f"  -> {'PASS' if t['passed'] else 'FAIL ' + str(t.get('reason'))} "
                 f"steps={t['steps']} {t['seconds']}s (api {t.get('api_seconds')}s)")
             trials.append(t)
         if args.tools == "panda":
-            info["pandaTools"] = ("panda-cu tools" if state.get("panda_specs") else
-                                  f"fallback ({state.get('panda_err')})")
+            info["pandaTools"] = "panda-cu tools" if state.get("panda_specs") else f"unavailable ({state.get('panda_err')})"
+            info["toolSetupFailures"] = state.get("tool_setup_failures", 0)
         q.close()
     except Exception as e:
         info["error"] = f"{type(e).__name__}: {e}"
@@ -613,8 +629,9 @@ def run_oracle(steps, env, sh, subs, shot_dir, points=None):
 
 
 def validate_task(sh, q, p, task, args, subs, tdir):
-    row = {"task": task["id"], "nullFailed": None, "oraclePassed": None}
-    for kind in ("null", "oracle"):
+    row = {"task": task["id"], "nullFailed": None, "oraclePassed": None,
+           "cheatFailed": None if not task.get("cheat") else False}
+    for kind in ("null", "oracle") + (("cheat",) if task.get("cheat") else ()):
         d = os.path.join(tdir, f"{task['id']}-{kind}")
         os.makedirs(d, exist_ok=True)
         try:
@@ -623,19 +640,22 @@ def validate_task(sh, q, p, task, args, subs, tdir):
             if rc != 0:
                 raise RuntimeError(f"setup exited {rc}: {(err or out)[-800:]}")
             time.sleep(SETUP_SETTLE_S)
-            if kind == "oracle":
-                run_oracle(oracle_steps(task, p["name"]), agent.Env(q, sh, d), sh, subs, d, p.get("points"))
+            if kind in ("oracle", "cheat"):
+                steps = oracle_steps(task, p["name"]) if kind == "oracle" else task["cheat"]
+                if kind == "oracle" and "app_focus" in (p.get("points") or {}) and not task.get("script"):
+                    steps = [["os_click", "app_focus"]] + steps  # GNOME 50 does not focus ssh-launched windows
+                run_oracle(steps, agent.Env(q, sh, d), sh, subs, d, p.get("points"))
                 time.sleep(1)
             rc, out, err = sh(task["verify"], timeout=90)
             row[f"{kind}Verify"] = (out + err).strip()[-400:]
-            if kind == "null":
-                row["nullFailed"] = rc != 0
-            else:
+            if kind == "oracle":
                 row["oraclePassed"] = rc == 0
+            else:
+                row[f"{kind}Failed"] = rc != 0
         except Exception as e:
             row[f"{kind}Error"] = f"{type(e).__name__}: {e}"
         q.screendump(os.path.join(d, "final.png"))
-    row["ok"] = row["nullFailed"] is True and row["oraclePassed"] is True
+    row["ok"] = row["nullFailed"] is True and row["oraclePassed"] is True and row["cheatFailed"] is not False
     return row
 
 
@@ -679,7 +699,8 @@ def cmd_validate(args):
             for task in tasks:
                 row = validate_task(sh, q, p, task, args, subs, tdir)
                 log(f"{name}: {task['id']}: null {'FAIL ok' if row['nullFailed'] else 'PASSED (bad)'}, "
-                    f"oracle {'PASS ok' if row['oraclePassed'] else 'FAILED (bad)'}"
+                    f"oracle {'PASS ok' if row['oraclePassed'] else 'FAILED (bad)'}, "
+                    f"cheat {'n/a' if row['cheatFailed'] is None else 'FAIL ok' if row['cheatFailed'] else 'PASSED (bad)'}"
                     + ("" if row["ok"] else f" | {row.get('oracleError') or row.get('oracleVerify', '')}"))
                 rows.append(row)
             q.close()
@@ -699,7 +720,8 @@ def cmd_validate(args):
             json.dump({"meta": meta, "validate": rows}, f, indent=2)
         bad = [r["task"] for r in rows if not r["ok"]]
         log(f"VALIDATE {name}: null fail-rate {sum(bool(r['nullFailed']) for r in rows)}/{len(rows)}, "
-            f"oracle pass-rate {sum(bool(r['oraclePassed']) for r in rows)}/{len(rows)}"
+            f"oracle pass-rate {sum(bool(r['oraclePassed']) for r in rows)}/{len(rows)}, "
+            f"cheat fail-rate {sum(r['cheatFailed'] is True for r in rows)}/{sum(r['cheatFailed'] is not None for r in rows)}"
             + (f"; bad: {', '.join(bad)}" if bad else ""))
         if bad or "error" in info or len(rows) != len(tasks):
             rc = 1
@@ -717,7 +739,9 @@ def cmd_report(args):
             validations.append((d["meta"], d["validate"]))
     rows = score.summarize(trials)
     pairs = score.paired(trials)
-    md = score.markdown(rows, trials, pairs) if trials else ""
+    same = score.same_os_pairs(trials)
+    md = score.warnings_markdown(metas, trials) + (score.markdown(rows, trials, pairs) if trials else "") + \
+        score.same_os_markdown(same)
     head = metas[0] if metas else {}
     notes = [f"- {m['os']} ({m['tools']}): run failed: {m['error']}" for m in metas if m.get("error")]
     notes += [f"- {m['os']} ({m['tools']}): smoke " + ("; ".join(m["smokeFailures"]) or
@@ -731,7 +755,7 @@ def cmd_report(args):
         ("\n" + "\n".join(notes) + "\n" if notes else "")
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out + ".json", "w") as f:
-        json.dump({"runs": metas, "summary": rows, "paired": pairs, "trials": trials,
+        json.dump({"runs": metas, "summary": rows, "paired": pairs, "sameOsPaired": same, "trials": trials,
                    "validate": [{"os": m["os"], "rows": r} for m, r in validations]}, f, indent=2)
     with open(args.out + ".md", "w") as f:
         f.write(md)

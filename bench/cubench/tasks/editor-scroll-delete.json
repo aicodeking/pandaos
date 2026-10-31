@@ -38,5 +38,11 @@
   ],
   "timeout_s": 420,
   "max_steps": 30,
-  "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell"
+  "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell",
+  "cheat": [
+    [
+      "sh",
+      "sed -i '/TODO/d' \"$B/long.txt\""
+    ]
+  ]
 }

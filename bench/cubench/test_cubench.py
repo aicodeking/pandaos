@@ -66,6 +66,9 @@ class Tasks(unittest.TestCase):
                 self.assertFalse(any("launch terminal" in s for s in t["setup"]), t["id"])
             if "drag" in t["id"] or "clipboard" in t["id"]:
                 self.assertIn("enforced", t, f"{t['id']} promises a method but does not say how it is enforced")
+            if t.get("enforced") and not t["enforced"].startswith("outcome only"):
+                self.assertTrue(t.get("cheat"), f"{t['id']} enforces a method but has no cheat to prove it")
+                self.assertTrue(all(st[0] == "sh" for st in t["cheat"]), t["id"])
 
     def test_oracle_steps_are_well_formed(self):
         ops = {"sh", "key", "type", "wait", "click", "rclick", "dclick", "drag", "a11y", "os_click"}
@@ -109,7 +112,7 @@ class Tasks(unittest.TestCase):
         for name in OS_NAMES:
             p = cubench.load_os(name)
             for t in tasks:
-                shs = [st[1] for st in cubench.oracle_steps(t, name) if st[0] == "sh"]
+                shs = [st[1] for st in cubench.oracle_steps(t, name) + t.get("cheat", []) if st[0] == "sh"]
                 script = cubench.prelude(p) + "\n".join(t["setup"] + shs) + "\n" + t["verify"]
                 r = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
                 self.assertEqual(r.returncode, 0, f"{name}/{t['id']}: {r.stderr}")
@@ -174,6 +177,26 @@ class Scoring(unittest.TestCase):
         md = score.markdown(rows, trials, pairs)
         self.assertLess(md.index("Generic tools"), md.index("accessibility tools"))
         self.assertIn("panda has more tools", md)
+
+    def test_same_os_pairs_and_warnings(self):
+        trials = [{"os": "P", "tools": m, "task": f"t{i}", "repeat": 1, "passed": i < w, "steps": 1, "seconds": 1}
+                  for m, w in (("generic", 1), ("atspi", 2), ("panda", 3)) for i in range(4)]
+        trials.append({"os": "U", "tools": "generic", "task": "t0", "repeat": 1, "passed": True, "steps": 1, "seconds": 1})
+        same = score.same_os_pairs(trials)
+        self.assertEqual([(p["a"], p["b"]) for p in same], [("panda", "atspi"), ("panda", "generic"), ("atspi", "generic")])
+        self.assertTrue(all(p["os"] == "P" for p in same))
+        self.assertEqual(same[1]["meanDiff"], 0.5)
+        self.assertIn("Same OS, different tools", score.same_os_markdown(same))
+        crash = {"os": "P", "tools": "panda", "task": "t9", "passed": False, "reason": "crash",
+                 "error": "tool-setup: panda-cu mcp: exited"}
+        w = score.warnings_markdown([{"os": "P", "tools": "panda", "toolSetupAborted": True, "error": "aborted"}], [crash])
+        self.assertTrue(w.startswith("## Warnings"))
+        self.assertIn("column aborted", w)
+        self.assertIn("1 attempt(s) crashed in tool setup", w)
+        self.assertEqual(score.warnings_markdown([], []), "")
+        st = {}
+        t = cubench.tool_setup_crash({"task": "x"}, st, "no tools")
+        self.assertEqual((t["reason"], t["error"], st["tool_setup_failures"]), ("crash", "tool-setup: no tools", 1))
 
     def test_summary_and_table(self):
         trials = [{"os": "a", "tools": "generic", "task": "t1", "passed": True, "steps": 3, "seconds": 10, "cost_usd": 0.1},
@@ -372,6 +395,32 @@ class DryRun(unittest.TestCase):
                 env.panda("cu_fail", {})
         finally:
             mcp.close()
+
+    def test_validate_task_cheat_column(self):
+        """A cheat that reaches the checker's end state makes the row bad; one the checker rejects is fine."""
+        d = tempfile.mkdtemp()
+        srv = qmp.FakeQMPServer(os.path.join(d, "s"))
+        q = qmp.QMP(os.path.join(d, "s"))
+        state = {"done": None}
+
+        def sh(script, timeout=120):
+            if script.startswith("ORACLE") or script.startswith("CHEAT"):
+                state["done"] = script.split()[0]
+            elif script.startswith("rm -rf"):
+                state["done"] = None
+            elif script == "VERIFY":
+                return (0 if state["done"] == "ORACLE" or (state["done"] == "CHEAT" and loose) else 1), "", ""
+            return 0, "", ""
+        args = type("A", (), {"dry_run": True})()
+        p = cubench.load_os("debian-13-xfce")
+        task = {"id": "t", "setup": [], "verify": "VERIFY", "oracle": [["sh", "ORACLE"]], "cheat": [["sh", "CHEAT"]]}
+        cubench.SETUP_SETTLE_S = 0
+        for loose, ok in ((False, True), (True, False)):
+            row = cubench.validate_task(sh, q, p, task, args, {}, d)
+            self.assertEqual((row["nullFailed"], row["oraclePassed"], row["cheatFailed"], row["ok"]), (True, True, not loose, ok))
+        q.close()
+        srv.close()
+        shutil.rmtree(d)
 
     def test_audit_and_token_checkers(self):
         d = tempfile.mkdtemp()

@@ -74,5 +74,11 @@
   ],
   "timeout_s": 600,
   "max_steps": 40,
-  "enforced": "the change is made by the file manager process (fanotify writer audit), not by a shell"
+  "enforced": "the change is made by the file manager process (fanotify writer audit), not by a shell",
+  "cheat": [
+    [
+      "sh",
+      "mkdir \"$B/2026\" && mv \"$B/inv-1.pdf\" \"$B/inv-2.pdf\" \"$B/2026/\""
+    ]
+  ]
 }

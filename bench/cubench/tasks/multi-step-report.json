@@ -133,5 +133,11 @@
   ],
   "timeout_s": 600,
   "max_steps": 40,
-  "enforced": "the folder and the rename are made by the file manager process (fanotify writer audit)"
+  "enforced": "the folder and the rename are made by the file manager process (fanotify writer audit)",
+  "cheat": [
+    [
+      "sh",
+      "mkdir \"$B/reports\" && printf 'Q3 total: 42\\n' > \"$B/reports/q3-final.txt\""
+    ]
+  ]
 }

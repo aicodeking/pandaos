@@ -20,5 +20,11 @@
   ],
   "timeout_s": 300,
   "max_steps": 25,
-  "enforced": "the form must be submitted by Firefox (server-side User-Agent check)"
+  "enforced": "the form must be submitted by Firefox (server-side User-Agent check)",
+  "cheat": [
+    [
+      "sh",
+      "python3 \"$A/cheatpost.py\" form=signup 'name=Ada Lovelace' email=ada@example.org plan=pro agree=yes"
+    ]
+  ]
 }

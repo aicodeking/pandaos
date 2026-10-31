@@ -24,5 +24,11 @@
   ],
   "timeout_s": 420,
   "max_steps": 30,
-  "enforced": "the form must be submitted by Firefox (server-side User-Agent check)"
+  "enforced": "the form must be submitted by Firefox (server-side User-Agent check)",
+  "cheat": [
+    [
+      "sh",
+      "python3 \"$A/cheatpost.py\" form=find code=EMBER-9944"
+    ]
+  ]
 }
