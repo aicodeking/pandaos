@@ -2,13 +2,25 @@
   "id": "multi-step-order",
   "title": "Multi-step: read a file, submit it in the browser",
   "instruction": "The order number is written in the file ~/bench/order.txt. Open that file to read it (for example from the file manager), then submit the order number with the form shown in the web browser.",
+  "gui_only": true,
   "setup": [
     "printf 'Order number: 58213\\n' > \"$B/order.txt\"",
     "serve_form",
     "launch files \"$B\"",
     "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/order.html"
   ],
-  "verify": "grep -qxF 'form=order|order_id=58213' \"$B/form.log\"",
+  "verify": "grep -qxF 'form=order|order_id=58213|ua=firefox' \"$B/form.log\"",
+  "oracle": [
+    [
+      "type",
+      "58213\n"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 600,
-  "max_steps": 40
+  "max_steps": 40,
+  "enforced": "the form must be submitted by Firefox (server-side User-Agent check)"
 }

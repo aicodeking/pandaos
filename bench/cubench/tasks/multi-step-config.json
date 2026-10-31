@@ -2,12 +2,37 @@
   "id": "multi-step-config",
   "title": "Multi-step: back up a config, then edit it",
   "instruction": "First make an unchanged backup copy of ~/bench/config.ini named ~/bench/config.ini.bak. Then change port=8080 to port=9090 in ~/bench/config.ini (it is open in the text editor) and save it.",
+  "gui_only": false,
   "setup": [
     "printf '[server]\\nhost=0.0.0.0\\nport=8080\\n' > \"$B/config.ini\"",
+    "audit_start",
     "launch terminal",
     "launch editor \"$B/config.ini\""
   ],
-  "verify": "[ \"$(cat \"$B/config.ini.bak\")\" = \"$(printf '[server]\\nhost=0.0.0.0\\nport=8080')\" ] && [ \"$(cat \"$B/config.ini\")\" = \"$(printf '[server]\\nhost=0.0.0.0\\nport=9090')\" ]",
+  "verify": "[ \"$(cat \"$B/config.ini.bak\")\" = \"$(printf '[server]\\nhost=0.0.0.0\\nport=8080')\" ] && [ \"$(cat \"$B/config.ini\")\" = \"$(printf '[server]\\nhost=0.0.0.0\\nport=9090')\" ] && audit editor \"$B/config.ini\"",
+  "oracle": [
+    [
+      "sh",
+      "cp \"$B/config.ini\" \"$B/config.ini.bak\""
+    ],
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "type",
+      "[server]\nhost=0.0.0.0\nport=9090"
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 600,
-  "max_steps": 40
+  "max_steps": 40,
+  "enforced": "the edit is written by the editor (fanotify writer audit); the backup may come from any app"
 }

@@ -1,0 +1,29 @@
+{
+  "id": "browser-long-list",
+  "title": "Scroll a long list: click one row out of 500",
+  "instruction": "The web page has a scrolling list of 500 rows. Click Row 437 (and no other row).",
+  "gui_only": true,
+  "setup": [
+    "serve_form",
+    "LAUNCH_WAIT=12 launch browser --kiosk http://127.0.0.1:8000/longlist.html"
+  ],
+  "verify": "[ \"$(grep -c '^ev=pick' \"$B/form.log\")\" = 1 ] && grep -qxF 'ev=pick|row=437|ua=firefox' \"$B/form.log\"",
+  "oracle": [
+    [
+      "key",
+      "Tab",
+      437
+    ],
+    [
+      "key",
+      "Return"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
+  "timeout_s": 420,
+  "max_steps": 30,
+  "enforced": "exactly one row picked, in the page"
+}

@@ -1,0 +1,5 @@
+<!doctype html><html><head><meta charset=utf-8><title>Redeem a coupon</title><style>body{font:16px sans-serif;margin:2em;max-width:44em}label{display:block;margin:.8em 0}input,select,button{font:inherit}</style></head><body><h1>Redeem a coupon</h1>
+<form method=post action=/submit id=f><input type=hidden name=form value=coupon><input type=hidden name=pasted id=p value=0>
+<label>Coupon code <input name=code id=c autofocus></label><button type=submit>Redeem</button></form>
+<script>document.getElementById('c').addEventListener('paste', () => { document.getElementById('p').value = '1'; });</script>
+</body></html>

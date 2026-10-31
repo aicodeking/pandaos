@@ -1,0 +1,46 @@
+{
+  "id": "multi-app-editor-to-browser",
+  "title": "Multi-app: paste a code from the editor into a web form",
+  "instruction": "The text editor shows ~/bench/coupon.txt with a coupon code. Copy the code and paste it into the coupon field of the web page in the browser, then redeem it.",
+  "gui_only": true,
+  "setup": [
+    "printf 'SAVE-7Q4K-2026' > \"$B/coupon.txt\"",
+    "serve_form",
+    "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/coupon.html",
+    "launch editor \"$B/coupon.txt\""
+  ],
+  "verify": "grep -qxF 'code=SAVE-7Q4K-2026|form=coupon|pasted=1|ua=firefox' \"$B/form.log\"",
+  "oracle": [
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "key",
+      "ctrl+c"
+    ],
+    [
+      "key",
+      "alt+Tab"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+v"
+    ],
+    [
+      "key",
+      "Return"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
+  "timeout_s": 420,
+  "max_steps": 30,
+  "enforced": "the code field must receive a paste event (pasted=1) and the form must come from Firefox"
+}

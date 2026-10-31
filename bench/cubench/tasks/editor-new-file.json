@@ -2,10 +2,39 @@
   "id": "editor-new-file",
   "title": "Text editor: write and save a new file",
   "instruction": "In the text editor, type exactly the text `hello cubench` and save the document as ~/bench/hello.txt.",
+  "gui_only": true,
   "setup": [
+    "audit_start",
     "launch editor"
   ],
-  "verify": "[ \"$(cat \"$B/hello.txt\")\" = \"hello cubench\" ]",
+  "verify": "[ \"$(cat \"$B/hello.txt\")\" = \"hello cubench\" ] && audit editor \"$B/hello.txt\"",
+  "oracle": [
+    [
+      "type",
+      "hello cubench"
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2.5
+    ],
+    [
+      "type",
+      "{HOME}/bench/hello.txt"
+    ],
+    [
+      "key",
+      "Return"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 300,
-  "max_steps": 20
+  "max_steps": 20,
+  "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell"
 }

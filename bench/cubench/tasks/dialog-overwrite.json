@@ -2,12 +2,45 @@
   "id": "dialog-overwrite",
   "title": "Dialog: confirm overwriting a file",
   "instruction": "The text editor shows ~/bench/new-version.txt. Use Save As to save this document as ~/bench/out.txt, replacing the existing out.txt (confirm the overwrite).",
+  "gui_only": true,
   "setup": [
     "echo \"version 1\" > \"$B/out.txt\"",
     "echo \"version 2\" > \"$B/new-version.txt\"",
+    "audit_start",
     "launch editor \"$B/new-version.txt\""
   ],
-  "verify": "[ \"$(cat \"$B/out.txt\")\" = \"version 2\" ]",
+  "verify": "[ \"$(cat \"$B/out.txt\")\" = \"version 2\" ] && audit editor \"$B/out.txt\"",
+  "oracle": [
+    [
+      "key",
+      "ctrl+shift+s"
+    ],
+    [
+      "wait",
+      2.5
+    ],
+    [
+      "type",
+      "{HOME}/bench/out.txt"
+    ],
+    [
+      "key",
+      "Return"
+    ],
+    [
+      "wait",
+      2
+    ],
+    [
+      "key",
+      "Return"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 300,
-  "max_steps": 25
+  "max_steps": 25,
+  "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell"
 }

@@ -39,6 +39,9 @@ welcome-dialog-last-shown-version='999'
 
 [org/gnome/settings-daemon/plugins/power]
 sleep-inactive-ac-type='nothing'
+
+[org/gnome/desktop/interface]
+toolkit-accessibility=true
 INI
   dconf update
   install -d -o "$u" -g "$u" "$h/.config"

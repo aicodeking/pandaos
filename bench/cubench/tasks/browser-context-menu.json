@@ -1,0 +1,34 @@
+{
+  "id": "browser-context-menu",
+  "title": "Context menu: archive a row",
+  "instruction": "The web page lists reports. Archive the row Report Q3 using its context menu (right-click it).",
+  "gui_only": true,
+  "setup": [
+    "serve_form",
+    "LAUNCH_WAIT=12 launch browser --kiosk http://127.0.0.1:8000/context.html"
+  ],
+  "verify": "[ \"$(grep -c '^action=' \"$B/form.log\")\" = 1 ] && grep -qxF 'action=archive|ev=menu|row=Report Q3|ua=firefox' \"$B/form.log\"",
+  "oracle": [
+    [
+      "rclick",
+      300,
+      270
+    ],
+    [
+      "wait",
+      1
+    ],
+    [
+      "click",
+      800,
+      298
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
+  "timeout_s": 300,
+  "max_steps": 25,
+  "enforced": "the menu only opens on the row's contextmenu event; exactly one menu action"
+}

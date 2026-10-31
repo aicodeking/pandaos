@@ -2,10 +2,35 @@
   "id": "files-new-folder",
   "title": "File manager: create a folder",
   "instruction": "The file manager shows the folder ~/bench. Create a new folder named projects inside it.",
+  "gui_only": true,
   "setup": [
+    "audit_start",
     "launch files \"$B\""
   ],
-  "verify": "[ -d \"$B/projects\" ]",
+  "verify": "[ -d \"$B/projects\" ] && audit files \"$B/projects\"",
+  "oracle": [
+    [
+      "key",
+      "ctrl+shift+n"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "type",
+      "projects\n"
+    ],
+    [
+      "wait",
+      1.5
+    ]
+  ],
   "timeout_s": 300,
-  "max_steps": 20
+  "max_steps": 20,
+  "enforced": "the change is made by the file manager process (fanotify writer audit), not by a shell"
 }

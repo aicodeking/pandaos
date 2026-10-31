@@ -1,3 +1,9 @@
 <!doctype html><html><head><meta charset=utf-8><title>Your access token</title><style>body{font:16px sans-serif;margin:2em;max-width:44em}label{display:block;margin:.8em 0}input,select,button{font:inherit}</style></head><body><h1>Your access token</h1>
-<p>Token:</p><p><code style='font-size:20px'>cb-7XQ2-M9KD-41PZ-VW3H-8RTN-J5LC-Q0YE-2BFA</code></p>
+<p>Your one-time access token. It is shown only here and stored nowhere else:</p>
+<textarea id=t readonly rows=3 cols=40 style="font:16px monospace">@TOKEN@</textarea>
+<script>const post = f => fetch('/submit', {method: 'POST', body: new URLSearchParams(f)});</script><script>
+const t = document.getElementById('t');
+addEventListener('load', () => { t.focus(); t.select(); });
+document.addEventListener('copy', () => post({ev: 'copy'}));
+</script>
 </body></html>

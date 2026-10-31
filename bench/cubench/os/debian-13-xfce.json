@@ -15,14 +15,20 @@
   },
   "hints": [
     "Desktop: Debian 13 with Xfce (X11 session), a panel at the top with an Applications menu at the top left.",
-    "Apps: the text editor is Mousepad, the file manager is Thunar, the terminal is Xfce Terminal, the web browser is Firefox ESR.",
-    "To start an app: use the Applications menu, or press alt+F2, type the app name, press Enter. ctrl+alt+t opens a terminal.",
+    "Apps: the text editor is Mousepad, the file manager is Thunar, the web browser is Firefox ESR.",
+    "To start an app: use the Applications menu, or press alt+F2, type the app name, press Enter.",
     "Windows: alt+Tab switches windows, alt+F10 maximizes, alt+F4 closes the focused window."
   ],
-  "reset": [
-    "pkill -u \"$(id -u)\" -f '(mousepad|thunar|Thunar|xfce4-terminal|firefox|formserver)' || true",
-    "sleep 1",
-    "pkill -9 -u \"$(id -u)\" -f '(mousepad|thunar|Thunar|xfce4-terminal|firefox|formserver)' || true",
-    "rm -rf ~/.mozilla ~/.config/mozilla ~/.cache/mozilla ~/snap/firefox ~/.config/Mousepad"
-  ]
+  "terminal_hint": "The terminal is Xfce Terminal; ctrl+alt+t opens one.",
+  "procs": {
+    "editor": "^mousepad$",
+    "files": "^[Tt]hunar$"
+  },
+  "dconf": {
+    "line_numbers": "/org/xfce/mousepad/preferences/view/show-line-numbers"
+  },
+  "keys": {
+    "switch_window": "alt+Tab"
+  },
+  "desktop_version": "xfce4-session --version"
 }

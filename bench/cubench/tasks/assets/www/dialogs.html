@@ -1,0 +1,23 @@
+<!doctype html><html><head><meta charset=utf-8><title>Set the sync frequency to Weekly and save</title><style>html,body{margin:0;width:1280px;height:800px;overflow:hidden;font:16px sans-serif;background:#f4f4f4}.a{position:absolute;box-sizing:border-box}h1{position:absolute;left:100px;top:10px;margin:0;font-size:24px}</style></head><body><h1>Set the sync frequency to Weekly and save</h1>
+
+<button class=a id=open style="left:100px;top:100px;width:160px;height:50px">Settings</button>
+<div class=a id=d1 style="display:none;left:300px;top:150px;width:600px;height:400px;background:#fff;border:2px solid #333;padding:20px">
+  <b>Settings</b><p>Sync frequency: <span id=cur>Daily</span></p>
+  <button class=a id=adv style="left:40px;top:100px;width:160px;height:40px">Advanced…</button>
+  <button class=a id=save style="left:440px;top:330px;width:120px;height:40px">Save</button></div>
+<div class=a id=d2 style="display:none;left:450px;top:250px;width:400px;height:260px;background:#ffe;border:2px solid #333;padding:20px">
+  <b>Advanced</b>
+  <label class=a style="left:20px;top:50px;width:220px;height:30px"><input type=radio name=f value=daily checked> Daily</label>
+  <label class=a style="left:20px;top:90px;width:220px;height:30px"><input type=radio name=f value=weekly> Weekly</label>
+  <label class=a style="left:20px;top:130px;width:220px;height:30px"><input type=radio name=f value=monthly> Monthly</label>
+  <button class=a id=apply style="left:250px;top:200px;width:100px;height:36px">Apply</button></div>
+<script>const post = f => fetch('/submit', {method: 'POST', body: new URLSearchParams(f)});</script><script>
+const $ = id => document.getElementById(id);
+let freq = 'daily';
+$('open').onclick = () => { $('d1').style.display = 'block'; };
+$('adv').onclick = () => { $('d2').style.display = 'block'; };
+$('apply').onclick = () => { freq = document.querySelector('input[name=f]:checked').value;
+  $('cur').textContent = freq; $('d2').style.display = 'none'; };
+$('save').onclick = () => { if ($('d2').style.display !== 'block') { post({ev: 'save', freq}); $('d1').style.display = 'none'; } };
+</script>
+</body></html>

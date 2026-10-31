@@ -2,6 +2,7 @@
 # Fedora 44 Cloud Base -> the Workstation environment group (GNOME, Wayland),
 # gdm autologin. Large (~2 GB of packages): run it only when CI time allows.
 dnf -y install @workstation-product-environment
+dnf -y install at-spi2-core python3-gobject dconf
 dnf -y remove gnome-initial-setup gnome-tour || true
 gdm_autologin /etc/gdm/custom.conf
 gnome_defaults

@@ -1,0 +1,70 @@
+{
+  "id": "files-new-folder-move",
+  "title": "File manager: new folder, then move files into it",
+  "instruction": "The file manager shows ~/bench with two invoices. Create the folder ~/bench/2026 and move both invoices (inv-1.pdf and inv-2.pdf) into it, using the file manager.",
+  "gui_only": true,
+  "setup": [
+    "printf x > \"$B/inv-1.pdf\"",
+    "printf y > \"$B/inv-2.pdf\"",
+    "audit_start",
+    "launch files \"$B\""
+  ],
+  "verify": "[ -f \"$B/2026/inv-1.pdf\" ] && [ -f \"$B/2026/inv-2.pdf\" ] && [ ! -e \"$B/inv-1.pdf\" ] && [ ! -e \"$B/inv-2.pdf\" ] && audit files \"$B/2026\" \"$B/2026/inv-1.pdf\" \"$B/2026/inv-2.pdf\"",
+  "oracle": [
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "key",
+      "ctrl+x"
+    ],
+    [
+      "key",
+      "ctrl+shift+n"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "type",
+      "2026\n"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+l"
+    ],
+    [
+      "wait",
+      1
+    ],
+    [
+      "type",
+      "{HOME}/bench/2026\n"
+    ],
+    [
+      "wait",
+      2
+    ],
+    [
+      "key",
+      "ctrl+v"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
+  "timeout_s": 600,
+  "max_steps": 40,
+  "enforced": "the change is made by the file manager process (fanotify writer audit), not by a shell"
+}

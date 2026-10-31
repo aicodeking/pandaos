@@ -1,0 +1,43 @@
+{
+  "id": "files-drag-between-windows",
+  "title": "Drag and drop: move a file between two file manager windows",
+  "instruction": "Two file manager windows are open, one showing ~/bench/camera and one showing ~/bench/Album. Drag photo.png from the camera window into the Album window so the file moves there.",
+  "gui_only": true,
+  "setup": [
+    "mkdir \"$B/camera\" \"$B/Album\"",
+    "cp \"$A/www/pixel.png\" \"$B/camera/photo.png\"",
+    "audit_start",
+    "launch files \"$B/Album\"",
+    "launch files \"$B/camera\""
+  ],
+  "verify": "[ -f \"$B/Album/photo.png\" ] && [ ! -e \"$B/camera/photo.png\" ] && audit files \"$B/Album/photo.png\"",
+  "oracle": [
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "key",
+      "ctrl+x"
+    ],
+    [
+      "key",
+      "{switch_window}"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+v"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
+  "timeout_s": 420,
+  "max_steps": 30,
+  "enforced": "the change is made by the file manager process (fanotify writer audit), not by a shell; a cut-and-paste inside the file manager also passes (the checker cannot tell it from a drag)"
+}

@@ -1,13 +1,59 @@
 {
   "id": "clipboard-browser-to-editor",
-  "title": "Clipboard: copy from the browser into the editor",
-  "instruction": "The web browser shows an access token. Copy the token into the text editor using the clipboard, and save the document as ~/bench/token.txt containing only the token.",
+  "title": "Clipboard: copy a token from the browser into the editor",
+  "instruction": "The web browser shows a one-time access token. Copy it with the clipboard into the document ~/bench/token.txt that is open in the text editor, so it contains only the token, and save it.",
+  "gui_only": true,
   "setup": [
     "serve_form",
     "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/token.html",
-    "launch editor"
+    ": > \"$B/token.txt\"",
+    "audit_start",
+    "launch editor \"$B/token.txt\""
   ],
-  "verify": "[ \"$(tr -d ' \\n' < \"$B/token.txt\")\" = \"cb-7XQ2-M9KD-41PZ-VW3H-8RTN-J5LC-Q0YE-2BFA\" ]",
+  "verify": "python3 \"$A/tokencheck.py\" \"$B/form.log\" \"$B/token.txt\" && audit editor \"$B/token.txt\"",
+  "oracle": [
+    [
+      "key",
+      "alt+Tab"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "key",
+      "ctrl+c"
+    ],
+    [
+      "wait",
+      1
+    ],
+    [
+      "key",
+      "alt+Tab"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+v"
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 420,
-  "max_steps": 30
+  "max_steps": 30,
+  "enforced": "the token exists only in the form server's memory (the checker compares its sha256), the page must report a copy event from Firefox, and the editor must write the file"
 }

@@ -2,11 +2,32 @@
   "id": "editor-find-replace",
   "title": "Text editor: replace all occurrences",
   "instruction": "The text editor has ~/bench/essay.txt open. Replace every occurrence of the word colour with color in the whole file, then save it.",
+  "gui_only": true,
   "setup": [
     "for i in $(seq 1 25); do echo \"The colour of item $i is nice.\"; done > \"$B/essay.txt\"",
+    "audit_start",
     "launch editor \"$B/essay.txt\""
   ],
-  "verify": "! grep -q colour \"$B/essay.txt\" && [ \"$(grep -c '^The color of item [0-9]* is nice\\.$' \"$B/essay.txt\")\" = 25 ]",
+  "verify": "! grep -q colour \"$B/essay.txt\" && [ \"$(grep -c '^The color of item [0-9]* is nice\\.$' \"$B/essay.txt\")\" = 25 ] && audit editor \"$B/essay.txt\"",
+  "oracle": [
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "type",
+      "The color of item 1 is nice.\nThe color of item 2 is nice.\nThe color of item 3 is nice.\nThe color of item 4 is nice.\nThe color of item 5 is nice.\nThe color of item 6 is nice.\nThe color of item 7 is nice.\nThe color of item 8 is nice.\nThe color of item 9 is nice.\nThe color of item 10 is nice.\nThe color of item 11 is nice.\nThe color of item 12 is nice.\nThe color of item 13 is nice.\nThe color of item 14 is nice.\nThe color of item 15 is nice.\nThe color of item 16 is nice.\nThe color of item 17 is nice.\nThe color of item 18 is nice.\nThe color of item 19 is nice.\nThe color of item 20 is nice.\nThe color of item 21 is nice.\nThe color of item 22 is nice.\nThe color of item 23 is nice.\nThe color of item 24 is nice.\nThe color of item 25 is nice."
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 420,
-  "max_steps": 30
+  "max_steps": 30,
+  "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell"
 }

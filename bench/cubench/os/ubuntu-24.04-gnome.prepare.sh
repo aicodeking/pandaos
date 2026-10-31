@@ -11,6 +11,8 @@ echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://package
 printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla
 apt_get update
 apt_get install ubuntu-desktop-minimal firefox
+# AT-SPI for --tools atspi and the validate oracles; dconf for checkers.
+apt_get install at-spi2-core python3-gi gir1.2-atspi-2.0 dconf-cli
 apt_get purge gnome-initial-setup update-notifier || true
 gdm_autologin /etc/gdm3/custom.conf
 gnome_defaults

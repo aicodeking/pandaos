@@ -2,12 +2,41 @@
   "id": "keyboard-editor-save",
   "title": "Keyboard only: write and save in the editor",
   "instruction": "Using only the keyboard, type the line keyboard only in the text editor and save it as ~/bench/kbd.txt.",
+  "gui_only": true,
   "setup": [
+    "audit_start",
     "launch editor"
   ],
-  "verify": "[ \"$(cat \"$B/kbd.txt\")\" = \"keyboard only\" ]",
+  "verify": "[ \"$(cat \"$B/kbd.txt\")\" = \"keyboard only\" ] && audit editor \"$B/kbd.txt\"",
+  "oracle": [
+    [
+      "type",
+      "keyboard only"
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2.5
+    ],
+    [
+      "type",
+      "{HOME}/bench/kbd.txt"
+    ],
+    [
+      "key",
+      "Return"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 300,
   "max_steps": 20,
+  "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell; mouse tools are not offered",
   "tools_exclude": [
     "click",
     "double_click",

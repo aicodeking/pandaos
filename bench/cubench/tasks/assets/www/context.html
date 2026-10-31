@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset=utf-8><title>Archive the Report Q3 row (use its context menu)</title><style>html,body{margin:0;width:1280px;height:800px;overflow:hidden;font:16px sans-serif;background:#f4f4f4}.a{position:absolute;box-sizing:border-box}h1{position:absolute;left:100px;top:10px;margin:0;font-size:24px}.row{width:400px;height:40px;background:#fff;border:1px solid #999;padding:9px}.item{width:200px;height:36px;background:#eef;border:1px solid #446;padding:8px}</style></head><body><h1>Archive the Report Q3 row (use its context menu)</h1>
+<div class="a row" style="left:100px;top:150px">Report Q1</div>
+<div class="a row" style="left:100px;top:200px">Report Q2</div>
+<div class="a row" style="left:100px;top:250px">Report Q3</div>
+<div class="a row" style="left:100px;top:300px">Report Q4</div>
+<div class="a row" style="left:100px;top:350px">Budget</div>
+<div id=menu style="display:none"><div class="a item" data-a=open style="left:700px;top:200px">Open</div>
+<div class="a item" data-a=rename style="left:700px;top:240px">Rename</div>
+<div class="a item" data-a=archive style="left:700px;top:280px">Archive</div>
+<div class="a item" data-a=delete style="left:700px;top:320px">Delete</div></div>
+<script>const post = f => fetch('/submit', {method: 'POST', body: new URLSearchParams(f)});</script><script>
+let row = null;
+const menu = document.getElementById('menu');
+for (const r of document.querySelectorAll('.row'))
+  r.addEventListener('contextmenu', e => { e.preventDefault(); row = r.textContent; menu.style.display = 'block'; });
+for (const it of document.querySelectorAll('.item'))
+  it.addEventListener('click', () => { post({ev: 'menu', action: it.dataset.a, row}); menu.style.display = 'none'; });
+</script>
+</body></html>

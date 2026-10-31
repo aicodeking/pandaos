@@ -9,14 +9,24 @@ Providers (Python stdlib + urllib only):
              (e.g. Z.AI GLM-V at https://api.z.ai/api/paas/v4).
   scripted   a fake model for --dry-run and the self-tests.
 
-Tool modes:
+Tool modes (the report only compares like with like):
   generic    screenshot, click, double_click, drag, scroll, type, key, wait, done:
-             all done from outside the VM over QMP.
-  panda      generic + PandaOS's in-OS panda-cu tools, run over ssh inside the
-             graphical session as `panda-cu call <tool> '<json-args>'`. Contract:
-             it prints one JSON value on stdout and exits 0, or exits non-zero
-             with the error on stderr. A result carrying "png_base64", or a
-             "path" to a .png in the guest, is forwarded to the model as an image.
+             all done from outside the VM over QMP. The headline column.
+  atspi      generic + cu_tree / cu_find / cu_act with panda-cu's schemas, run
+             over ssh by tasks/assets/cu_atspi.py on the same AT-SPI walker as
+             panda-cu: equal accessibility access on every OS.
+  panda      generic + every PandaOS panda-cu tool, schemas loaded at run start
+             from `panda-cu tools`, each run over ssh inside the graphical
+             session as `panda-cu call <tool> '<json-args>'`. Contract: one JSON
+             value on stdout and exit 0, or non-zero with the error on stderr. A
+             result with "png_base64" (or a "path" to a .png in the guest) is
+             forwarded to the model as an image. PandaOS-only, so its rows are
+             compared with atspi rows, never with generic ones.
+
+After every turn that acted, the last tool result carries a fresh screenshot
+(QMP), whatever tools the turn used; read-only calls (screenshot, cu_tree,
+cu_find, ...) do not trigger one. Keyboard-only tasks drop the mouse tools,
+the pointer cu_* tools and cu_act's click/press actions.
 """
 import base64
 import hashlib
@@ -62,40 +72,103 @@ GENERIC_TOOLS = [
      {"success": {"type": "boolean"}, "summary": {"type": "string"}}, ["success"]),
 ]
 MOUSE_TOOLS = {"click", "double_click", "drag", "scroll"}
+MODES = ("generic", "atspi", "panda")
+POINTER_CU = {"cu_click", "cu_drag", "cu_move", "cu_scroll"}
+READ_ONLY = {"screenshot", "cu_tree", "cu_find", "cu_windows", "cu_wait", "cu_clipboard_get", "cu_screenshot"}
 
-PANDA_TOOLS = [
-    ("cu_tree", "PandaOS panda-cu: the accessibility tree of the focused window or the whole desktop."),
-    ("cu_find", "PandaOS panda-cu: find UI elements by role/name/text; returns ids and boxes."),
-    ("cu_act", "PandaOS panda-cu: act on an element id (click, focus, set_text, press, ...)."),
-    ("cu_screenshot", "PandaOS panda-cu: a screenshot with numbered marks on interactive elements."),
-    ("cu_wait", "PandaOS panda-cu: wait until an element/window appears or the UI settles."),
-    ("cu_launch", "PandaOS panda-cu: launch an application by name or desktop id."),
-    ("cu_clipboard_get", "PandaOS panda-cu: read the clipboard."),
-    ("cu_clipboard_set", "PandaOS panda-cu: set the clipboard."),
+# cu_tree / cu_find / cu_act exactly as `panda-cu tools` prints them
+# (components/computer-use/toolsjson.go), minus cu_act's `screenshot` flag:
+# the end-of-turn screenshot covers it in every mode.
+_EL = {"type": "string", "description": "An id from the latest cu_tree, cu_find or cu_screenshot{marks} result; "
+                                        "the pointer goes to the centre of its box."}
+ATSPI_TOOLS = [
+    ("cu_tree", "Compact AT-SPI accessibility tree of the running apps: [{id,d(depth),role,name,bbox:[x,y,w,h],"
+     "states,actions,text}]. ids are child-index paths, valid for this snapshot (cu_act refuses an id whose "
+     "element changed). Hidden subtrees are pruned.",
+     {"type": "object", "properties": {
+         "max_depth": {"type": "integer", "minimum": 1, "maximum": 50, "default": 30,
+                       "description": "Depth limit below each application."},
+         "app": {"type": "string", "description": "Only applications whose name or window title contains this "
+                                                  "(case-insensitive), e.g. mousepad."},
+         "role": {"type": "string", "description": "Only elements with this role (e.g. \"push button\", \"text\", "
+                                                   "\"entry\", \"menu item\"); apps and windows are always kept."},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 400,
+                   "description": "Maximum elements returned."}}}),
+    ("cu_find", "Find accessibility elements whose name or text contains text (case-insensitive) and/or with this "
+     "role. Returns elements with ids usable by cu_act.",
+     {"type": "object", "properties": {
+         "text": {"type": "string", "description": "Substring of the name or text."},
+         "role": {"type": "string", "description": "Exact role, e.g. \"push button\"."},
+         "app": {"type": "string", "description": "Only this application."},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 50,
+                   "description": "Maximum matches."}}}),
+    ("cu_act", "Act on an element through AT-SPI, without pixels: click/press (runs its action), focus, set_text "
+     "(replaces an editable field's whole contents, up to 100000 characters). Works even when the element is "
+     "covered or off screen.",
+     {"type": "object", "required": ["element_id", "action"], "properties": {
+         "element_id": _EL,
+         "action": {"type": "string", "enum": ["click", "focus", "set_text", "press"], "description": "What to do."},
+         "text": {"type": "string", "description": "For set_text: the new contents."}}}),
 ]
+# Used only when `panda-cu tools` cannot be read: names, loose schemas.
+PANDA_FALLBACK = ["cu_screenshot", "cu_click", "cu_move", "cu_drag", "cu_scroll", "cu_type", "cu_key", "cu_tree",
+                  "cu_find", "cu_act", "cu_wait", "cu_windows", "cu_focus", "cu_launch", "cu_open",
+                  "cu_clipboard_get", "cu_clipboard_set"]
 
 
-def tool_specs(mode, exclude=()):
-    """[(name, description, JSON schema)] for this mode, minus excluded tools."""
-    specs = [(n, d, {"type": "object", "properties": p, "required": r})
-             for n, d, p, r in GENERIC_TOOLS if n not in exclude]
-    if mode == "panda":
-        specs += [(n, d + " Arguments are passed through as the panda-cu JSON args.",
-                   {"type": "object", "additionalProperties": True}) for n, d in PANDA_TOOLS]
-    elif mode != "generic":
-        raise ValueError(f"unknown tool mode {mode!r}")
+def parse_panda_tools(text):
+    """`panda-cu tools` output (a JSON list of MCP tools) -> [(name, description, schema)]."""
+    specs = [(t["name"], t.get("description", ""), t.get("inputSchema") or {"type": "object"})
+             for t in json.loads(text)]
+    if not specs or not all(n.startswith("cu_") for n, _, _ in specs):
+        raise ValueError("unexpected `panda-cu tools` output")
     return specs
 
 
-def system_prompt(os_profile, size, mode):
+def keyboard_only_act(schema):
+    """cu_act's schema without the click/press actions."""
+    s = json.loads(json.dumps(schema))
+    action = s.get("properties", {}).get("action")
+    if action is not None:
+        action["enum"] = [a for a in action.get("enum", ["focus", "set_text"]) if a not in ("click", "press")]
+    return s
+
+
+def tool_specs(mode, exclude=(), panda_specs=None):
+    """[(name, description, JSON schema)] for this mode. A task excluding the mouse
+    tools (keyboard only) also loses the pointer cu_* tools and cu_act click/press."""
+    if mode not in MODES:
+        raise ValueError(f"unknown tool mode {mode!r}")
+    exclude = set(exclude)
+    keyboard_only = bool(exclude & MOUSE_TOOLS)
+    specs = [(n, d, {"type": "object", "properties": p, "required": r})
+             for n, d, p, r in GENERIC_TOOLS if n not in exclude]
+    extra = []
+    if mode == "atspi":
+        extra = ATSPI_TOOLS
+    elif mode == "panda":
+        extra = panda_specs or [(n, "PandaOS panda-cu tool (schema unavailable: pass its JSON arguments).",
+                                 {"type": "object", "additionalProperties": True}) for n in PANDA_FALLBACK]
+    for n, d, s in extra:
+        if keyboard_only and n in POINTER_CU:
+            continue
+        specs.append((n, d, keyboard_only_act(s) if keyboard_only and n == "cu_act" else s))
+    return specs
+
+
+def system_prompt(os_profile, size, mode, gui_only=False):
     w, h = size
-    hints = "\n".join(f"- {line}" for line in os_profile["hints"])
-    extra = ("\nYou also have PandaOS's panda-cu tools (cu_*), which read the accessibility "
-             "tree and act on elements directly." if mode == "panda" else "")
+    lines = list(os_profile["hints"]) + ([] if gui_only or not os_profile.get("terminal_hint")
+                                         else [os_profile["terminal_hint"]])
+    hints = "\n".join(f"- {line}" for line in lines)
+    extra = {"panda": "\nYou also have PandaOS's panda-cu tools (cu_*), which read the accessibility tree and act "
+                      "on elements directly.",
+             "atspi": "\nYou also have accessibility tools (cu_tree, cu_find, cu_act) that read the AT-SPI tree "
+                      "and act on elements directly."}.get(mode, "")
     return (
         f"You operate a Linux desktop computer through tools. The screen is {w}x{h} pixels; "
-        "coordinates are pixels from the top-left corner of the latest screenshot. Every "
-        "action returns a new screenshot.\n"
+        "coordinates are pixels from the top-left corner of the latest screenshot. After each "
+        "turn in which you act, the last tool result includes a new screenshot.\n"
         f"About this computer:\n{hints}\n"
         "The home directory is ~ and paths like ~/bench/x.txt are inside it. Keyboard "
         "layout: US. Nobody will answer questions: work until the task is done, check the "
@@ -304,8 +377,11 @@ class Env:
     shell(script, timeout) -> (rc, stdout, stderr), run in the session prelude.
     """
 
-    def __init__(self, qmp, shell, shot_dir):
+    CU = {"panda": "panda-cu call", "atspi": 'python3 "$A/cu_atspi.py"'}
+
+    def __init__(self, qmp, shell, shot_dir, mode="generic"):
         self.qmp, self.shell, self.dir, self.n = qmp, shell, shot_dir, 0
+        self.cu_cmd = self.CU.get(mode, "panda-cu call")
         os.makedirs(shot_dir, exist_ok=True)
 
     def screenshot(self):
@@ -337,13 +413,13 @@ class Env:
         return "ok"
 
     def panda(self, name, args):
-        rc, out, err = self.shell(f"panda-cu call {shlex.quote(name)} {shlex.quote(json.dumps(args))}", 120)
+        rc, out, err = self.shell(f"{self.cu_cmd} {shlex.quote(name)} {shlex.quote(json.dumps(args))}", 120)
         if rc != 0:
-            raise RuntimeError(f"panda-cu exited {rc}: {(err or out).strip()[:2000]}")
+            raise RuntimeError(f"{name} exited {rc}: {(err or out).strip()[:2000]}")
         try:
             res = json.loads(out)
         except json.JSONDecodeError:
-            raise RuntimeError(f"panda-cu printed non-JSON: {out[:500]}") from None
+            raise RuntimeError(f"{name} printed non-JSON: {out[:500]}") from None
         png = None
         if isinstance(res, dict):
             if "png_base64" in res:
@@ -355,76 +431,100 @@ class Env:
         return json.dumps(res)[:MAX_TOOL_TEXT], png
 
 
-def run_episode(model, env, task, os_profile, mode, log_path):
-    """Run one task attempt. Returns the agent-side record (verify runs elsewhere)."""
-    specs_names = {n for n, _, _ in tool_specs(mode, task.get("tools_exclude", ()))}
+def run_episode(model, env, task, os_profile, mode, log_path, specs=None):
+    """Run one task attempt. Returns the agent-side record (verify runs elsewhere).
+
+    Time is split: api_seconds is spent waiting for the model, env_seconds is
+    everything else (tools, settling, screenshots). timeout_s budgets env time
+    only, so a slow API does not fail a task.
+    """
+    specs = specs or tool_specs(mode, task.get("tools_exclude", ()))
+    names = {n for n, _, _ in specs}
+    keyboard_only = bool(set(task.get("tools_exclude", ())) & MOUSE_TOOLS)
     t0 = time.monotonic()
     rec = {"steps": 0, "clicks": 0, "noop_clicks": 0, "agent_done": False, "agent_success": None,
-           "out_of_budget": False, "error": None}
+           "out_of_budget": False, "error": None, "api_seconds": 0.0}
     log = open(log_path, "w")
 
     def write(**kw):
         log.write(json.dumps({"t": round(time.monotonic() - t0, 2), **kw}) + "\n")
         log.flush()
 
+    def env_s():
+        return time.monotonic() - t0 - rec["api_seconds"]
+
     try:
         shot, png = env.screenshot()
         last_hash = hashlib.sha256(png).hexdigest()
-        system = system_prompt(os_profile, env.qmp.size, mode)
+        system = system_prompt(os_profile, env.qmp.size, mode, task.get("gui_only", False))
         text = "Task: " + task["instruction"]
-        if task.get("tools_exclude"):
-            text += "\n(For this task you have no mouse tools: use the keyboard only.)"
+        if keyboard_only:
+            text += "\n(For this task you have no mouse or pointer tools: use the keyboard only.)"
         model.start(system, text, png)
-        write(event="start", system=system, user=text, screenshot=os.path.basename(shot))
+        write(event="start", system=system, user=text, tools=sorted(names), screenshot=os.path.basename(shot))
         while not rec["agent_done"]:
-            if rec["steps"] >= task["max_steps"] or time.monotonic() - t0 > task["timeout_s"]:
+            if rec["steps"] >= task["max_steps"] or env_s() > task["timeout_s"]:
                 rec["out_of_budget"] = True
                 break
+            ta = time.monotonic()
             calls, said = model.step()
+            rec["api_seconds"] += time.monotonic() - ta
             write(event="model", text=said, calls=[{"id": c, "name": n, "input": a} for c, n, a in calls],
-                  usage=dict(model.usage))
+                  usage=dict(model.usage), api_s=round(time.monotonic() - ta, 2))
             if not calls:  # the model ended its turn without acting: treat as finished
                 rec["agent_done"] = True
                 break
-            results = []
+            results, acted = [], False
             for i, (cid, name, args) in enumerate(calls):
                 rec["steps"] += 1
                 png_out, err = None, False
                 try:
-                    if name not in specs_names:
+                    if name not in names:
                         raise ValueError(f"tool {name} is not available")
                     if name == "done":
                         rec["agent_done"], rec["agent_success"] = True, bool(args.get("success"))
                         out = "recorded"
-                    elif name.startswith("cu_"):
-                        out, png_out = env.panda(name, args)
                     else:
-                        out = env.act(name, args)
-                        if name != "screenshot":
+                        if keyboard_only and name == "cu_act" and args.get("action") in ("click", "press"):
+                            raise ValueError("keyboard-only task: cu_act click/press is not available")
+                        if name.startswith("cu_"):
+                            out, png_out = env.panda(name, args)
+                        else:
+                            out = env.act(name, args)
+                        if name not in READ_ONLY:
+                            acted = True
                             time.sleep(SETTLE_S)
-                        shot, png_out = env.screenshot()
-                        h = hashlib.sha256(png_out).hexdigest()
-                        if name in ("click", "double_click"):
-                            rec["clicks"] += 1
-                            rec["noop_clicks"] += h == last_hash
-                        last_hash = h
-                        if i < len(calls) - 1:
-                            png_out = None  # only the last result of a turn carries an image
+                        if name in READ_ONLY and png_out is None and name == "screenshot":
+                            shot, png_out = env.screenshot()
+                        elif name not in READ_ONLY:
+                            shot, shot_png = env.screenshot()
+                            h = hashlib.sha256(shot_png).hexdigest()
+                            if name in ("click", "double_click", "cu_click"):
+                                rec["clicks"] += 1
+                                rec["noop_clicks"] += h == last_hash
+                            last_hash = h
+                            png_out = png_out or shot_png
+                        if i < len(calls) - 1 and name not in ("screenshot", "cu_screenshot"):
+                            png_out = None  # only the last result of a turn carries the screenshot
                 except Exception as e:  # tool errors go back to the model
                     out, err = f"{type(e).__name__}: {e}", True
                 write(event="tool", id=cid, name=name, input=args, result=out, error=err,
                       screenshot=os.path.basename(shot) if png_out else None)
-                results.append((cid, out, png_out, err))
+                results.append([cid, out, png_out, err])
                 if rec["agent_done"]:
                     # Answer the remaining calls so the transcript stays well-formed.
-                    results += [(c, "skipped: done was called", None, False) for c, _, _ in calls[i + 1:]]
+                    results += [[c, "skipped: done was called", None, False] for c, _, _ in calls[i + 1:]]
                     break
-            model.add_results(results)
+            if acted and not rec["agent_done"] and results[-1][2] is None:
+                shot, results[-1][2] = env.screenshot()  # a failed last call still gets the screen
+            model.add_results([tuple(r) for r in results])
     except Exception as e:
         rec["error"] = f"{type(e).__name__}: {e}"
         write(event="crash", error=rec["error"])
     finally:
         rec["seconds"] = round(time.monotonic() - t0, 1)
+        rec["api_seconds"] = round(rec["api_seconds"], 1)
+        rec["env_seconds"] = round(rec["seconds"] - rec["api_seconds"], 1)
         rec["usage"] = dict(model.usage)
         write(event="end", **{k: v for k, v in rec.items() if k != "usage"})
         log.close()

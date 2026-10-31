@@ -2,10 +2,39 @@
   "id": "editor-multiline",
   "title": "Text editor: three lines in order",
   "instruction": "In the text editor, write these three lines in this order, one per line and nothing else: alpha, beta, gamma. Save the document as ~/bench/greek.txt.",
+  "gui_only": true,
   "setup": [
+    "audit_start",
     "launch editor"
   ],
-  "verify": "[ \"$(cat \"$B/greek.txt\")\" = \"$(printf 'alpha\\nbeta\\ngamma')\" ]",
+  "verify": "[ \"$(cat \"$B/greek.txt\")\" = \"$(printf 'alpha\\nbeta\\ngamma')\" ] && audit editor \"$B/greek.txt\"",
+  "oracle": [
+    [
+      "type",
+      "alpha\nbeta\ngamma"
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2.5
+    ],
+    [
+      "type",
+      "{HOME}/bench/greek.txt"
+    ],
+    [
+      "key",
+      "Return"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 300,
-  "max_steps": 20
+  "max_steps": 20,
+  "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell"
 }

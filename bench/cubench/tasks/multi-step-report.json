@@ -1,12 +1,121 @@
 {
   "id": "multi-step-report",
   "title": "Multi-step: folder, document, rename",
-  "instruction": "Create the folder ~/bench/reports. In the text editor, write a document with the single line Q3 total: 42 and save it as ~/bench/reports/q3.txt. Then, in the file manager, rename that file to q3-final.txt.",
+  "instruction": "Create the folder ~/bench/reports in the file manager. In the text editor, write a document with the single line Q3 total: 42 and save it as ~/bench/reports/q3.txt. Then, in the file manager, rename that file to q3-final.txt.",
+  "gui_only": true,
   "setup": [
+    "audit_start",
     "launch files \"$B\"",
     "launch editor"
   ],
-  "verify": "[ \"$(cat \"$B/reports/q3-final.txt\")\" = \"Q3 total: 42\" ] && [ ! -e \"$B/reports/q3.txt\" ]",
+  "verify": "[ \"$(cat \"$B/reports/q3-final.txt\")\" = \"Q3 total: 42\" ] && [ ! -e \"$B/reports/q3.txt\" ] && audit files \"$B/reports\" \"$B/reports/q3-final.txt\"",
+  "oracle": [
+    [
+      "key",
+      "alt+Tab"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+shift+n"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "type",
+      "reports\n"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "alt+Tab"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "type",
+      "Q3 total: 42"
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2.5
+    ],
+    [
+      "type",
+      "{HOME}/bench/reports/q3.txt\n"
+    ],
+    [
+      "wait",
+      2
+    ],
+    [
+      "key",
+      "alt+Tab"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+l"
+    ],
+    [
+      "wait",
+      1
+    ],
+    [
+      "type",
+      "{HOME}/bench/reports\n"
+    ],
+    [
+      "wait",
+      2
+    ],
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "key",
+      "F2"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "type",
+      "q3-final.txt\n"
+    ],
+    [
+      "wait",
+      1.5
+    ]
+  ],
   "timeout_s": 600,
-  "max_steps": 40
+  "max_steps": 40,
+  "enforced": "the folder and the rename are made by the file manager process (fanotify writer audit)"
 }

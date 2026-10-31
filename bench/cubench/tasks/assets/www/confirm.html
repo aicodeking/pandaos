@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset=utf-8><title>Delete the demo account</title><style>body{font:16px sans-serif;margin:2em;max-width:44em}label{display:block;margin:.8em 0}input,select,button{font:inherit}</style></head><body><h1>Delete the demo account</h1>
+<p>This removes the demo account and all its data.</p>
+<label><input type=checkbox id=ok autofocus> I understand this cannot be undone</label>
+<button id=del>Delete account</button><p id=st></p>
+<script>const post = f => fetch('/submit', {method: 'POST', body: new URLSearchParams(f)});</script><script>
+document.getElementById('del').addEventListener('click', () => {
+  if (!document.getElementById('ok').checked) { alert('Tick the box first.'); return; }
+  if (confirm('Really delete the demo account?')) { post({ev: 'delete'}); document.getElementById('st').textContent = 'Deleted.'; }
+});
+</script>
+</body></html>

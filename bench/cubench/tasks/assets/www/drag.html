@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset=utf-8><title>Put the banana in the basket</title><style>html,body{margin:0;width:1280px;height:800px;overflow:hidden;font:16px sans-serif;background:#f4f4f4}.a{position:absolute;box-sizing:border-box}h1{position:absolute;left:100px;top:10px;margin:0;font-size:24px}.fruit{width:160px;height:80px;background:#fd5;border:1px solid #333;padding:28px 0;text-align:center;cursor:grab}</style></head><body><h1>Put the banana in the basket</h1>
+
+<div class="a fruit" draggable=true data-item=apple style="left:100px;top:150px">Apple</div>
+<div class="a fruit" draggable=true data-item=banana style="left:100px;top:300px">Banana</div>
+<div class="a fruit" draggable=true data-item=cherry style="left:100px;top:450px">Cherry</div>
+<div class=a id=basket style="left:800px;top:250px;width:300px;height:300px;border:4px dashed #555;background:#fff">Basket</div>
+<script>const post = f => fetch('/submit', {method: 'POST', body: new URLSearchParams(f)});</script><script>
+for (const f of document.querySelectorAll('.fruit'))
+  f.addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', f.dataset.item));
+const b = document.getElementById('basket');
+b.addEventListener('dragover', e => e.preventDefault());
+b.addEventListener('drop', e => { e.preventDefault(); const it = e.dataTransfer.getData('text/plain');
+  post({ev: 'drop', item: it, trusted: e.isTrusted}); b.textContent = 'Basket: ' + it; });
+</script>
+</body></html>

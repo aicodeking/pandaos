@@ -1,0 +1,19 @@
+{
+  "id": "editor-preferences-line-numbers",
+  "title": "Preferences: turn on line numbers in the editor",
+  "instruction": "Open the text editor's preferences (settings) and turn on line numbers.",
+  "gui_only": true,
+  "setup": [
+    "launch editor"
+  ],
+  "verify": "[ \"$(dconf read \"$DCONF_line_numbers\")\" = true ]",
+  "oracle": [
+    [
+      "sh",
+      "dconf write \"$DCONF_line_numbers\" true"
+    ]
+  ],
+  "timeout_s": 300,
+  "max_steps": 25,
+  "enforced": "outcome only: the editor's own setting (dconf key per OS); the method is not checked"
+}

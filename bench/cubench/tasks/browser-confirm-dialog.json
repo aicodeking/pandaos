@@ -1,0 +1,40 @@
+{
+  "id": "browser-confirm-dialog",
+  "title": "Dialog: confirm a destructive action in the browser",
+  "instruction": "The web page lets you delete the demo account. Do it: tick the confirmation box, press Delete account and confirm the browser's dialog.",
+  "gui_only": true,
+  "setup": [
+    "serve_form",
+    "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/confirm.html"
+  ],
+  "verify": "grep -qxF 'ev=delete|ua=firefox' \"$B/form.log\"",
+  "oracle": [
+    [
+      "key",
+      "space"
+    ],
+    [
+      "key",
+      "Tab"
+    ],
+    [
+      "key",
+      "Return"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "Return"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
+  "timeout_s": 300,
+  "max_steps": 25,
+  "enforced": "the page posts only after its confirm() dialog returns OK"
+}

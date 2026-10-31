@@ -1,6 +1,6 @@
 # bench/cubench: cross-OS computer-use benchmark
 
-Measures how often an AI agent completes desktop tasks on each OS. The same 25
+Measures how often an AI agent completes desktop tasks on each OS. The same 35
 tasks, checkers, model and tool interface run on every OS. Each OS runs under
 QEMU/KVM with identical resources: UEFI, 4 vCPU, 4 GB, virtio-vga fixed at
 1280x800, a usb-tablet and a QMP socket.
@@ -9,32 +9,41 @@ QEMU/KVM with identical resources: UEFI, 4 vCPU, 4 GB, virtio-vga fixed at
   `screendump` (PNG) for screenshots, `input-send-event` for absolute mouse
   and wheel, and `send-key` for keys and typing (printable ASCII to US-layout
   qcodes, with shift).
-  The generic tools are `screenshot`, `click`, `double_click`, `drag`,
-  `scroll`, `type`, `key`, `wait` and `done`. Every action returns a fresh
-  screenshot.
-- **Harness side (never seen by the agent).** Setup and verification run over
-  ssh inside the graphical session. The session env comes from the session
-  process (or from `systemctl --user show-environment` on GNOME). Setup helpers:
-  `launch ROLE [args]` (ROLE is editor, files, terminal or browser, mapped per
-  OS in `os/<name>.json`), `serve_form` (`tasks/assets/formserver.py` on
-  127.0.0.1:8000, logs each POST to `$B/form.log`), and `$B` = `~/bench`.
-  Before each attempt, the OS's `reset` lines close the apps and wipe the
-  Firefox/editor state and `~/bench`.
+  - Generic tools: `screenshot`, `click`, `double_click`, `drag`, `scroll`,
+    `type`, `key`, `wait` and `done`.
+  - The agent sees a screenshot at the start. After each turn in which it
+    acted, the last tool result of that turn carries a fresh screenshot,
+    whichever tools it used. Results of earlier calls in the same turn are
+    text only, and read-only calls (`screenshot` excepted) add no image.
+- **Isolation.** After boot, the harness snapshots the whole VM once (QMP
+  `savevm`, with the OVMF vars on qcow2 so every writable drive can be
+  snapshotted). Before every attempt, of the model and of validation alike, it
+  restores that snapshot (`loadvm`): RAM, disk and the logged-in session are
+  bit-identical. The guest clock is then set to the host's time.
+- **Harness side (never seen by the agent).** Setup and checking run over ssh
+  inside the graphical session (env from the session process, or from
+  `systemctl --user show-environment` on GNOME). Setup helpers:
+  - `launch ROLE [args]`: ROLE is editor, files, terminal or browser, mapped
+    per OS in `os/<name>.json`;
+  - `serve_form`: `tasks/assets/formserver.py` on 127.0.0.1:8000, which logs
+    each POST to `$B/form.log` with the User-Agent class;
+  - `audit_start` / `audit ROLE PATH...`: the fanotify writer audit (below);
+  - `$B` is `~/bench`.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `cubench.py` | CLI: `prepare` (build a desktop disk), `run` (also `--smoke`, `--dry-run`), `report` |
-| `agent.py` | agent loop, providers (Anthropic, OpenAI-compatible, scripted), tool specs, cost |
-| `qmp.py` | QMP client, key mapping, fake QMP server |
-| `score.py` | Wilson intervals, fail reasons, summary and markdown |
-| `tasks/*.json` | `{id, title, instruction, setup: [sh], verify: sh, timeout_s, max_steps, tools_exclude?}` |
-| `tasks/assets/` | form server, static pages and `probecheck.py`, uploaded to `~/.cubench` in the VM |
-| `smoke/*.json` | plumbing tasks for `run --smoke` (an optional `script` replaces the scripted agent's default actions) |
-| `os/<name>.json` | image pin, user, session env source, app commands, agent hints, reset |
-| `os/common.sh`, `os/<name>.prepare.sh` | desktop install, run as root over ssh by `prepare` |
-| `pandaos-desktop-image.nix` | PandaOS desktop qcow2 (how it differs from the shipped desktop: see its header) |
+| `cubench.py` | CLI: `prepare`, `run` (also `--smoke`, `--dry-run`), `validate`, `report` |
+| `agent.py` | agent loop, providers (Anthropic, OpenAI-compatible, scripted), tool modes, cost, timing |
+| `qmp.py` | QMP client (incl. `savevm`/`loadvm`), key mapping, fake QMP server |
+| `score.py` | tool classes, task bootstrap, paired differences, Wilson, fail reasons, markdown |
+| `tasks/*.json` | `{id, title, instruction, gui_only, setup: [sh], verify: sh, oracle: [steps], enforced?, timeout_s, max_steps, tools_exclude?}` |
+| `tasks/assets/` | form server, pages, `audit.py` (fanotify), `cu_atspi.py` (AT-SPI tools), `tokencheck.py`, `probecheck.py`; uploaded to `~/.cubench` |
+| `smoke/*.json` | plumbing tasks (`run --smoke`; also part of `validate`) |
+| `os/<name>.json` | image pin, user, session, app commands, hints, writer process names, dconf keys, oracle keys |
+| `os/common.sh`, `os/<name>.prepare.sh` | desktop install (incl. AT-SPI and dconf), run as root over ssh by `prepare` |
+| `pandaos-desktop-image.nix` | PandaOS desktop qcow2 (its header lists the bench-only changes) |
 | `test_cubench.py` | self-tests (no VM, no API) |
 
 ## OS matrix
@@ -43,159 +52,182 @@ QEMU/KVM with identical resources: UEFI, 4 vCPU, 4 GB, virtio-vga fixed at
 |---|---|---|---|---|
 | `pandaos-desktop` | flake desktop profile, built by nix | labwc, Wayland, greetd autologin | Mousepad, PCManFM, foot, Firefox | default |
 | `ubuntu-24.04-gnome` | Ubuntu 24.04 cloud image 20261017 | `ubuntu-desktop-minimal`, GNOME on **Wayland**, gdm autologin | Text Editor, Files, GNOME Terminal, Firefox (Mozilla .deb) | default |
-| `debian-13-xfce` | Debian 13 *generic* cloud image 20261026 (full kernel, so virtio-gpu DRM is present) | minimal Xfce on **X11**, lightdm autologin | Mousepad, Thunar, Xfce Terminal, Firefox ESR | default |
-| `fedora-44-workstation` | Fedora 44 Cloud Base 1.7 + `@workstation-product-environment` | GNOME on Wayland, gdm autologin | Text Editor, Files, Ptyxis, Firefox | opt-in: the install is ~2 GB and takes about 45-60 min the first time |
-
-PandaOS uses the editor and file manager its desktop ships (Mousepad,
-PCManFM). The bench image adds Firefox, the browser every other column uses,
-so the comparison is about shells and compositors, not app choices.
+| `debian-13-xfce` | Debian 13 *generic* cloud image 20261026 | minimal Xfce on **X11**, lightdm autologin | Mousepad, Thunar, Xfce Terminal, Firefox ESR | default |
+| `fedora-44-workstation` | Fedora 44 Cloud Base 1.7 + `@workstation-product-environment` | GNOME on Wayland, gdm autologin | Text Editor, Files, Ptyxis, Firefox | opt-in (a ~2 GB install) |
 
 Every OS gets the same small set of changes: no idle lock or blanking, no
-first-run tours, and the same Firefox policies (no welcome page, no
-crash-restore prompt). Each result records the session type and display size
-that were actually used. The real-VM path is checked by smoke mode (see Status).
+first-run tours, the same Firefox policies, AT-SPI and `GNOME_ACCESSIBILITY=1`
+for launched apps, and passwordless sudo for the harness. Each result records
+the OS, kernel, session type, display size and the desktop, editor, file
+manager, terminal and browser versions the guest reports.
 
-## Tool modes and the panda-cu contract
+## Tool modes and like-for-like comparison
 
-`--tools generic` is the default and the only mode for non-PandaOS columns.
-`--tools panda` adds PandaOS's in-OS tools: `cu_tree`, `cu_find`, `cu_act`,
-`cu_screenshot`, `cu_wait`, `cu_launch`, `cu_clipboard_get` and
-`cu_clipboard_set`. Each call runs over ssh inside the session as:
+| Mode | Tools | Runs on | Class |
+|---|---|---|---|
+| `generic` | the QMP tools above | every OS | **generic**: the headline |
+| `atspi` | generic + `cu_tree`, `cu_find`, `cu_act` with panda-cu's exact schemas, run by `tasks/assets/cu_atspi.py` on panda-cu's own AT-SPI walker (`panda-cu-atspi` on PandaOS, a copy of `components/computer-use/atspi.py` elsewhere) | every OS | a11y |
+| `panda` | generic + every panda-cu tool, schemas loaded from `panda-cu tools` at run start (retried after each reset if that fails; the result records `pandaToolsSource`) | PandaOS | a11y |
 
-```sh
-panda-cu call <tool> '<json-args>'
-```
+The report has one table per class, and its paired differences never cross
+classes. The like-for-like accessibility comparison is atspi against atspi. A
+panda row only ever appears next to atspi rows, labelled as having more tools.
+On keyboard-only tasks the mouse tools, `cu_click`, `cu_drag`, `cu_move`,
+`cu_scroll` and `cu_act`'s click/press actions are removed, and cu_act
+click/press calls are also refused at run time.
 
-It must print one JSON value on stdout and exit 0, or exit non-zero with the
-error on stderr (the error goes back to the model). If the result has a
-`"png_base64"` field, or a `"path"` to a `.png` in the guest, cubench forwards
-that image to the model. This matches `components/computer-use` (`panda-cu
-call`). The desktop profile ships `services.panda-cu` in `mode = "attach"`,
-so the image's autologin session has it; the image only sets Firefox as its
-browser.
+panda-cu contract: `panda-cu call <tool> '<json-args>'` prints one JSON value
+and exits 0, or exits non-zero with the error on stderr. `png_base64` in a
+result is forwarded to the model as an image.
+
+## Tasks and how the method is enforced
+
+35 tasks: 11 text editor and dialog, 6 file manager, 4 multi-step or
+multi-app, 6 terminal or settings, and 8 browser (5 of them in kiosk mode, so
+page pixels are screen pixels). A task with `gui_only: true` gets no terminal
+pre-launched and no terminal hint. Its checker also verifies how the result
+was made, where the title promises a method (each task's `enforced` field
+says how):
+
+- **Writer audit (`audit.py`).** A root fanotify watcher (filesystem mark,
+  `FAN_REPORT_DFID_NAME`) logs the writing process of every create, rename
+  and close-after-write under `$HOME` to `/var/tmp/cubench-audit.log`, where
+  the agent cannot write. The checker requires the last write to each result
+  path to come from the role's process (`procs` in the OS profile, e.g.
+  `^mousepad$`), so a terminal command (`bash`, `mv`, `cp`, `python3`, ...)
+  cannot produce a passing result. This covers editor, dialog and file
+  manager tasks.
+- **Drag and drop.**
+  - `browser-drag-to-basket` passes only on the page's trusted HTML5 `drop`
+    event (exactly one, of the banana).
+  - `files-drag-between-windows` requires the file manager process to have
+    made the move. A cut-and-paste inside the file manager also passes: the
+    checker cannot tell it from a drag, and its `enforced` field says so.
+- **Clipboard.** `clipboard-browser-to-editor` uses a token that exists only
+  in the form server's memory (the page is served no-store, and the log
+  holds only its sha256). The page must report a `copy` event from Firefox,
+  and the editor must write the file. `multi-app-editor-to-browser` requires
+  a `paste` event in the field.
+- **Browser forms.** The server tags every POST with `ua=firefox` or
+  `ua=other`, so a `curl` from a terminal fails.
+- **Outcome only.** `editor-preferences-line-numbers` (the editor's dconf
+  key) and `settings-browser-homepage` (Firefox's `prefs.js`) check only the
+  result. Their `enforced` field says so.
+
+## Validation (`cubench.py validate`)
+
+Every checker is proven on the real VMs, from the same snapshot, for every
+task (plus the smoke input probe):
+
+- **(a) Null agent.** Setup only, then the checker, which must FAIL.
+- **(b) Oracle.** The task's `oracle` steps, then the checker, which must
+  PASS. Oracle steps:
+  - `sh`: over ssh, only where the checker does not enforce a method;
+  - `key`/`type`: QMP keys, e.g. the editors' ctrl+s and the file managers'
+    ctrl+a / F2 / ctrl+shift+n / ctrl+l;
+  - `click`/`rclick`/`drag`: QMP at fixed kiosk coordinates;
+  - `a11y`: `cu_atspi.py do` (find an element, then act on it).
+
+  Placeholders `{HOME}`, `{HOSTNAME}` and the OS profile's `keys` (e.g.
+  `{switch_window}`) are filled in per OS. A task can override its steps per
+  OS with `{"default": [...], "<os>": [...]}`. Because the oracles of the
+  method-enforced tasks drive the real apps, they pass the writer audit.
+
+Each validate job also checks that `cu_atspi.py` finds the editor's window
+(the atspi mode works on that OS) and, on PandaOS, that `panda-cu call`
+works. It saves a screenshot after every oracle step. It exits non-zero
+unless the null fail-rate and the oracle pass-rate are both 100%.
 
 ## Scoring
 
-- **Pass rate** per OS and tool mode, with a 95% Wilson interval.
-- **Median steps and seconds** per attempt.
-- **Fail reasons:**
-  - `crash`: setup failed, the API failed or refused, or the VM died.
+- **Task pass rate.** Repeats are first averaged per task. The mean over
+  tasks gets a 95% bootstrap interval over tasks. The attempt-level pass rate
+  with a Wilson interval is also shown.
+- **Paired per-task differences** between OSes of the same class: mean
+  difference, a 95% bootstrap interval over tasks, and the count of tasks
+  where A is better, tied or worse.
+- **Timing.**
+  - API time (waiting for the model) and environment time (everything else)
+    are measured separately; medians of both are reported.
+  - `timeout_s` budgets environment time only, so a slow API cannot fail a
+    task. `max_steps` caps steps.
+- **Fail reasons.**
+  - `crash`: snapshot restore or setup failed, the API failed or refused, or
+    the VM died.
   - `misclick`: at least 3 clicks, and at least half of them left the screen
     pixel-identical (a heuristic).
-  - `timeout`: the attempt ran out of `max_steps` or `timeout_s`.
-  - `wrong_result`: the agent finished but the checker failed.
-- A checker exit code of 0 is the only definition of a pass. What the agent
-  claims does not count.
+  - `timeout`: the attempt ran out of steps or environment time.
+  - `wrong_result`: the checker failed.
+- **What counts as a pass.** Only the checker's exit code decides it. What
+  the agent claims does not count.
 
-Defaults: 3 repeats per task, task order shuffled with `--seed`. Outputs:
+Defaults: 3 repeats, with task order shuffled by `--seed`. The outputs are
+`results-<os>-<tools>[-rK].json`, `validate-<os>.json`, and transcripts
+(`transcript.jsonl` plus every screenshot). `report` merges them into
+`results/<date>.json` and `.md`.
 
-- `results-<os>-<tools>[-rK].json` per run;
-- `report` merges them into `results/<date>.json` and `results/<date>.md`;
-- transcripts go to `transcripts/<os>-<tools>/<task>-rK/`
-  (`transcript.jsonl` plus every screenshot).
-
-Providers:
+**Providers:**
 
 - **Anthropic** (raw HTTP, default `claude-sonnet-5-5`): custom tools with
-  image blocks in tool results, not the computer-use tool, so every provider
-  sees the same tools. History is append-only and auto-cached.
+  image blocks, so every provider sees the same tools. History is append-only
+  and auto-cached.
 - **OpenAI-compatible** (`OPENAI_BASE_URL`, `OPENAI_API_KEY`,
-  `OPENAI_MODEL`; e.g. Z.AI GLM-V): keeps the last 3 screenshots and sends
-  `seed`.
-- Server-side model fallbacks are deliberately off: one model per run.
-- For models not in `agent.PRICES`, pass `--price in,out` (USD per million
-  tokens) to get cost figures.
-
-## Smoke mode (no API key)
-
-`run --smoke` proves the VM plumbing before any money is spent on a model.
-The scripted agent runs `smoke/input-probe`: setup starts the form server and
-a kiosk browser on `probe.html`, which logs every mouse down, wheel event and
-keystroke; the agent clicks (640,400) and (900,600), scrolls and types
-`cubench probe 42`; `probecheck.py` passes only if both clicks arrived at the
-same offset from their targets (within 2 px, so 1:1), the wheel moved and the
-text arrived. The `--tasks` given also run, so their setup and checkers are
-exercised over ssh (the scripted agent fails them, which is fine). The exit
-code is non-zero if the QMP display is not 1280x800, a setup crashed, a smoke
-task failed, or, with `--tools panda`, `panda-cu call cu_windows` /
-`cu_screenshot` failed in the session. Results carry `smokeFailures`.
+  `OPENAI_MODEL`): keeps the last 3 screenshots and sends `seed`.
+- Model fallbacks are off.
+- For other models, pass `--price in,out` to get cost figures.
 
 ## Running
 
 ```sh
-python3 bench/cubench/test_cubench.py                     # self-tests
-python3 bench/cubench/cubench.py run --dry-run --os pandaos-desktop --repeats 1 --out /tmp/cu
+python3 bench/cubench/test_cubench.py
 ssh-keygen -t ed25519 -N '' -f key
 python3 bench/cubench/cubench.py prepare --os debian-13-xfce --key key
-python3 bench/cubench/cubench.py run --smoke --os debian-13-xfce --key key --repeats 1 \
-  --tasks editor-new-file,browser-form --out smoke
-ANTHROPIC_API_KEY=... python3 bench/cubench/cubench.py run --os debian-13-xfce --key key --out out
-python3 bench/cubench/cubench.py report out/results-*.json --out bench/cubench/results/$(date -u +%F)
+python3 bench/cubench/cubench.py validate --os debian-13-xfce --key key --out val
+ANTHROPIC_API_KEY=... python3 bench/cubench/cubench.py run --os debian-13-xfce --tools generic --key key --out out
+python3 bench/cubench/cubench.py report out/results-*.json val/validate-*.json --out bench/cubench/results/$(date -u +%F)
 ```
 
-The host needs `qemu-system-x86_64`, `qemu-img` (7.1 or later, for PNG
-screendump), OVMF, `cloud-localds` and `ssh`. It also reuses
-`bench/compare/run.py` for image download, checksums and the base VM.
+The host needs `qemu-system-x86_64` and `qemu-img` (7.1 or later), OVMF,
+`cloud-localds` and `ssh`. cubench reuses `bench/compare/run.py`.
 
 ## CI: `.github/workflows/cubench.yml` (manual)
 
 **Inputs:**
 
-- `provider`: `anthropic` or `openai`
+- `provider`
 - `model`
 - `repeats`
-- `os`: comma-separated profiles
-- `tasks`: a glob over task ids
-- `panda_tools`: also run the PandaOS panda column
+- `os`
+- `tasks`
+- `mode`:
+  - `auto` runs the model when the key secret exists, and validates
+    otherwise;
+  - `validate`;
+  - `run`.
+- `atspi_tools`: also run the atspi column on every OS.
+- `panda_tools`: also run the PandaOS panda column.
 
-**Secrets:**
-
-- `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` plus the repo variables
-  `OPENAI_BASE_URL` and `OPENAI_MODEL`;
-- optional: `CACHIX_AUTH_TOKEN` and the variable `CACHIX_CACHE`, as in
-  compare.yml.
-
-Without the provider's key the workflow runs in smoke mode: `selftest`, then
-`prepare` and one `run` job per OS (plus the PandaOS panda column) with
-`run --smoke --tasks <smoke_tasks>`. Artifacts: `cubench-smoke-<os>-<tools>-r1`
-(results, transcripts and `<os>-<tools>-desktop.png`, the first screenshot).
+**Secrets:** `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` with the variables
+`OPENAI_BASE_URL` and `OPENAI_MODEL`. `CACHIX_AUTH_TOKEN` is optional.
 
 **Jobs:**
 
-- `prepare` builds each cloud desktop disk once and caches it, keyed by the OS
-  profile, its prepare script and `common.sh`. The image hash is in the
-  profile.
-- `run` runs one job per (OS, tool mode, repeat), each in a fresh VM.
-- `report` merges the results.
+- `selftest`: unit tests and dry runs.
+- `prepare`: builds each cloud disk once, cached.
+- `run`:
+  - in run mode, one job per (OS, tool mode, repeat);
+  - in validate mode, one job per OS.
+- `report`
 
-Cache budget: about 2 to 3 GB per zstd-compressed disk, against the
-repository's 10 GB Actions cache limit.
+**Cost of a full default run** (3 OSes × generic and atspi, plus the PandaOS
+panda column; 35 tasks; 3 repeats; that is 21 jobs and 735 attempts):
 
-**Estimates for a full default run** (3 OSes plus the panda column, 25 tasks, 3
-repeats, so 12 run jobs and 300 attempts):
-
-- **CI minutes:** about 12 × 45-75 min for the runs. The first run also takes
-  about 60 min to prepare disks; cached runs take about 5 min to restore them.
-  The PandaOS image is rebuilt for each job, about 10 min each with a warm
-  cache. Total: roughly 700-1000 runner-minutes, and about 1-1.5 h of wall
-  time at `max-parallel: 8`.
-- **API cost with claude-sonnet-5-5:** about $0.10-0.60 per attempt
-  (12-40 steps, a screenshot of about 1.4k tokens per step, cached prefix), so
-  about **$40-100 per full run**. This estimate has not been measured yet: the
-  report shows the measured cost per column.
+- **CI time:** about 21 × 60-90 min of runner time.
+- **API cost:** at an estimated $0.10-0.60 per attempt with claude-sonnet-5-5,
+  roughly $75-440. Running `atspi_tools=false` cuts that to 420 attempts.
+- These are estimates. The report shows the measured cost per column.
 
 ## Status
 
-- Smoke mode is green on every default OS (cubench runs 41184240650 and
-  41201988784, no API key). The prepared disks took 105 s (Debian 13 Xfce) and 192 s (Ubuntu
-  24.04 GNOME) of install script, and about 4-6 min per prepare job, so
-  preparing fits easily in CI. Each OS booted to its desktop at 1280x800
-  (Debian on X11, Ubuntu and PandaOS on Wayland). Both QMP clicks reached the
-  kiosk page at offset (0, 0), the wheel and the typed text arrived, setup and
-  checkers ran over ssh, and `panda-cu call` worked in the PandaOS session.
-  Smoke jobs took 3-5 min on the cloud images and 12-16 min on PandaOS, most
-  of it building the image.
-- No model has been run yet: that needs `ANTHROPIC_API_KEY` (or an
-  OpenAI-compatible key).
-- Still unverified: whether `/etc/firefox/policies` is honoured by Debian's
-  firefox-esr (it is also written to `/etc/firefox-esr/policies`).
+See the validation table in the latest `cubench` workflow run (validate
+mode). No model run yet: that needs an API key secret.

@@ -1,12 +1,20 @@
 {
   "id": "settings-browser-homepage",
-  "title": "Settings: change an app preference",
+  "title": "Settings: change the browser's home page",
   "instruction": "In the web browser's settings, set the home page to the custom URL http://127.0.0.1:8000/home.html.",
+  "gui_only": true,
   "setup": [
     "serve_form",
     "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/form.html"
   ],
   "verify": "pkill -TERM -u \"$(id -u)\" -f firefox; sleep 5; grep -rqsE 'browser\\.startup\\.homepage\", \"http://127\\.0\\.0\\.1:8000/home\\.html/?\"' ~/.mozilla ~/.config/mozilla",
+  "oracle": [
+    [
+      "sh",
+      "pkill -u \"$(id -u)\" -f firefox; sleep 4; d=$(dirname \"$(find ~/.mozilla ~/.config/mozilla -name times.json 2>/dev/null | head -n1)\"); echo 'user_pref(\"browser.startup.homepage\", \"http://127.0.0.1:8000/home.html\");' >> \"$d/prefs.js\""
+    ]
+  ],
   "timeout_s": 420,
-  "max_steps": 30
+  "max_steps": 30,
+  "enforced": "outcome only: Firefox's saved preference"
 }

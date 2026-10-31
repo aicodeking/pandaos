@@ -1,0 +1,44 @@
+{
+  "id": "browser-small-targets",
+  "title": "Small targets: tick tiny checkboxes",
+  "instruction": "The web page shows 40 tiny numbered checkboxes. Tick exactly boxes 7, 23 and 31, then press the small Send button.",
+  "gui_only": true,
+  "setup": [
+    "serve_form",
+    "LAUNCH_WAIT=12 launch browser --kiosk http://127.0.0.1:8000/small.html"
+  ],
+  "verify": "grep -qxF 'checked=7,23,31|ev=send|ua=firefox' \"$B/form.log\"",
+  "oracle": [
+    [
+      "click",
+      685,
+      205
+    ],
+    [
+      "click",
+      365,
+      325
+    ],
+    [
+      "click",
+      205,
+      385
+    ],
+    [
+      "wait",
+      0.5
+    ],
+    [
+      "click",
+      1115,
+      607
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
+  "timeout_s": 300,
+  "max_steps": 30,
+  "enforced": "outcome in the page, posted by Firefox"
+}

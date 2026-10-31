@@ -2,10 +2,17 @@
   "id": "terminal-save-output",
   "title": "Terminal: save a command's output",
   "instruction": "In the open terminal, save the output of the command uname -r into the file ~/bench/kernel.txt.",
+  "gui_only": false,
   "setup": [
     "launch terminal"
   ],
   "verify": "[ \"$(cat \"$B/kernel.txt\")\" = \"$(uname -r)\" ]",
+  "oracle": [
+    [
+      "sh",
+      "uname -r > \"$B/kernel.txt\""
+    ]
+  ],
   "timeout_s": 300,
   "max_steps": 20
 }

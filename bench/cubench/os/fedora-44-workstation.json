@@ -16,14 +16,20 @@
   },
   "hints": [
     "Desktop: Fedora 44 Workstation with GNOME (Wayland session), a top bar and no permanent dock.",
-    "Apps: the text editor is Text Editor (gnome-text-editor), the file manager is Files (Nautilus), the terminal is Ptyxis (Terminal), the web browser is Firefox.",
+    "Apps: the text editor is Text Editor (gnome-text-editor), the file manager is Files (Nautilus), the web browser is Firefox.",
     "To start an app: press Super (the Windows key) to open the Activities overview, type the app name, press Enter.",
     "Windows: alt+Tab switches windows, super+Up maximizes, alt+F4 closes the focused window."
   ],
-  "reset": [
-    "pkill -u \"$(id -u)\" -f '(gnome-text-editor|nautilus|ptyxis|firefox|formserver)' || true",
-    "sleep 1",
-    "pkill -9 -u \"$(id -u)\" -f '(gnome-text-editor|nautilus|ptyxis|firefox|formserver)' || true",
-    "rm -rf ~/.mozilla ~/.config/mozilla ~/.cache/mozilla ~/snap/firefox ~/.local/share/gnome-text-editor"
-  ]
+  "terminal_hint": "The terminal is Ptyxis (Terminal); find it from the Activities overview.",
+  "procs": {
+    "editor": "^(gnome-text-edit|xdg-desktop-por)",
+    "files": "^nautilus$"
+  },
+  "dconf": {
+    "line_numbers": "/org/gnome/TextEditor/show-line-numbers"
+  },
+  "keys": {
+    "switch_window": "alt+`"
+  },
+  "desktop_version": "gnome-shell --version"
 }

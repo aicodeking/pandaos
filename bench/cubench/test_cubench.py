@@ -53,12 +53,38 @@ class KeyMap(unittest.TestCase):
 class Tasks(unittest.TestCase):
     def test_real_tasks_load_and_cover_categories(self):
         tasks = cubench.load_tasks(os.path.join(HERE, "tasks"))
-        self.assertGreaterEqual(len(tasks), 20)
+        self.assertGreaterEqual(len(tasks), 35)
         ids = " ".join(t["id"] for t in tasks)
         for cat in ("editor", "files", "terminal", "browser", "clipboard", "settings", "dialog",
-                    "multi-window", "scroll", "drag", "keyboard", "multi-step"):
+                    "multi-window", "scroll", "drag", "keyboard", "multi-step", "multi-app", "context-menu",
+                    "small-targets", "nested-dialogs", "preferences"):
             self.assertIn(cat, ids)
         self.assertTrue(all(t.get("tools_exclude") for t in tasks if t["id"].startswith("keyboard")))
+        for t in tasks:
+            self.assertTrue(t.get("oracle"), f"{t['id']} has no oracle")
+            if t.get("gui_only"):
+                self.assertFalse(any("launch terminal" in s for s in t["setup"]), t["id"])
+            if "drag" in t["id"] or "clipboard" in t["id"]:
+                self.assertIn("enforced", t, f"{t['id']} promises a method but does not say how it is enforced")
+
+    def test_oracle_steps_are_well_formed(self):
+        ops = {"sh", "key", "type", "wait", "click", "rclick", "dclick", "drag", "a11y"}
+        for name in OS_NAMES:
+            p = cubench.load_os(name)
+            subs = {"{%s}" % k: v for k, v in p["keys"].items()} | {"{HOME}": "/home/u", "{HOSTNAME}": "h"}
+            for t in cubench.load_tasks(os.path.join(HERE, "tasks")):
+                for step in cubench.oracle_steps(t, name):
+                    self.assertIn(step[0], ops, f"{t['id']}: {step}")
+                    arg = step[1] if len(step) > 1 else None
+                    for k, v in subs.items():
+                        arg = arg.replace(k, v) if isinstance(arg, str) else arg
+                    if step[0] == "key":
+                        qmp.combo_keys(arg)
+                    elif step[0] == "type":
+                        [qmp.char_keys(c) for c in arg]
+                    elif step[0] in ("click", "rclick", "drag"):
+                        xs = [int(v) for v in step[1:]]
+                        self.assertTrue(all(0 <= x < 1280 for x in xs[::2]) and all(0 <= y < 800 for y in xs[1::2]))
 
     def test_rejects_bad_tasks(self):
         d = tempfile.mkdtemp()
@@ -83,7 +109,8 @@ class Tasks(unittest.TestCase):
         for name in OS_NAMES:
             p = cubench.load_os(name)
             for t in tasks:
-                script = cubench.prelude(p) + "\n".join(p["reset"] + t["setup"]) + "\n" + t["verify"]
+                shs = [st[1] for st in cubench.oracle_steps(t, name) if st[0] == "sh"]
+                script = cubench.prelude(p) + "\n".join(t["setup"] + shs) + "\n" + t["verify"]
                 r = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
                 self.assertEqual(r.returncode, 0, f"{name}/{t['id']}: {r.stderr}")
 
@@ -92,7 +119,7 @@ class Tasks(unittest.TestCase):
         """Every checker must fail if the agent does nothing (setup only, no apps)."""
         p = cubench.load_os("pandaos-desktop")
         home = tempfile.mkdtemp()
-        stub = "launch() { :; }\nserve_form() { :; }\npkill() { :; }\n"
+        stub = "launch() { :; }\nserve_form() { :; }\npkill() { :; }\naudit_start() { :; }\n"
         for t in cubench.load_tasks(os.path.join(HERE, "tasks")):
             script = (f"export HOME={home}\n" + cubench.prelude(p) + stub + 'rm -rf "$B"; mkdir -p "$B"\n'
                       + "\n".join(t["setup"]) + "\nsleep() { :; }\n" + t["verify"])
@@ -121,6 +148,32 @@ class Scoring(unittest.TestCase):
         self.assertEqual(score.fail_reason({"clicks": 4, "noop_clicks": 2, "out_of_budget": True}, False), "misclick")
         self.assertEqual(score.fail_reason({"clicks": 4, "noop_clicks": 1, "out_of_budget": True}, False), "timeout")
         self.assertEqual(score.fail_reason({"clicks": 1, "noop_clicks": 1}, False), "wrong_result")
+
+    def test_bootstrap_and_pairs(self):
+        lo, hi = score.bootstrap([1.0] * 10)
+        self.assertEqual((lo, hi), (1.0, 1.0))
+        lo, hi = score.bootstrap([0.0, 1.0] * 20)
+        self.assertTrue(0.3 < lo < 0.5 < hi < 0.7, (lo, hi))
+        trials = []
+        for os_name, tools, wins in (("A", "generic", 3), ("B", "generic", 1), ("A", "panda", 4), ("B", "atspi", 2),
+                                     ("A", "atspi", 3)):
+            for i in range(4):
+                for rep in (1, 2):
+                    trials.append({"os": os_name, "tools": tools, "task": f"t{i}", "repeat": rep,
+                                   "passed": i < wins, "steps": 1, "seconds": 1})
+        pairs = score.paired(trials)
+        for pr in pairs:  # never generic against a11y, never same-OS mode deltas
+            self.assertEqual(score.CLASS[pr["a"].split("(")[1][:-1]], score.CLASS[pr["b"].split("(")[1][:-1]])
+            self.assertNotEqual(pr["a"].split()[0], pr["b"].split()[0])
+        gen = [pr for pr in pairs if pr["class"] == "generic"][0]
+        self.assertEqual((gen["meanDiff"], gen["aBetter"], gen["ties"]), (0.5, 2, 2))
+        panda = [pr for pr in pairs if "panda" in pr["a"] + pr["b"]]
+        self.assertTrue(panda and not any(pr["likeForLike"] for pr in panda))
+        rows = score.summarize(trials)
+        self.assertEqual([r["class"] for r in rows], ["a11y"] * 3 + ["generic"] * 2)
+        md = score.markdown(rows, trials, pairs)
+        self.assertLess(md.index("Generic tools"), md.index("accessibility tools"))
+        self.assertIn("panda has more tools", md)
 
     def test_summary_and_table(self):
         trials = [{"os": "a", "tools": "generic", "task": "t1", "passed": True, "steps": 3, "seconds": 10, "cost_usd": 0.1},
@@ -154,6 +207,25 @@ class Providers(unittest.TestCase):
         self.assertIn("cu_tree", [n for n, _, _ in agent.tool_specs("panda")])
         with self.assertRaises(ValueError):
             agent.tool_specs("bogus")
+        at = dict((n, sch) for n, _, sch in agent.tool_specs("atspi"))
+        self.assertEqual(set(at) - {n for n, _, _, _ in agent.GENERIC_TOOLS}, {"cu_tree", "cu_find", "cu_act"})
+        kb = dict((n, sch) for n, _, sch in agent.tool_specs("atspi", ["click", "double_click", "drag", "scroll"]))
+        self.assertEqual(kb["cu_act"]["properties"]["action"]["enum"], ["focus", "set_text"])
+        self.assertIn("click", at["cu_act"]["properties"]["action"]["enum"])  # the original is untouched
+        loaded = agent.parse_panda_tools(json.dumps([
+            {"name": "cu_click", "description": "d", "inputSchema": {"type": "object"}},
+            {"name": "cu_act", "description": "d", "inputSchema": at["cu_act"]},
+            {"name": "cu_drag", "description": "d", "inputSchema": {"type": "object"}},
+            {"name": "cu_open", "description": "d", "inputSchema": {"type": "object"}}]))
+        pk = [n for n, _, _ in agent.tool_specs("panda", ["click", "double_click", "drag", "scroll"], loaded)]
+        self.assertIn("cu_open", pk)
+        self.assertNotIn("cu_click", pk)
+        self.assertNotIn("cu_drag", pk)
+        self.assertIn("cu_click", [n for n, _, _ in agent.tool_specs("panda", (), loaded)])
+        with self.assertRaises(ValueError):
+            agent.parse_panda_tools("[]")
+        for name in ("cu_tree", "cu_find", "cu_act", "cu_click", "cu_type", "cu_key", "cu_open", "cu_drag"):
+            self.assertIn(name, agent.PANDA_FALLBACK)
 
     def test_panda_cu_contract(self):
         calls = []
@@ -222,6 +294,60 @@ class DryRun(unittest.TestCase):
         self.assertEqual(len(cubench.smoke_failures(ok, [crash, probe_fail], {"input-probe"})), 2)
         self.assertIn("input-probe: did not run", cubench.smoke_failures(ok, [], {"input-probe"}))
         self.assertTrue(cubench.smoke_failures({**ok, "pandaCu": {"ok": False, "error": "x"}}, [], set()))
+
+    @unittest.skipUnless(shutil.which("bash"), "needs bash")
+    def test_validate_with_a_local_shell(self):
+        """validate end to end with a local bash standing in for the guest: the
+        shell-oracle tasks must fail when untouched and pass with their oracle."""
+        home = tempfile.mkdtemp()
+        p = cubench.load_os("debian-13-xfce")
+        stub = "launch() { :; }\nserve_form() { :; }\n"
+
+        def sh(script, timeout=120):
+            r = subprocess.run(["bash"], input=cubench.prelude(p) + stub + script, text=True,
+                               capture_output=True, env={"PATH": os.environ["PATH"], "HOME": home})
+            return r.returncode, r.stdout, r.stderr
+        cubench.FAKE_SHELL, out = sh, tempfile.mkdtemp()
+        try:
+            rc = cubench.main(["validate", "--dry-run", "--os", "debian-13-xfce", "--out", out,
+                               "--tasks", "terminal-*,launch-terminal,settings-desktop-entry"])
+        finally:
+            cubench.FAKE_SHELL = None
+        d = json.load(open(os.path.join(out, "validate-debian-13-xfce.json")))
+        self.assertEqual(len(d["validate"]), 4)
+        self.assertTrue(all(r["ok"] for r in d["validate"]), d["validate"])
+        self.assertEqual(rc, 0)
+        rc = cubench.main(["report", os.path.join(out, "validate-debian-13-xfce.json"), "--out", os.path.join(out, "r")])
+        self.assertIn("| debian-13-xfce | 4 | 4/4 | 4/4 |", open(os.path.join(out, "r.md")).read())
+        shutil.rmtree(out)
+        shutil.rmtree(home)
+
+    def test_audit_and_token_checkers(self):
+        d = tempfile.mkdtemp()
+        log = os.path.join(d, "audit.log")
+        f1, f2 = os.path.realpath(d) + "/a.txt", os.path.realpath(d) + "/b.txt"
+        with open(log, "w") as f:
+            f.write(f"ready\n10\tmousepad\tcreate\t{f1}\n11\tbash\tclose_write\t{f2}\n"
+                    f"12\tmousepad\tclose_write\t{f2}\n13\tmv\tmoved_to\t{f2}\n")
+        aud = os.path.join(HERE, "tasks", "assets", "audit.py")
+        run = lambda *a: subprocess.run([sys.executable, aud, "check", log, "^mousepad$", *a],  # noqa: E731
+                                        capture_output=True, text=True).returncode
+        self.assertEqual(run(f1), 0)
+        self.assertEqual(run(f2), 1)  # last written by mv
+        self.assertEqual(run(os.path.join(d, "missing")), 1)
+        import hashlib
+        tok = os.path.join(d, "token.txt")
+        flog = os.path.join(d, "form.log")
+        with open(tok, "w") as f:
+            f.write("cb-secret\n")
+        tc = os.path.join(HERE, "tasks", "assets", "tokencheck.py")
+        for lines, want in ((["tokensha=" + hashlib.sha256(b"cb-secret").hexdigest(), "ev=copy|ua=firefox"], 0),
+                            (["tokensha=" + hashlib.sha256(b"cb-secret").hexdigest()], 1),
+                            (["tokensha=00", "ev=copy|ua=firefox"], 1)):
+            with open(flog, "w") as f:
+                f.write("\n".join(lines) + "\n")
+            self.assertEqual(subprocess.run([sys.executable, tc, flog, tok], capture_output=True).returncode, want, lines)
+        shutil.rmtree(d)
 
     def test_probecheck(self):
         sys.path.insert(0, os.path.join(HERE, "tasks", "assets"))

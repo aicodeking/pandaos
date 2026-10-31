@@ -1,0 +1,61 @@
+{
+  "id": "browser-nested-dialogs",
+  "title": "Nested dialogs: change a setting two dialogs deep",
+  "instruction": "In the web page, open Settings, then Advanced\u2026, choose Weekly, apply it, and save the settings.",
+  "gui_only": true,
+  "setup": [
+    "serve_form",
+    "LAUNCH_WAIT=12 launch browser --kiosk http://127.0.0.1:8000/dialogs.html"
+  ],
+  "verify": "grep -qxF 'ev=save|freq=weekly|ua=firefox' \"$B/form.log\"",
+  "oracle": [
+    [
+      "click",
+      180,
+      125
+    ],
+    [
+      "wait",
+      0.8
+    ],
+    [
+      "click",
+      422,
+      272
+    ],
+    [
+      "wait",
+      0.8
+    ],
+    [
+      "click",
+      582,
+      357
+    ],
+    [
+      "wait",
+      0.5
+    ],
+    [
+      "click",
+      752,
+      470
+    ],
+    [
+      "wait",
+      0.8
+    ],
+    [
+      "click",
+      802,
+      502
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
+  "timeout_s": 300,
+  "max_steps": 30,
+  "enforced": "outcome in the page, posted by Firefox"
+}

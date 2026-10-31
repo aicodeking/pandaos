@@ -2,11 +2,32 @@
   "id": "editor-edit-existing",
   "title": "Text editor: change one value in an open file",
   "instruction": "The text editor has ~/bench/settings.conf open. Change color=red to color=blue, leave the other lines unchanged, and save the file.",
+  "gui_only": true,
   "setup": [
     "printf 'name=demo\\ncolor=red\\nsize=3\\n' > \"$B/settings.conf\"",
+    "audit_start",
     "launch editor \"$B/settings.conf\""
   ],
-  "verify": "[ \"$(cat \"$B/settings.conf\")\" = \"$(printf 'name=demo\\ncolor=blue\\nsize=3')\" ]",
+  "verify": "[ \"$(cat \"$B/settings.conf\")\" = \"$(printf 'name=demo\\ncolor=blue\\nsize=3')\" ] && audit editor \"$B/settings.conf\"",
+  "oracle": [
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "type",
+      "name=demo\ncolor=blue\nsize=3"
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 300,
-  "max_steps": 20
+  "max_steps": 20,
+  "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell"
 }

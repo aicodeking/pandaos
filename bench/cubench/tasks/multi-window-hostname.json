@@ -2,12 +2,49 @@
   "id": "multi-window-hostname",
   "title": "Multi-window: terminal to editor",
   "instruction": "Several windows are open. Use the terminal to find this computer's hostname, then type the hostname in the text editor and save it as ~/bench/host.txt.",
+  "gui_only": false,
   "setup": [
+    "audit_start",
     "launch files \"$B\"",
     "launch editor",
     "launch terminal"
   ],
-  "verify": "[ -s \"$B/host.txt\" ] && [ \"$(tr -d ' \\n' < \"$B/host.txt\")\" = \"$(cat /proc/sys/kernel/hostname)\" ]",
+  "verify": "[ -s \"$B/host.txt\" ] && [ \"$(tr -d ' \\n' < \"$B/host.txt\")\" = \"$(cat /proc/sys/kernel/hostname)\" ] && audit editor \"$B/host.txt\"",
+  "oracle": [
+    [
+      "key",
+      "alt+Tab"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "type",
+      "{HOSTNAME}"
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2.5
+    ],
+    [
+      "type",
+      "{HOME}/bench/host.txt"
+    ],
+    [
+      "key",
+      "Return"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 420,
-  "max_steps": 30
+  "max_steps": 30,
+  "enforced": "host.txt is written by the editor (fanotify writer audit)"
 }

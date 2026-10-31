@@ -2,11 +2,41 @@
   "id": "editor-scroll-delete",
   "title": "Scroll: find and delete a line far down a file",
   "instruction": "The text editor has ~/bench/long.txt open. Somewhere far down there is a line that says TODO: delete this line. Delete that whole line (leave no empty line behind) and save the file.",
+  "gui_only": true,
   "setup": [
     "for i in $(seq 1 300); do if [ \"$i\" = 217 ]; then echo \"TODO: delete this line\"; else echo \"line $i\"; fi; done > \"$B/long.txt\"",
+    "audit_start",
     "launch editor \"$B/long.txt\""
   ],
-  "verify": "! grep -q TODO \"$B/long.txt\" && [ \"$(grep -c '^line [0-9]*$' \"$B/long.txt\")\" = 299 ] && [ \"$(grep -vc '^line [0-9]*$' \"$B/long.txt\")\" = 0 ]",
+  "verify": "! grep -q TODO \"$B/long.txt\" && [ \"$(grep -c '^line [0-9]*$' \"$B/long.txt\")\" = 299 ] && [ \"$(grep -vc '^line [0-9]*$' \"$B/long.txt\")\" = 0 ] && audit editor \"$B/long.txt\"",
+  "oracle": [
+    [
+      "key",
+      "ctrl+Home"
+    ],
+    [
+      "key",
+      "Down",
+      216
+    ],
+    [
+      "key",
+      "shift+Down"
+    ],
+    [
+      "key",
+      "Delete"
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 420,
-  "max_steps": 30
+  "max_steps": 30,
+  "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell"
 }

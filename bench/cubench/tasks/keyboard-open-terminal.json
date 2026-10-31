@@ -2,8 +2,15 @@
   "id": "keyboard-open-terminal",
   "title": "Keyboard only: open a terminal and run a command",
   "instruction": "Using only the keyboard, open a terminal and run the command date +%Y > ~/bench/year.txt in it.",
+  "gui_only": false,
   "setup": [],
   "verify": "[ \"$(cat \"$B/year.txt\")\" = \"$(date +%Y)\" ]",
+  "oracle": [
+    [
+      "sh",
+      "date +%Y > \"$B/year.txt\""
+    ]
+  ],
   "timeout_s": 300,
   "max_steps": 25,
   "tools_exclude": [

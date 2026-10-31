@@ -1,0 +1,27 @@
+{
+  "id": "browser-drag-to-basket",
+  "title": "Drag and drop: drag an item onto a target in a web page",
+  "instruction": "The web page shows three fruits and a basket. Drag the Banana into the basket (only the banana).",
+  "gui_only": true,
+  "setup": [
+    "serve_form",
+    "LAUNCH_WAIT=12 launch browser --kiosk http://127.0.0.1:8000/drag.html"
+  ],
+  "verify": "[ \"$(grep -c '^ev=drop' \"$B/form.log\")\" = 1 ] && grep -qxF 'ev=drop|item=banana|trusted=true|ua=firefox' \"$B/form.log\"",
+  "oracle": [
+    [
+      "drag",
+      180,
+      340,
+      950,
+      400
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
+  "timeout_s": 300,
+  "max_steps": 25,
+  "enforced": "only a real drag fires the page's trusted drop event; exactly one drop, of the banana"
+}

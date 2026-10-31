@@ -1,0 +1,31 @@
+{
+  "id": "two-documents-copy-line",
+  "title": "Two documents: copy a line from one into the other",
+  "instruction": "The text editor has two files open: ~/bench/source.txt and ~/bench/dest.txt. Put the second line of source.txt into dest.txt (dest.txt must contain only that line) and save dest.txt.",
+  "gui_only": true,
+  "setup": [
+    "printf 'first line\\nref: 9f8e7d6c5b4a39281706f5e4d3c2b1a0\\nthird line\\n' > \"$B/source.txt\"",
+    ": > \"$B/dest.txt\"",
+    "audit_start",
+    "launch editor \"$B/source.txt\"",
+    "launch editor \"$B/dest.txt\""
+  ],
+  "verify": "[ \"$(cat \"$B/dest.txt\")\" = \"ref: 9f8e7d6c5b4a39281706f5e4d3c2b1a0\" ] && [ \"$(sed -n 2p \"$B/source.txt\")\" = \"ref: 9f8e7d6c5b4a39281706f5e4d3c2b1a0\" ] && audit editor \"$B/dest.txt\"",
+  "oracle": [
+    [
+      "type",
+      "ref: 9f8e7d6c5b4a39281706f5e4d3c2b1a0"
+    ],
+    [
+      "key",
+      "ctrl+s"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
+  "timeout_s": 420,
+  "max_steps": 30,
+  "enforced": "the file is written by the editor process (fanotify writer audit), not by a shell"
+}

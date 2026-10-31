@@ -10,6 +10,9 @@
 #   - autologin of `panda` into the labwc session, no idle lock;
 #   - Firefox with the same policies as the other OSes, also set as
 #     panda-cu's browser; python3 for the task form server;
+#   - passwordless sudo for `panda`, as the cloud images give their user: the
+#     harness (never the agent's tools) runs the fanotify writer audit as root
+#     and resets the guest clock after each snapshot restore;
 #   - ext4 root + ESP disk layout, wizard off, ssh key for `panda`, as in compare.
 { flake, pubkey ? builtins.getEnv "BENCH_SSH_PUBKEY", system ? "x86_64-linux" }:
 assert pubkey != "" || throw "set BENCH_SSH_PUBKEY (and pass --impure)";
@@ -39,6 +42,9 @@ let
         pandaos.desktop.autoLock = false;
         services.panda-cu.browser = pkgs.firefox;
         users.users.panda.openssh.authorizedKeys.keys = [ pubkey ];
+        security.sudo.extraRules = [
+          { users = [ "panda" ]; commands = [ { command = "ALL"; options = [ "NOPASSWD" ]; } ]; }
+        ];
 
         programs.dconf.enable = true;
         programs.firefox = {
@@ -65,7 +71,7 @@ let
             };
           };
         };
-        environment.systemPackages = [ pkgs.python3 ];
+        environment.systemPackages = [ pkgs.python3 pkgs.dconf ];
       })
     ];
   };

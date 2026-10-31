@@ -5,6 +5,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt_get() { apt-get -o DPkg::Lock::Timeout=900 -yq "$@"; }
 apt_get update
 apt_get install xorg xfce4 xfce4-terminal mousepad thunar lightdm firefox-esr dbus-user-session
+# AT-SPI for --tools atspi and the validate oracles; dconf for checkers.
+apt_get install at-spi2-core libatk-adaptor python3-gi gir1.2-atspi-2.0 dconf-cli dconf-gsettings-backend
 apt_get purge light-locker xfce4-screensaver || true
 install -d /etc/lightdm/lightdm.conf.d
 printf '[Seat:*]\nautologin-user=%s\nautologin-session=xfce\nxserver-command=X -s 0 -dpms\n' "$u" \

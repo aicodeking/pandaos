@@ -2,11 +2,40 @@
   "id": "files-rename",
   "title": "File manager: rename a file",
   "instruction": "The file manager shows the folder ~/bench. Rename the file draft.txt to final.txt.",
+  "gui_only": true,
   "setup": [
     "echo draft > \"$B/draft.txt\"",
+    "audit_start",
     "launch files \"$B\""
   ],
-  "verify": "[ -f \"$B/final.txt\" ] && [ ! -e \"$B/draft.txt\" ] && [ \"$(cat \"$B/final.txt\")\" = draft ]",
+  "verify": "[ -f \"$B/final.txt\" ] && [ ! -e \"$B/draft.txt\" ] && [ \"$(cat \"$B/final.txt\")\" = draft ] && audit files \"$B/final.txt\"",
+  "oracle": [
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "key",
+      "F2"
+    ],
+    [
+      "wait",
+      1.5
+    ],
+    [
+      "key",
+      "ctrl+a"
+    ],
+    [
+      "type",
+      "final.txt\n"
+    ],
+    [
+      "wait",
+      1.5
+    ]
+  ],
   "timeout_s": 300,
-  "max_steps": 20
+  "max_steps": 20,
+  "enforced": "the change is made by the file manager process (fanotify writer audit), not by a shell"
 }

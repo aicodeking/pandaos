@@ -116,6 +116,12 @@ class QMP:
             raise RuntimeError(f"QMP {cmd}: {msg['error'].get('desc', msg['error'])}")
         return msg.get("return")
 
+    def hmp(self, command):
+        """A human-monitor command (savevm/loadvm); QEMU reports their errors as text."""
+        out = self.execute("human-monitor-command", {"command-line": command})
+        if isinstance(out, str) and out.strip():
+            raise RuntimeError(f"{command}: {out.strip()}")
+
     def close(self):
         try:
             self.sock.close()

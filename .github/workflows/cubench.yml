@@ -2,11 +2,13 @@ name: cubench
 
 # Computer-use benchmark: the same tasks, checkers, model and tool interface on
 # PandaOS and other desktops, each under QEMU/KVM (bench/cubench). Manual only.
-# Without the provider's API key secret it runs in smoke mode: the dry-run
-# self-test, then each OS image is prepared and booted and the scripted agent
-# checks the VM plumbing (cubench.py run --smoke): QMP screenshots at
-# 1280x800, clicks/wheel/keys reaching the guest 1:1, setup and checkers
-# running over ssh, and `panda-cu call` in the PandaOS session.
+# Without the provider's API key secret (or with mode=validate) it validates
+# the checkers instead: each OS image is prepared and booted, snapshotted, and
+# for every task a null agent must fail the checker and the task's scripted
+# oracle must pass it (cubench.py validate), restoring the snapshot before
+# each attempt. With a key it runs the model: one job per (OS, tool mode,
+# repeat); tool modes are generic everywhere, atspi everywhere (optional) and
+# panda on PandaOS (optional).
 on:
   workflow_dispatch:
     inputs:
@@ -31,10 +33,15 @@ on:
         description: "Comma-separated globs over task ids"
         type: string
         default: "*"
-      smoke_tasks:
-        description: "Smoke mode (no API key): benchmark tasks whose setup and checker also run"
-        type: string
-        default: "editor-new-file,browser-form"
+      mode:
+        description: "auto: run the model if the API key secret exists, else validate"
+        type: choice
+        options: [auto, validate, run]
+        default: auto
+      atspi_tools:
+        description: "Also run every OS with --tools atspi (generic + AT-SPI tree/find/act)"
+        type: boolean
+        default: true
       panda_tools:
         description: "Also run PandaOS with --tools panda (generic + panda-cu)"
         type: boolean
@@ -59,6 +66,7 @@ jobs:
         run: |
           os=$(cd bench/cubench/os && for f in *.json; do printf '%s,' "${f%.json}"; done)
           python3 bench/cubench/cubench.py run --dry-run --os "$os" --repeats 1 --out dry
+          python3 bench/cubench/cubench.py run --dry-run --os "$os" --tools atspi --repeats 1 --tasks 'browser-*' --out dry
           python3 bench/cubench/cubench.py report dry/results-*.json --out dry/report
           cat dry/report.md >> "$GITHUB_STEP_SUMMARY"
 
@@ -74,19 +82,23 @@ jobs:
       - id: plan
         env:
           PROVIDER: ${{ inputs.provider }}
+          WANT: ${{ inputs.mode }}
           HAS_ANTHROPIC: ${{ secrets.ANTHROPIC_API_KEY != '' }}
           HAS_OPENAI: ${{ secrets.OPENAI_API_KEY != '' }}
           OS_LIST: ${{ inputs.os }}
           REPEATS: ${{ inputs.repeats }}
+          ATSPI_TOOLS: ${{ inputs.atspi_tools }}
           PANDA_TOOLS: ${{ inputs.panda_tools }}
         run: |
+          KEY=false
           if { [ "$PROVIDER" = anthropic ] && [ "$HAS_ANTHROPIC" = true ]; } ||
-             { [ "$PROVIDER" = openai ] && [ "$HAS_OPENAI" = true ]; }; then
-            MODE=run
-          else
-            MODE=smoke
-            echo "::notice::No API key secret for $PROVIDER: smoke mode (scripted agent, VM plumbing only)."
-          fi
+             { [ "$PROVIDER" = openai ] && [ "$HAS_OPENAI" = true ]; }; then KEY=true; fi
+          case "$WANT" in
+            validate) MODE=validate ;;
+            run) [ "$KEY" = true ] || { echo "::error::mode=run needs the $PROVIDER API key secret"; exit 1; }; MODE=run ;;
+            *) if [ "$KEY" = true ]; then MODE=run; else MODE=validate
+                 echo "::notice::No API key secret for $PROVIDER: validating the checkers (null agent + oracle)."; fi ;;
+          esac
           export MODE
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
           python3 - >> "$GITHUB_OUTPUT" <<'EOF'
@@ -94,12 +106,15 @@ jobs:
           oses = [o.strip() for o in os.environ["OS_LIST"].split(",") if o.strip()]
           assert oses and all(re.fullmatch(r"[\w.-]+", o) for o in oses), oses
           reps = max(1, min(int(os.environ["REPEATS"]), 10))
-          if os.environ.get("MODE") == "smoke":
-              reps = 1
-          cols = [(o, "generic") for o in oses]
-          if os.environ["PANDA_TOOLS"] == "true" and "pandaos-desktop" in oses:
-              cols.append(("pandaos-desktop", "panda"))
-          shards = [{"os": o, "tools": t, "rep": r} for o, t in cols for r in range(1, reps + 1)]
+          if os.environ["MODE"] == "validate":
+              shards = [{"os": o, "tools": "validate", "rep": 1} for o in oses]
+          else:
+              cols = [(o, "generic") for o in oses]
+              if os.environ["ATSPI_TOOLS"] == "true":
+                  cols += [(o, "atspi") for o in oses]
+              if os.environ["PANDA_TOOLS"] == "true" and "pandaos-desktop" in oses:
+                  cols.append(("pandaos-desktop", "panda"))
+              shards = [{"os": o, "tools": t, "rep": r} for o, t in cols for r in range(1, reps + 1)]
           print("prepare=" + json.dumps([o for o in oses if o != "pandaos-desktop"]))
           print("shards=" + json.dumps(shards))
           EOF
@@ -215,13 +230,13 @@ jobs:
           mkdir -p disks
           ln -sf "$(ls "$PWD"/pandaos-image/*.qcow2)" disks/pandaos-desktop.qcow2
 
-      - name: Smoke pass (scripted agent, no API key)
-        if: needs.plan.outputs.mode == 'smoke'
+      - name: Validate the checkers (null agent fails, oracle passes)
+        if: needs.plan.outputs.mode == 'validate'
         env:
-          SMOKE_TASKS: ${{ inputs.smoke_tasks }}
+          TASKS: ${{ inputs.tasks }}
         run: |
-          python3 bench/cubench/cubench.py run --smoke --os "${{ matrix.os }}" --tools "${{ matrix.tools }}" \
-            --repeats 1 --tasks "$SMOKE_TASKS" --seed 0 \
+          [ "$TASKS" = "*" ] && TASKS=""
+          python3 bench/cubench/cubench.py validate --os "${{ matrix.os }}" ${TASKS:+--tasks "$TASKS"} \
             --key "$RUNNER_TEMP/vmkey" --disks disks --work "$RUNNER_TEMP" --out out
 
       - name: Run the tasks
@@ -244,7 +259,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: cubench-${{ needs.plan.outputs.mode == 'smoke' && 'smoke-' || '' }}${{ matrix.os }}-${{ matrix.tools }}-r${{ matrix.rep }}
+          name: cubench-${{ matrix.os }}-${{ matrix.tools }}-r${{ matrix.rep }}
           path: out/
           if-no-files-found: warn
 
@@ -264,7 +279,8 @@ jobs:
       - name: Merge results
         run: |
           d=$(date -u +%Y-%m-%d)
-          python3 bench/cubench/cubench.py report parts/*/results-*.json --out "results/$d"
+          shopt -s nullglob
+          python3 bench/cubench/cubench.py report parts/*/results-*.json parts/*/validate-*.json --out "results/$d"
           cat "results/$d.md" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

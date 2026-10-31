@@ -2,11 +2,27 @@
   "id": "browser-scroll-find",
   "title": "Scroll: find an item in a long web page",
   "instruction": "The web browser shows a long list of items. Find item 237, read its key, and submit that key with the form at the bottom of the page.",
+  "gui_only": true,
   "setup": [
     "serve_form",
     "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/list.html"
   ],
-  "verify": "grep -qxF 'code=EMBER-9944|form=find' \"$B/form.log\"",
+  "verify": "grep -qxF 'code=EMBER-9944|form=find|ua=firefox' \"$B/form.log\"",
+  "oracle": [
+    [
+      "key",
+      "Tab"
+    ],
+    [
+      "type",
+      "EMBER-9944\n"
+    ],
+    [
+      "wait",
+      2
+    ]
+  ],
   "timeout_s": 420,
-  "max_steps": 30
+  "max_steps": 30,
+  "enforced": "the form must be submitted by Firefox (server-side User-Agent check)"
 }
