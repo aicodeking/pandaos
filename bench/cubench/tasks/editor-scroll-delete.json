@@ -1,0 +1,12 @@
+{
+  "id": "editor-scroll-delete",
+  "title": "Scroll: find and delete a line far down a file",
+  "instruction": "The text editor has ~/bench/long.txt open. Somewhere far down there is a line that says TODO: delete this line. Delete that whole line (leave no empty line behind) and save the file.",
+  "setup": [
+    "for i in $(seq 1 300); do if [ \"$i\" = 217 ]; then echo \"TODO: delete this line\"; else echo \"line $i\"; fi; done > \"$B/long.txt\"",
+    "launch editor \"$B/long.txt\""
+  ],
+  "verify": "! grep -q TODO \"$B/long.txt\" && [ \"$(grep -c '^line [0-9]*$' \"$B/long.txt\")\" = 299 ] && [ \"$(grep -vc '^line [0-9]*$' \"$B/long.txt\")\" = 0 ]",
+  "timeout_s": 420,
+  "max_steps": 30
+}

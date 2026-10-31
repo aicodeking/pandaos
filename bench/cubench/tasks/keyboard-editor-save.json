@@ -1,0 +1,17 @@
+{
+  "id": "keyboard-editor-save",
+  "title": "Keyboard only: write and save in the editor",
+  "instruction": "Using only the keyboard, type the line keyboard only in the text editor and save it as ~/bench/kbd.txt.",
+  "setup": [
+    "launch editor"
+  ],
+  "verify": "[ \"$(cat \"$B/kbd.txt\")\" = \"keyboard only\" ]",
+  "timeout_s": 300,
+  "max_steps": 20,
+  "tools_exclude": [
+    "click",
+    "double_click",
+    "drag",
+    "scroll"
+  ]
+}

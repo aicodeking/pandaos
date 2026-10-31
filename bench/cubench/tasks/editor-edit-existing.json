@@ -1,0 +1,12 @@
+{
+  "id": "editor-edit-existing",
+  "title": "Text editor: change one value in an open file",
+  "instruction": "The text editor has ~/bench/settings.conf open. Change color=red to color=blue, leave the other lines unchanged, and save the file.",
+  "setup": [
+    "printf 'name=demo\\ncolor=red\\nsize=3\\n' > \"$B/settings.conf\"",
+    "launch editor \"$B/settings.conf\""
+  ],
+  "verify": "[ \"$(cat \"$B/settings.conf\")\" = \"$(printf 'name=demo\\ncolor=blue\\nsize=3')\" ]",
+  "timeout_s": 300,
+  "max_steps": 20
+}

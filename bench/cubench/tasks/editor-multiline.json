@@ -1,0 +1,11 @@
+{
+  "id": "editor-multiline",
+  "title": "Text editor: three lines in order",
+  "instruction": "In the text editor, write these three lines in this order, one per line and nothing else: alpha, beta, gamma. Save the document as ~/bench/greek.txt.",
+  "setup": [
+    "launch editor"
+  ],
+  "verify": "[ \"$(cat \"$B/greek.txt\")\" = \"$(printf 'alpha\\nbeta\\ngamma')\" ]",
+  "timeout_s": 300,
+  "max_steps": 20
+}

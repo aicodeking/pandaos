@@ -1,0 +1,13 @@
+{
+  "id": "multi-step-config",
+  "title": "Multi-step: back up a config, then edit it",
+  "instruction": "First make an unchanged backup copy of ~/bench/config.ini named ~/bench/config.ini.bak. Then change port=8080 to port=9090 in ~/bench/config.ini (it is open in the text editor) and save it.",
+  "setup": [
+    "printf '[server]\\nhost=0.0.0.0\\nport=8080\\n' > \"$B/config.ini\"",
+    "launch terminal",
+    "launch editor \"$B/config.ini\""
+  ],
+  "verify": "[ \"$(cat \"$B/config.ini.bak\")\" = \"$(printf '[server]\\nhost=0.0.0.0\\nport=8080')\" ] && [ \"$(cat \"$B/config.ini\")\" = \"$(printf '[server]\\nhost=0.0.0.0\\nport=9090')\" ]",
+  "timeout_s": 600,
+  "max_steps": 40
+}

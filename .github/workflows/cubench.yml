@@ -1,0 +1,272 @@
+name: cubench
+
+# Computer-use benchmark: the same tasks, checkers, model and tool interface on
+# PandaOS and other desktops, each under QEMU/KVM (bench/cubench). Manual only.
+# Without the provider's API key secret it runs in smoke mode: the dry-run
+# self-test, then each OS image is prepared and booted and the scripted agent
+# checks the VM plumbing (cubench.py run --smoke): QMP screenshots at
+# 1280x800, clicks/wheel/keys reaching the guest 1:1, setup and checkers
+# running over ssh, and `panda-cu call` in the PandaOS session.
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "Model provider"
+        type: choice
+        options: [anthropic, openai]
+        default: anthropic
+      model:
+        description: "Model id (empty: claude-sonnet-5-5 / vars.OPENAI_MODEL)"
+        type: string
+        default: ""
+      repeats:
+        description: "Repeats per task (each repeat is its own job and VM)"
+        type: number
+        default: 3
+      os:
+        description: "Comma-separated OS profiles (bench/cubench/os); fedora-44-workstation is opt-in"
+        type: string
+        default: "pandaos-desktop,ubuntu-24.04-gnome,debian-13-xfce"
+      tasks:
+        description: "Comma-separated globs over task ids"
+        type: string
+        default: "*"
+      smoke_tasks:
+        description: "Smoke mode (no API key): benchmark tasks whose setup and checker also run"
+        type: string
+        default: "editor-new-file,browser-form"
+      panda_tools:
+        description: "Also run PandaOS with --tools panda (generic + panda-cu)"
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  selftest:
+    name: cubench self-test (dry run)
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Compile and unit-test
+        run: |
+          python3 -m py_compile bench/cubench/*.py bench/cubench/tasks/assets/formserver.py
+          python3 bench/cubench/test_cubench.py
+      - name: Dry run (scripted model, fake QMP) over every task and OS profile
+        run: |
+          os=$(cd bench/cubench/os && for f in *.json; do printf '%s,' "${f%.json}"; done)
+          python3 bench/cubench/cubench.py run --dry-run --os "$os" --repeats 1 --out dry
+          python3 bench/cubench/cubench.py report dry/results-*.json --out dry/report
+          cat dry/report.md >> "$GITHUB_STEP_SUMMARY"
+
+  plan:
+    name: Plan the matrix
+    needs: selftest
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      prepare: ${{ steps.plan.outputs.prepare }}
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - id: plan
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          HAS_ANTHROPIC: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HAS_OPENAI: ${{ secrets.OPENAI_API_KEY != '' }}
+          OS_LIST: ${{ inputs.os }}
+          REPEATS: ${{ inputs.repeats }}
+          PANDA_TOOLS: ${{ inputs.panda_tools }}
+        run: |
+          if { [ "$PROVIDER" = anthropic ] && [ "$HAS_ANTHROPIC" = true ]; } ||
+             { [ "$PROVIDER" = openai ] && [ "$HAS_OPENAI" = true ]; }; then
+            MODE=run
+          else
+            MODE=smoke
+            echo "::notice::No API key secret for $PROVIDER: smoke mode (scripted agent, VM plumbing only)."
+          fi
+          export MODE
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import json, os, re
+          oses = [o.strip() for o in os.environ["OS_LIST"].split(",") if o.strip()]
+          assert oses and all(re.fullmatch(r"[\w.-]+", o) for o in oses), oses
+          reps = max(1, min(int(os.environ["REPEATS"]), 10))
+          if os.environ.get("MODE") == "smoke":
+              reps = 1
+          cols = [(o, "generic") for o in oses]
+          if os.environ["PANDA_TOOLS"] == "true" and "pandaos-desktop" in oses:
+              cols.append(("pandaos-desktop", "panda"))
+          shards = [{"os": o, "tools": t, "rep": r} for o, t in cols for r in range(1, reps + 1)]
+          print("prepare=" + json.dumps([o for o in oses if o != "pandaos-desktop"]))
+          print("shards=" + json.dumps(shards))
+          EOF
+
+  prepare:
+    name: Prepare ${{ matrix.os }} disk
+    needs: plan
+    if: needs.plan.outputs.prepare != '[]'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.prepare) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install QEMU, OVMF, cloud-image-utils
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends qemu-system-x86 qemu-utils ovmf cloud-image-utils
+      - name: Cache the prepared disk
+        id: disk
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: disks/${{ matrix.os }}.qcow2
+          key: cubench-disk-${{ matrix.os }}-${{ hashFiles(format('bench/cubench/os/{0}.json', matrix.os), format('bench/cubench/os/{0}.prepare.sh', matrix.os), 'bench/cubench/os/common.sh') }}
+      - name: Install the desktop
+        if: steps.disk.outputs.cache-hit != 'true'
+        run: |
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/vmkey"
+          python3 bench/cubench/cubench.py prepare --os "${{ matrix.os }}" --key "$RUNNER_TEMP/vmkey" \
+            --cache images --disks disks --work "$RUNNER_TEMP"
+          ls -l disks/
+
+  run:
+    name: ${{ matrix.os }} (${{ matrix.tools }}) repeat ${{ matrix.rep }}
+    needs: [plan, prepare]
+    # prepare is skipped when only PandaOS runs; it must not have failed.
+    if: always() && needs.plan.result == 'success' && needs.prepare.result != 'failure' && needs.prepare.result != 'cancelled'
+    permissions:
+      contents: read
+    env:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install QEMU, OVMF, cloud-image-utils
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends qemu-system-x86 qemu-utils ovmf cloud-image-utils
+      - name: ssh key for the VM
+        run: ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/vmkey"
+
+      - name: Restore the prepared disk
+        if: matrix.os != 'pandaos-desktop'
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: disks/${{ matrix.os }}.qcow2
+          key: cubench-disk-${{ matrix.os }}-${{ hashFiles(format('bench/cubench/os/{0}.json', matrix.os), format('bench/cubench/os/{0}.prepare.sh', matrix.os), 'bench/cubench/os/common.sh') }}
+          fail-on-cache-miss: true
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        if: matrix.os == 'pandaos-desktop'
+        with:
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+            fallback = true
+            connect-timeout = 15
+      - uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4 # v9
+        if: matrix.os == 'pandaos-desktop'
+        continue-on-error: true
+      - uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+        if: matrix.os == 'pandaos-desktop' && env.CACHIX_AUTH_TOKEN != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE || 'pandaos' }}
+          authToken: ${{ env.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+      - name: Build the PandaOS desktop image
+        if: matrix.os == 'pandaos-desktop'
+        run: |
+          BENCH_SSH_PUBKEY="$(cat "$RUNNER_TEMP/vmkey.pub")"
+          export BENCH_SSH_PUBKEY
+          .github/scripts/nix-retry.sh build.log nix build --impure -L --no-update-lock-file -o pandaos-image \
+            --expr "import ./bench/cubench/pandaos-desktop-image.nix { flake = builtins.getFlake \"git+file://$PWD\"; }"
+          mkdir -p disks
+          ln -sf "$(ls "$PWD"/pandaos-image/*.qcow2)" disks/pandaos-desktop.qcow2
+
+      - name: Smoke pass (scripted agent, no API key)
+        if: needs.plan.outputs.mode == 'smoke'
+        env:
+          SMOKE_TASKS: ${{ inputs.smoke_tasks }}
+        run: |
+          python3 bench/cubench/cubench.py run --smoke --os "${{ matrix.os }}" --tools "${{ matrix.tools }}" \
+            --repeats 1 --tasks "$SMOKE_TASKS" --seed 0 \
+            --key "$RUNNER_TEMP/vmkey" --disks disks --work "$RUNNER_TEMP" --out out
+
+      - name: Run the tasks
+        if: needs.plan.outputs.mode == 'run'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          PROVIDER: ${{ inputs.provider }}
+          MODEL: ${{ inputs.model }}
+          TASKS: ${{ inputs.tasks }}
+          REPEATS: ${{ inputs.repeats }}
+        run: |
+          python3 bench/cubench/cubench.py run --os "${{ matrix.os }}" --tools "${{ matrix.tools }}" \
+            --provider "$PROVIDER" ${MODEL:+--model "$MODEL"} --tasks "$TASKS" \
+            --repeats "$REPEATS" --repeat-index "${{ matrix.rep }}" --seed 0 \
+            --key "$RUNNER_TEMP/vmkey" --disks disks --work "$RUNNER_TEMP" --out out
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: cubench-${{ needs.plan.outputs.mode == 'smoke' && 'smoke-' || '' }}${{ matrix.os }}-${{ matrix.tools }}-r${{ matrix.rep }}
+          path: out/
+          if-no-files-found: warn
+
+  report:
+    name: Report
+    needs: [plan, run]
+    if: always() && needs.plan.result == 'success'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: cubench-*
+          path: parts
+      - name: Merge results
+        run: |
+          d=$(date -u +%Y-%m-%d)
+          python3 bench/cubench/cubench.py report parts/*/results-*.json --out "results/$d"
+          cat "results/$d.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cubench-report
+          path: results/

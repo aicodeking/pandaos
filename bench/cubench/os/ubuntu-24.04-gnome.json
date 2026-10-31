@@ -1,0 +1,28 @@
+{
+  "name": "ubuntu-24.04-gnome",
+  "title": "Ubuntu 24.04 LTS, GNOME (Wayland)",
+  "user": "ubuntu",
+  "image": {
+    "url": "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img",
+    "sha256": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
+  },
+  "session": "systemd",
+  "apps": {
+    "editor": "gnome-text-editor",
+    "files": "nautilus",
+    "terminal": "gnome-terminal",
+    "browser": "firefox"
+  },
+  "hints": [
+    "Desktop: Ubuntu 24.04 with GNOME (Wayland session), a top bar and a dock on the left.",
+    "Apps: the text editor is Text Editor (gnome-text-editor), the file manager is Files (Nautilus), the terminal is Terminal (GNOME Terminal), the web browser is Firefox.",
+    "To start an app: press Super (the Windows key), type the app name, press Enter. ctrl+alt+t opens a terminal.",
+    "Windows: alt+Tab switches windows, super+Up maximizes, alt+F4 closes the focused window."
+  ],
+  "reset": [
+    "pkill -u \"$(id -u)\" -f '(gnome-text-editor|nautilus|gnome-terminal-server|firefox|formserver)' || true",
+    "sleep 1",
+    "pkill -9 -u \"$(id -u)\" -f '(gnome-text-editor|nautilus|gnome-terminal-server|firefox|formserver)' || true",
+    "rm -rf ~/.mozilla ~/.config/mozilla ~/.cache/mozilla ~/snap/firefox ~/.local/share/gnome-text-editor"
+  ]
+}

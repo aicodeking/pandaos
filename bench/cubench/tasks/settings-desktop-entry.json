@@ -1,0 +1,12 @@
+{
+  "id": "settings-desktop-entry",
+  "title": "Settings: create an application launcher entry",
+  "instruction": "Create an application launcher entry for the current user: the file ~/.local/share/applications/cubench-hello.desktop in the usual [Desktop Entry] format with the keys Type=Application, Name=Cubench Hello and Exec=true. Use any app you like.",
+  "setup": [
+    "rm -f ~/.local/share/applications/cubench-hello.desktop",
+    "launch terminal"
+  ],
+  "verify": "f=~/.local/share/applications/cubench-hello.desktop; grep -qx '\\[Desktop Entry\\]' \"$f\" && grep -qx 'Type=Application' \"$f\" && grep -qx 'Name=Cubench Hello' \"$f\" && grep -qx 'Exec=true' \"$f\"",
+  "timeout_s": 420,
+  "max_steps": 30
+}

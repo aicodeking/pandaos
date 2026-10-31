@@ -1,0 +1,9 @@
+{
+  "id": "launch-terminal",
+  "title": "Launch an app: open a terminal yourself",
+  "instruction": "Open a terminal and use it to create the file ~/bench/launched.txt containing the word cubench.",
+  "setup": [],
+  "verify": "grep -qx cubench \"$B/launched.txt\"",
+  "timeout_s": 300,
+  "max_steps": 25
+}

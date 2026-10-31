@@ -1,0 +1,12 @@
+{
+  "id": "multi-step-report",
+  "title": "Multi-step: folder, document, rename",
+  "instruction": "Create the folder ~/bench/reports. In the text editor, write a document with the single line Q3 total: 42 and save it as ~/bench/reports/q3.txt. Then, in the file manager, rename that file to q3-final.txt.",
+  "setup": [
+    "launch files \"$B\"",
+    "launch editor"
+  ],
+  "verify": "[ \"$(cat \"$B/reports/q3-final.txt\")\" = \"Q3 total: 42\" ] && [ ! -e \"$B/reports/q3.txt\" ]",
+  "timeout_s": 600,
+  "max_steps": 40
+}

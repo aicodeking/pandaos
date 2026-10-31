@@ -1,0 +1,12 @@
+{
+  "id": "editor-find-replace",
+  "title": "Text editor: replace all occurrences",
+  "instruction": "The text editor has ~/bench/essay.txt open. Replace every occurrence of the word colour with color in the whole file, then save it.",
+  "setup": [
+    "for i in $(seq 1 25); do echo \"The colour of item $i is nice.\"; done > \"$B/essay.txt\"",
+    "launch editor \"$B/essay.txt\""
+  ],
+  "verify": "! grep -q colour \"$B/essay.txt\" && [ \"$(grep -c '^The color of item [0-9]* is nice\\.$' \"$B/essay.txt\")\" = 25 ]",
+  "timeout_s": 420,
+  "max_steps": 30
+}

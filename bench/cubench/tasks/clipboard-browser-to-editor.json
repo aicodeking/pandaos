@@ -1,0 +1,13 @@
+{
+  "id": "clipboard-browser-to-editor",
+  "title": "Clipboard: copy from the browser into the editor",
+  "instruction": "The web browser shows an access token. Copy the token into the text editor using the clipboard, and save the document as ~/bench/token.txt containing only the token.",
+  "setup": [
+    "serve_form",
+    "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/token.html",
+    "launch editor"
+  ],
+  "verify": "[ \"$(tr -d ' \\n' < \"$B/token.txt\")\" = \"cb-7XQ2-M9KD-41PZ-VW3H-8RTN-J5LC-Q0YE-2BFA\" ]",
+  "timeout_s": 420,
+  "max_steps": 30
+}

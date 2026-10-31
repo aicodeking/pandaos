@@ -1,0 +1,23 @@
+{
+  "id": "input-probe",
+  "title": "Smoke: QMP mouse, wheel and keys reach the guest browser 1:1",
+  "instruction": "Smoke test (scripted agent only): click twice, scroll, type.",
+  "setup": [
+    "serve_form",
+    "LAUNCH_WAIT=15 launch browser --kiosk http://127.0.0.1:8000/probe.html"
+  ],
+  "verify": "python3 \"$A/probecheck.py\" \"$B/form.log\" 640,400 900,600 'cubench probe 42'",
+  "timeout_s": 180,
+  "max_steps": 20,
+  "script": [
+    ["screenshot", {}],
+    ["cu_windows", {}],
+    ["cu_screenshot", {"scale": 0.5}],
+    ["click", {"x": 640, "y": 400}],
+    ["click", {"x": 900, "y": 600}],
+    ["scroll", {"x": 640, "y": 400, "direction": "down", "amount": 2}],
+    ["type", {"text": "cubench probe 42"}],
+    ["wait", {"seconds": 2}],
+    ["done", {"success": true, "summary": "scripted probe"}]
+  ]
+}

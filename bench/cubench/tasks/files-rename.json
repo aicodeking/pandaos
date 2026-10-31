@@ -1,0 +1,12 @@
+{
+  "id": "files-rename",
+  "title": "File manager: rename a file",
+  "instruction": "The file manager shows the folder ~/bench. Rename the file draft.txt to final.txt.",
+  "setup": [
+    "echo draft > \"$B/draft.txt\"",
+    "launch files \"$B\""
+  ],
+  "verify": "[ -f \"$B/final.txt\" ] && [ ! -e \"$B/draft.txt\" ] && [ \"$(cat \"$B/final.txt\")\" = draft ]",
+  "timeout_s": 300,
+  "max_steps": 20
+}

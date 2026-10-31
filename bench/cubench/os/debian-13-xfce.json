@@ -1,0 +1,28 @@
+{
+  "name": "debian-13-xfce",
+  "title": "Debian 13, Xfce (X11)",
+  "user": "debian",
+  "image": {
+    "url": "https://cloud.debian.org/images/cloud/trixie/20261026-2643/debian-13-generic-amd64-20261026-2643.qcow2",
+    "sha512": "5bd891c6e62d01639f52a5587b72a4607421e445732214be787dba6043cf9797a6ff90bed982aada6a6c7e619f1f956d961c4fad76757171abd607920aac098a"
+  },
+  "session": "proc:xfce4-session",
+  "apps": {
+    "editor": "mousepad",
+    "files": "thunar",
+    "terminal": "xfce4-terminal",
+    "browser": "firefox-esr"
+  },
+  "hints": [
+    "Desktop: Debian 13 with Xfce (X11 session), a panel at the top with an Applications menu at the top left.",
+    "Apps: the text editor is Mousepad, the file manager is Thunar, the terminal is Xfce Terminal, the web browser is Firefox ESR.",
+    "To start an app: use the Applications menu, or press alt+F2, type the app name, press Enter. ctrl+alt+t opens a terminal.",
+    "Windows: alt+Tab switches windows, alt+F10 maximizes, alt+F4 closes the focused window."
+  ],
+  "reset": [
+    "pkill -u \"$(id -u)\" -f '(mousepad|thunar|Thunar|xfce4-terminal|firefox|formserver)' || true",
+    "sleep 1",
+    "pkill -9 -u \"$(id -u)\" -f '(mousepad|thunar|Thunar|xfce4-terminal|firefox|formserver)' || true",
+    "rm -rf ~/.mozilla ~/.config/mozilla ~/.cache/mozilla ~/snap/firefox ~/.config/Mousepad"
+  ]
+}

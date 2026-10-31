@@ -105,6 +105,21 @@ jobs:
       - run: shellcheck components/desktop/bin/* components/desktop/*.sh bench/cubench/os/*.sh
       - run: python3 -m py_compile components/computer-use/*.py
 
+  cubench:
+    permissions:
+      contents: read
+    name: cubench unit tests + dry run
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: python3 bench/cubench/test_cubench.py
+      - name: Dry run (scripted model, fake QMP) over every task and OS profile
+        run: |
+          os=$(cd bench/cubench/os && for f in *.json; do printf '%s,' "${f%.json}"; done)
+          python3 bench/cubench/cubench.py run --dry-run --os "$os" --repeats 1 --out dry
+          python3 bench/cubench/cubench.py report dry/results-*.json --out dry/report
+
   iso:
     permissions:
       contents: read

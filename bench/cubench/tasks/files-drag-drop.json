@@ -1,0 +1,13 @@
+{
+  "id": "files-drag-drop",
+  "title": "Drag and drop: move a file onto a folder",
+  "instruction": "The file manager shows the folder ~/bench. Use drag and drop to move the file photo.png into the folder Album.",
+  "setup": [
+    "mkdir \"$B/Album\"",
+    "cp \"$A/www/pixel.png\" \"$B/photo.png\"",
+    "launch files \"$B\""
+  ],
+  "verify": "[ -f \"$B/Album/photo.png\" ] && [ ! -e \"$B/photo.png\" ]",
+  "timeout_s": 300,
+  "max_steps": 25
+}

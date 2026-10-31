@@ -1,0 +1,11 @@
+{
+  "id": "files-new-folder",
+  "title": "File manager: create a folder",
+  "instruction": "The file manager shows the folder ~/bench. Create a new folder named projects inside it.",
+  "setup": [
+    "launch files \"$B\""
+  ],
+  "verify": "[ -d \"$B/projects\" ]",
+  "timeout_s": 300,
+  "max_steps": 20
+}

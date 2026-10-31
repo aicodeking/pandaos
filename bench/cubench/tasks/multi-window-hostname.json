@@ -1,0 +1,13 @@
+{
+  "id": "multi-window-hostname",
+  "title": "Multi-window: terminal to editor",
+  "instruction": "Several windows are open. Use the terminal to find this computer's hostname, then type the hostname in the text editor and save it as ~/bench/host.txt.",
+  "setup": [
+    "launch files \"$B\"",
+    "launch editor",
+    "launch terminal"
+  ],
+  "verify": "[ -s \"$B/host.txt\" ] && [ \"$(tr -d ' \\n' < \"$B/host.txt\")\" = \"$(cat /proc/sys/kernel/hostname)\" ]",
+  "timeout_s": 420,
+  "max_steps": 30
+}

@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>cubench input probe</title>
+<!-- Smoke test page (smoke/input-probe.json): logs what reaches the guest
+     (page size, mouse downs, wheel, typed text) through the form server. -->
+<style>html, body { margin: 0; height: 100%; overflow: hidden; background: #203040; color: #fff; font: 24px sans-serif; }</style>
+<body>
+<p style="padding: 40px">cubench input probe</p>
+<script>
+  const post = f => fetch("/submit", { method: "POST", body: new URLSearchParams(f) });
+  let typed = "";
+  addEventListener("load", () => post({ ev: "load", w: innerWidth, h: innerHeight, dpr: devicePixelRatio }));
+  addEventListener("mousedown", e => post({ ev: "down", x: e.clientX, y: e.clientY, b: e.button }));
+  addEventListener("wheel", e => post({ ev: "wheel", dy: Math.sign(e.deltaY) }));
+  addEventListener("keydown", e => {
+    if (e.key.length !== 1 || e.ctrlKey || e.altKey || e.metaKey) return;
+    typed += e.key;
+    post({ ev: "keys", text: typed });
+  });
+</script>

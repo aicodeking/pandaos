@@ -1,0 +1,28 @@
+{
+  "name": "pandaos-desktop",
+  "title": "PandaOS desktop (labwc, Wayland)",
+  "user": "panda",
+  "build": "nix: bench/cubench/pandaos-desktop-image.nix (pass --disk pandaos-desktop=PATH)",
+  "session": "proc:labwc",
+  "apps": {
+    "editor": "mousepad",
+    "files": "pcmanfm",
+    "terminal": "foot",
+    "browser": "firefox"
+  },
+  "hints": [
+    "Desktop: PandaOS with the labwc window manager (Wayland session), a top bar and a dock.",
+    "Apps: the text editor is Mousepad, the file manager is PCManFM, the terminal is foot, the web browser is Firefox.",
+    "To start an app: press Super (the Windows key) to open the app launcher, type the app name, press Enter. Super+Return opens a terminal.",
+    "Windows: alt+Tab switches windows, super+Up maximizes, super+q closes the focused window."
+  ],
+  "reset": [
+    "pkill -u \"$(id -u)\" -f '(mousepad|pcmanfm|foot|firefox|formserver)' || true",
+    "sleep 1",
+    "pkill -9 -u \"$(id -u)\" -f '(mousepad|pcmanfm|foot|firefox|formserver)' || true",
+    "rm -rf ~/.mozilla ~/.config/mozilla ~/.cache/mozilla ~/snap/firefox ~/.config/Mousepad"
+  ],
+  "session_setup": [
+    "pkill -u \"$(id -u)\" -x swayidle || true"
+  ]
+}

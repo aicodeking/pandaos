@@ -1,0 +1,12 @@
+{
+  "id": "browser-form",
+  "title": "Browser: fill in and submit a form",
+  "instruction": "The web browser shows a sign-up form. Fill it in with the name Ada Lovelace, the email ada@example.org and the plan Pro, tick the terms checkbox, and submit the form.",
+  "setup": [
+    "serve_form",
+    "LAUNCH_WAIT=12 launch browser http://127.0.0.1:8000/form.html"
+  ],
+  "verify": "grep -qxF 'agree=yes|email=ada@example.org|form=signup|name=Ada Lovelace|plan=pro' \"$B/form.log\"",
+  "timeout_s": 300,
+  "max_steps": 25
+}

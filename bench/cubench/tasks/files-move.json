@@ -1,0 +1,13 @@
+{
+  "id": "files-move",
+  "title": "File manager: move a file into a folder",
+  "instruction": "The file manager shows the folder ~/bench. Move the file report-2026.txt into the folder archive.",
+  "setup": [
+    "mkdir \"$B/archive\"",
+    "echo report > \"$B/report-2026.txt\"",
+    "launch files \"$B\""
+  ],
+  "verify": "[ -f \"$B/archive/report-2026.txt\" ] && [ ! -e \"$B/report-2026.txt\" ]",
+  "timeout_s": 300,
+  "max_steps": 20
+}
