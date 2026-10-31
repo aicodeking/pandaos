@@ -1,14 +1,42 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Panda labwc config. Tuned so screenshots are predictable for people and
+  computer-use agents (see labwc-config(5) for every element):
+  - labwc has no window animations; drop shadows are off, windows are opaque.
+  - New windows open centred on the screen and get focus (placement policy
+    and the "*" window rule below).
+  - Alt+Tab (from <default/>) lists windows as "app name | title".
+  - Pointers have flat acceleration; absolute devices (QEMU usb-tablet,
+    tablets) map 1:1 to the screen with no acceleration.
+  - Keyboard: US layout (environment file), fixed repeat 25/s after 600 ms.
+-->
 <labwc_config>
   <core>
     <gap>4</gap>
   </core>
+  <placement>
+    <policy>center</policy>
+  </placement>
   <theme>
-    <cornerRadius>6</cornerRadius>
-    <font><name>DejaVu Sans</name><size>10</size></font>
+    <icon>Adwaita</icon>
+    <cornerRadius>0</cornerRadius>
+    <dropShadows>no</dropShadows>
+    <font><name>DejaVu Sans</name><size>11</size></font>
   </theme>
+  <windowSwitcher preview="no" outlines="yes">
+    <fields>
+      <field content="desktop_entry_name" width="30%" />
+      <field content="title" width="70%" />
+    </fields>
+  </windowSwitcher>
+  <focus>
+    <followMouse>no</followMouse>
+    <raiseOnFocus>yes</raiseOnFocus>
+  </focus>
   <desktops number="2" />
   <keyboard>
+    <repeatRate>25</repeatRate>
+    <repeatDelay>600</repeatDelay>
     <!-- Keep labwc's defaults (Alt-Tab, A-F4, ...), then add the Panda binds. -->
     <default />
     <keybind key="Super_L" onRelease="yes"><action name="Execute" command="fuzzel" /></keybind>
@@ -16,7 +44,9 @@
     <keybind key="W-Return"><action name="Execute" command="foot" /></keybind>
     <keybind key="W-q"><action name="Close" /></keybind>
     <keybind key="W-x"><action name="Execute" command="panda-menu" /></keybind>
-    <keybind key="W-e"><action name="Execute" command="foot lf" /></keybind>
+    <keybind key="W-e"><action name="Execute" command="pcmanfm" /></keybind>
+    <keybind key="W-t"><action name="Execute" command="mousepad" /></keybind>
+    <keybind key="W-n"><action name="Execute" command="panda-dnd toggle" /></keybind>
     <keybind key="W-Left"><action name="SnapToEdge" direction="left" /></keybind>
     <keybind key="W-Right"><action name="SnapToEdge" direction="right" /></keybind>
     <keybind key="W-Up"><action name="ToggleMaximize" /></keybind>
@@ -29,4 +59,31 @@
     <keybind key="XF86MonBrightnessUp"><action name="Execute" command="brightnessctl -q set 5%+" /></keybind>
     <keybind key="XF86MonBrightnessDown"><action name="Execute" command="brightnessctl -q set 5%-" /></keybind>
   </keyboard>
+  <!-- Tablet tools map to the whole screen and act as a mouse, so clicks and
+       drag-and-drop behave the same as with a mouse (pen pressure is lost). -->
+  <tablet rotate="0" mouseEmulation="yes" />
+  <tabletTool motion="absolute" />
+  <libinput>
+    <!-- Mice and absolute pointers: no acceleration, so a move of N device
+         units is always N pixels. Touchpads keep their device defaults. -->
+    <device category="non-touch">
+      <accelProfile>flat</accelProfile>
+      <pointerSpeed>0.0</pointerSpeed>
+    </device>
+    <device category="default">
+      <tap>yes</tap>
+    </device>
+  </libinput>
+  <!--
+    Window rules: every new window is focused and raised (labwc already does
+    this; the rule keeps it explicit). Add per-app rules after it, e.g.
+    <windowRule identifier="mousepad"><action name="Maximize" /></windowRule>
+    Match on app_id (identifier) or title; see labwc-config(5) WINDOW RULES.
+  -->
+  <windowRules>
+    <windowRule identifier="*">
+      <action name="Focus" />
+      <action name="Raise" />
+    </windowRule>
+  </windowRules>
 </labwc_config>

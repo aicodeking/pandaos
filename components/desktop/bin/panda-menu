@@ -120,6 +120,7 @@ choice=$(printf '%s\n' \
   "Memory browser" \
   "Restore /mem from snapshot" \
   "Updates" \
+  "Do not disturb on/off" \
   "Roll back system" \
   "Lock screen" \
   "Reboot" \
@@ -142,6 +143,7 @@ case "$choice" in
     # Hold first, so the next daily update does not undo the rollback.
     confirm "Roll back to the previous system and hold updates (Updates > Unhold to resume)" &&
       term rollback "$sudo" sh -c 'panda-update hold && nixos-rebuild switch --rollback' ;;
+  "Do not disturb on/off") panda-dnd toggle ;;
   "Lock screen") panda-lock ;;
   "Reboot") confirm "Reboot" && systemctl reboot ;;
   "Power off") confirm "Power off" && systemctl poweroff ;;

@@ -1,0 +1,47 @@
+#!/bin/sh
+# Keep the screen from auto-locking while a computer-use task runs.
+# Usage: panda-cu-busy on|off|status|run CMD...
+#   on/off  set or clear a manual busy mark
+#   run     mark busy only while CMD runs (nested runs are fine)
+#   status  prints busy/idle; exits 0 when busy, 1 when idle
+# The idle lock (swayidle) calls `status` and skips locking while busy.
+set -eu
+dir=${XDG_RUNTIME_DIR:-/tmp}/panda-cu-busy
+
+# busy: true if the manual mark or a live run.PID mark exists. Marks left by
+# a killed `run` are removed here.
+busy() {
+  found=1
+  for mark in "$dir"/*; do
+    [ -e "$mark" ] || continue
+    case ${mark##*/} in
+      manual) found=0 ;;
+      run.*)
+        if kill -0 "${mark##*.}" 2>/dev/null; then found=0; else rm -f "$mark"; fi
+        ;;
+    esac
+  done
+  return "$found"
+}
+
+cmd=${1:-status}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  on) mkdir -p "$dir" && : >"$dir/manual" ;;
+  off) rm -f "$dir/manual" ;;
+  status)
+    if busy; then echo busy; else echo idle; exit 1; fi
+    ;;
+  run)
+    [ $# -gt 0 ] || { echo "usage: panda-cu-busy run CMD..." >&2; exit 2; }
+    mkdir -p "$dir"
+    mark=$dir/run.$$
+    : >"$mark"
+    trap 'rm -f "$mark"' EXIT
+    "$@"
+    ;;
+  *)
+    echo "usage: panda-cu-busy on|off|status|run CMD..." >&2
+    exit 2
+    ;;
+esac

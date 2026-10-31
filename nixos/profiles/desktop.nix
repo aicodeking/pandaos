@@ -28,8 +28,23 @@
   };
 
   # The ISO's minimal profile turns these off; a desktop needs them.
-  fonts.fontconfig.enable = true;
   fonts.packages = [ pkgs.dejavu_fonts ];
+  # Crisp, predictable text in screenshots: slight hinting, greyscale
+  # antialiasing (no colour fringes), DejaVu for everything.
+  fonts.fontconfig = {
+    enable = true;
+    antialias = true;
+    hinting = {
+      enable = true;
+      style = "slight";
+    };
+    subpixel.rgba = "none";
+    defaultFonts = {
+      sansSerif = [ "DejaVu Sans" ];
+      serif = [ "DejaVu Serif" ];
+      monospace = [ "DejaVu Sans Mono" ];
+    };
+  };
   xdg.icons.enable = true;
   xdg.mime.enable = true;
 }

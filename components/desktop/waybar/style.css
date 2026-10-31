@@ -5,6 +5,7 @@
   border: none;
   border-radius: 0;
   min-height: 0;
+  transition: none; /* no hover fades: screenshots show the final state */
 }
 
 window#waybar {
@@ -41,6 +42,8 @@ window#waybar.dock {
 #pulseaudio.muted { color: #e5707a; }
 
 #clock { font-weight: bold; }
+
+#custom-dnd { color: #14161b; background: #e5c07b; font-weight: bold; }
 
 /* Dock: a rounded strip of launchers. */
 window#waybar.dock .modules-center {

@@ -1,22 +1,33 @@
-# Panda dark theme: one accent (#5ec39a) on near-black.
-border.width: 1
-padding.height: 4
+# Panda dark theme: one accent (#5ec39a) on near-black. See labwc-theme(5).
+# Built for screenshots: opaque, no shadows, a 2px accent ring on the focused
+# window, and 32x28 titlebar buttons (no tiny click targets).
+border.width: 2
+window.titlebar.padding.width: 4
+window.titlebar.padding.height: 2
 window.active.border.color: #5ec39a
-window.inactive.border.color: #2a2e37
-window.active.title.bg.color: #1d2027
+window.inactive.border.color: #3a3f4a
+window.active.title.bg.color: #2a3a33
 window.inactive.title.bg.color: #14161b
-window.active.label.text.color: #e6e6e6
-window.inactive.label.text.color: #7d8590
+window.active.label.text.color: #ffffff
+window.inactive.label.text.color: #9aa3ad
 window.label.text.justify: center
-window.active.button.unpressed.image.color: #e6e6e6
-window.inactive.button.unpressed.image.color: #7d8590
+window.button.width: 32
+window.button.height: 28
+window.button.spacing: 2
+window.button.hover.bg.color: #5ec39a40
+window.active.button.unpressed.image.color: #ffffff
+window.inactive.button.unpressed.image.color: #9aa3ad
 window.active.button.hover.image.color: #5ec39a
-menu.border.color: #2a2e37
+window.active.shadow.size: 0
+window.inactive.shadow.size: 0
+menu.border.color: #3a3f4a
 menu.items.bg.color: #1d2027
 menu.items.text.color: #e6e6e6
 menu.items.active.bg.color: #5ec39a
 menu.items.active.text.color: #14161b
-menu.separator.color: #2a2e37
+menu.items.padding.y: 6
+menu.separator.color: #3a3f4a
 osd.bg.color: #1d2027
 osd.border.color: #5ec39a
+osd.border.width: 2
 osd.label.text.color: #e6e6e6

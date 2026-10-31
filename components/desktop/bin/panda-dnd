@@ -1,0 +1,36 @@
+#!/bin/sh
+# Do not disturb for fnott. Usage: panda-dnd on|off|toggle|status|bar
+# Paused fnott queues notifications and shows them on `off`. fnottctl cannot
+# report the paused state, so a flag file in $XDG_RUNTIME_DIR records it.
+# status prints on/off; bar prints the waybar module text (empty hides it).
+set -eu
+flag=${XDG_RUNTIME_DIR:-/tmp}/panda-dnd
+
+# Redraw waybar's DND module (signal 8); no waybar is fine.
+refresh() {
+  pkill -RTMIN+8 waybar 2>/dev/null || true
+}
+
+on() {
+  fnottctl pause
+  : >"$flag"
+  refresh
+}
+
+off() {
+  fnottctl unpause
+  rm -f "$flag"
+  refresh
+}
+
+case "${1:-status}" in
+  on) on ;;
+  off) off ;;
+  toggle) if [ -e "$flag" ]; then off; else on; fi ;;
+  status) if [ -e "$flag" ]; then echo on; else echo off; fi ;;
+  bar) if [ -e "$flag" ]; then echo DND; else echo; fi ;;
+  *)
+    echo "usage: panda-dnd on|off|toggle|status|bar" >&2
+    exit 2
+    ;;
+esac

@@ -68,6 +68,20 @@ let
     '';
   };
 
+  # Do not disturb (fnottctl pause/unpause), for agents, Super+N and the menu.
+  panda-dnd = pkgs.writeShellApplication {
+    name = "panda-dnd";
+    runtimeInputs = [ pkgs.fnott pkgs.procps ];
+    text = builtins.readFile ./bin/panda-dnd;
+  };
+
+  # Marks a computer-use task as running; the idle lock skips while busy.
+  panda-cu-busy = pkgs.writeShellApplication {
+    name = "panda-cu-busy";
+    runtimeInputs = [ pkgs.coreutils ];
+    text = builtins.readFile ./bin/panda-cu-busy;
+  };
+
   panda-agents-status = pkgs.writeShellApplication {
     name = "panda-agents-status";
     runtimeInputs = [ pkgs.jq pkgs.coreutils ];
@@ -96,6 +110,7 @@ let
       pkgs.coreutils # df
       config.networking.networkmanager.package # nmtui; the configured NM (no ModemManager)
       panda-lock
+      panda-dnd
     ];
     text = builtins.readFile ./bin/panda-menu;
   };
@@ -107,11 +122,15 @@ let
   '';
 
   lockCmd = "${panda-lock}/bin/panda-lock";
+  # ponytail: a lock skipped while busy is not retried when the task ends; the
+  # next idle period locks. Add a resume/retry loop if that gap matters.
+  idleLockCmd = "${panda-cu-busy}/bin/panda-cu-busy status >/dev/null || ${lockCmd}";
+  idleTimeout = lib.optionalString cfg.autoLock "timeout 600 '${idleLockCmd}'";
   autostart = ''
     ${pkgs.swaybg}/bin/swaybg -c '#14161b' -m center -i ${wallpaper} >/dev/null 2>&1 &
     waybar >/dev/null 2>&1 &
     ${pkgs.fnott}/bin/fnott >/dev/null 2>&1 &
-    ${pkgs.swayidle}/bin/swayidle -w timeout 600 '${lockCmd}' before-sleep '${lockCmd}' >/dev/null 2>&1 &
+    ${pkgs.swayidle}/bin/swayidle -w ${idleTimeout} before-sleep '${lockCmd}' >/dev/null 2>&1 &
   '';
 
   waybarConfig = [
@@ -124,7 +143,7 @@ let
       # module is not on the default bar.
       modules-left = [ "custom/panda" "custom/connect" ];
       modules-center = [ "clock" ];
-      modules-right = [ "network" "cpu" "memory" "disk" "battery" "pulseaudio" ];
+      modules-right = [ "custom/dnd" "network" "cpu" "memory" "disk" "battery" "pulseaudio" ];
       "custom/panda" = {
         format = "panda";
         tooltip-format = "Repair menu (Super+X)";
@@ -135,6 +154,14 @@ let
         return-type = "json";
         interval = 5;
         on-click = "${lib.getExe panda-connect-status} click";
+      };
+      # Shown only while do-not-disturb is on; panda-dnd sends signal 8.
+      "custom/dnd" = {
+        exec = "${lib.getExe panda-dnd} bar";
+        interval = "once";
+        signal = 8;
+        tooltip-format = "Notifications paused (Super+N)";
+        on-click = "${lib.getExe panda-dnd} toggle";
       };
       clock = {
         format = "{:%a %d %b  %H:%M}";
@@ -180,13 +207,15 @@ let
       modules-center = [
         "custom/terminal"
         "custom/files"
+        "custom/editor"
         "custom/monitor"
         "custom/network"
         "custom/logs"
         "custom/repair"
       ];
       "custom/terminal" = { format = "Terminal"; on-click = footExe; tooltip = false; };
-      "custom/files" = { format = "Files"; on-click = inTerm "lf"; tooltip = false; };
+      "custom/files" = { format = "Files"; on-click = "pcmanfm"; tooltip = false; };
+      "custom/editor" = { format = "Editor"; on-click = "mousepad"; tooltip = false; };
       "custom/monitor" = { format = "Monitor"; on-click = inTerm "btop"; tooltip = false; };
       "custom/network" = { format = "Network"; on-click = inTerm "nmtui"; tooltip = false; };
       "custom/logs" = { format = "Logs"; on-click = inTerm "journalctl -f -n 200"; tooltip = false; };
@@ -203,6 +232,15 @@ in
         GPU acceleration: Mesa drivers (hardware.graphics) and labwc's GL
         renderer. Off by default: software rendering is enough for this shell
         and saves about 800 MB of closure (Mesa + LLVM).
+      '';
+    };
+    autoLock = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Lock the screen after 10 minutes idle. It never locks while
+        `panda-cu-busy` marks a computer-use task as running. Turn off for
+        benchmark or kiosk images; the lock before suspend stays.
       '';
     };
     autologinUser = lib.mkOption {
@@ -236,10 +274,21 @@ in
 
     # programs.labwc already declares security.pam.services.swaylock.
 
+    # Accessibility bus on (screen readers, agents reading the AT-SPI tree).
+    # Off, NixOS would set NO_AT_BRIDGE=1 and GTK_A11Y=none for everyone.
+    # at-spi2-core is already in GTK 3's closure.
+    services.gnome.at-spi2-core.enable = true;
+
     environment.systemPackages = [
       waybar
       fuzzel
       pkgs.foot
+      # GTK 3 apps that agents and people can both drive: a text editor and a
+      # file manager. GTK 3 is already here for waybar. Adwaita gives icons and
+      # the fixed cursor theme; it is in pcmanfm's closure anyway.
+      pkgs.mousepad
+      pkgs.pcmanfm
+      pkgs.adwaita-icon-theme
       pkgs.swaybg
       pkgs.lf
       pkgs.btop
@@ -250,13 +299,18 @@ in
       panda-agents-status
       panda-connect-status
       panda-menu
+      panda-dnd
+      panda-cu-busy
     ];
 
     environment.etc = {
       "xdg/labwc/rc.xml".source = ./labwc/rc.xml;
       "xdg/labwc/menu.xml".source = ./labwc/menu.xml;
       "xdg/labwc/themerc-override".source = ./labwc/themerc-override;
+      "xdg/labwc/environment".source = ./labwc/environment;
       "xdg/labwc/autostart".text = autostart;
+      "xdg/fuzzel/fuzzel.ini".source = ./fuzzel.ini;
+      "xdg/gtk-3.0/settings.ini".source = ./gtk-3.0/settings.ini;
       "xdg/waybar/config".text = builtins.toJSON waybarConfig;
       "xdg/waybar/style.css".source = ./waybar/style.css;
       "xdg/fnott/fnott.ini".source = ./fnott.ini;
