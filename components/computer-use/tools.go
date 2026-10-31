@@ -206,7 +206,8 @@ func (s *Server) runTool(name string, a toolArgs) ([]content, error) {
 		if err := checkText(*a.Text, maxClipboard, "text"); err != nil {
 			return nil, err
 		}
-		_, err := s.run(execTimeout, *a.Text, "wl-copy")
+		// An explicit type: otherwise wl-copy sniffs it with xdg-mime.
+		_, err := s.run(execTimeout, *a.Text, "wl-copy", "--type", "text/plain;charset=utf-8")
 		return jsonOut(map[string]any{"set": len([]rune(*a.Text))}, err)
 	}
 	return nil, fmt.Errorf("unknown tool %q", name)
