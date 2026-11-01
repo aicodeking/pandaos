@@ -120,7 +120,7 @@ if [ "$JAILER" = 1 ]; then
 fi
 cat >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
- "firecracker":"$WORK/dl/firecracker","jailer":$jailer,"jailerArgs":$jargs,"cgroupParent":"boat-e2e","reflink":"always","btrfsQgroups":true,
+ "firecracker":"$WORK/dl/firecracker","jailer":$jailer,"jailerArgs":$jargs,"cgroupParent":"boat-e2e","reflink":"always",
  "bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e","ipv6Prefix":"fd42:b0a7::/64","reapIntervalS":5,
  "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},
  "defaultTeam":{"maxVMs":$MAX_VMS}}
@@ -376,9 +376,10 @@ echo "METRIC $(jq -nc \
   --argjson k "$(mib "$GUEST/vmlinux")" --argjson sl "$(mib "$GUEST/rootfs-slim.ext4")" \
   --argjson fu "$(mib "$GUEST/rootfs-full.ext4")" --argjson slz "$(zst "$GUEST/rootfs-slim.ext4.zst")" \
   --argjson fuz "$(zst "$GUEST/rootfs-full.ext4.zst")" --argjson vs "$vm_seconds" \
-  --argjson hs1 "$stop2_s" --argjson hs2 "$stop3_s" --argjson hr "$resume2_s" --argjson hf "$fork2_s" \
+  --argjson hs1 "$stop2_s" --argjson hs2 "$stop3_s" --argjson hr "$resume2_s" --argjson hf "$fork2_s" --argjson hq "$forkq_s" \
   '{test: "boat-e2e", createReadyS: $c, sshReadyS: $s, forkS: $f, stopS: $st, resumeS: $r,
     newFromSnapshotS: $sn, desktopS: $d, kernelMB: $k, slimImageMB: $sl, fullImageMB: $fu,
     slimZstMB: $slz, fullZstMB: $fuz, usageVmSeconds: $vs,
-    hostStopFirstS: $hs1, hostStopDiffS: $hs2, hostResumeS: $hr, hostForkS: $hf}')"
+    hostStopFirstS: $hs1, hostStopDiffS: $hs2, hostResumeS: $hr, hostForkS: $hf, hostForkQgroupsS: $hq}')"
+[ -z "$perf_fail" ] || fail "timing targets: $perf_fail"
 echo "e2e: PASS"

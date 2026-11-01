@@ -159,7 +159,7 @@ func waitAgent(ctx context.Context, sock string, d time.Duration) error {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("guest agent not ready after %s: %w", d, err)
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(20 * time.Millisecond):
 		}
 	}
 }

@@ -16,6 +16,9 @@
 #   restart   boatd SIGKILLed mid-run: running VMs re-adopted
 #   floor     free-space floor: create/snapshot refused (507), stop falls back cold
 #   docker    docker run hello-world in the full image
+#   qgroups   btrfsQgroups: VM dirs are limited subvolumes, fork across them works
+#             (last: quota accounting stays on for the whole filesystem and
+#             makes reflinks slower, so the timings above are without it)
 
 # shellcheck disable=SC2154 # host_ip, PIDS come from e2e.sh
 FORK_MAX=${E2E_FORK_MAX:-2}
@@ -35,9 +38,10 @@ tcp() { echo "timeout 5 bash -c '</dev/tcp/$1/$2'"; } # a bash TCP connect probe
 vmf() { bd GET "/v1/vms/$1" | jq -r ".$2"; }
 newvm() { bd POST /v1/vms "$1" | jq -r .id; }
 fingerprint() { bx "$1" 'cat /etc/machine-id; cut -d" " -f2 /etc/ssh/ssh_host_ed25519_key.pub' | tr '\n' ' '; }
+perf_fail="" # timing misses fail the run after METRIC, so every phase still runs
 check_max() { # NAME SECONDS MAX
   printf 'e2e: %-12s %6ss (max %ss)\n' "$1" "$2" "$3"
-  awk -v a="$2" -v b="$3" 'BEGIN { exit !(a <= b) }' || fail "$1 took $2s > $3s"
+  awk -v a="$2" -v b="$3" 'BEGIN { exit !(a <= b) }' || perf_fail+="$1 took $2s > $3s; "
 }
 restart_boatd() { # CONFIG: SIGKILL boatd (no snapshot-all), start it with CONFIG
   sudo kill -9 "$(cat "$WORK/boatd.pid")"
@@ -89,8 +93,10 @@ echo "$fps"
 [ "$(tr ' ' '\n' <<<"$fps" | grep -c .)" = 8 ] || fail "missing machine-id/host key"
 [ "$(tr ' ' '\n' <<<"$fps" | grep . | sort -u | wc -l)" = 8 ] || fail "machine-ids/host keys not all distinct: $fps"
 echo "stop ${stop2_s}s (first, diff since boot) ${stop3_s}s (diff since restore), resume ${resume2_s}s, fork ${fork2_s}s"
+check_max fork_cli "$fork_s" "$FORK_MAX"
+check_max stop_cli "$stop_s" "$STOP_MAX"
 check_max fork "$fork2_s" "$FORK_MAX"
-check_max stop "$stop3_s" "$STOP_MAX"
+check_max stop_diff "$stop3_s" "$STOP_MAX"
 
 log "host e2e: jail (netns, pid ns, cgroup)"
 pid=$(vmf "$p1" pid)
@@ -182,6 +188,22 @@ bx "$dk" 'for i in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; 
   fail "docker hello-world"
 bd DELETE "/v1/vms/$dk" >/dev/null
 bd DELETE "/v1/vms/$p1" >/dev/null
+
+log "host e2e: btrfs qgroups"
+jq '.btrfsQgroups = true' "$WORK/boatd.json" >"$WORK/boatd-q.json"
+restart_boatd "$WORK/boatd-q.json"
+q1=$(newvm '{"name":"q1","team":"iso2"}')
+[ "$(vmf "$q1" agent_ready)" = true ] || fail "q1 not ready: $(vmf "$q1" error)"
+qid=$(sudo btrfs subvolume show "$STATE/vms/$q1" | awk '/Subvolume ID:/ {print $3}')
+[ -n "$qid" ] || fail "q1's VM dir is not a subvolume"
+want=$(((8 << 30) + 2 * (2048 << 20) + (1 << 30))) # disk + 2 x RAM + 1 GiB
+sudo btrfs qgroup show -e --raw "$STATE" | grep "^0/$qid " | grep -qw "$want" || fail "qgroup limit: $(sudo btrfs qgroup show -e --raw "$STATE")"
+t=$(now); q2=$(bd POST "/v1/vms/$q1/fork" '{"name":"q2"}' | jq -r .id); forkq_s=$(secs "$t" "$(now)") # a reflink across subvolumes
+[ "$(bx "$q2" hostname)" = q2 ] || fail "fork across subvolumes"
+echo "fork with qgroups ${forkq_s}s"
+bd DELETE "/v1/vms/$q2" >/dev/null
+bd DELETE "/v1/vms/$q1" >/dev/null
+[ -z "$(sudo ls "$STATE/vms")" ] || fail "subvolumes left: $(sudo ls "$STATE/vms")"
 sudo pkill -f 'http.server 8000' || true
 sudo ip netns del e2e-ext
 sudo ip link del e2eh 2>/dev/null || true
