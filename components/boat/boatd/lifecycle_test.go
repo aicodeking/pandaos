@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -237,11 +238,13 @@ func TestReconcile(t *testing.T) {
 func TestReap(t *testing.T) {
 	m, h := newTestManager(t, func(c *Config) { c.IdleStopS = 60 })
 	ctx := context.Background()
+	var skew atomic.Int64
+	m.now = func() time.Time { return time.Now().UTC().Add(time.Duration(skew.Load())) }
 	ttl, _ := m.Create(ctx, CreateReq{Name: "ttl", TTLS: 30})
 	busy, _ := m.Create(ctx, CreateReq{Name: "busy"})
 	never, _ := m.Create(ctx, CreateReq{Name: "never", IdleStopS: -1})
-	real := m.now
-	m.now = func() time.Time { return real().Add(45 * time.Second) }
+	m.reap(ctx) // nothing due yet
+	skew.Store(int64(45 * time.Second))
 	m.reap(ctx) // agent reports idle_s=0: only the TTL fires
 	if v, _ := m.get(ttl.ID); v.State != Stopped {
 		t.Fatalf("ttl: %s", v.State)
@@ -252,7 +255,7 @@ func TestReap(t *testing.T) {
 	h.mu.Lock()
 	h.idleS = 3600
 	h.mu.Unlock()
-	m.now = func() time.Time { return real().Add(2 * time.Hour) }
+	skew.Store(int64(2 * time.Hour))
 	m.reap(ctx)
 	if v, _ := m.get(busy.ID); v.State != Stopped {
 		t.Fatalf("idle: %s", v.State)
@@ -409,5 +412,34 @@ func TestCopyExtents(t *testing.T) {
 	// Holes keep the base where the filesystem reports them (APFS/btrfs/ext4 do at 4K+).
 	if b[0] != 'x' && b[0] != 0 {
 		t.Fatalf("byte 0 = %q", b[0])
+	}
+}
+
+func TestSnapshotDurability(t *testing.T) {
+	m, h := newTestManager(t, nil)
+	ctx := context.Background()
+	a, _ := m.Create(ctx, CreateReq{Name: "synced"})
+	b, _ := m.Create(ctx, CreateReq{Name: "unsynced"})
+	m.Stop(ctx, a.ID, "")
+	m.Stop(ctx, b.ID, "")
+	eventually(t, "background fsync", func() bool {
+		x, _ := m.get(a.ID)
+		y, _ := m.get(b.ID)
+		return x.SnapSynced && y.SnapSynced
+	})
+	// As if the host died before b's fsync finished.
+	m.update(b.ID, "", func(x *VM) { x.SnapSynced = false })
+	m2, err := newManager(m.cfg, h.run, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := m2.get(a.ID); !v.HasSnapshot {
+		t.Fatal("durable snapshot discarded")
+	}
+	if v, _ := m2.get(b.ID); v.HasSnapshot || exists(filepath.Join(m2.root(b.ID), memFile)) {
+		t.Fatalf("unsynced snapshot trusted: %+v", v)
+	}
+	if v, err := m2.Start(ctx, b.ID, nil); err != nil || !h.fcOf(t, m2, v.ID).called("PUT /actions") {
+		t.Fatalf("cold boot: %v", err)
 	}
 }

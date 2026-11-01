@@ -333,6 +333,21 @@ func (m *Manager) reconcile() error {
 		m.vms[v.ID] = v
 	}
 	for _, v := range vms {
+		if v.State == Stopped && v.HasSnapshot && !v.SnapSynced {
+			// Maybe a host crash before the fsync: the memory file cannot be trusted.
+			log.Printf("%s: stop snapshot was not synced; the next start cold-boots", v.ID)
+			nv := v.clone()
+			nv.HasSnapshot = false
+			os.Remove(filepath.Join(m.root(v.ID), vmstate))
+			os.Remove(filepath.Join(m.root(v.ID), memFile))
+			m.mu.Lock()
+			err := m.commitLocked(v, nv, "")
+			m.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		alive := v.PID > 0 && m.procs.Alive(v.PID, v.ID)
 		if alive && v.State == Running {
 			done := m.procs.Adopt(v.PID, v.ID)
@@ -425,6 +440,7 @@ func (m *Manager) stopAll(ctx context.Context, reason string) {
 					log.Printf("%s: stop: %v", v.ID, err)
 					return
 				}
+				m.syncSnapshot(v.ID) // we are exiting: the background one would not finish
 				m.update(v.ID, "", func(x *VM) { x.ResumeOnBoot = true })
 			}()
 		}

@@ -70,15 +70,18 @@ func (m *Manager) takeSnapshot(ctx context.Context, v VM) (VM, error) {
 	return m.update(v.ID, "", func(x *VM) { x.DiffOK = m.cfg.DiffSnapshots })
 }
 
-// mergeDiff writes the data extents of the sparse diff onto a reflink copy of
-// root/mem (or a sparse all-zero file) at dst.
+// mergeDiff makes dst the VM's full memory: the data extents of the sparse
+// diff on a reflink copy of root/mem. Without a base (first snapshot since a
+// cold boot) the holes are all zeros, so the diff already is the full memory.
 func (m *Manager) mergeDiff(v VM, diff, dst string) error {
 	base := filepath.Join(m.root(v.ID), memFile)
-	if exists(base) {
-		if err := m.cp(base, dst); err != nil {
+	if !exists(base) {
+		if err := os.Rename(diff, dst); err != nil {
 			return err
 		}
-	} else if err := os.WriteFile(dst, nil, 0o600); err != nil {
+		return os.Truncate(dst, int64(v.MemMiB)<<20)
+	}
+	if err := m.cp(base, dst); err != nil {
 		return err
 	}
 	if err := os.Truncate(dst, int64(v.MemMiB)<<20); err != nil {
@@ -129,11 +132,31 @@ func copyExtents(src, dst string) error {
 		}
 		off = hole
 	}
-	if err := out.Sync(); err != nil {
-		out.Close()
+	return out.Close()
+}
+
+// syncSnapshot fsyncs a stop snapshot and records that it is durable. Stop
+// does not wait for it (it is most of a stop's cost on a slow disk); until the
+// flag is set, reconcile treats the snapshot as lost in a host crash and the
+// VM cold-boots from its disk, which Firecracker fsyncs itself when
+// snapshotting.
+func (m *Manager) syncSnapshot(id string) {
+	root := m.root(id)
+	for _, f := range []string{memFile, vmstate} {
+		if err := fsyncFile(filepath.Join(root, f)); err != nil {
+			return // restored or deleted meanwhile
+		}
+	}
+	m.update(id, "", func(x *VM) { x.SnapSynced = x.HasSnapshot })
+}
+
+func fsyncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
 		return err
 	}
-	return out.Close()
+	defer f.Close()
+	return f.Sync()
 }
 
 // guestSync flushes the guest's page cache to its disk before a pause, so the
@@ -184,22 +207,26 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 		return v.HasSnapshot, nil
 	}
 	v, err := m.takeSnapshot(ctx, v)
-	for _, f := range []string{diskFile, kernFile} {
-		if err == nil {
-			err = m.cp(filepath.Join(root, f), filepath.Join(dst, f))
-		}
+	t0 := time.Now()
+	if err == nil {
+		err = m.cp(filepath.Join(root, diskFile), filepath.Join(dst, diskFile))
 	}
+	t1 := time.Now()
 	if rerr := newFC(filepath.Join(root, apiSock)).resume(context.WithoutCancel(ctx)); rerr != nil {
 		log.Printf("%s: resume after snapshot: %v", v.ID, rerr)
 	}
-	// root/mem is immutable (only ever renamed over), so copying it after the resume is safe.
-	if err == nil {
-		err = m.cp(filepath.Join(root, memFile), filepath.Join(dst, memFile))
-	}
-	if err == nil {
-		err = os.Rename(filepath.Join(root, snapState), filepath.Join(dst, vmstate))
+	// The rest is immutable (root/mem is only ever renamed over): no need to stay paused.
+	for _, f := range []string{kernFile, memFile, snapState} {
+		if err == nil {
+			target := f
+			if f == snapState {
+				target = vmstate
+			}
+			err = m.cp(filepath.Join(root, f), filepath.Join(dst, target)) // VM dirs may be subvolumes: no rename
+		}
 	}
 	os.Remove(filepath.Join(root, snapState))
+	log.Printf("%s: freeze disk=%dms copies=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
 	return err == nil, err
 }
 
@@ -240,7 +267,13 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 		return Snapshot{}, err
 	}
 	dir := m.snapDir(s.ID)
-	if s.HasMem, err = m.freeze(ctx, v, dir); err == nil {
+	if s.HasMem, err = m.freeze(ctx, v, dir); err == nil && s.HasMem {
+		// A saved snapshot must survive a host crash (the VM is already resumed).
+		if err = fsyncFile(filepath.Join(dir, memFile)); err == nil {
+			err = fsyncFile(filepath.Join(dir, vmstate))
+		}
+	}
+	if err == nil {
 		err = writeJSONAtomic(filepath.Join(dir, "snap.json"), s, 0o600)
 	}
 	if err != nil {

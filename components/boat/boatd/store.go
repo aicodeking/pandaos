@@ -51,7 +51,8 @@ type VM struct {
 	PublicIP     string            `json:"public_ip,omitempty"`
 	Tap          string            `json:"tap"`
 	PID          int               `json:"pid,omitempty"`
-	HasSnapshot  bool              `json:"has_snapshot"` // stop snapshot (mem+vmstate) present
+	HasSnapshot  bool              `json:"has_snapshot"`          // stop snapshot (mem+vmstate) present
+	SnapSynced   bool              `json:"snap_synced,omitempty"` // stop snapshot fsynced: safe after a host crash
 	AgentReady   bool              `json:"agent_ready"`
 	DiffOK       bool              `json:"diff_ok,omitempty"`        // root/mem (or zeros) is a valid base for a diff snapshot
 	ResumeOnBoot bool              `json:"resume_on_boot,omitempty"` // stopped by a boatd shutdown

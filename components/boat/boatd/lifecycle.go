@@ -334,9 +334,12 @@ func (m *Manager) Stop(ctx context.Context, id, reason string) (VM, error) {
 	}
 	delVMNet(m.run, v)
 	v, err = m.update(id, reason, func(x *VM) {
-		x.State, x.PID, x.HasSnapshot, x.AgentReady, x.ExpiresAt = Stopped, 0, snap, false, nil
+		x.State, x.PID, x.HasSnapshot, x.SnapSynced, x.AgentReady, x.ExpiresAt = Stopped, 0, snap, false, false, nil
 	})
 	m.syncNet()
+	if snap {
+		go m.syncSnapshot(id)
+	}
 	return v, err
 }
 
