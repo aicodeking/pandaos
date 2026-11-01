@@ -207,7 +207,8 @@ class CmdTest(Base):
         self.assertIn(long_running, ids)
         self.assertIn(done[-1], ids)
         self.assertNotIn(done[0], ids)
-        self.assertLessEqual(len(ids), 3)
+        # the running one, CMD_KEEP finished, and the newest if it finished after its prune
+        self.assertLessEqual(len(ids), 4)
         self.assertEqual(ops.running_count(), 1)
 
 
