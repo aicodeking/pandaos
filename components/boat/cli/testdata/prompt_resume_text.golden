@@ -6,5 +6,5 @@ out
 conversation: conv_1
 --- requests
 GET /v1/vms/vm1 
-POST /v1/vms/vm1/prompts {"agent":"claude","conversation_id":"conv_1","cwd":"","model":"","new":false,"prompt":"hi"}
+POST /v1/vms/vm1/prompts {"conversation_id":"conv_1","cwd":"","model":"","new":false,"prompt":"hi"}
 GET /v1/vms/vm1/prompts/prm_1/logs?follow=1&offset=0 

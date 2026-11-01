@@ -289,7 +289,14 @@ func cmdPrompt(a *app, args []string) error {
 		return err
 	}
 	if turn.used() {
-		return a.startTurn(s(vm, "id"), obj{"prompt": text, "agent": *agent, "model": *model, "cwd": *cwd}, &turn)
+		body := obj{"prompt": text, "model": *model, "cwd": *cwd}
+		// Only an explicit --agent: a conversation resumes with its own agent.
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "agent" {
+				body["agent"] = *agent
+			}
+		})
+		return a.startTurn(s(vm, "id"), body, &turn)
 	}
 	return a.stream(vmPath(s(vm, "id"), "prompt"), obj{"prompt": text, "agent": *agent, "model": *model, "cwd": *cwd, "timeout_s": *timeout})
 }

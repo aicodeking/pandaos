@@ -5,4 +5,4 @@ exit 0
 --- stderr
 --- requests
 GET /v1/vms/vm1 
-POST /v1/vms/vm1/prompts {"agent":"claude","conversation_id":"","cwd":"","model":"","new":false,"prompt":"hi"}
+POST /v1/vms/vm1/prompts {"conversation_id":"","cwd":"","model":"","new":false,"prompt":"hi"}

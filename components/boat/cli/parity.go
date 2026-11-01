@@ -98,13 +98,15 @@ func (a *app) readFollow(body io.Reader, offset *int64) (done bool, code int, er
 		case ev.Exit != nil:
 			return true, *ev.Exit, nil
 		case ev.Signal != "":
+			fmt.Fprintln(a.errw, "boat: the command was killed by", ev.Signal)
 			return true, 128, nil
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return false, 0, err
 	}
-	return true, 0, nil // stream ended with neither: exit status unknown (killed)
+	fmt.Fprintln(a.errw, "boat: the command ended with no exit status (lost)")
+	return true, 1, nil
 }
 
 // ---- detached commands ----

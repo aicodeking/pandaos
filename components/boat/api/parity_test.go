@@ -1146,6 +1146,9 @@ func TestRemainingRoutes(t *testing.T) {
 		t.Errorf("remove member: %d", st)
 	}
 	id := e.createVM()
+	if st, vm := e.do(e.owner, "GET", "/v1/vms/"+id, nil); st != 200 || vm["id"] != id {
+		t.Errorf("get vm: %d %v", st, vm)
+	}
 	sid := e.snapshotOf(id)
 	if _, l := e.do(e.owner, "GET", "/v1/vms/"+id+"/snapshots", nil); len(list(l, "snapshots")) != 1 {
 		t.Errorf("snapshots: %v", l)
