@@ -6,9 +6,15 @@ export DISPLAY=:1 XDG_SESSION_TYPE=x11
 GEOMETRY=${BOAT_DESKTOP_GEOMETRY:-1920x1080}
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
+# No RFB or HTTP auth here, by design: the listeners are loopback-only and the
+# token proxy authenticates every connection, including the websocket, and checks
+# Origin. Anything that can reach loopback already runs inside the VM, where `dev`
+# has sudo; the VM is the boundary.
+extra=()
+if [ -r /etc/boat/desktop-xvnc.args ]; then read -r -a extra </etc/boat/desktop-xvnc.args || true; fi
 Xvnc :1 -interface 127.0.0.1 -rfbport 5901 -websocketPort 6081 \
   -httpd /usr/share/kasmvnc/www -disableBasicAuth -SecurityTypes None \
-  -FrameRate 60 -geometry "$GEOMETRY" -depth 24 -dpi 96 &
+  -FrameRate 60 -geometry "$GEOMETRY" -depth 24 -dpi 96 "${extra[@]}" &
 xvnc=$!
 
 # Generous: exiting early makes systemd kill a slow Xvnc and start over from

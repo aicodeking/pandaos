@@ -75,7 +75,7 @@ RUN curl -fsSLo /tmp/rustup-init https://static.rust-lang.org/rustup/archive/${R
  && su dev -c '~/.cargo/bin/rustc --version'
 
 COPY rootfs/ /
-COPY agent/boat-agent.py /usr/local/lib/boat/boat-agent.py
+COPY agent/boat-agent.py agent/boat_ops.py /usr/local/lib/boat/
 
 RUN chmod 0440 /etc/sudoers.d/dev && visudo -cf /etc/sudoers.d/dev \
  && chmod 755 /usr/local/lib/boat/boat-agent.py \
@@ -114,6 +114,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xfce4-terminal dbus-x11 x11-utils x11-xserver-utils xprintidle \
       fonts-dejavu-core fonts-liberation adwaita-icon-theme \
       libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-utils xdotool \
+      libavcodec60 libavformat60 libavutil58 libswscale7 \
  && curl -fsSLo /tmp/ghostty.deb "${GHOSTTY_URL}/${GHOSTTY_DEB}" \
  && echo "${GHOSTTY_SHA256}  /tmp/ghostty.deb" | sha256sum -c - \
  && apt-get install -y --no-install-recommends /tmp/ghostty.deb \
@@ -134,5 +135,14 @@ RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor
  && google-chrome --version
 
 COPY rootfs-full/ /
+# KasmVNC dlopens unversioned libav*.so for H.264 and silently has none without
+# them. The web client gets our defaults (boat-defaults.js) before it starts.
+RUN cd /usr/lib/x86_64-linux-gnu \
+ && ln -s libavcodec.so.60 libavcodec.so && ln -s libavformat.so.60 libavformat.so \
+ && ln -s libavutil.so.58 libavutil.so && ln -s libswscale.so.7 libswscale.so \
+ && test -e libavcodec.so && test -e libavformat.so && test -e libavutil.so && test -e libswscale.so \
+ && cd /usr/share/kasmvnc/www \
+ && sed -i 's#<head>#<head><script src="boat-defaults.js"></script>#' index.html vnc.html \
+ && grep -q boat-defaults index.html && grep -q boat-defaults vnc.html
 RUN chmod 755 /usr/local/bin/boat-desktop-session /usr/local/bin/boat-desktop-animate \
  && rm -rf /var/cache/* /var/log/*.log /tmp/*

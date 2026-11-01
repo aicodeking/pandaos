@@ -7,12 +7,10 @@ See ../README.md for the op reference.
 """
 import base64
 import fcntl
-import grp
 import hmac
 import ipaddress
 import json
 import os
-import pwd
 import re
 import secrets
 import select
@@ -25,11 +23,16 @@ import sys
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit
+
+# -I leaves the script's directory off sys.path; it is root-owned (/usr/local/lib/boat).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import boat_ops  # noqa: E402
+from boat_ops import OpError, b64d, user_info  # noqa: E402
 
 VERSION = "1"
 VSOCK_PORT = 1024
 MAX_LINE = 64 << 20          # one request line (base64 chunks included)
-CHUNK = 1 << 20              # get_file chunk size
 KILL_GRACE_S = 2.0           # SIGTERM -> SIGKILL on timeout
 DRAIN_GRACE_S = 1.0          # keep reading after exit (children holding pipes)
 DEFAULT_TIMEOUT_S = 600
@@ -68,10 +71,6 @@ RNDRESEEDCRNG = 0x5207       # _IO('R', 0x07)
 ENTROPY_MIN, ENTROPY_MAX = 32, 4096
 
 
-class OpError(Exception):
-    pass
-
-
 # ---------------------------------------------------------------- activity
 
 def touch(delta_running=0):
@@ -105,20 +104,13 @@ def idle_seconds():
         if _activity["running"]:
             return 0.0
         idle = time.monotonic() - _activity["last"]
-    if ssh_sessions_active():
+    if ssh_sessions_active() or boat_ops.running_count():
         return 0.0
     d = desktop_idle_s()
     return round(min(idle, d) if d is not None else idle, 1)
 
 
 # ---------------------------------------------------------------- helpers
-
-def b64d(s):
-    try:
-        return base64.b64decode(s or "", validate=True)
-    except (ValueError, TypeError) as e:
-        raise OpError("bad base64: %s" % e)
-
 
 def b64e(b):
     return base64.b64encode(b).decode()
@@ -149,16 +141,6 @@ def read_env_file(path=None):
     return env
 
 
-def user_info(name):
-    """pwd entry to switch to, or None to run as ourselves (non-root/tests)."""
-    if os.geteuid() != 0 or not name:
-        return None
-    try:
-        return pwd.getpwnam(name)
-    except KeyError:
-        raise OpError("no such user: %s" % name)
-
-
 # ---------------------------------------------------------------- exec
 
 def exec_env(req, pw):
@@ -181,17 +163,23 @@ def exec_env(req, pw):
     return env
 
 
-def spawn(req):
+def run_spec(req):
+    """Who, where and with what a request's argv runs: exec and cmd_start share this."""
     argv = req.get("argv")
     if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
         raise OpError("argv must be a non-empty list of strings")
     pw = user_info(req.get("user", EXEC_USER))
-    env = exec_env(req, pw)
-    cwd = req.get("cwd") or (pw.pw_dir if pw else None)
-    kw = dict(env=env, cwd=cwd, start_new_session=True, close_fds=True)
+    sp = {"argv": argv, "env": exec_env(req, pw), "cwd": req.get("cwd") or (pw.pw_dir if pw else None)}
     if pw:
-        kw.update(user=pw.pw_uid, group=pw.pw_gid,
+        sp.update(user=pw.pw_uid, group=pw.pw_gid,
                   extra_groups=os.getgrouplist(pw.pw_name, pw.pw_gid))
+    return sp
+
+
+def spawn(req):
+    sp = run_spec(req)
+    argv = sp.pop("argv")
+    kw = dict(sp, start_new_session=True, close_fds=True)
     if req.get("tty"):
         import pty
         master, slave = pty.openpty()
@@ -305,78 +293,6 @@ def pump(proc, fds, send, deadline):
             timed_out = True
             kill_group(proc, signal.SIGKILL)
     return timed_out
-
-
-# ---------------------------------------------------------------- files
-
-def chown_like_parent(path, owner):
-    if os.geteuid() != 0:
-        return
-    if owner:
-        user, _, group = str(owner).partition(":")
-        pw = user_info(user)
-        gid = grp.getgrnam(group).gr_gid if group else pw.pw_gid
-        os.chown(path, pw.pw_uid, gid)
-        return
-    st = os.stat(os.path.dirname(path) or "/")
-    os.chown(path, st.st_uid, st.st_gid)
-
-
-def makedirs_owned(d):
-    """mkdir -p, each new dir owned like its parent (so /home/dev/x stays dev's)."""
-    if not d or os.path.isdir(d):
-        return
-    makedirs_owned(os.path.dirname(d))
-    os.mkdir(d, 0o755)
-    chown_like_parent(d, None)
-
-
-def op_put_file(req, send):
-    path = req.get("path")
-    if not isinstance(path, str) or not os.path.isabs(path):
-        raise OpError("path must be absolute")
-    data = b64d(req.get("data_b64"))
-    offset = int(req.get("offset") or 0)
-    last = req.get("last", True)
-    part = path + ".boat-part"
-    makedirs_owned(os.path.dirname(path))
-    flags = os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if offset == 0 else 0)
-    fd = os.open(part, flags, 0o600)
-    try:
-        if offset and os.fstat(fd).st_size != offset:
-            raise OpError("offset %d != received %d" % (offset, os.fstat(fd).st_size))
-        os.lseek(fd, offset, os.SEEK_SET)
-        os.write(fd, data)
-        size = os.fstat(fd).st_size
-    finally:
-        os.close(fd)
-    if last:
-        mode = req.get("mode", 0o644)
-        os.chmod(part, int(mode, 8) if isinstance(mode, str) else int(mode))
-        chown_like_parent(part, req.get("owner"))
-        os.replace(part, path)
-        touch()
-    send({"ok": True, "size": size, "complete": bool(last)})
-
-
-def op_get_file(req, send):
-    path = req.get("path")
-    if not isinstance(path, str) or not os.path.isabs(path):
-        raise OpError("path must be absolute")
-    try:
-        f = open(path, "rb")
-    except OSError as e:
-        raise OpError("open %s: %s" % (path, e.strerror))
-    with f:
-        st = os.fstat(f.fileno())
-        offset = 0
-        while True:
-            data = f.read(CHUNK)
-            if not data:
-                break
-            send({"offset": offset, "data_b64": b64e(data)})
-            offset += len(data)
-    send({"eof": True, "size": offset, "mode": "%o" % (st.st_mode & 0o7777)})
 
 
 # ---------------------------------------------------------------- identity / env
@@ -544,8 +460,39 @@ def op_set_env(req, send):
 
 # ---------------------------------------------------------------- desktop
 
+def header_values(head, wanted):
+    """Every value of one header in an HTTP request head (name is lowercase)."""
+    out = []
+    for line in head.split(b"\r\n\r\n", 1)[0].decode("latin-1").split("\r\n")[1:]:
+        name, _, value = line.partition(":")
+        if name.strip().lower() == wanted:
+            out.append(value.strip())
+    return out
+
+
+def origin_ok(head):
+    """Browsers send Origin on websockets and cross-site requests; it must be this host.
+
+    The gateway preserves Host. No Origin means not a cross-site browser request.
+    """
+    origins = header_values(head, "origin")
+    if not origins:
+        return True
+    hosts = header_values(head, "host")
+    if len(hosts) != 1:
+        return False
+    return all(urlsplit(o).netloc.lower() == hosts[0].lower() for o in origins)
+
+
+def is_websocket(head):
+    return any("websocket" in v.lower() for v in header_values(head, "upgrade"))
+
+
 def check_token(head, token):
-    """Return (ok, redirect_location_or_None) for an HTTP request head."""
+    """Return (ok, redirect_location_or_None) for an HTTP request head.
+
+    The query token only ever buys the cookie redirect; a websocket needs the cookie.
+    """
     if not token:
         return False, None
     try:
@@ -556,18 +503,16 @@ def check_token(head, token):
     path, _, query = target.partition("?")
     params = [p for p in query.split("&") if p]
     rest = [p for p in params if not p.startswith("token=")]
-    for p in params:
+    for p in params if not is_websocket(head) else []:
         if p.startswith("token=") and hmac.compare_digest(p[6:], token):
             # relative Location, so a host-side path prefix survives
             loc = (path.rsplit("/", 1)[-1] or "./") + ("?" + "&".join(rest) if rest else "")
             return True, loc
-    for line in head.decode("latin-1").split("\r\n")[1:]:
-        name, _, value = line.partition(":")
-        if name.strip().lower() == "cookie":
-            for c in value.split(";"):
-                k, _, v = c.strip().partition("=")
-                if k == TOKEN_COOKIE and hmac.compare_digest(v, token):
-                    return True, None
+    for value in header_values(head, "cookie"):
+        for c in value.split(";"):
+            k, _, v = c.strip().partition("=")
+            if k == TOKEN_COOKIE and hmac.compare_digest(v, token):
+                return True, None
     return False, None
 
 
@@ -601,7 +546,7 @@ def proxy_conn(client, backend_addr):
         except OSError:
             return
         ok, loc = check_token(head, _desktop["token"])
-        if not ok:
+        if not ok or not origin_ok(head):
             client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
         if loc is not None:
@@ -713,8 +658,22 @@ def op_shutdown(req, send):
     threading.Thread(target=bye, daemon=True).start()
 
 
-OPS = {"health": op_health, "exec": op_exec, "put_file": op_put_file,
-       "get_file": op_get_file, "set_identity": op_set_identity, "set_env": op_set_env,
+def op_cmd_start(req, send):
+    boat_ops.op_cmd_start(req, send, run_spec(req))
+    touch()
+
+
+def op_put_file(req, send):
+    boat_ops.op_put_file(req, send)
+    touch()
+
+
+OPS = {"cmd_start": op_cmd_start, "cmd_list": boat_ops.op_cmd_list,
+       "cmd_status": boat_ops.op_cmd_status, "cmd_logs": boat_ops.op_cmd_logs,
+       "cmd_signal": boat_ops.op_cmd_signal, "file_list": boat_ops.op_file_list,
+       "file_delete": boat_ops.op_file_delete, "file_move": boat_ops.op_file_move,
+       "file_search": boat_ops.op_file_search, "health": op_health, "exec": op_exec, "put_file": op_put_file,
+       "get_file": boat_ops.op_get_file, "set_identity": op_set_identity, "set_env": op_set_env,
        "desktop": op_desktop, "shutdown": op_shutdown, "reseed": op_reseed, "sync": op_sync}
 
 

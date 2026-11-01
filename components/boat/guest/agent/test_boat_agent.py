@@ -15,6 +15,9 @@ spec = importlib.util.spec_from_file_location("boat_agent", os.path.join(HERE, "
 agent = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(agent)
 
+# ci runs this module only, so it pulls in the other agent test classes.
+from test_boat_ops import CmdTest, FileTest, SearchTest  # noqa: E402,F401
+
 
 def types_ns(**kw):
     import types
@@ -252,7 +255,105 @@ class AgentTest(unittest.TestCase):
         self.assertIn("error", self.c.call({"op": "desktop", "action": "dance"}))
 
 
+class AgentOpsWiringTest(unittest.TestCase):
+    """The cmd_*/file_* ops through the real protocol loop, env and all."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.saved = agent.ENV_FILE, agent.EXEC_USER, agent.boat_ops.CMD_ROOT
+        agent.ENV_FILE = os.path.join(self.tmp, "env")
+        agent.EXEC_USER = pwd.getpwuid(os.getuid()).pw_name
+        agent.boat_ops.CMD_ROOT = os.path.join(self.tmp, "cmds")
+        self.c = Client()
+
+    def tearDown(self):
+        self.c.close()
+        agent.ENV_FILE, agent.EXEC_USER, agent.boat_ops.CMD_ROOT = self.saved
+
+    def test_cmd_start_applies_set_env_and_request_env(self):
+        self.assertTrue(self.c.call({"op": "set_env", "vars": {"FROM_SET_ENV": "yes"}})["ok"])
+        m = self.c.call({"op": "cmd_start", "env": {"FROM_REQ": "too"}, "cwd": self.tmp,
+                         "argv": ["sh", "-c", 'printf "%s %s" "$FROM_SET_ENV" "$FROM_REQ"']})
+        self.assertTrue(m["ok"], m)
+        cid = m["cmd_id"]
+        for _ in range(200):
+            logs = self.c.call({"op": "cmd_logs", "cmd_id": cid})
+            if logs["size"] >= 7 and not logs["running"]:
+                break
+            time.sleep(0.02)
+        self.assertEqual(base64.b64decode(logs["data_b64"]), b"yes too")
+        st = self.c.call({"op": "cmd_status", "cmd_id": cid})
+        self.assertEqual((st["ok"], st["state"], st["exit"]), (True, "exited", 0))
+        self.assertEqual([c["cmd_id"] for c in self.c.call({"op": "cmd_list"})["cmds"]], [cid])
+
+    def test_cmd_errors_are_replies(self):
+        self.assertIn("argv", self.c.call({"op": "cmd_start", "argv": []})["error"])
+        self.assertIn("No such", self.c.call({"op": "cmd_start", "argv": ["/nope/x"]})["error"])
+        self.assertIn("No such command", self.c.call({"op": "cmd_status", "cmd_id": "x"})["error"])
+        self.assertIn("No such file", self.c.call({"op": "file_list", "path": "/nope/x"})["error"])
+        self.assertTrue(self.c.call({"op": "health"})["ok"])
+
+    def test_running_command_is_activity(self):
+        m = self.c.call({"op": "cmd_start", "argv": ["sleep", "30"]})
+        agent._activity["last"] -= 1000
+        try:
+            self.assertEqual(self.c.call({"op": "health"})["idle_s"], 0.0)
+        finally:
+            self.c.call({"op": "cmd_signal", "cmd_id": m["cmd_id"], "signal": "KILL"})
+
+    def test_file_ops_through_the_protocol(self):
+        with open(os.path.join(self.tmp, "a"), "w") as f:
+            f.write("x")
+        self.assertEqual(self.c.call({"op": "file_move", "from": os.path.join(self.tmp, "a"),
+                                      "to": os.path.join(self.tmp, "b")}), {"ok": True})
+        names = [e["name"] for e in self.c.call({"op": "file_list", "path": self.tmp})["entries"]]
+        self.assertIn("b", names)
+        self.assertEqual(self.c.call({"op": "file_delete", "path": os.path.join(self.tmp, "b")}),
+                         {"ok": True})
+
+
 class DesktopProxyTest(unittest.TestCase):
+    def test_websocket_needs_the_cookie_not_just_the_query_token(self):
+        tok = "t" * 32
+        ws = b"Upgrade: websocket\r\nConnection: Upgrade\r\nHost: h\r\n"
+        self.assertFalse(agent.check_token(b"GET /websockify?token=%s HTTP/1.1\r\n%s\r\n"
+                                           % (tok.encode(), ws), tok)[0])
+        self.assertFalse(agent.check_token(b"GET /websockify HTTP/1.1\r\n%s\r\n" % ws, tok)[0])
+        self.assertEqual(agent.check_token(b"GET /websockify HTTP/1.1\r\n%sCookie: boat_desktop=%s\r\n\r\n"
+                                           % (ws, tok.encode()), tok), (True, None))
+
+    def test_origin_must_match_host(self):
+        def head(*lines):
+            return b"GET / HTTP/1.1\r\n" + b"".join(l + b"\r\n" for l in lines) + b"\r\n"
+        ok = agent.origin_ok
+        self.assertTrue(ok(head(b"Host: vm.example")))                # no Origin: not a browser fetch
+        self.assertTrue(ok(head(b"Host: vm.example", b"Origin: https://vm.example")))
+        self.assertTrue(ok(head(b"Host: VM.example:8742", b"origin: http://vm.EXAMPLE:8742")))
+        self.assertFalse(ok(head(b"Host: vm.example", b"Origin: https://evil.example")))
+        self.assertFalse(ok(head(b"Host: vm.example", b"Origin: https://vm.example.evil.example")))
+        self.assertFalse(ok(head(b"Host: vm.example:1", b"Origin: https://vm.example:2")))
+        self.assertFalse(ok(head(b"Host: vm.example", b"Origin: null")))
+        self.assertFalse(ok(head(b"Origin: https://vm.example")))     # Origin without Host
+        self.assertFalse(ok(head(b"Host: vm.example", b"Origin: https://vm.example",
+                                 b"Origin: https://evil.example")))   # every Origin must match
+
+    def test_proxy_rejects_a_cross_origin_websocket_even_with_the_cookie(self):
+        backend = socket.socket()
+        backend.bind(("127.0.0.1", 0))
+        backend.listen(1)
+        srv = agent.start_proxy(port=0, backend_addr=backend.getsockname(), host="127.0.0.1")
+        agent._desktop["token"] = tok = "o" * 32
+        try:
+            s = socket.create_connection(("127.0.0.1", srv.getsockname()[1]), timeout=5)
+            with s:
+                s.sendall(b"GET /websockify HTTP/1.1\r\nHost: vm\r\nOrigin: https://evil\r\n"
+                          b"Upgrade: websocket\r\nCookie: boat_desktop=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"403", s.recv(4096))
+        finally:
+            agent._desktop["token"] = None
+            srv.close()
+            backend.close()
+
     def test_check_token(self):
         tok = "t" * 32
         ok, loc = agent.check_token(b"GET /?token=%s HTTP/1.1\r\n\r\n" % tok.encode(), tok)
@@ -390,15 +491,16 @@ class DesktopCheckTest(unittest.TestCase):
         agent._desktop["token"] = tok = "d" * 32
         try:
             link = "http://127.0.0.1:%d/?token=%s&meta=1" % (srv.getsockname()[1], tok)
+            env = dict(os.environ, DESKTOP_BROWSER="0")  # no real client behind the fake
             r = subprocess.run(["bash", os.path.join(HERE, "..", "desktop-check.sh"), link, "1"],
-                               capture_output=True, text=True, timeout=60)
+                               capture_output=True, text=True, timeout=60, env=env)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertIn("METRIC desktop_first_frame_ms=", r.stdout)
-            fps = float(r.stdout.split("METRIC desktop_fps=")[1].split()[0])
+            fps = float(r.stdout.split("METRIC desktop_raw_8bpp_fps=")[1].split()[0])
             self.assertGreater(fps, 10, r.stdout)
             bad = subprocess.run(["bash", os.path.join(HERE, "..", "desktop-check.sh"),
                                   link.replace(tok, "x" * 32), "1"],
-                                 capture_output=True, text=True, timeout=60)
+                                 capture_output=True, text=True, timeout=60, env=env)
             self.assertNotEqual(bad.returncode, 0)
         finally:
             agent._desktop["token"] = None

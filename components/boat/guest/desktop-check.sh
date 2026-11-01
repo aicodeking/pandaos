@@ -13,12 +13,17 @@
 # 3. Passes once the first FramebufferUpdate arrives, then counts non-empty
 #    updates for SECONDS and prints
 #      METRIC desktop_first_frame_ms=N
-#      METRIC desktop_fps=F
-# $ANIMATE_CMD, if set, runs in the background first (e.g.
+#      METRIC desktop_raw_8bpp_fps=F    server side only, not what a user sees
+# 4. If Chrome is here, desktop-browser-fps.py opens LINK in the real web client
+#    and prints desktop_browser_fps, which is what a user sees. It fails below
+#    MIN_BROWSER_FPS (default below). DESKTOP_BROWSER=0 skips this step.
+# $ANIMATE_CMD, if set, runs in a loop in the background (e.g.
 # "boat exec VM -- boat-desktop-animate 10") so there is something to stream.
 set -euo pipefail
 LINK=${1:?usage: desktop-check.sh LINK [SECONDS]}
 SECS=${2:-5}
+HERE=$(cd "$(dirname "$0")" && pwd)
+MIN_BROWSER_FPS=${MIN_BROWSER_FPS:-0}
 W=$(mktemp -d)
 trap 'rm -rf "$W"; [[ -n ${anim:-} ]] && kill "$anim" 2>/dev/null; true' EXIT
 
@@ -48,7 +53,7 @@ grep -qiE '<html|<!doctype html' "$W/page.html" || { echo "desktop-check: $final
 echo "desktop-check: page $final (HTTP $code)"
 
 if [[ -n ${ANIMATE_CMD:-} ]]; then
-  bash -c "$ANIMATE_CMD" >"$W/animate.log" 2>&1 &
+  ( while :; do bash -c "$ANIMATE_CMD" || sleep 1; done ) >"$W/animate.log" 2>&1 &
   anim=$!
   sleep 2
 fi
@@ -239,6 +244,13 @@ if first_ms is None:
     die("no framebuffer update")
 elapsed = min(time.monotonic(), stop) - t_first
 print("METRIC desktop_first_frame_ms=%d" % first_ms)
-print("METRIC desktop_fps=%.1f" % (frames / max(elapsed, 1e-3)))
+print("METRIC desktop_raw_8bpp_fps=%.1f" % (frames / max(elapsed, 1e-3)))
 PY
-if [[ -n ${anim:-} ]]; then cat "$W/animate.log" 2>/dev/null || true; fi
+if [[ ${DESKTOP_BROWSER:-1} != 0 ]]; then
+  if command -v "${CHROME:-google-chrome}" >/dev/null || command -v chromium >/dev/null; then
+    MIN_FPS=$MIN_BROWSER_FPS python3 -I "$HERE/desktop-browser-fps.py" "$LINK" "$SECS"
+  else
+    echo "desktop-check: no Chrome here, so no desktop_browser_fps" >&2
+  fi
+fi
+if [[ -n ${anim:-} ]]; then sort -u "$W/animate.log" 2>/dev/null || true; fi

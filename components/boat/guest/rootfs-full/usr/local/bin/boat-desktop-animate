@@ -1,17 +1,24 @@
 #!/bin/bash
-# Keep the desktop busy for N seconds (default 10) so a stream fps measurement
-# means something: glxgears on Mesa llvmpipe, or, if GL is unavailable, an
-# xdotool-moved window. Prints which one ran.
+# Keep the desktop busy for N seconds so a stream fps measurement means something.
+#   boat-desktop-animate [SECONDS=10] [full|small]
+# full: glxgears over the whole screen on Mesa llvmpipe, a 1080p worst case.
+# small: a 400x400 window, more like normal desktop use.
+# Falls back to an xdotool-moved window if GL is unavailable. Prints the source's
+# own frame rate, because a slow source would otherwise look like a slow stream.
 set -u
 secs=${1:-10}
-export DISPLAY=${DISPLAY:-:1}
+mode=${2:-full}
+export DISPLAY=${DISPLAY:-:1} vblank_mode=0
+if [ "$mode" = full ]; then geom=(-fullscreen); else geom=(-geometry 400x400+100+100); fi
 
-timeout "$secs" glxgears -geometry 400x400+100+100 >/dev/null 2>&1 &
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+timeout "$secs" stdbuf -oL glxgears "${geom[@]}" >"$log" 2>&1 &
 gears=$!
 sleep 1
 if kill -0 "$gears" 2>/dev/null; then
-  echo "animate: glxgears $secs s"
   wait "$gears"
+  echo "animate: glxgears $mode, $(grep 'frames in' "$log" | tail -1)"
   exit 0
 fi
 

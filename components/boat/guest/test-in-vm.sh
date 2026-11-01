@@ -190,6 +190,37 @@ for c in "claude --version" "codex --version" "opencode --version" "gh --version
   pass "$c: $v"
 done
 
+# ---- 8b. detached commands: survive an agent restart; signal; logs
+jget() { python3 -c 'import json,sys; v=json.loads(sys.argv[1])
+for k in sys.argv[2:]: v=v[k]
+print(v)' "$@"; }
+reply=$(boat '{"op":"cmd_start","argv":["sh","-c","id -un; echo $HOME; echo started; exec sleep 1000"]}') || fail "cmd_start: $reply"
+cid=$(jget "$reply" cmd_id)
+vexec 30 root systemctl restart boat-agent.service >/dev/null 2>&1 || true
+for _ in $(seq 30); do boat '{"op":"health"}' >/dev/null 2>&1 && break; sleep 1; done
+reply=$(boat "{\"op\":\"cmd_status\",\"cmd_id\":\"$cid\"}") || fail "cmd_status: $reply"
+[[ $(jget "$reply" state) == running ]] || fail "command did not survive an agent restart: $reply"
+idle=$(jget "$(boat '{"op":"health"}')" idle_s); [[ $idle == 0* ]] || fail "running command is not activity: idle_s=$idle"
+reply=$(boat "{\"op\":\"cmd_logs\",\"cmd_id\":\"$cid\"}") || fail "cmd_logs: $reply"
+logtext=$(jget "$reply" data_b64 | base64 -d)
+[[ $logtext == *dev*/home/dev*started* ]] || fail "cmd_logs: $logtext"
+[[ $(boat '{"op":"cmd_list"}') == *"$cid"* ]] || fail "cmd_list"
+boat "{\"op\":\"cmd_signal\",\"cmd_id\":\"$cid\",\"signal\":\"TERM\"}" >/dev/null || fail "cmd_signal"
+for _ in $(seq 20); do reply=$(boat "{\"op\":\"cmd_status\",\"cmd_id\":\"$cid\"}"); [[ $reply == *'"state": "exited"'* ]] && break; sleep 0.5; done
+[[ $(jget "$reply" signal) == SIGTERM ]] || fail "cmd_signal result: $reply"
+pass "cmd_*: survives an agent restart, runs as dev, logs, activity, signal"
+
+# ---- 8c. file ops, as dev's files and through real ripgrep
+vexec 30 dev sh -c 'mkdir -p /home/dev/ft/sub && echo needle >/home/dev/ft/sub/a.txt' >/dev/null || fail "file setup"
+[[ $(boat '{"op":"file_list","path":"/home/dev/ft"}') == *'"name": "sub"'* ]] || fail "file_list"
+[[ $(boat '{"op":"file_search","path":"/home/dev/ft","query":"needle"}') == *'/home/dev/ft/sub/a.txt'* ]] || fail "file_search content"
+[[ $(boat '{"op":"file_search","path":"/home/dev/ft","query":"A.TXT","content":false}') == *'a.txt'* ]] || fail "file_search names"
+boat '{"op":"file_move","from":"/home/dev/ft/sub/a.txt","to":"/home/dev/ft/b.txt"}' >/dev/null || fail "file_move"
+boat '{"op":"file_delete","path":"/home/dev/ft","recursive":true}' >/dev/null || fail "file_delete"
+vexec 30 dev test ! -e /home/dev/ft || fail "file_delete left it"
+boat '{"op":"file_delete","path":"/","recursive":true}' >/dev/null 2>&1 && fail "file_delete / was allowed"
+pass "file_*: list, search (ripgrep), move, delete"
+
 # ---- 9. idle tracking
 sleep 3
 idle=$(boat '{"op":"health"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["idle_s"])')
@@ -211,9 +242,53 @@ if [[ $VARIANT == full ]]; then
   vexec 30 dev env DISPLAY=:1 xdpyinfo >/dev/null 2>&1 || fail "X display :1"
   pass "desktop: KasmVNC on :$port, token -> cookie, backend local-only"
 
-  # websocket + RFB through the token proxy, fps with glxgears running
+  # The proxy guards the websocket too, whatever the HTTP path did.
+  WSH=(-H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==")
+  wscode() { curl -s -m 5 --http1.1 -o /dev/null -w '%{http_code}' "${WSH[@]}" "$@" || true; }
+  [[ $(wscode "$base/websockify") == 403 ]] || fail "websocket without the cookie"
+  [[ $(wscode "$base/websockify?token=$tok") == 403 ]] || fail "websocket with only the query token"
+  [[ $(wscode -b "$W/jar" -H "Origin: https://evil.example" "$base/websockify") == 403 ]] || fail "websocket from another Origin"
+  [[ $(wscode -b "$W/jar" -H "Origin: $base" "$base/websockify") == 101 ]] || fail "websocket with cookie and own Origin"
+  curl -s -m 3 "http://$GUEST_IP:5901/" >/dev/null && fail "RFB port reachable from the host"
+  pass "desktop proxy: websocket needs the cookie and a matching Origin; 5901/6081 are loopback-only"
+
+  # What a viewer's browser gets, one row per configuration, always 1920x1080.
+  browser_row() {  # browser_row NAME DEFAULTS_JS XVNC_ARGS ANIMATE_MODE
+    local name=$1 js=$2 args=$3 mode=$4 reply link anim log
+    printf '%s\n' "$js" >"$W/defaults.js"; printf '%s\n' "$args" >"$W/xvnc.args"
+    boat put "$W/defaults.js" /usr/share/kasmvnc/www/boat-defaults.js 0644 >/dev/null || fail "row $name: js"
+    boat put "$W/xvnc.args" /etc/boat/desktop-xvnc.args 0644 >/dev/null || fail "row $name: args"
+    boat '{"op":"desktop","action":"stop"}' >/dev/null
+    reply=$(boat '{"op":"desktop","action":"start"}') || fail "row $name: start: $reply"
+    link="$base/?token=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["token"])' "$reply")"
+    anim=$(python3 -c 'import json,sys; print(json.dumps({"op":"exec","argv":["boat-desktop-animate","12",sys.argv[1]],"timeout_s":20}))' "$mode")
+    log="$W/row-$name.log"
+    ( while :; do python3 "$W/boat.py" "$W/vsock.sock" "$anim" 2>/dev/null || sleep 1; done ) >"$W/row-$name.anim" &
+    local animpid=$!
+    python3 -I "$HERE/desktop-browser-fps.py" "$link" 5 >"$log" 2>&1 || cat "$log"
+    kill "$animpid" 2>/dev/null || true
+    sed -E "s/^METRIC desktop_browser_/METRIC desktop_row_${name}_/" "$log" | grep '^METRIC'
+    grep -h gears "$W/row-$name.anim" | tail -1
+  }
+  stock_js=$(printf '%s' 'localStorage.setItem("video_quality","2");localStorage.setItem("stream_mode","-1025");')
+  image_js=$(printf '%s' 'localStorage.setItem("video_quality","3");localStorage.setItem("stream_mode","-1025");')
+  default_js=$(vexec 30 root cat /usr/share/kasmvnc/www/boat-defaults.js)
+  default_args=$(vexec 30 root cat /etc/boat/desktop-xvnc.args)
+  if command -v google-chrome >/dev/null || command -v chromium >/dev/null; then
+    browser_row stock_q2_24fps_image "$stock_js" "" full
+    browser_row q3_60fps_image "$image_js" "" full
+    browser_row q3_60fps_image_small "$image_js" "" small
+    browser_row default_h264_small "$default_js" "$default_args" small
+    browser_row default_h264 "$default_js" "$default_args" full
+  else
+    printf '\033[33mWARN\033[0m no Chrome on this host, so no browser rows\n'
+    reply=$(boat '{"op":"desktop","action":"start"}') || fail "desktop start: $reply"
+  fi
+  tok=$(boat '{"op":"desktop","action":"start"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
+  # websocket + RFB through the token proxy (server-side rate), default configuration
   anim=$(python3 -c 'import json; print(json.dumps({"op":"exec","argv":["boat-desktop-animate","12"],"timeout_s":20}))')
-  ANIMATE_CMD="python3 $W/boat.py $W/vsock.sock '$anim'" \
+  DESKTOP_BROWSER=0 ANIMATE_CMD="python3 $W/boat.py $W/vsock.sock '$anim'" \
     "$HERE/desktop-check.sh" "$base/?token=$tok" 5 | tee "$W/desktop-check.log" || fail "desktop-check"
   pass "desktop stream: $(grep -h '^METRIC' "$W/desktop-check.log" | tr '\n' ' ')"
   vexec 30 dev env DISPLAY=:1 glxinfo -B 2>&1 | grep -E 'OpenGL (renderer|core profile version)' || true
