@@ -1,0 +1,21 @@
+#!/bin/bash
+# XFCE on KasmVNC's Xvnc. Xvnc serves the web client and the websocket on
+# 127.0.0.1:6081 only; boat-agent's token proxy on :6080 is the way in.
+set -euo pipefail
+export DISPLAY=:1 XDG_SESSION_TYPE=x11
+GEOMETRY=${BOAT_DESKTOP_GEOMETRY:-1920x1080}
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+
+Xvnc :1 -interface 127.0.0.1 -rfbport 5901 -websocketPort 6081 \
+  -httpd /usr/share/kasmvnc/www -disableBasicAuth -SecurityTypes None \
+  -FrameRate 60 -geometry "$GEOMETRY" -depth 24 -dpi 96 &
+xvnc=$!
+
+for _ in $(seq 100); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
+xdpyinfo >/dev/null || { echo "Xvnc did not start" >&2; exit 1; }
+xset s off -dpms || true
+
+dbus-run-session -- startxfce4 &
+session=$!
+# Either one dying ends the unit; systemd restarts it.
+wait -n "$xvnc" "$session"

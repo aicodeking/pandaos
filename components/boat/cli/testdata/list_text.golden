@@ -1,0 +1,9 @@
+$ boat list
+exit 0
+--- stdout
+ID   NAME  SIZE     STATE    IMAGE
+vm1  dev   default  running  ubuntu-24.04
+vm2  ci    large    stopped  ubuntu-24.04
+--- stderr
+--- requests
+GET /v1/vms 

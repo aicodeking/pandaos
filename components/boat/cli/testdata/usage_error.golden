@@ -1,0 +1,6 @@
+$ boat bogus
+exit 2
+--- stdout
+--- stderr
+<usage>
+--- requests

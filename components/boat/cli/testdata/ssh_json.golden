@@ -1,0 +1,8 @@
+$ boat ssh vm1 --json
+exit 0
+--- stdout
+{"argv":["ssh","-p","22","-o","StrictHostKeyChecking=accept-new","-o","ProxyCommand=ssh -W %h:%p -p 2222 boat@gw.example","ubuntu@10.0.0.5"],"host":"10.0.0.5","jump":"boat@gw.example:2222","port":22,"user":"ubuntu"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+POST /v1/vms/vm1/ssh {"public_key":"ssh-ed25519 AAAAC3Nza me@laptop"}

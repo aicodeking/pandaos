@@ -1,0 +1,13 @@
+{
+  "name": "@boat/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript/JavaScript SDK for the Boat VM API (fetch-based, no dependencies)",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": { ".": { "types": "./index.d.ts", "default": "./index.js" } },
+  "files": ["index.js", "index.d.ts"],
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test test/*.test.js" },
+  "license": "MIT"
+}

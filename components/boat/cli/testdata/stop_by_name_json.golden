@@ -1,0 +1,9 @@
+$ boat stop dev --json
+exit 0
+--- stdout
+{"id":"vm1","image":"ubuntu-24.04","name":"dev","size":"default","state":"stopped"}
+--- stderr
+--- requests
+GET /v1/vms/dev 
+GET /v1/vms 
+POST /v1/vms/vm1/stop 

@@ -1,0 +1,7 @@
+$ boat webhooks ls --json
+exit 0
+--- stdout
+{"events":["vm.*"],"id":"wh_1","url":"https://h.example"}
+--- stderr
+--- requests
+GET /v1/webhooks 

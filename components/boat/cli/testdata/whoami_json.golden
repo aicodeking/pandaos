@@ -1,0 +1,7 @@
+$ boat whoami --json
+exit 0
+--- stdout
+{"key_id":"k1","role":"owner","scopes":["vms:read","vms:write","exec","admin"],"team":{"id":"team_1","name":"acme"},"user":{"id":"usr_1","name":"alice"}}
+--- stderr
+--- requests
+GET /v1/me 

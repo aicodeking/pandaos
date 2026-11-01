@@ -1,0 +1,9 @@
+$ boat exec vm1 -- ls
+exit 3
+--- stdout
+hi
+--- stderr
+warn
+--- requests
+GET /v1/vms/vm1 
+POST /v1/vms/vm1/exec {"cmd":["ls"],"cwd":"","timeout_s":0}

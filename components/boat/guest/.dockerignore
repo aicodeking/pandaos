@@ -1,0 +1,4 @@
+out/
+agent/__pycache__/
+*.ext4
+*.zst

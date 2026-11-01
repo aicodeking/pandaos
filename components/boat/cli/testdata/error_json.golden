@@ -1,0 +1,8 @@
+$ boat stop nope --json
+exit 1
+--- stdout
+--- stderr
+{"error":{"message":"no VM with id or name \"nope\""}}
+--- requests
+GET /v1/vms/nope 
+GET /v1/vms 

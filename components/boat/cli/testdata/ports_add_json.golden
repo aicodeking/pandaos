@@ -1,0 +1,8 @@
+$ boat ports add vm1 8080 --json
+exit 0
+--- stdout
+{"guest_port":8080,"hostname":"8080-vm1"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+POST /v1/vms/vm1/ports {"port":8080,"public":false}

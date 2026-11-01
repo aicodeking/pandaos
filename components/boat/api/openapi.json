@@ -1,0 +1,1926 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "Boat API",
+  "version": "1.0.0",
+  "description": "Persistent Ubuntu VMs for AI agents. Auth: Authorization: Bearer boat_<id>_<secret>. Each operation lists its required scope in x-boat-scope. Webhooks are signed: X-Boat-Signature: t=<unix>,v1=hex(HMAC-SHA256(secret, t + '.' + body))."
+ },
+ "servers": [
+  {
+   "url": "/"
+  }
+ ],
+ "security": [
+  {
+   "bearer": []
+  }
+ ],
+ "paths": {
+  "/healthz": {
+   "get": {
+    "summary": "Liveness",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    }
+   }
+  },
+  "/v1/openapi.json": {
+   "get": {
+    "summary": "This document",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "OpenAPI 3.1"
+     }
+    }
+   }
+  },
+  "/v1/me": {
+   "get": {
+    "summary": "Caller identity, team, role and effective scopes",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Me"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/images": {
+   "get": {
+    "summary": "Available images",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "images": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "id": {
+              "type": "string"
+             },
+             "default": {
+              "type": "boolean"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/usage": {
+   "get": {
+    "summary": "Team usage since a time (default: all recorded): VM-seconds by size, snapshot-days (from boatd)",
+    "x-boat-scope": "vms:read",
+    "parameters": [
+     {
+      "name": "since",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "RFC 3339 (alias: from); usage is counted up to now"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms": {
+   "get": {
+    "summary": "List team VMs",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "VMs"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "vms": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/VM"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "summary": "Create a VM (team secrets injected as env)",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/CreateVM"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VM"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}": {
+   "get": {
+    "summary": "Get a VM",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VM"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "summary": "Delete a VM",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Ok"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/start": {
+   "post": {
+    "summary": "Resume a stopped VM (secrets re-injected)",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VM"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/stop": {
+   "post": {
+    "summary": "Stop (snapshot) a VM",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VM"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/fork": {
+   "post": {
+    "summary": "Fork a VM",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VM"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/exec": {
+   "post": {
+    "summary": "Run a command; streams JSON lines {stream,data_b64} then {exit}",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Exec"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/x-ndjson": {
+        "schema": {
+         "$ref": "#/components/schemas/ExecEvent"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/prompt": {
+   "post": {
+    "summary": "Run a coding agent headless in the VM; streams like exec",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Prompt"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/x-ndjson": {
+        "schema": {
+         "$ref": "#/components/schemas/ExecEvent"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/files": {
+   "get": {
+    "summary": "Download a file",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "absolute path"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "put": {
+    "summary": "Upload a file",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "absolute path"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/octet-stream": {
+       "schema": {
+        "type": "string",
+        "format": "binary"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Ok"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/ports": {
+   "get": {
+    "summary": "List exposed ports",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ports": {
+           "type": "array",
+           "items": {
+            "type": "object"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "summary": "Expose a port",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "port": {
+          "type": "integer"
+         },
+         "public": {
+          "type": "boolean"
+         }
+        },
+        "required": [
+         "port"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/ports/{port}": {
+   "delete": {
+    "summary": "Unexpose a port",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "port",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Ok"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/snapshots": {
+   "get": {
+    "summary": "List snapshots",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "summary": "Take a snapshot",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/snapshots/{sid}": {
+   "delete": {
+    "summary": "Delete a snapshot",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "sid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Ok"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/ssh": {
+   "post": {
+    "summary": "SSH connection info; registers public_key in ~/.ssh/authorized_keys",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "public_key": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SSH"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/desktop": {
+   "get": {
+    "summary": "Signed short-lived desktop URL",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "url": {
+           "type": "string"
+          },
+          "expires_at": {
+           "type": "string",
+           "format": "date-time"
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/teams": {
+   "get": {
+    "summary": "Teams the caller belongs to",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "teams": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Team"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "summary": "Create a team (caller becomes owner)",
+    "x-boat-scope": "admin",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "name"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Team"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/teams/{id}": {
+   "get": {
+    "summary": "Team with members",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Team"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/teams/{id}/members": {
+   "post": {
+    "summary": "Create a user in the team; returns their first key",
+    "x-boat-scope": "admin",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "role": {
+          "enum": [
+           "owner",
+           "admin",
+           "member"
+          ]
+         }
+        },
+        "required": [
+         "name"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "user": {
+           "type": "object"
+          },
+          "role": {
+           "type": "string"
+          },
+          "key": {
+           "$ref": "#/components/schemas/Key"
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/teams/{id}/members/{user}": {
+   "delete": {
+    "summary": "Remove a member and revoke their keys for the team",
+    "x-boat-scope": "admin",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     },
+     {
+      "name": "user",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Ok"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/keys": {
+   "get": {
+    "summary": "List keys (own; all team keys with admin)",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "keys": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Key"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "summary": "Mint a key; scopes \u2286 caller scopes \u2229 role. token shown once",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "team_id": {
+          "type": "string"
+         },
+         "scopes": {
+          "type": "array",
+          "items": {
+           "$ref": "#/components/schemas/Scope"
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Key"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/keys/{id}": {
+   "delete": {
+    "summary": "Revoke a key",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Ok"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/secrets": {
+   "get": {
+    "summary": "List secret names (values are never returned)",
+    "x-boat-scope": "vms:read",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "secrets": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "name": {
+              "type": "string"
+             },
+             "updated": {
+              "type": "string",
+              "format": "date-time"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/secrets/{name}": {
+   "put": {
+    "summary": "Set a secret (AES-256-GCM at rest)",
+    "x-boat-scope": "admin",
+    "parameters": [
+     {
+      "name": "name",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "UPPER_SNAKE env var name"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "value": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "value"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "summary": "Delete a secret",
+    "x-boat-scope": "admin",
+    "parameters": [
+     {
+      "name": "name",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Ok"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/webhooks": {
+   "get": {
+    "summary": "List webhooks",
+    "x-boat-scope": "admin",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "webhooks": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Webhook"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "summary": "Create a webhook; secret shown once",
+    "x-boat-scope": "admin",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "url": {
+          "type": "string"
+         },
+         "events": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        },
+        "required": [
+         "url"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Webhook"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/webhooks/{id}": {
+   "delete": {
+    "summary": "Delete a webhook",
+    "x-boat-scope": "admin",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Ok"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/webhooks/{id}/deliveries": {
+   "get": {
+    "summary": "Last 100 delivery attempts",
+    "x-boat-scope": "admin",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "deliveries": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Delivery"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/webhooks/{id}/test": {
+   "post": {
+    "summary": "Send a webhook.test event",
+    "x-boat-scope": "admin",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "202": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "event_id": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "securitySchemes": {
+   "bearer": {
+    "type": "http",
+    "scheme": "bearer"
+   }
+  },
+  "schemas": {
+   "Ok": {
+    "type": "object",
+    "properties": {
+     "ok": {
+      "type": "boolean"
+     }
+    }
+   },
+   "Error": {
+    "type": "object",
+    "properties": {
+     "error": {
+      "type": "object",
+      "properties": {
+       "code": {
+        "type": "string"
+       },
+       "message": {
+        "type": "string"
+       },
+       "request_id": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   },
+   "Scope": {
+    "enum": [
+     "vms:read",
+     "vms:write",
+     "exec",
+     "admin"
+    ]
+   },
+   "Size": {
+    "enum": [
+     "small",
+     "default",
+     "large",
+     "xlarge"
+    ]
+   },
+   "VM": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "size": {
+      "$ref": "#/components/schemas/Size"
+     },
+     "image": {
+      "type": "string"
+     },
+     "team": {
+      "type": "string"
+     },
+     "state": {
+      "enum": [
+       "creating",
+       "running",
+       "stopping",
+       "stopped",
+       "starting",
+       "forking",
+       "error"
+      ]
+     },
+     "labels": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string"
+      }
+     },
+     "ports": {
+      "type": "array",
+      "items": {
+       "type": "object"
+      }
+     }
+    }
+   },
+   "CreateVM": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "size": {
+      "$ref": "#/components/schemas/Size"
+     },
+     "image": {
+      "type": "string"
+     },
+     "ttl_s": {
+      "type": "integer"
+     },
+     "idle_stop_s": {
+      "type": "integer",
+      "description": "Auto-stop after this many idle seconds; -1 = never; 0 = server default"
+     },
+     "snapshot": {
+      "type": "string",
+      "description": "Create the VM from this snapshot (same team) instead of an image"
+     },
+     "labels": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string"
+      }
+     },
+     "env": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string"
+      }
+     }
+    }
+   },
+   "Exec": {
+    "type": "object",
+    "properties": {
+     "cmd": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "env": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string"
+      }
+     },
+     "cwd": {
+      "type": "string"
+     },
+     "stdin_b64": {
+      "type": "string"
+     },
+     "timeout_s": {
+      "type": "integer"
+     }
+    },
+    "required": [
+     "cmd"
+    ]
+   },
+   "Prompt": {
+    "type": "object",
+    "properties": {
+     "prompt": {
+      "type": "string"
+     },
+     "agent": {
+      "enum": [
+       "claude",
+       "codex",
+       "opencode"
+      ],
+      "default": "claude"
+     },
+     "model": {
+      "type": "string"
+     },
+     "cwd": {
+      "type": "string"
+     },
+     "timeout_s": {
+      "type": "integer"
+     }
+    },
+    "required": [
+     "prompt"
+    ]
+   },
+   "ExecEvent": {
+    "type": "object",
+    "properties": {
+     "stream": {
+      "enum": [
+       "stdout",
+       "stderr"
+      ]
+     },
+     "data_b64": {
+      "type": "string"
+     },
+     "exit": {
+      "type": "integer"
+     }
+    }
+   },
+   "SSH": {
+    "type": "object",
+    "properties": {
+     "host": {
+      "type": "string"
+     },
+     "port": {
+      "type": "integer"
+     },
+     "user": {
+      "type": "string"
+     },
+     "jump": {
+      "type": "string"
+     }
+    }
+   },
+   "Me": {
+    "type": "object",
+    "properties": {
+     "user": {
+      "type": "object"
+     },
+     "team": {
+      "type": "object",
+      "properties": {
+       "id": {
+        "type": "string"
+       },
+       "name": {
+        "type": "string"
+       }
+      }
+     },
+     "role": {
+      "type": "string"
+     },
+     "scopes": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Scope"
+      }
+     },
+     "key_id": {
+      "type": "string"
+     }
+    }
+   },
+   "Team": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "role": {
+      "type": "string"
+     },
+     "members": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "user_id": {
+         "type": "string"
+        },
+        "role": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "created": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "Key": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "user_id": {
+      "type": "string"
+     },
+     "team_id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "scopes": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Scope"
+      }
+     },
+     "created": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "token": {
+      "type": "string",
+      "description": "only in the create response"
+     }
+    }
+   },
+   "Webhook": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "url": {
+      "type": "string"
+     },
+     "events": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "created": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "secret": {
+      "type": "string",
+      "description": "only in the create response"
+     }
+    }
+   },
+   "Delivery": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "webhook_id": {
+      "type": "string"
+     },
+     "event_id": {
+      "type": "string"
+     },
+     "event": {
+      "type": "string"
+     },
+     "attempt": {
+      "type": "integer"
+     },
+     "status": {
+      "type": "integer"
+     },
+     "ok": {
+      "type": "boolean"
+     },
+     "error": {
+      "type": "string"
+     },
+     "at": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   }
+  },
+  "responses": {
+   "Error": {
+    "description": "Error",
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    }
+   }
+  }
+ }
+}

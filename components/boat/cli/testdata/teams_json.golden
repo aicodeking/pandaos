@@ -1,0 +1,7 @@
+$ boat teams --json
+exit 0
+--- stdout
+{"id":"team_1","name":"acme","role":"owner"}
+--- stderr
+--- requests
+GET /v1/teams 

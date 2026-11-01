@@ -1,0 +1,14 @@
+[Unit]
+Description=Grow the root ext4 to fill /dev/vda
+DefaultDependencies=no
+After=local-fs.target
+Before=boat-agent.service
+
+[Service]
+Type=oneshot
+# Idempotent and cheap: a fork may get a bigger disk than its parent.
+ExecStart=/usr/sbin/resize2fs /dev/vda
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

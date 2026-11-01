@@ -1,0 +1,7 @@
+$ boat new --name new --size small --ttl 2h --json
+exit 0
+--- stdout
+{"id":"vm3","image":"ubuntu-24.04","name":"new","size":"small","state":"creating"}
+--- stderr
+--- requests
+POST /v1/vms {"image":"","name":"new","size":"small","ttl_s":7200}

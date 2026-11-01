@@ -1,0 +1,718 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+var commands map[string]func(*app, []string) error
+
+func init() {
+	commands = map[string]func(*app, []string) error{
+		"whoami": cmdWhoami, "images": cmdImages, "usage": cmdUsage,
+		"new": cmdNew, "list": cmdList, "ls": cmdList,
+		"ssh": cmdSSH, "scp": cmdSCP, "exec": cmdExec, "prompt": cmdPrompt,
+		"fork": cmdFork, "stop": vmAction("stop"), "start": vmAction("start"), "rm": cmdRm,
+		"desktop": cmdDesktop, "ports": cmdPorts, "snapshots": cmdSnapshots,
+		"secrets": cmdSecrets, "keys": cmdKeys, "teams": cmdTeams, "webhooks": cmdWebhooks,
+	}
+}
+
+var (
+	vmCols   = []string{"id", "name", "size", "state", "image"}
+	portCols = []string{"guest_port", "host_port", "hostname"}
+)
+
+func (a *app) emitVM(vm obj) error {
+	return a.emitList([]obj{vm}, vmCols...)
+}
+
+func cmdWhoami(a *app, args []string) error {
+	var me obj
+	if err := a.c.call("GET", "/v1/me", nil, &me); err != nil {
+		return err
+	}
+	return a.emit(me, func() {
+		u, _ := me["user"].(map[string]any)
+		t, _ := me["team"].(map[string]any)
+		fmt.Fprintf(a.out, "%v (%v) in team %v as %v; scopes %v\n", u["name"], u["id"], t["name"], me["role"], me["scopes"])
+	})
+}
+
+func listCall(a *app, path, key string) ([]obj, error) {
+	var out map[string][]obj
+	if err := a.c.call("GET", path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out[key], nil
+}
+
+func cmdImages(a *app, args []string) error {
+	l, err := listCall(a, "/v1/images", "images")
+	if err != nil {
+		return err
+	}
+	return a.emitList(l, "id", "default")
+}
+
+func cmdUsage(a *app, args []string) error {
+	var u obj
+	if err := a.c.call("GET", "/v1/usage", nil, &u); err != nil {
+		return err
+	}
+	return a.emit(u, func() {
+		b, _ := json.MarshalIndent(u, "", "  ")
+		fmt.Fprintln(a.out, string(b))
+	})
+}
+
+type labels map[string]string
+
+func (l labels) String() string { return "" }
+func (l labels) Set(v string) error {
+	k, val, ok := strings.Cut(v, "=")
+	if !ok {
+		return errors.New("label must be key=value")
+	}
+	l[k] = val
+	return nil
+}
+
+func cmdNew(a *app, args []string) error {
+	fs := flag.NewFlagSet("new", flag.ContinueOnError)
+	name := fs.String("name", "", "")
+	size := fs.String("size", "", "")
+	image := fs.String("image", "", "")
+	ttl := fs.Duration("ttl", 0, "")
+	idle := fs.String("idle-stop", "", "auto-stop after this idle time (e.g. 30m), or never")
+	snap := fs.String("snapshot", "", "create from a snapshot id")
+	lab := labels{}
+	fs.Var(lab, "label", "")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 1 && *name == "" {
+		*name = pos[0]
+	} else if len(pos) > 0 {
+		return fmt.Errorf("unexpected arguments %v: %w", pos, errUsage)
+	}
+	body := obj{"name": *name, "size": *size, "image": *image, "ttl_s": int64(ttl.Seconds())}
+	if *idle == "never" {
+		body["idle_stop_s"] = -1
+	} else if *idle != "" {
+		d, err := time.ParseDuration(*idle)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("--idle-stop wants a duration like 30m, or never: %w", errUsage)
+		}
+		body["idle_stop_s"] = int64(d.Seconds())
+	}
+	if *snap != "" {
+		body["snapshot"] = *snap
+	}
+	if len(lab) > 0 {
+		body["labels"] = lab
+	}
+	var vm obj
+	if err := a.c.call("POST", "/v1/vms", body, &vm); err != nil {
+		return err
+	}
+	return a.emitVM(vm)
+}
+
+func cmdList(a *app, args []string) error {
+	l, err := listCall(a, "/v1/vms", "vms")
+	if err != nil {
+		return err
+	}
+	return a.emitList(l, vmCols...)
+}
+
+func oneVM(a *app, args []string) (obj, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("expected <vm>: %w", errUsage)
+	}
+	return a.c.resolveVM(args[0])
+}
+
+func vmAction(action string) func(*app, []string) error {
+	return func(a *app, args []string) error {
+		vm, err := oneVM(a, args)
+		if err != nil {
+			return err
+		}
+		var out obj
+		if err := a.c.call("POST", vmPath(s(vm, "id"), action), nil, &out); err != nil {
+			return err
+		}
+		return a.emitVM(out)
+	}
+}
+
+func cmdRm(a *app, args []string) error {
+	vm, err := oneVM(a, args)
+	if err != nil {
+		return err
+	}
+	if err := a.c.call("DELETE", vmPath(s(vm, "id")), nil, nil); err != nil {
+		return err
+	}
+	return a.emit(obj{"ok": true, "id": s(vm, "id")}, func() { fmt.Fprintln(a.out, "deleted", s(vm, "id")) })
+}
+
+func cmdFork(a *app, args []string) error {
+	fs := flag.NewFlagSet("fork", flag.ContinueOnError)
+	name := fs.String("name", "", "")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	vm, err := oneVM(a, pos)
+	if err != nil {
+		return err
+	}
+	var out obj
+	if err := a.c.call("POST", vmPath(s(vm, "id"), "fork"), obj{"name": *name}, &out); err != nil {
+		return err
+	}
+	return a.emitVM(out)
+}
+
+// ---- exec / prompt ----
+
+func cmdExec(a *app, args []string) error {
+	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
+	timeout := fs.Int("timeout", 0, "seconds")
+	cwd := fs.String("cwd", "", "")
+	pos, cmd, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 2 && len(cmd) == 0 { // boat exec vm "cmd string"
+		cmd, pos = []string{"bash", "-lc", pos[1]}, pos[:1]
+	}
+	if len(cmd) == 0 {
+		return fmt.Errorf("usage: boat exec <vm> -- cmd: %w", errUsage)
+	}
+	vm, err := oneVM(a, pos)
+	if err != nil {
+		return err
+	}
+	return a.stream(vmPath(s(vm, "id"), "exec"), obj{"cmd": cmd, "timeout_s": *timeout, "cwd": *cwd})
+}
+
+func cmdPrompt(a *app, args []string) error {
+	fs := flag.NewFlagSet("prompt", flag.ContinueOnError)
+	agent := fs.String("agent", "claude", "")
+	model := fs.String("model", "", "")
+	cwd := fs.String("cwd", "", "")
+	timeout := fs.Int("timeout", 0, "seconds")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if err := need(pos, 2, `<vm> "<prompt>"`); err != nil {
+		return err
+	}
+	text := pos[1]
+	if text == "-" {
+		b, err := io.ReadAll(a.in)
+		if err != nil {
+			return err
+		}
+		text = string(b)
+	}
+	vm, err := a.c.resolveVM(pos[0])
+	if err != nil {
+		return err
+	}
+	return a.stream(vmPath(s(vm, "id"), "prompt"), obj{"prompt": text, "agent": *agent, "model": *model, "cwd": *cwd, "timeout_s": *timeout})
+}
+
+// stream relays exec JSON lines. --json passes them through verbatim;
+// otherwise output is decoded to stdout/stderr. Returns the remote exit code.
+func (a *app) stream(path string, body obj) error {
+	b, _ := json.Marshal(body)
+	resp, err := a.c.request("POST", path, bytes.NewReader(b), "application/json")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 64<<10), 16<<20)
+	exit := -1
+	for sc.Scan() {
+		line := sc.Bytes()
+		var ev struct {
+			Stream  string `json:"stream"`
+			DataB64 string `json:"data_b64"`
+			Exit    *int   `json:"exit"`
+			Error   any    `json:"error"`
+		}
+		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		if a.json {
+			a.out.Write(append(bytes.TrimSpace(line), '\n'))
+		}
+		if ev.Exit != nil {
+			exit = *ev.Exit
+		}
+		if a.json {
+			continue
+		}
+		data, _ := base64.StdEncoding.DecodeString(ev.DataB64)
+		if ev.Stream == "stderr" {
+			a.errw.Write(data)
+		} else {
+			a.out.Write(data)
+		}
+		if ev.Error != nil {
+			fmt.Fprintln(a.errw, "boat: remote error:", ev.Error)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	if exit < 0 {
+		return errors.New("stream ended without exit status")
+	}
+	if exit != 0 {
+		return exitError{exit}
+	}
+	return nil
+}
+
+// ---- ssh / scp / desktop ----
+
+func (a *app) publicKey(path string) (string, error) {
+	cands := []string{path}
+	if path == "" {
+		home := a.getenv("HOME")
+		cands = nil
+		for _, n := range []string{"id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"} {
+			cands = append(cands, filepath.Join(home, ".ssh", n))
+		}
+	}
+	for _, p := range cands {
+		if b, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(b)), nil
+		}
+	}
+	return "", errors.New("no ssh public key found (~/.ssh/id_ed25519.pub); create one with ssh-keygen or pass --identity")
+}
+
+func cmdSSH(a *app, args []string) error {
+	fs := flag.NewFlagSet("ssh", flag.ContinueOnError)
+	ident := fs.String("identity", "", "public key file")
+	pos, extra, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	vm, err := oneVM(a, pos)
+	if err != nil {
+		return err
+	}
+	pub, err := a.publicKey(*ident)
+	if err != nil {
+		return err
+	}
+	var info obj
+	if err := a.c.call("POST", vmPath(s(vm, "id"), "ssh"), obj{"public_key": pub}, &info); err != nil {
+		return err
+	}
+	argv := []string{"ssh", "-p", s(info, "port"), "-o", "StrictHostKeyChecking=accept-new"}
+	if j := s(info, "jump"); j != "" {
+		argv = append(argv, "-o", "ProxyCommand=ssh -W %h:%p "+sshJumpArgs(j))
+	}
+	argv = append(argv, s(info, "user")+"@"+s(info, "host"))
+	argv = append(argv, extra...)
+	if a.json {
+		info["argv"] = argv
+		return a.emit(info, nil)
+	}
+	return a.execProg(argv)
+}
+
+// sshJumpArgs turns user@host:port into "-p port user@host".
+func sshJumpArgs(j string) string {
+	if i := strings.LastIndex(j, ":"); i > 0 && !strings.Contains(j[i:], "]") {
+		return "-p " + j[i+1:] + " " + j[:i]
+	}
+	return j
+}
+
+// cmdSCP copies one file through the files API: boat scp a.txt vm:/tmp/a.txt
+func cmdSCP(a *app, args []string) error {
+	if err := need(args, 2, "<src> <dst> with vm:/path on one side"); err != nil {
+		return err
+	}
+	src, dst := args[0], args[1]
+	srcVM, srcPath, srcRemote := splitRemote(src)
+	dstVM, dstPath, dstRemote := splitRemote(dst)
+	switch {
+	case srcRemote == dstRemote:
+		return fmt.Errorf("exactly one of src/dst must be vm:/path: %w", errUsage)
+	case dstRemote:
+		vm, err := a.c.resolveVM(dstVM)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(src)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if strings.HasSuffix(dstPath, "/") {
+			dstPath += filepath.Base(src)
+		}
+		resp, err := a.c.request("PUT", vmPath(s(vm, "id"), "files")+"?path="+url.QueryEscape(dstPath), f, "application/octet-stream")
+		if err != nil {
+			return err
+		}
+		var out obj
+		json.NewDecoder(resp.Body).Decode(&out)
+		resp.Body.Close()
+		return a.emit(out, func() { fmt.Fprintf(a.out, "%s -> %s:%s (%v bytes)\n", src, dstVM, dstPath, out["bytes"]) })
+	default:
+		vm, err := a.c.resolveVM(srcVM)
+		if err != nil {
+			return err
+		}
+		resp, err := a.c.request("GET", vmPath(s(vm, "id"), "files")+"?path="+url.QueryEscape(srcPath), nil, "")
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if st, err := os.Stat(dst); err == nil && st.IsDir() {
+			dst = filepath.Join(dst, filepath.Base(srcPath))
+		}
+		f, err := os.Create(dst)
+		if err != nil {
+			return err
+		}
+		n, err := io.Copy(f, resp.Body)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+		return a.emit(obj{"ok": true, "path": dst, "bytes": n}, func() { fmt.Fprintf(a.out, "%s -> %s (%d bytes)\n", src, dst, n) })
+	}
+}
+
+func splitRemote(p string) (vm, path string, remote bool) {
+	vm, path, ok := strings.Cut(p, ":")
+	if !ok || vm == "" || strings.ContainsAny(vm, `/\`) || !strings.HasPrefix(path, "/") {
+		return "", p, false
+	}
+	return vm, path, true
+}
+
+func cmdDesktop(a *app, args []string) error {
+	fs := flag.NewFlagSet("desktop", flag.ContinueOnError)
+	noOpen := fs.Bool("no-open", false, "")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	vm, err := oneVM(a, pos)
+	if err != nil {
+		return err
+	}
+	var d obj
+	if err := a.c.call("GET", vmPath(s(vm, "id"), "desktop"), nil, &d); err != nil {
+		return err
+	}
+	if a.json || *noOpen {
+		return a.emit(d, func() { fmt.Fprintln(a.out, s(d, "url")) })
+	}
+	fmt.Fprintln(a.out, s(d, "url"))
+	return a.open(s(d, "url"))
+}
+
+// ---- ports / snapshots ----
+
+func cmdPorts(a *app, args []string) error {
+	op, args := sub(args, "ls", "ls", "add", "rm")
+	fs := flag.NewFlagSet("ports", flag.ContinueOnError)
+	public := fs.Bool("public", false, "")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	want := 2
+	if op == "ls" {
+		want = 1
+	}
+	if err := need(pos, want, "<vm> [port]"); err != nil {
+		return err
+	}
+	vm, err := a.c.resolveVM(pos[0])
+	if err != nil {
+		return err
+	}
+	id := s(vm, "id")
+	switch op {
+	case "ls":
+		l, err := listCall(a, vmPath(id, "ports"), "ports")
+		if err != nil {
+			return err
+		}
+		return a.emitList(l, portCols...)
+	case "add":
+		port, err := strconv.Atoi(pos[1])
+		if err != nil {
+			return fmt.Errorf("port must be a number: %w", errUsage)
+		}
+		var out obj
+		if err := a.c.call("POST", vmPath(id, "ports"), obj{"port": port, "public": *public}, &out); err != nil {
+			return err
+		}
+		return a.emitList([]obj{out}, portCols...)
+	default:
+		if err := a.c.call("DELETE", vmPath(id, "ports", url.PathEscape(pos[1])), nil, nil); err != nil {
+			return err
+		}
+		return a.emit(obj{"ok": true, "port": pos[1]}, func() { fmt.Fprintln(a.out, "removed port", pos[1]) })
+	}
+}
+
+func cmdSnapshots(a *app, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("expected <vm>: %w", errUsage)
+	}
+	vm, err := a.c.resolveVM(args[0])
+	if err != nil {
+		return err
+	}
+	id := s(vm, "id")
+	op, args := sub(args[1:], "ls", "ls", "create", "rm")
+	fs := flag.NewFlagSet("snapshots", flag.ContinueOnError)
+	name := fs.String("name", "", "")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	switch op {
+	case "ls":
+		l, err := listCall(a, vmPath(id, "snapshots"), "snapshots")
+		if err != nil {
+			return err
+		}
+		return a.emitList(l, "id", "name", "created", "size_bytes")
+	case "create":
+		var out obj
+		if err := a.c.call("POST", vmPath(id, "snapshots"), obj{"name": *name}, &out); err != nil {
+			return err
+		}
+		return a.emitList([]obj{out}, "id", "name", "created")
+	default:
+		if err := need(pos, 1, "<snapshot-id>"); err != nil {
+			return err
+		}
+		if err := a.c.call("DELETE", vmPath(id, "snapshots", url.PathEscape(pos[0])), nil, nil); err != nil {
+			return err
+		}
+		return a.emit(obj{"ok": true, "id": pos[0]}, func() { fmt.Fprintln(a.out, "deleted snapshot", pos[0]) })
+	}
+}
+
+// ---- secrets / keys / teams / webhooks ----
+
+func cmdSecrets(a *app, args []string) error {
+	op, pos := sub(args, "ls", "ls", "set", "rm")
+	switch op {
+	case "ls":
+		l, err := listCall(a, "/v1/secrets", "secrets")
+		if err != nil {
+			return err
+		}
+		return a.emitList(l, "name", "updated")
+	case "set":
+		if len(pos) < 1 || len(pos) > 2 {
+			return fmt.Errorf("usage: boat secrets set NAME [VALUE|-]: %w", errUsage)
+		}
+		var value string
+		if len(pos) == 2 && pos[1] != "-" {
+			value = pos[1]
+		} else {
+			b, err := io.ReadAll(io.LimitReader(a.in, 64<<10+1))
+			if err != nil {
+				return err
+			}
+			value = strings.TrimRight(string(b), "\r\n")
+		}
+		var out obj
+		if err := a.c.call("PUT", "/v1/secrets/"+url.PathEscape(pos[0]), obj{"value": value}, &out); err != nil {
+			return err
+		}
+		return a.emit(out, func() { fmt.Fprintln(a.out, "set", pos[0]) })
+	default:
+		if err := need(pos, 1, "NAME"); err != nil {
+			return err
+		}
+		if err := a.c.call("DELETE", "/v1/secrets/"+url.PathEscape(pos[0]), nil, nil); err != nil {
+			return err
+		}
+		return a.emit(obj{"ok": true, "name": pos[0]}, func() { fmt.Fprintln(a.out, "removed", pos[0]) })
+	}
+}
+
+func cmdKeys(a *app, args []string) error {
+	op, args := sub(args, "ls", "ls", "create", "rm")
+	fs := flag.NewFlagSet("keys", flag.ContinueOnError)
+	name := fs.String("name", "", "")
+	scopes := fs.String("scopes", "", "")
+	team := fs.String("team", "", "")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	switch op {
+	case "ls":
+		l, err := listCall(a, "/v1/keys", "keys")
+		if err != nil {
+			return err
+		}
+		return a.emitList(l, "id", "name", "user_id", "scopes", "created")
+	case "create":
+		var out obj
+		if err := a.c.call("POST", "/v1/keys", obj{"name": *name, "scopes": splitList(*scopes), "team_id": *team}, &out); err != nil {
+			return err
+		}
+		return a.emit(out, func() {
+			fmt.Fprintf(a.out, "%s\n(key %s; shown once, store it now)\n", s(out, "token"), s(out, "id"))
+		})
+	default:
+		if err := need(pos, 1, "KEY_ID"); err != nil {
+			return err
+		}
+		if err := a.c.call("DELETE", "/v1/keys/"+url.PathEscape(pos[0]), nil, nil); err != nil {
+			return err
+		}
+		return a.emit(obj{"ok": true, "id": pos[0]}, func() { fmt.Fprintln(a.out, "revoked", pos[0]) })
+	}
+}
+
+func cmdTeams(a *app, args []string) error {
+	op, args := sub(args, "ls", "ls", "create", "show", "add-member", "rm-member")
+	fs := flag.NewFlagSet("teams", flag.ContinueOnError)
+	role := fs.String("role", "member", "")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	var out obj
+	switch op {
+	case "ls":
+		l, err := listCall(a, "/v1/teams", "teams")
+		if err != nil {
+			return err
+		}
+		return a.emitList(l, "id", "name", "role")
+	case "create":
+		if err := need(pos, 1, "NAME"); err != nil {
+			return err
+		}
+		if err := a.c.call("POST", "/v1/teams", obj{"name": pos[0]}, &out); err != nil {
+			return err
+		}
+		return a.emitList([]obj{out}, "id", "name", "role")
+	case "show":
+		if err := need(pos, 1, "TEAM_ID"); err != nil {
+			return err
+		}
+		if err := a.c.call("GET", "/v1/teams/"+url.PathEscape(pos[0]), nil, &out); err != nil {
+			return err
+		}
+		return a.emit(out, func() {
+			fmt.Fprintf(a.out, "%s %s (you: %s)\n", s(out, "id"), s(out, "name"), s(out, "role"))
+			ms, _ := out["members"].([]any)
+			for _, m := range ms {
+				mm, _ := m.(map[string]any)
+				fmt.Fprintf(a.out, "  %s\t%s\n", s(mm, "user_id"), s(mm, "role"))
+			}
+		})
+	case "add-member":
+		if err := need(pos, 2, "TEAM_ID NAME"); err != nil {
+			return err
+		}
+		if err := a.c.call("POST", "/v1/teams/"+url.PathEscape(pos[0])+"/members", obj{"name": pos[1], "role": *role}, &out); err != nil {
+			return err
+		}
+		return a.emit(out, func() {
+			k, _ := out["key"].(map[string]any)
+			u, _ := out["user"].(map[string]any)
+			fmt.Fprintf(a.out, "added %v (%v) as %v\nkey: %v (shown once)\n", u["name"], u["id"], out["role"], k["token"])
+		})
+	default:
+		if err := need(pos, 2, "TEAM_ID USER_ID"); err != nil {
+			return err
+		}
+		if err := a.c.call("DELETE", "/v1/teams/"+url.PathEscape(pos[0])+"/members/"+url.PathEscape(pos[1]), nil, nil); err != nil {
+			return err
+		}
+		return a.emit(obj{"ok": true, "team_id": pos[0], "user_id": pos[1]}, func() { fmt.Fprintln(a.out, "removed", pos[1]) })
+	}
+}
+
+func cmdWebhooks(a *app, args []string) error {
+	op, args := sub(args, "ls", "ls", "create", "rm", "deliveries", "test")
+	fs := flag.NewFlagSet("webhooks", flag.ContinueOnError)
+	events := fs.String("events", "", "")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if op != "ls" {
+		if err := need(pos, 1, "URL or WEBHOOK_ID"); err != nil {
+			return err
+		}
+	}
+	var out obj
+	switch op {
+	case "ls":
+		l, err := listCall(a, "/v1/webhooks", "webhooks")
+		if err != nil {
+			return err
+		}
+		return a.emitList(l, "id", "url", "events")
+	case "create":
+		if err := a.c.call("POST", "/v1/webhooks", obj{"url": pos[0], "events": splitList(*events)}, &out); err != nil {
+			return err
+		}
+		return a.emit(out, func() {
+			fmt.Fprintf(a.out, "%s %s\nsigning secret: %s (shown once)\n", s(out, "id"), s(out, "url"), s(out, "secret"))
+		})
+	case "deliveries":
+		l, err := listCall(a, "/v1/webhooks/"+url.PathEscape(pos[0])+"/deliveries", "deliveries")
+		if err != nil {
+			return err
+		}
+		return a.emitList(l, "at", "event", "attempt", "status", "ok", "error")
+	case "test":
+		if err := a.c.call("POST", "/v1/webhooks/"+url.PathEscape(pos[0])+"/test", nil, &out); err != nil {
+			return err
+		}
+		return a.emit(out, func() { fmt.Fprintln(a.out, "queued", s(out, "event_id")) })
+	default:
+		if err := a.c.call("DELETE", "/v1/webhooks/"+url.PathEscape(pos[0]), nil, nil); err != nil {
+			return err
+		}
+		return a.emit(obj{"ok": true, "id": pos[0]}, func() { fmt.Fprintln(a.out, "deleted", pos[0]) })
+	}
+}

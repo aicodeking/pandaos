@@ -1,0 +1,10 @@
+$ boat exec --json vm1 -- ls --json
+exit 3
+--- stdout
+{"data_b64":"aGkK","stream":"stdout"}
+{"data_b64":"d2Fybgo=","stream":"stderr"}
+{"exit":3}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+POST /v1/vms/vm1/exec {"cmd":["ls","--json"],"cwd":"","timeout_s":0}

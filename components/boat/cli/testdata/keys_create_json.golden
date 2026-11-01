@@ -1,0 +1,7 @@
+$ boat keys create --name ci --scopes vms:read --json
+exit 0
+--- stdout
+{"id":"k2","name":"ci","scopes":["vms:read"],"token":"boat_x_y"}
+--- stderr
+--- requests
+POST /v1/keys {"name":"ci","scopes":["vms:read"],"team_id":""}

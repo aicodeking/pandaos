@@ -1,0 +1,398 @@
+# boat: self-hosted persistent Firecracker microVMs (a boat.dev alternative).
+#
+#   boatd.service        root VM manager (KVM, tap/bridge, nftables, jailer)
+#   boat-api.service     public API + webhooks as the unprivileged `boat` user
+#   boat-images.service  downloads released guest images into imagesDir
+#   boat-secrets.service creates the desktop-link HMAC key once
+#   gateway/module.nix   Caddy (TLS) + boat-gateway (routes) + ssh jump host
+#
+# boatd reads /etc/boat/boatd.json (its Config in boatd/config.go); boat-api
+# gets flags. Off unless services.boat.enable.
+{ config, lib, pkgs, ... }:
+let
+  cfg = config.services.boat;
+  inherit (lib) mkOption types;
+
+  sizeType = types.submodule {
+    options = {
+      vcpu = mkOption { type = types.ints.positive; };
+      mem_mib = mkOption { type = types.ints.positive; };
+      disk_gib = mkOption { type = types.ints.positive; };
+    };
+  };
+
+  # Image ids boat-api offers: first path component of each images entry.
+  imageIds = lib.unique (map (n: lib.head (lib.splitString "/" n)) (lib.attrNames cfg.images));
+
+  imageType = types.submodule {
+    options = {
+      url = mkOption {
+        type = types.strMatching "https://.+";
+        description = "Release URL. A `.zst` suffix is decompressed after the hash check.";
+      };
+      sha256 = mkOption {
+        type = types.strMatching "[0-9a-f]{64}";
+        description = "Hex SHA-256 of the file at {option}`url` (before decompression).";
+      };
+    };
+  };
+
+  # Exit status for "this host cannot run boatd" (EX_CONFIG): no restart loop.
+  exConfig = 78;
+  kvmCheck = pkgs.writeShellScript "boatd-kvm-check" ''
+    if [ ! -c /dev/kvm ]; then
+      echo "boatd: /dev/kvm is missing, so this machine cannot run Firecracker VMs." >&2
+      echo "  Bare metal: enable VT-x/AMD-V (SVM) in the firmware setup." >&2
+      echo "  Inside a VM: the hypervisor must expose nested virtualization" >&2
+      echo "  (kvm_intel nested=1 / kvm_amd nested=1 on the host, CPU model 'host')." >&2
+      echo "  Set services.boat.requireKvm = false only for tests with a stub boatd." >&2
+      exit ${toString exConfig}
+    fi
+  '';
+
+  imagesScript = pkgs.writeShellScript "boat-images" ''
+    set -euo pipefail
+    export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.zstd ]}
+    fetch() { # <rel path> <url> <sha256>
+      dest=${cfg.imagesDir}/$1 url=$2 sha=$3
+      final=''${dest%.zst}
+      if [ -e "$final" ] && [ "$(cat "$final.sha256" 2>/dev/null)" = "$sha" ]; then
+        return 0
+      fi
+      mkdir -p "$(dirname "$dest")"
+      tmp=$(mktemp "$dest.part.XXXXXX")
+      trap 'rm -f "$tmp" "$tmp.out"' RETURN
+      echo "boat-images: fetching $url"
+      # Called as `fetch ... || rc=1`, where set -e is off: check every step.
+      curl -fL --retry 5 --retry-delay 5 --proto =https -o "$tmp" "$url" || return 1
+      echo "$sha  $tmp" | sha256sum -c --quiet || { echo "boat-images: sha256 mismatch for $url" >&2; return 1; }
+      case "$url" in
+        *.zst) zstd -dq -f -o "$tmp.out" "$tmp" || return 1 ;;
+        *) mv "$tmp" "$tmp.out" || return 1 ;;
+      esac
+      chmod 0644 "$tmp.out" && mv -f "$tmp.out" "$final" || return 1
+      echo "$sha" >"$final.sha256"
+    }
+    rc=0
+    ${lib.concatStrings (
+      lib.mapAttrsToList (
+        name: img: "fetch ${lib.escapeShellArgs [ name img.url img.sha256 ]} || rc=1\n"
+      ) cfg.images
+    )}
+    exit $rc
+  '';
+
+  # boatd's Config (boatd/config.go); unset fields keep boatd's defaults.
+  boatdConfig = {
+    stateDir = cfg.dataDir;
+    runDir = "/run/boat";
+    socket = "/run/boat/boatd.sock";
+    socketGroup = "boat";
+    firecracker = lib.getExe' cfg.firecrackerPackage "firecracker";
+    jailer = lib.getExe' cfg.firecrackerPackage "jailer";
+    bridge = "boatbr0";
+    subnet = "10.200.0.0/16";
+    ipv6Prefix = if cfg.ipv6Prefix == null then "" else cfg.ipv6Prefix;
+    publicIPv4 = cfg.publicIPv4Pool;
+    inherit (cfg) sizes defaultSize;
+    defaultTeam = cfg.quotas;
+  }
+  // lib.optionalAttrs (imageIds != [ ]) { defaultImage = lib.head imageIds; };
+
+  apiArgs = [
+    "serve"
+    "-data" "${cfg.dataDir}/api"
+    "-listen" "127.0.0.1:${toString cfg.apiPort}"
+    "-boatd" "/run/boat/boatd.sock"
+    "-ssh-user" "dev" # the guest image's login user
+    "-desktop-url" "https://desktop.${cfg.domain}"
+    "-desktop-key-file" "${cfg.dataDir}/secrets/desktop.key"
+  ]
+  ++ lib.optionals cfg.sshGateway.enable [ "-ssh-jump" "jump@ssh.${cfg.domain}:${toString cfg.sshGateway.port}" ]
+  ++ lib.optionals (imageIds != [ ]) [ "-images" (lib.concatStringsSep "," imageIds) ];
+in
+{
+  imports = [ ./gateway/module.nix ];
+
+  options.services.boat = {
+    enable = lib.mkEnableOption "boat, persistent Firecracker microVMs for agents";
+    domain = mkOption {
+      type = types.strMatching "[a-z0-9]([a-z0-9.-]*[a-z0-9])?";
+      example = "boat.example.com";
+      description = "Base domain: api., desktop., ssh. and *.vm. live under it (see docs/boat.md for DNS).";
+    };
+    acmeEmail = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "ops@example.com";
+      description = "ACME account e-mail for Caddy's certificates.";
+    };
+    ipv6Prefix = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "2a01:4f8:1:2:b0a7::/80";
+      description = "Routed IPv6 prefix; each VM gets a public address from it. Null: IPv4 NAT only.";
+    };
+    publicIPv4Pool = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "203.0.113.10" "203.0.113.11" ];
+      description = "Extra routed IPv4 addresses boatd may assign 1:1 to VMs (dedicated IPs).";
+    };
+    sizes = mkOption {
+      type = types.attrsOf sizeType;
+      default = {
+        small = { vcpu = 2; mem_mib = 4096; disk_gib = 51; };
+        default = { vcpu = 4; mem_mib = 8192; disk_gib = 51; };
+        large = { vcpu = 8; mem_mib = 16384; disk_gib = 111; };
+        xlarge = { vcpu = 16; mem_mib = 32768; disk_gib = 251; };
+      };
+      description = "VM sizes (`boat new --size NAME`); disks are sparse.";
+    };
+    defaultSize = mkOption {
+      type = types.str;
+      default = "default";
+      description = "Size used when a create request names none; must be in {option}`sizes`.";
+    };
+    quotas = mkOption {
+      description = "Default per-team limits (boatd `defaultTeam`); 0 = unlimited.";
+      default = { };
+      type = types.submodule {
+        options = {
+          maxVMs = mkOption { type = types.ints.unsigned; default = 10; };
+          maxVCPU = mkOption { type = types.ints.unsigned; default = 32; };
+          maxMemMiB = mkOption { type = types.ints.unsigned; default = 65536; };
+          allowIntraTeam = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Let a team's VMs reach each other (other teams: never).";
+          };
+        };
+      };
+    };
+    dataDir = mkOption {
+      type = types.strMatching "/.+";
+      default = "/var/lib/boat";
+      description = "VM disks, snapshots, API database and secrets. Put it on the btrfs data disk.";
+    };
+    imagesDir = mkOption {
+      type = types.strMatching "/.+";
+      default = "${cfg.dataDir}/images";
+      defaultText = lib.literalExpression ''"''${config.services.boat.dataDir}/images"'';
+      readOnly = true;
+      description = "Guest images, `<id>/{vmlinux,rootfs.ext4}` (boatd reads `<dataDir>/images`).";
+    };
+    images = mkOption {
+      type = types.attrsOf imageType;
+      default = { };
+      example = lib.literalExpression ''
+        {
+          "ubuntu-24.04/vmlinux" = { url = "https://github.com/AICodeKing/pandaos/releases/download/boat-guest-v1/vmlinux"; sha256 = "..."; };
+          "ubuntu-24.04/rootfs.ext4.zst" = { url = "https://.../rootfs-slim.ext4.zst"; sha256 = "..."; };
+        }
+      '';
+      description = ''
+        Guest images boat-images.service downloads. The name is the path under
+        {option}`imagesDir` (a trailing `.zst` is dropped after decompression);
+        its first component is the image id boat-api offers (first = default).
+      '';
+    };
+    firecrackerPackage = mkOption {
+      type = types.package;
+      default = pkgs.firecracker;
+      defaultText = lib.literalExpression "pkgs.firecracker";
+      description = "Provides bin/firecracker and bin/jailer.";
+    };
+    boatdPackage = mkOption {
+      type = types.package;
+      default = pkgs.callPackage ./boatd/package.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./boatd/package.nix { }";
+    };
+    apiPackage = mkOption {
+      type = types.package;
+      default = pkgs.callPackage ./api/package.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./api/package.nix { }";
+      description = "Provides bin/boat-api.";
+    };
+    cliPackage = mkOption {
+      type = types.package;
+      default = pkgs.callPackage ./cli/package.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./cli/package.nix { }";
+      description = "Provides bin/boat (installed system-wide).";
+    };
+    apiPort = mkOption {
+      type = types.port;
+      default = 8740;
+      description = "boat-api listens on 127.0.0.1 only; Caddy publishes it as api.<domain>.";
+    };
+    requireKvm = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Refuse to start boatd without /dev/kvm. Turn off only for stub-boatd tests.";
+    };
+    sshGateway = {
+      enable = lib.mkEnableOption "the ssh jump host for VMs" // { default = true; };
+      port = mkOption {
+        type = types.port;
+        default = 2222;
+        description = "sshd port reserved for the `jump` user (ProxyJump into VMs).";
+      };
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = lib.all (n: !(lib.hasPrefix "/" n) && !(lib.elem ".." (lib.splitString "/" n))) (lib.attrNames cfg.images);
+        message = "services.boat.images names must be relative paths without '..'.";
+      }
+      {
+        assertion = lib.hasAttr cfg.defaultSize cfg.sizes;
+        message = "services.boat.defaultSize must name one of services.boat.sizes.";
+      }
+    ];
+
+    boot.kernelModules = [ "kvm" "tun" "vhost_net" "bridge" "nf_tables" ];
+    boot.kernel.sysctl = {
+      "net.ipv4.ip_forward" = 1;
+    }
+    // lib.optionalAttrs (cfg.ipv6Prefix != null) {
+      "net.ipv6.conf.all.forwarding" = 1;
+      # Forwarding turns off RA on the uplink; keep RA-configured uplinks (OVH) working.
+      "net.ipv6.conf.default.accept_ra" = 2;
+    };
+    networking.nftables.enable = true;
+
+    users.users.boat = {
+      isSystemUser = true;
+      group = "boat";
+      description = "boat API";
+    };
+    users.groups.boat = { };
+
+    environment.etc."boat/boatd.json".text = builtins.toJSON boatdConfig;
+    environment.systemPackages = [ cfg.cliPackage ];
+
+    systemd.tmpfiles.rules = [
+      "d /run/boat 0750 root boat - -"
+      # `v`: a btrfs subvolume when on btrfs (outside root snapshots, reflink
+      # clones for fork/snapshot), a plain directory elsewhere.
+      "v ${cfg.dataDir} 0750 root boat - -"
+      "d ${cfg.imagesDir} 0755 root root - -"
+      # boat-api and boat-gateway (both user boat) share the desktop key, 0600.
+      "d ${cfg.dataDir}/secrets 0700 boat boat - -"
+      "d ${cfg.dataDir}/api 0700 boat boat - -"
+      "d ${cfg.dataDir}/ssh 0750 boat boat - -"
+    ];
+
+    systemd.services.boat-secrets = {
+      description = "boat: create the desktop-link signing key";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "systemd-tmpfiles-setup.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        UMask = "0077";
+      };
+      script = ''
+        f=${cfg.dataDir}/secrets/desktop.key
+        if [ ! -s "$f" ]; then
+          ${pkgs.coreutils}/bin/head -c 32 /dev/urandom >"$f.tmp"
+          ${pkgs.coreutils}/bin/chmod 0600 "$f.tmp"
+          ${pkgs.coreutils}/bin/chown boat:boat "$f.tmp"
+          ${pkgs.coreutils}/bin/mv "$f.tmp" "$f"
+        fi
+      '';
+    };
+
+    systemd.services.boat-images = {
+      description = "boat: download guest images";
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "network-online.target" ];
+      after = [ "network-online.target" "systemd-tmpfiles-setup.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = imagesScript;
+        ProtectSystem = "strict";
+        ReadWritePaths = [ cfg.imagesDir ];
+        PrivateTmp = true;
+        ProtectHome = true;
+        NoNewPrivileges = true;
+      };
+    };
+
+    systemd.services.boatd = {
+      description = "boat VM manager (Firecracker)";
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "boat-images.service" "network-online.target" ];
+      after = [ "boat-images.service" "boat-secrets.service" "network-online.target" ];
+      # Persistent VMs: never restart on `nixos-rebuild switch` or the daily
+      # auto-upgrade; a new boatd takes effect on reboot or a manual restart.
+      restartIfChanged = false;
+      stopIfChanged = false;
+      path = [ cfg.firecrackerPackage pkgs.iproute2 pkgs.nftables pkgs.e2fsprogs pkgs.btrfs-progs pkgs.util-linux ];
+      serviceConfig = {
+        ExecStartPre = lib.optional cfg.requireKvm kvmCheck;
+        ExecStart = lib.getExe' cfg.boatdPackage "boatd";
+        Restart = "on-failure";
+        RestartSec = 5;
+        RestartPreventExitStatus = exConfig;
+        # SIGTERM lets boatd pause/snapshot VMs; then everything in the cgroup dies.
+        KillMode = "mixed";
+        TimeoutStopSec = 120;
+        # jailer puts each Firecracker in a child cgroup of this unit.
+        Delegate = true;
+        # Root: jailer needs chroot/mknod/setuid/namespaces, boatd needs
+        # CAP_NET_ADMIN for taps and nftables. Firecracker itself runs jailed
+        # (own uid, chroot, seccomp). Sandbox what does not break that.
+        ProtectSystem = "full";
+        ProtectHome = true;
+        PrivateTmp = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectClock = true;
+        RestrictRealtime = true;
+        LimitNOFILE = 1048576;
+      };
+    };
+
+    systemd.services.boat-api = {
+      description = "boat public API";
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "boatd.service" ];
+      after = [ "boatd.service" "boat-secrets.service" "network-online.target" ];
+      requires = [ "boat-secrets.service" ];
+      serviceConfig = {
+        ExecStart = lib.escapeShellArgs ([ (lib.getExe' cfg.apiPackage "boat-api") ] ++ apiArgs);
+        User = "boat";
+        Group = "boat";
+        Restart = "always";
+        RestartSec = 2;
+        ReadWritePaths = [ "${cfg.dataDir}/api" "${cfg.dataDir}/ssh" ];
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        NoNewPrivileges = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        ProtectClock = true;
+        ProtectHostname = true;
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [ "@system-service" "~@privileged" ];
+        CapabilityBoundingSet = "";
+        # Unix: boatd socket; inet: clients via Caddy and outbound webhooks.
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+        UMask = "0027";
+      };
+    };
+  };
+}

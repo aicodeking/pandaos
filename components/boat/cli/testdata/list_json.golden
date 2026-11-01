@@ -1,0 +1,8 @@
+$ boat list --json
+exit 0
+--- stdout
+{"id":"vm1","image":"ubuntu-24.04","name":"dev","size":"default","state":"running","team":"team_1"}
+{"id":"vm2","image":"ubuntu-24.04","name":"ci","size":"large","state":"stopped"}
+--- stderr
+--- requests
+GET /v1/vms 

@@ -1,0 +1,7 @@
+$ boat usage --json
+exit 0
+--- stdout
+{"starts":2,"team":"team_1","vm_seconds":{"default":42}}
+--- stderr
+--- requests
+GET /v1/usage 

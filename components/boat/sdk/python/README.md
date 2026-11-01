@@ -1,0 +1,36 @@
+# boat (Python SDK)
+
+Uses only the standard library (urllib) and needs Python 3.8 or newer. Install it with
+`pip install ./components/boat/sdk/python`, or put the directory on your `PYTHONPATH`.
+
+```python
+from boat import Boat, verify_webhook
+
+boat = Boat()  # BOAT_URL / BOAT_API_KEY, else ~/.config/boat/config.json; or Boat(url, key)
+vm = boat.create_vm(name="demo", size="default", ttl_s=3600)      # -> VM dataclass
+for ev in boat.prompt(vm.id, "fix the failing test", agent="claude"):  # ExecEvent stream
+    print(ev.data.decode(), end="")
+res = boat.run(vm.id, ["pytest", "-q"])        # ExecResult(stdout, stderr, exit_code)
+fork = boat.fork(vm.id, name="demo-2")
+boat.stop(vm.id)
+```
+
+**Methods:**
+
+- **Account:** `me`, `images`, `usage`
+- **VMs:** `list_vms`, `get_vm`, `create_vm`, `start`, `stop`, `fork`, `delete`
+- **Run commands:** `exec` (generator), `run`, `prompt` (generator)
+- **Files:** `read_file`, `write_file`
+- **Ports:** `ports`, `add_port`, `remove_port`
+- **Snapshots:** `snapshots`, `create_snapshot`, `delete_snapshot`
+- **Access:** `ssh`, `desktop`
+- **Teams:** `teams`, `create_team`, `add_member`
+- **Keys:** `keys`, `create_key`, `delete_key`
+- **Secrets:** `secrets`, `set_secret`, `delete_secret`
+- **Webhooks:** `webhooks`, `create_webhook`, `delete_webhook`, `deliveries`, `test_webhook`
+
+Errors are raised as `BoatError(status, code, message, request_id)`.
+`verify_webhook(secret, request.headers["X-Boat-Signature"], raw_body)` checks a webhook
+signature.
+
+Example: `examples/quickstart.py`. Tests: `python3 -m unittest discover -s tests`.

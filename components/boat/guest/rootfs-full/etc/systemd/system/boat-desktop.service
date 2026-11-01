@@ -1,0 +1,9 @@
+[Unit]
+Description=boat desktop (XFCE on KasmVNC, websocket on 127.0.0.1:6081)
+
+[Service]
+User=dev
+WorkingDirectory=/home/dev
+ExecStart=/usr/local/bin/boat-desktop-session
+Restart=on-failure
+RestartSec=2
