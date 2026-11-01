@@ -244,10 +244,11 @@ Workflow `boat-e2e`, on a GitHub KVM runner with real Firecracker (jailer on) an
 NixOS VM tests, with stubs for boatd and boat-api unless noted (`boat-install` and `boat-ops` are jobs in `boat-e2e`; run one with `nix build --impure -f tests/standalone.nix boat-ops`; `boat-module` is in `nix flake check`):
 
 - `boat-install`: boots the `iso-server` modules under UEFI, runs `panda-install` with every server flag on two blank disks, boots the disk: `local.nix`, `disk.nix`, the data mount, sealed keys, `panda-health`, and **real** boat-api, gateway, Caddy and `boat-admin` over TLS.
+- `boat-real` (job in `boat-e2e`): **real boatd, jailer, Firecracker and guest image under the real NixOS module** (nested KVM): a VM stays up through `switch` to a generation with a new boatd and boat-api (same Firecracker process), a boatd restart onto the new binary (same `boot_id`, processes and files), and a graceful reboot, then `boat rm` leaves no process.
 - `boat-ops`: `switch` between two prebuilt generations with a stub VM running: boatd untouched, boat-api moved, health passes, `boat_reboot_pending` turns on, a boatd restart snapshots and resumes; real restic backup, restore to a scratch dir, master key recovery.
 - `boat-module`: units, sealed keys, gateway uid, data-disk guard, Caddy + gateway over TLS, Origin refusals, dashboard, jump host.
 
-**Not tested by anything:** a real NixOS `switch` with real Firecracker VMs (the two halves above are separate; test VMs cannot reliably run Firecracker), `local.nix` taking effect after the first rebuild, real ACME/DNS-01, a real TPM, public IPv4, maintenance reboots, restoring a backup into a running service, and two tenants' real browsers.
+**Not tested by anything:** `local.nix` taking effect after the first rebuild, real ACME/DNS-01, a real TPM, public IPv4, the maintenance-reboot timer itself (the reboot it does is in `boat-real`), restoring a backup into a running service, and two tenants' real browsers.
 
 The fps numbers in `guest/README.md` are raw 8bpp updates measured in CI on 2 vCPU with a synthetic animation. They show how fast the server produces frames, not what a user sees through a browser and an internet link.
 
