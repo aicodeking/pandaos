@@ -46,7 +46,7 @@ func setup(t *testing.T) *env {
 		DesktopKey: []byte("desktop-key"), DesktopTTL: time.Minute, AllowPrivateHook: true}
 	s := newServer(store, kr, newBoatd(bsrv.URL), cfg, newLimiter(0, 0), &auditLog{w: audit})
 	s.hooks.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
-	api := httptest.NewServer(s)
+	api := httptest.NewServer(recorder(s))
 	t.Cleanup(api.Close)
 	return &env{t: t, api: api, srv: s, boatd: fb, owner: k.Token, dir: dir, audit: audit}
 }
@@ -84,7 +84,11 @@ func (e *env) raw(token, method, path string, body any) (int, []byte) {
 }
 
 func (e *env) newKey(scopes ...string) string {
-	st, out := e.do(e.owner, "POST", "/v1/keys", map[string]any{"name": "k", "scopes": scopes})
+	body := map[string]any{"name": "k"}
+	if len(scopes) > 0 {
+		body["scopes"] = scopes
+	}
+	st, out := e.do(e.owner, "POST", "/v1/keys", body)
 	if st != 201 {
 		e.t.Fatalf("create key: %d %v", st, out)
 	}

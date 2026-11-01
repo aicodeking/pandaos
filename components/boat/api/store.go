@@ -53,6 +53,11 @@ type APIKey struct {
 	Salt    string    `json:"salt"`
 	Hash    string    `json:"hash"`
 	Created time.Time `json:"created"`
+	// Rotation overlap: the previous secret keeps working until PrevUntil.
+	PrevSalt  string     `json:"prev_salt,omitempty"`
+	PrevHash  string     `json:"prev_hash,omitempty"`
+	PrevUntil *time.Time `json:"prev_until,omitempty"`
+	Rotated   *time.Time `json:"rotated,omitempty"`
 }
 
 type Secret struct {
@@ -69,6 +74,9 @@ type Webhook struct {
 	Events       []string  `json:"events"`
 	SealedSecret string    `json:"sealed_secret"`
 	Created      time.Time `json:"created"`
+	// Rotation overlap: deliveries also carry a signature with the old secret.
+	PrevSealedSecret string     `json:"prev_sealed_secret,omitempty"`
+	PrevUntil        *time.Time `json:"prev_until,omitempty"`
 }
 
 type Delivery struct {
@@ -95,6 +103,137 @@ type State struct {
 	SSHGrants  map[string]*SSHGrant  `json:"ssh_grants"` // key: team_id + "|" + "type base64"
 	// VMSecrets: secret names selected at create (absent = all team secrets).
 	VMSecrets map[string][]string `json:"vm_secrets"`
+	// Commands: detached command history per VM (newest last, capped).
+	Commands map[string][]CommandRecord `json:"commands"`
+	// Prompts and Conversations per VM (newest last, capped).
+	Prompts       map[string][]*PromptRun    `json:"prompts"`
+	Conversations map[string][]*Conversation `json:"conversations"`
+	Environments  map[string]*Environment    `json:"environments"`
+	// VMEnvs: the environment a VM was created from, by VM id.
+	VMEnvs     map[string]string         `json:"vm_envs"`
+	SnapShares map[string]*SnapShare     `json:"snap_shares"`
+	AICreds    map[string]*AICredential  `json:"ai_creds"` // key: team_id + "/" + provider
+	AIVMs      map[string]*AIVM          `json:"ai_vms"`
+	AIProxyOff map[string]bool           `json:"ai_proxy_off"` // team id: proxy off, raw keys injected
+	AIUsage    map[string]*AIUsageRow    `json:"ai_usage"`     // key: team_id + "/" + vm_id + "/" + provider + "/" + model
+	Telemetry  map[string]*TeamTelemetry `json:"telemetry"`
+}
+
+// CommandRecord remembers a detached command after its VM stops or forgets it.
+type CommandRecord struct {
+	ID         string     `json:"id"`
+	Cmd        []string   `json:"cmd"`
+	Cwd        string     `json:"cwd,omitempty"`
+	Kind       string     `json:"kind"` // command | prompt | setup
+	KeyID      string     `json:"key_id,omitempty"`
+	StartedAt  time.Time  `json:"started_at"`
+	State      string     `json:"state"`
+	Exit       *int       `json:"exit"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
+type PromptRun struct {
+	ID             string     `json:"id"`
+	VMID           string     `json:"vm_id"`
+	ConversationID string     `json:"conversation_id"`
+	Agent          string     `json:"agent"`
+	Model          string     `json:"model,omitempty"`
+	Prompt         string     `json:"prompt"`
+	CmdID          string     `json:"cmd_id"`
+	State          string     `json:"state"` // running | completed | failed | interrupted | steered
+	Exit           *int       `json:"exit"`
+	Created        time.Time  `json:"created"`
+	Finished       *time.Time `json:"finished,omitempty"`
+	SteeredBy      string     `json:"steered_by,omitempty"`
+}
+
+type Conversation struct {
+	ID          string    `json:"id"`
+	VMID        string    `json:"vm_id"`
+	Agent       string    `json:"agent"`
+	Model       string    `json:"model,omitempty"`
+	Session     string    `json:"session,omitempty"` // the agent CLI's own session id
+	PromptCount int       `json:"prompt_count"`
+	LastPrompt  string    `json:"last_prompt"`
+	Created     time.Time `json:"created"`
+	Updated     time.Time `json:"updated"`
+}
+
+// Environment = base image + setup script + env vars + secret selection.
+type Environment struct {
+	ID          string            `json:"id"`
+	TeamID      string            `json:"team_id"`
+	Name        string            `json:"name"`
+	Image       string            `json:"image,omitempty"`
+	Size        string            `json:"size,omitempty"`
+	SetupScript string            `json:"setup_script,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	Secrets     *[]string         `json:"secrets,omitempty"`
+	IsDefault   bool              `json:"is_default"`
+	Version     int               `json:"version"` // bumped when image/script/env change
+	Created     time.Time         `json:"created"`
+	Updated     time.Time         `json:"updated"`
+	Build       *EnvBuild         `json:"build,omitempty"`
+}
+
+// EnvBuild: a setup run saved as a snapshot, used for fast start. The builder
+// VM stays stopped because deleting a VM deletes its snapshots.
+type EnvBuild struct {
+	State      string    `json:"state"` // building | ready | failed
+	Version    int       `json:"version"`
+	VMID       string    `json:"vm_id,omitempty"`
+	SnapshotID string    `json:"snapshot_id,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	At         time.Time `json:"at"`
+}
+
+// SnapShare grants another team (Grantee) or the holder of a code read access.
+type SnapShare struct {
+	ID         string     `json:"id"`
+	TeamID     string     `json:"team_id"`
+	VMID       string     `json:"vm_id"`
+	SnapshotID string     `json:"snapshot_id"`
+	Grantee    string     `json:"grantee,omitempty"`
+	CodeSalt   string     `json:"code_salt,omitempty"`
+	CodeHash   string     `json:"code_hash,omitempty"`
+	Expires    *time.Time `json:"expires,omitempty"`
+	Uses       int        `json:"uses"`
+	Created    time.Time  `json:"created"`
+}
+
+type AICredential struct {
+	TeamID   string    `json:"team_id"`
+	Provider string    `json:"provider"`
+	Sealed   string    `json:"sealed"`
+	Last4    string    `json:"last4"`
+	Updated  time.Time `json:"updated"`
+}
+
+// AIVM is a VM's proxy identity. Gen changes at every start and stop, which
+// invalidates the previous per-VM token.
+type AIVM struct {
+	TeamID  string `json:"team_id"`
+	Gen     int    `json:"gen"`
+	Blocked bool   `json:"blocked,omitempty"`
+}
+
+type AIUsageRow struct {
+	TeamID       string    `json:"team_id"`
+	VMID         string    `json:"vm_id"`
+	Provider     string    `json:"provider"`
+	Model        string    `json:"model"`
+	Requests     int64     `json:"requests"`
+	InputTokens  int64     `json:"input_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
+	Updated      time.Time `json:"updated"`
+}
+
+// TeamTelemetry is a team's own OTLP endpoint for VM lifecycle events.
+type TeamTelemetry struct {
+	Endpoint      string    `json:"endpoint"`
+	SealedHeaders string    `json:"sealed_headers,omitempty"`
+	HeaderNames   []string  `json:"header_names,omitempty"`
+	Updated       time.Time `json:"updated"`
 }
 
 // SSHGrant records which team VMs a public key was registered for, so the
@@ -131,6 +270,39 @@ func (st *State) init() {
 	}
 	if st.VMSecrets == nil {
 		st.VMSecrets = map[string][]string{}
+	}
+	if st.Commands == nil {
+		st.Commands = map[string][]CommandRecord{}
+	}
+	if st.Prompts == nil {
+		st.Prompts = map[string][]*PromptRun{}
+	}
+	if st.Conversations == nil {
+		st.Conversations = map[string][]*Conversation{}
+	}
+	if st.Environments == nil {
+		st.Environments = map[string]*Environment{}
+	}
+	if st.VMEnvs == nil {
+		st.VMEnvs = map[string]string{}
+	}
+	if st.SnapShares == nil {
+		st.SnapShares = map[string]*SnapShare{}
+	}
+	if st.AICreds == nil {
+		st.AICreds = map[string]*AICredential{}
+	}
+	if st.AIVMs == nil {
+		st.AIVMs = map[string]*AIVM{}
+	}
+	if st.AIProxyOff == nil {
+		st.AIProxyOff = map[string]bool{}
+	}
+	if st.AIUsage == nil {
+		st.AIUsage = map[string]*AIUsageRow{}
+	}
+	if st.Telemetry == nil {
+		st.Telemetry = map[string]*TeamTelemetry{}
 	}
 
 }

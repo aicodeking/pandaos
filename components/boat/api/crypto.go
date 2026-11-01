@@ -26,6 +26,7 @@ import (
 type Keyring struct {
 	aead   cipher.AEAD
 	pepper []byte
+	aiKey  []byte // signs per-VM AI proxy tokens
 }
 
 func derive(master []byte, label string) []byte {
@@ -46,7 +47,7 @@ func NewKeyring(master []byte) (*Keyring, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Keyring{aead: aead, pepper: derive(master, "boat-api key pepper v1")}, nil
+	return &Keyring{aead: aead, pepper: derive(master, "boat-api key pepper v1"), aiKey: derive(master, "boat-api ai proxy v1")}, nil
 }
 
 // LoadMasterKey reads 32 raw bytes or 64 hex chars. With create, a missing
@@ -155,11 +156,17 @@ func SignDesktop(key []byte, vmID string, exp int64) string {
 }
 
 // SignWebhook: X-Boat-Signature: t=<unix>,v1=hex(HMAC-SHA256(secret, "<t>." + body)).
-func SignWebhook(secret []byte, ts int64, body []byte) string {
-	m := hmac.New(sha256.New, secret)
-	fmt.Fprintf(m, "%d.", ts)
-	m.Write(body)
-	return fmt.Sprintf("t=%d,v1=%s", ts, hex.EncodeToString(m.Sum(nil)))
+// During a rotation overlap, one more v1= per extra secret is appended; a
+// receiver accepts the delivery if any v1 matches.
+func SignWebhook(secret []byte, ts int64, body []byte, older ...[]byte) string {
+	out := fmt.Sprintf("t=%d", ts)
+	for _, sec := range append([][]byte{secret}, older...) {
+		m := hmac.New(sha256.New, sec)
+		fmt.Fprintf(m, "%d.", ts)
+		m.Write(body)
+		out += ",v1=" + hex.EncodeToString(m.Sum(nil))
+	}
+	return out
 }
 
 // SignGuestDesktop is the token the desktop gateway sends to the guest proxy:

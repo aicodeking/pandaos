@@ -2,8 +2,8 @@
  "openapi": "3.1.0",
  "info": {
   "title": "Boat API",
-  "version": "1.0.0",
-  "description": "Persistent Ubuntu VMs for AI agents. Auth: Authorization: Bearer boat_<id>_<secret>. Each operation lists its required scope in x-boat-scope. Webhooks are signed: X-Boat-Signature: t=<unix>,v1=hex(HMAC-SHA256(secret, t + '.' + body))."
+  "version": "1.1.0",
+  "description": "Persistent Ubuntu VMs for AI agents. Auth: Authorization: Bearer boat_<id>_<secret>. Each operation lists its required scope in x-boat-scope. Webhooks are signed: X-Boat-Signature: t=<unix>,v1=hex(HMAC-SHA256(secret, t + '.' + body)); during a rotation overlap there is one v1= per secret, accept any match."
  },
  "servers": [
   {
@@ -22,7 +22,25 @@
     "security": [],
     "responses": {
      "200": {
-      "description": "OK"
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
      }
     }
    }
@@ -33,7 +51,18 @@
     "security": [],
     "responses": {
      "200": {
-      "description": "OpenAPI 3.1"
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
      }
     }
    }
@@ -80,10 +109,16 @@
              "default": {
               "type": "boolean"
              }
-            }
+            },
+            "required": [
+             "id"
+            ]
            }
           }
-         }
+         },
+         "required": [
+          "images"
+         ]
         }
        }
       }
@@ -96,7 +131,7 @@
   },
   "/v1/usage": {
    "get": {
-    "summary": "Team usage since a time (default: all recorded): VM-seconds by size, snapshot-days (from boatd)",
+    "summary": "Team usage from boatd: VM-seconds by size, snapshot-days",
     "x-boat-scope": "vms:read",
     "parameters": [
      {
@@ -106,7 +141,16 @@
       "schema": {
        "type": "string"
       },
-      "description": "RFC 3339 (alias: from); usage is counted up to now"
+      "description": "RFC 3339; alias from"
+     },
+     {
+      "name": "from",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "alias of since"
      }
     ],
     "responses": {
@@ -115,7 +159,40 @@
       "content": {
        "application/json": {
         "schema": {
-         "type": "object"
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/events": {
+   "get": {
+    "summary": "Server-sent VM lifecycle events for the caller's team. Resume with Last-Event-ID or ?after=",
+    "x-boat-scope": "vms:read",
+    "parameters": [
+     {
+      "name": "after",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "event sequence number"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "text/event-stream": {
+        "schema": {
+         "type": "string"
         }
        }
       }
@@ -147,7 +224,10 @@
             "$ref": "#/components/schemas/VM"
            }
           }
-         }
+         },
+         "required": [
+          "vms"
+         ]
         }
        }
       }
@@ -158,13 +238,13 @@
     }
    },
    "post": {
-    "summary": "Create a VM (team secrets injected as env)",
+    "summary": "Create a VM; team secrets and AI proxy tokens go into its env, and an environment's setup runs in it",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
     ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
@@ -247,7 +327,7 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Ok"
+         "$ref": "#/components/schemas/VM"
         }
        }
       }
@@ -260,7 +340,7 @@
   },
   "/v1/vms/{id}/start": {
    "post": {
-    "summary": "Resume a stopped VM (secrets re-injected)",
+    "summary": "Resume a stopped VM; secrets re-injected, new AI proxy token",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -330,7 +410,7 @@
   },
   "/v1/vms/{id}/fork": {
    "post": {
-    "summary": "Fork a VM",
+    "summary": "Fork a VM; the child gets its own AI token and copies of the conversations",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -347,7 +427,7 @@
      }
     ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
@@ -378,6 +458,106 @@
     }
    }
   },
+  "/v1/vms/{id}/resize": {
+   "post": {
+    "summary": "Change a stopped VM's size (409 while running)",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "size": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "size"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VM"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/usage": {
+   "get": {
+    "summary": "VM-seconds of one VM",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          },
+          "vm_seconds": {
+           "type": "number"
+          }
+         },
+         "required": [
+          "id",
+          "vm_seconds"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/v1/vms/{id}/exec": {
    "post": {
     "summary": "Run a command; streams JSON lines {stream,data_b64} then {exit}",
@@ -397,7 +577,7 @@
      }
     ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
@@ -425,7 +605,7 @@
   },
   "/v1/vms/{id}/prompt": {
    "post": {
-    "summary": "Run a coding agent headless in the VM; streams like exec",
+    "summary": "Run a coding agent and wait; streams like exec. For a background turn use /prompts",
     "x-boat-scope": "exec",
     "tags": [
      "VMs"
@@ -442,7 +622,7 @@
      }
     ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
@@ -468,12 +648,471 @@
     }
    }
   },
+  "/v1/vms/{id}/processes": {
+   "get": {
+    "summary": "Processes in the VM (ps)",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Commands"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "processes": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "pid": {
+              "type": "integer"
+             },
+             "ppid": {
+              "type": "integer"
+             },
+             "user": {
+              "type": "string"
+             },
+             "elapsed_s": {
+              "type": "integer"
+             },
+             "command": {
+              "type": "string"
+             }
+            }
+           }
+          }
+         },
+         "required": [
+          "processes"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/commands": {
+   "post": {
+    "summary": "Start a detached command. It outlives this request",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Commands"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "cmd": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "env": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         },
+         "cwd": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "cmd"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          },
+          "cmd": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          "state": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id",
+          "cmd",
+          "state"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "get": {
+    "summary": "Commands the guest knows about",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Commands"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "commands": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Command"
+           }
+          }
+         },
+         "required": [
+          "commands"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/commands/{cid}": {
+   "get": {
+    "summary": "Command status",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Commands"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "cid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "command id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Command"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "summary": "Stop a command (SIGTERM)",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Commands"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "cid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "command id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SignalResult"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/commands/{cid}/logs": {
+   "get": {
+    "summary": "Output from a byte offset. With follow=1, NDJSON until the command ends: {stream,data_b64,next_offset}… then {exit}; {reconnect,next_offset} means resume from there",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Commands"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "cid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "command id"
+     },
+     {
+      "name": "offset",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      },
+      "description": ""
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      },
+      "description": ""
+     },
+     {
+      "name": "follow",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "1 to stream"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/LogChunk"
+        }
+       },
+       "application/x-ndjson": {
+        "schema": {
+         "$ref": "#/components/schemas/LogLine"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/commands/{cid}/signal": {
+   "post": {
+    "summary": "Signal a command's process group",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Commands"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "cid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "command id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "signal": {
+          "type": "string",
+          "description": "TERM, INT, KILL or HUP; default TERM"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SignalResult"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/command-history": {
+   "get": {
+    "summary": "Commands started through this API, newest last (kept 200). Also works when the VM is stopped",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Commands"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "commands": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/CommandRecord"
+           }
+          }
+         },
+         "required": [
+          "commands"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/v1/vms/{id}/files": {
    "get": {
     "summary": "Download a file",
     "x-boat-scope": "exec",
     "tags": [
-     "VMs"
+     "Files"
     ],
     "parameters": [
      {
@@ -516,7 +1155,7 @@
     "summary": "Upload a file",
     "x-boat-scope": "exec",
     "tags": [
-     "VMs"
+     "Files"
     ],
     "parameters": [
      {
@@ -555,7 +1194,880 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Ok"
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "path": {
+           "type": "string"
+          },
+          "bytes": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "ok",
+          "path",
+          "bytes"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "summary": "Delete a file or (recursive=1) a tree",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Files"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "absolute path"
+     },
+     {
+      "name": "recursive",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "1 for a directory tree"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "path": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/files/list": {
+   "get": {
+    "summary": "List a directory",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Files"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "absolute path"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "path": {
+           "type": "string"
+          },
+          "entries": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/FileEntry"
+           }
+          }
+         },
+         "required": [
+          "path",
+          "entries"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/files/move": {
+   "post": {
+    "summary": "Move or rename",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Files"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "from": {
+          "type": "string"
+         },
+         "to": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "from",
+         "to"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "from": {
+           "type": "string"
+          },
+          "to": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/files/search": {
+   "get": {
+    "summary": "Search names, or contents with content=1",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Files"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     },
+     {
+      "name": "q",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     },
+     {
+      "name": "content",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "matches": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "path": {
+              "type": "string"
+             },
+             "line": {
+              "type": "integer"
+             },
+             "text": {
+              "type": "string"
+             }
+            },
+            "required": [
+             "path"
+            ]
+           }
+          }
+         },
+         "required": [
+          "matches"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/files/info": {
+   "get": {
+    "summary": "Stat a path",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Files"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "path": {
+           "type": "string"
+          },
+          "type": {
+           "enum": [
+            "file",
+            "dir",
+            "link"
+           ]
+          },
+          "size": {
+           "type": "integer"
+          },
+          "mode": {
+           "type": "string"
+          },
+          "mtime": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "path",
+          "type",
+          "size",
+          "mode",
+          "mtime"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/files/folder": {
+   "post": {
+    "summary": "mkdir -p",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Files"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "path": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/files/permissions": {
+   "post": {
+    "summary": "chmod",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Files"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "mode": {
+          "type": "string",
+          "description": "octal, e.g. 644"
+         }
+        },
+        "required": [
+         "path",
+         "mode"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "path": {
+           "type": "string"
+          },
+          "mode": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/prompts": {
+   "post": {
+    "summary": "Start an agent turn in the background; 409 while the conversation has one running",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Prompts"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/AsyncPrompt"
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/PromptRun"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "get": {
+    "summary": "Turns on this VM, newest last",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Prompts"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "prompts": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/PromptRun"
+           }
+          }
+         },
+         "required": [
+          "prompts"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/prompts/{pid}": {
+   "get": {
+    "summary": "Turn status",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Prompts"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "pid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "prompt id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/PromptRun"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/prompts/{pid}/logs": {
+   "get": {
+    "summary": "Turn output; same as command logs",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Prompts"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "pid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "prompt id"
+     },
+     {
+      "name": "offset",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      },
+      "description": ""
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      },
+      "description": ""
+     },
+     {
+      "name": "follow",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/LogChunk"
+        }
+       },
+       "application/x-ndjson": {
+        "schema": {
+         "$ref": "#/components/schemas/LogLine"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/prompts/{pid}/steer": {
+   "post": {
+    "summary": "Interrupt the running turn and resume its session with a new message. Files and memory stay; a tool call in flight is cut off",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Prompts"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "pid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "prompt id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "prompt": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "prompt"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/PromptRun"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/prompts/{pid}/interrupt": {
+   "post": {
+    "summary": "SIGINT the running turn. Files and memory stay",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Prompts"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "pid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "prompt id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/PromptRun"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/conversations": {
+   "get": {
+    "summary": "Conversations, newest first",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Prompts"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "conversations": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/ConversationView"
+           }
+          }
+         },
+         "required": [
+          "conversations"
+         ]
         }
        }
       }
@@ -595,10 +2107,13 @@
           "ports": {
            "type": "array",
            "items": {
-            "type": "object"
+            "$ref": "#/components/schemas/Port"
            }
           }
-         }
+         },
+         "required": [
+          "ports"
+         ]
         }
        }
       }
@@ -626,14 +2141,11 @@
      }
     ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
         "type": "object",
-        "required": [
-         "port"
-        ],
         "properties": {
          "port": {
           "type": "integer"
@@ -649,7 +2161,10 @@
           "type": "boolean",
           "description": "shorthand for auth=public"
          }
-        }
+        },
+        "required": [
+         "port"
+        ]
        }
       }
      }
@@ -660,7 +2175,7 @@
       "content": {
        "application/json": {
         "schema": {
-         "type": "object"
+         "$ref": "#/components/schemas/Port"
         }
        }
       }
@@ -704,7 +2219,68 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Ok"
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/ports/{port}/url": {
+   "get": {
+    "summary": "Gateway URL of a port route. Private routes carry ?boat_exp=&boat_sig=, and token for the X-Boat-Route-Token header",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "port",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     },
+     {
+      "name": "ttl_s",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      },
+      "description": "60..604800, default -port-url-ttl (1h)"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/PortURL"
         }
        }
       }
@@ -720,7 +2296,7 @@
     "summary": "List snapshots",
     "x-boat-scope": "vms:read",
     "tags": [
-     "VMs"
+     "Snapshots"
     ],
     "parameters": [
      {
@@ -739,7 +2315,18 @@
       "content": {
        "application/json": {
         "schema": {
-         "type": "object"
+         "type": "object",
+         "properties": {
+          "snapshots": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Snapshot"
+           }
+          }
+         },
+         "required": [
+          "snapshots"
+         ]
         }
        }
       }
@@ -753,7 +2340,7 @@
     "summary": "Take a snapshot",
     "x-boat-scope": "vms:write",
     "tags": [
-     "VMs"
+     "Snapshots"
     ],
     "parameters": [
      {
@@ -767,7 +2354,7 @@
      }
     ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
@@ -787,7 +2374,7 @@
       "content": {
        "application/json": {
         "schema": {
-         "type": "object"
+         "$ref": "#/components/schemas/Snapshot"
         }
        }
       }
@@ -803,7 +2390,7 @@
     "summary": "Delete a snapshot",
     "x-boat-scope": "vms:write",
     "tags": [
-     "VMs"
+     "Snapshots"
     ],
     "parameters": [
      {
@@ -822,6 +2409,227 @@
       "schema": {
        "type": "string"
       },
+      "description": "snapshot id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/snapshots/{sid}/download": {
+   "get": {
+    "summary": "Download the snapshot archive",
+    "x-boat-scope": "exec",
+    "tags": [
+     "Snapshots"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "sid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "snapshot id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/snapshots/{sid}/shares": {
+   "post": {
+    "summary": "Share: team_id grants that team read access; otherwise a signed link with a secret code, shown once. The disk's contents go with it",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Snapshots"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "sid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "snapshot id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "team_id": {
+          "type": "string"
+         },
+         "ttl_s": {
+          "type": "integer"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Share"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "get": {
+    "summary": "Shares of this snapshot",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Snapshots"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "sid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "snapshot id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "shares": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Share"
+           }
+          }
+         },
+         "required": [
+          "shares"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/snapshots/{sid}/shares/{share}": {
+   "delete": {
+    "summary": "Revoke a share. Copies already taken stay",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Snapshots"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "sid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "snapshot id"
+     },
+     {
+      "name": "share",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
       "description": ""
      }
     ],
@@ -831,7 +2639,177 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Ok"
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/snapshots/import": {
+   "post": {
+    "summary": "Import a snapshot archive (raw body) into the caller's team",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "Snapshots"
+    ],
+    "parameters": [
+     {
+      "name": "name",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/octet-stream": {
+       "schema": {
+        "type": "string",
+        "format": "binary"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Snapshot"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/snapshots/import-share": {
+   "post": {
+    "summary": "Copy a shared snapshot into the caller's team, by share_id (a grant) or code",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "Snapshots"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "share_id": {
+          "type": "string"
+         },
+         "code": {
+          "type": "string"
+         },
+         "name": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Snapshot"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/shared-snapshots": {
+   "get": {
+    "summary": "Live grants to the caller's team",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "Snapshots"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "shares": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Share"
+           }
+          }
+         },
+         "required": [
+          "shares"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/snapshot-links/{code}/download": {
+   "get": {
+    "summary": "Signed link: no API key, the code is the credential",
+    "tags": [
+     "Snapshots"
+    ],
+    "parameters": [
+     {
+      "name": "code",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
         }
        }
       }
@@ -861,7 +2839,7 @@
      }
     ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
@@ -925,7 +2903,649 @@
            "type": "string",
            "format": "date-time"
           }
+         },
+         "required": [
+          "url",
+          "expires_at"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/environments": {
+   "get": {
+    "summary": "List environments",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "Environments"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "environments": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Environment"
+           }
+          }
+         },
+         "required": [
+          "environments"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "summary": "Create an environment",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Environments"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/EnvironmentReq"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Environment"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/environments/{id}": {
+   "get": {
+    "summary": "Get by id or name",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "Environments"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "id or name"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Environment"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "put": {
+    "summary": "Update; a change to what it builds makes an existing build stale",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Environments"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "id or name"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/EnvironmentReq"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Environment"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "summary": "Delete it and its build",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Environments"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "id or name"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/environments/{id}/build": {
+   "post": {
+    "summary": "Run the setup once and snapshot the result, so new VMs start with it done. Poll build.state",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Environments"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "id or name"
+     }
+    ],
+    "responses": {
+     "202": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Environment"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/ai/credentials": {
+   "get": {
+    "summary": "Providers with a key, last 4 characters only",
+    "x-boat-scope": "admin",
+    "tags": [
+     "AI proxy"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "credentials": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/AICredential"
+           }
+          }
+         },
+         "required": [
+          "credentials"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/ai/credentials/{provider}": {
+   "put": {
+    "summary": "Set a provider key. It stays on the host; VMs get a per-VM proxy token",
+    "x-boat-scope": "admin",
+    "tags": [
+     "AI proxy"
+    ],
+    "parameters": [
+     {
+      "name": "provider",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "anthropic, openai, openrouter, deepseek, mistral, moonshot or xai"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "value": {
+          "type": "string"
          }
+        },
+        "required": [
+         "value"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AICredential"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "summary": "Remove a provider key",
+    "x-boat-scope": "admin",
+    "tags": [
+     "AI proxy"
+    ],
+    "parameters": [
+     {
+      "name": "provider",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/ai/proxy": {
+   "get": {
+    "summary": "Proxy switch",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "AI proxy"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AIProxy"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "put": {
+    "summary": "enabled=false injects raw keys into VMs at their next start",
+    "x-boat-scope": "admin",
+    "tags": [
+     "AI proxy"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "enabled": {
+          "type": "boolean"
+         }
+        },
+        "required": [
+         "enabled"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AIProxy"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/ai/usage": {
+   "get": {
+    "summary": "Tokens through the proxy, per VM, provider and model",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "AI proxy"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AIUsage"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/ai-usage": {
+   "get": {
+    "summary": "Tokens through the proxy for one VM",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "AI proxy"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AIUsage"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/ai-access": {
+   "put": {
+    "summary": "Block or unblock a VM at the proxy, at once",
+    "x-boat-scope": "admin",
+    "tags": [
+     "AI proxy"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "enabled": {
+          "type": "boolean"
+         }
+        },
+        "required": [
+         "enabled"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          },
+          "enabled": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "id",
+          "enabled"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/telemetry": {
+   "get": {
+    "summary": "The team's OTLP endpoint for VM lifecycle events",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Telemetry"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Telemetry"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "put": {
+    "summary": "Set it; header values are sealed and never returned",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Telemetry"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "endpoint": {
+          "type": "string"
+         },
+         "headers": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         }
+        },
+        "required": [
+         "endpoint"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Telemetry"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "summary": "Remove it",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Telemetry"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
         }
        }
       }
@@ -939,6 +3559,9 @@
   "/v1/teams": {
    "get": {
     "summary": "Teams the caller belongs to",
+    "tags": [
+     "Teams"
+    ],
     "responses": {
      "200": {
       "description": "OK",
@@ -953,7 +3576,10 @@
             "$ref": "#/components/schemas/Team"
            }
           }
-         }
+         },
+         "required": [
+          "teams"
+         ]
         }
        }
       }
@@ -966,15 +3592,15 @@
    "post": {
     "summary": "Create a team (operator only). With owner, a new user owns it and their first key is returned; else the operator owns it",
     "x-boat-scope": "admin",
+    "tags": [
+     "Teams"
+    ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
         "type": "object",
-        "required": [
-         "name"
-        ],
         "properties": {
          "name": {
           "type": "string"
@@ -983,7 +3609,10 @@
           "type": "string",
           "description": "name of a new user who becomes owner"
          }
-        }
+        },
+        "required": [
+         "name"
+        ]
        }
       }
      }
@@ -994,26 +3623,42 @@
       "content": {
        "application/json": {
         "schema": {
-         "allOf": [
-          {
-           "$ref": "#/components/schemas/Team"
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
           },
-          {
+          "name": {
+           "type": "string"
+          },
+          "role": {
+           "type": "string"
+          },
+          "members": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Member"
+           }
+          },
+          "created": {
+           "type": "string",
+           "format": "date-time"
+          },
+          "owner": {
            "type": "object",
            "properties": {
-            "owner": {
-             "type": "object",
-             "properties": {
-              "user": {
-               "type": "object"
-              },
-              "key": {
-               "$ref": "#/components/schemas/Key"
-              }
-             }
+            "user": {
+             "$ref": "#/components/schemas/User"
+            },
+            "key": {
+             "$ref": "#/components/schemas/Key"
             }
            }
           }
+         },
+         "required": [
+          "id",
+          "name"
          ]
         }
        }
@@ -1028,6 +3673,9 @@
   "/v1/teams/{id}": {
    "get": {
     "summary": "Team with members",
+    "tags": [
+     "Teams"
+    ],
     "parameters": [
      {
       "name": "id",
@@ -1056,8 +3704,11 @@
     }
    },
    "delete": {
-    "summary": "Delete a team (operator only; the team must have no VMs). Removes its keys, secrets and webhooks",
+    "summary": "Delete a team (operator only; it must have no VMs)",
     "x-boat-scope": "admin",
+    "tags": [
+     "Teams"
+    ],
     "parameters": [
      {
       "name": "id",
@@ -1075,7 +3726,18 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Ok"
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "ok"
+         ]
         }
        }
       }
@@ -1090,6 +3752,9 @@
    "post": {
     "summary": "Create a user in the team; returns their first key",
     "x-boat-scope": "admin",
+    "tags": [
+     "Teams"
+    ],
     "parameters": [
      {
       "name": "id",
@@ -1102,7 +3767,7 @@
      }
     ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
@@ -1135,7 +3800,7 @@
          "type": "object",
          "properties": {
           "user": {
-           "type": "object"
+           "$ref": "#/components/schemas/User"
           },
           "role": {
            "type": "string"
@@ -1143,7 +3808,12 @@
           "key": {
            "$ref": "#/components/schemas/Key"
           }
-         }
+         },
+         "required": [
+          "user",
+          "role",
+          "key"
+         ]
         }
        }
       }
@@ -1158,6 +3828,9 @@
    "delete": {
     "summary": "Remove a member and revoke their keys for the team",
     "x-boat-scope": "admin",
+    "tags": [
+     "Teams"
+    ],
     "parameters": [
      {
       "name": "id",
@@ -1184,7 +3857,15 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Ok"
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
         }
        }
       }
@@ -1198,6 +3879,9 @@
   "/v1/keys": {
    "get": {
     "summary": "List keys (own; all team keys with admin)",
+    "tags": [
+     "Keys"
+    ],
     "responses": {
      "200": {
       "description": "OK",
@@ -1212,7 +3896,10 @@
             "$ref": "#/components/schemas/Key"
            }
           }
-         }
+         },
+         "required": [
+          "keys"
+         ]
         }
        }
       }
@@ -1224,8 +3911,11 @@
    },
    "post": {
     "summary": "Mint a key; scopes ⊆ caller scopes ∩ role. token shown once",
+    "tags": [
+     "Keys"
+    ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
@@ -1268,6 +3958,9 @@
   "/v1/keys/{id}": {
    "delete": {
     "summary": "Revoke a key",
+    "tags": [
+     "Keys"
+    ],
     "parameters": [
      {
       "name": "id",
@@ -1285,7 +3978,114 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Ok"
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/keys/{id}/rotate": {
+   "post": {
+    "summary": "New secret, same id and scopes; the old one works for overlap_s more (default 86400, 0 = revoke now)",
+    "tags": [
+     "Keys"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "overlap_s": {
+          "type": "integer"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Key"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/keys/{id}/usage": {
+   "get": {
+    "summary": "Requests since this server started, and the last use",
+    "tags": [
+     "Keys"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          },
+          "requests": {
+           "type": "integer"
+          },
+          "last_used": {
+           "type": "string",
+           "format": "date-time"
+          }
+         },
+         "required": [
+          "id",
+          "requests"
+         ]
         }
        }
       }
@@ -1320,10 +4120,16 @@
               "type": "string",
               "format": "date-time"
              }
-            }
+            },
+            "required": [
+             "name"
+            ]
            }
           }
-         }
+         },
+         "required": [
+          "secrets"
+         ]
         }
        }
       }
@@ -1336,7 +4142,7 @@
   },
   "/v1/secrets/{name}": {
    "put": {
-    "summary": "Set or rotate a secret (AES-256-GCM at rest). Rotation only affects VMs started or created afterwards; running VMs, their disks and snapshots keep the old value",
+    "summary": "Set or rotate a secret (AES-256-GCM at rest). Rotation only affects VMs started or created afterwards",
     "x-boat-scope": "admin",
     "parameters": [
      {
@@ -1350,7 +4156,7 @@
      }
     ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
@@ -1373,7 +4179,26 @@
       "content": {
        "application/json": {
         "schema": {
-         "type": "object"
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "updated": {
+           "type": "string",
+           "format": "date-time"
+          },
+          "rotated": {
+           "type": "boolean"
+          },
+          "note": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "name",
+          "updated"
+         ]
         }
        }
       }
@@ -1403,7 +4228,15 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Ok"
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
         }
        }
       }
@@ -1418,6 +4251,9 @@
    "get": {
     "summary": "List webhooks",
     "x-boat-scope": "admin",
+    "tags": [
+     "Webhooks"
+    ],
     "responses": {
      "200": {
       "description": "OK",
@@ -1432,7 +4268,10 @@
             "$ref": "#/components/schemas/Webhook"
            }
           }
-         }
+         },
+         "required": [
+          "webhooks"
+         ]
         }
        }
       }
@@ -1445,8 +4284,11 @@
    "post": {
     "summary": "Create a webhook; secret shown once",
     "x-boat-scope": "admin",
+    "tags": [
+     "Webhooks"
+    ],
     "requestBody": {
-     "required": true,
+     "required": false,
      "content": {
       "application/json": {
        "schema": {
@@ -1487,9 +4329,12 @@
    }
   },
   "/v1/webhooks/{id}": {
-   "delete": {
-    "summary": "Delete a webhook",
+   "get": {
+    "summary": "Get a webhook",
     "x-boat-scope": "admin",
+    "tags": [
+     "Webhooks"
+    ],
     "parameters": [
      {
       "name": "id",
@@ -1507,7 +4352,152 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Ok"
+         "$ref": "#/components/schemas/Webhook"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "patch": {
+    "summary": "Change url or events; the secret stays",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Webhooks"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "url": {
+          "type": "string"
+         },
+         "events": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Webhook"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "summary": "Delete a webhook",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Webhooks"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/webhooks/{id}/rotate": {
+   "post": {
+    "summary": "New signing secret, shown once. During overlap_s (default 86400) deliveries carry a v1= for both secrets",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Webhooks"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "overlap_s": {
+          "type": "integer"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Webhook"
         }
        }
       }
@@ -1522,6 +4512,9 @@
    "get": {
     "summary": "Last 100 delivery attempts",
     "x-boat-scope": "admin",
+    "tags": [
+     "Webhooks"
+    ],
     "parameters": [
      {
       "name": "id",
@@ -1547,7 +4540,10 @@
             "$ref": "#/components/schemas/Delivery"
            }
           }
-         }
+         },
+         "required": [
+          "deliveries"
+         ]
         }
        }
       }
@@ -1562,6 +4558,9 @@
    "post": {
     "summary": "Send a webhook.test event",
     "x-boat-scope": "admin",
+    "tags": [
+     "Webhooks"
+    ],
     "parameters": [
      {
       "name": "id",
@@ -1584,62 +4583,10 @@
           "event_id": {
            "type": "string"
           }
-         }
-        }
-       }
-      }
-     },
-     "default": {
-      "$ref": "#/components/responses/Error"
-     }
-    }
-   }
-  },
-  "/v1/vms/{id}/ports/{port}/url": {
-   "get": {
-    "summary": "Gateway URL of a port route. Private routes carry ?boat_exp=&boat_sig= (and `token` for the X-Boat-Route-Token header); the gateway trades it for a host-only cookie",
-    "x-boat-scope": "exec",
-    "tags": [
-     "VMs"
-    ],
-    "parameters": [
-     {
-      "name": "id",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      },
-      "description": "VM id"
-     },
-     {
-      "name": "port",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      },
-      "description": ""
-     },
-     {
-      "name": "ttl_s",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "type": "integer",
-       "minimum": 60,
-       "maximum": 604800
-      },
-      "description": "token lifetime (default -port-url-ttl, 1h)"
-     }
-    ],
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/PortURL"
+         },
+         "required": [
+          "event_id"
+         ]
         }
        }
       }
@@ -1659,14 +4606,6 @@
    }
   },
   "schemas": {
-   "Ok": {
-    "type": "object",
-    "properties": {
-     "ok": {
-      "type": "boolean"
-     }
-    }
-   },
    "Error": {
     "type": "object",
     "properties": {
@@ -1682,9 +4621,16 @@
        "request_id": {
         "type": "string"
        }
-      }
+      },
+      "required": [
+       "code",
+       "message"
+      ]
      }
-    }
+    },
+    "required": [
+     "error"
+    ]
    },
    "Scope": {
     "enum": [
@@ -1701,44 +4647,54 @@
    "VM": {
     "type": "object",
     "additionalProperties": true,
+    "required": [
+     "id"
+    ],
     "properties": {
      "id": {
       "type": "string"
      },
      "name": {
-      "type": "string"
+      "type": [
+       "string",
+       "null"
+      ]
      },
      "size": {
-      "$ref": "#/components/schemas/Size"
+      "type": [
+       "string",
+       "null"
+      ]
      },
      "image": {
-      "type": "string"
+      "type": [
+       "string",
+       "null"
+      ]
      },
      "team": {
       "type": "string"
      },
      "state": {
-      "enum": [
-       "creating",
-       "running",
-       "stopping",
-       "stopped",
-       "starting",
-       "forking",
-       "error"
-      ]
+      "type": "string"
      },
      "labels": {
-      "type": "object",
-      "additionalProperties": {
-       "type": "string"
-      }
+      "type": [
+       "object",
+       "null"
+      ]
      },
-     "ports": {
-      "type": "array",
-      "items": {
-       "type": "object"
-      }
+     "environment": {
+      "type": "string"
+     },
+     "from_build": {
+      "type": "boolean"
+     },
+     "setup_cmd_id": {
+      "type": "string"
+     },
+     "setup_error": {
+      "type": "string"
      }
     }
    },
@@ -1759,11 +4715,10 @@
      },
      "idle_stop_s": {
       "type": "integer",
-      "description": "Auto-stop after this many idle seconds; -1 = never; 0 = server default"
+      "description": "-1 = never"
      },
      "snapshot": {
-      "type": "string",
-      "description": "Create the VM from this snapshot (same team) instead of an image"
+      "type": "string"
      },
      "labels": {
       "type": "object",
@@ -1782,7 +4737,18 @@
       "items": {
        "type": "string"
       },
-      "description": "team secret names injected into this VM (absent = all team secrets, [] = none). Forks inherit the selection."
+      "description": "team secret names (absent = all, [] = none). Forks inherit it"
+     },
+     "environment": {
+      "type": "string",
+      "description": "name; default: the team's default environment"
+     },
+     "no_env": {
+      "type": "boolean"
+     },
+     "from": {
+      "type": "string",
+      "description": "a share code bsh_…; imported first"
      }
     }
    },
@@ -1843,6 +4809,37 @@
      "prompt"
     ]
    },
+   "AsyncPrompt": {
+    "type": "object",
+    "properties": {
+     "prompt": {
+      "type": "string"
+     },
+     "agent": {
+      "enum": [
+       "claude",
+       "codex",
+       "opencode"
+      ],
+      "default": "claude"
+     },
+     "model": {
+      "type": "string"
+     },
+     "cwd": {
+      "type": "string"
+     },
+     "conversation_id": {
+      "type": "string"
+     },
+     "new": {
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "prompt"
+    ]
+   },
    "ExecEvent": {
     "type": "object",
     "properties": {
@@ -1857,8 +4854,697 @@
      },
      "exit": {
       "type": "integer"
+     },
+     "timed_out": {
+      "type": "boolean"
+     },
+     "signal": {
+      "type": "string"
+     },
+     "error": {
+      "type": "string"
      }
     }
+   },
+   "Command": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "cmd": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "state": {
+      "enum": [
+       "running",
+       "exited",
+       "signaled"
+      ]
+     },
+     "exit": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "signal": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "started_at": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "finished_at": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "id",
+     "cmd",
+     "state"
+    ]
+   },
+   "CommandRecord": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "cmd": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "cwd": {
+      "type": "string"
+     },
+     "kind": {
+      "enum": [
+       "command",
+       "prompt",
+       "setup"
+      ]
+     },
+     "key_id": {
+      "type": "string"
+     },
+     "started_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "state": {
+      "type": "string"
+     },
+     "exit": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "finished_at": {
+      "type": "string",
+      "format": "date-time"
+     }
+    },
+    "required": [
+     "id",
+     "cmd",
+     "kind",
+     "started_at",
+     "state"
+    ]
+   },
+   "SignalResult": {
+    "type": "object",
+    "properties": {
+     "ok": {
+      "type": "boolean"
+     },
+     "id": {
+      "type": "string"
+     },
+     "signal": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "ok",
+     "id",
+     "signal"
+    ]
+   },
+   "LogChunk": {
+    "type": "object",
+    "properties": {
+     "data_b64": {
+      "type": "string"
+     },
+     "next_offset": {
+      "type": "integer"
+     },
+     "running": {
+      "type": "boolean"
+     },
+     "exit": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "stream": {
+      "type": "string"
+     },
+     "signal": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "data_b64",
+     "next_offset",
+     "running"
+    ]
+   },
+   "LogLine": {
+    "type": "object",
+    "properties": {
+     "stream": {
+      "type": "string"
+     },
+     "data_b64": {
+      "type": "string"
+     },
+     "next_offset": {
+      "type": "integer"
+     },
+     "exit": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "signal": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "reconnect": {
+      "type": "boolean"
+     }
+    }
+   },
+   "FileEntry": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "type": {
+      "enum": [
+       "file",
+       "dir",
+       "link"
+      ]
+     },
+     "size": {
+      "type": "integer"
+     },
+     "mode": {
+      "type": "string"
+     },
+     "mtime": {
+      "type": "number"
+     }
+    },
+    "required": [
+     "name",
+     "type"
+    ]
+   },
+   "PromptRun": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "vm_id": {
+      "type": "string"
+     },
+     "conversation_id": {
+      "type": "string"
+     },
+     "agent": {
+      "type": "string"
+     },
+     "model": {
+      "type": "string"
+     },
+     "prompt": {
+      "type": "string",
+      "description": "first 200 bytes"
+     },
+     "cmd_id": {
+      "type": "string"
+     },
+     "state": {
+      "enum": [
+       "running",
+       "completed",
+       "failed",
+       "interrupted",
+       "steered"
+      ]
+     },
+     "exit": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "created": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "finished": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "steered_by": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "vm_id",
+     "conversation_id",
+     "agent",
+     "cmd_id",
+     "state",
+     "created"
+    ]
+   },
+   "ConversationView": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "vm_id": {
+      "type": "string"
+     },
+     "agent": {
+      "type": "string"
+     },
+     "model": {
+      "type": "string"
+     },
+     "prompt_count": {
+      "type": "integer"
+     },
+     "last_prompt": {
+      "type": "string"
+     },
+     "running": {
+      "type": "boolean"
+     },
+     "created": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "updated": {
+      "type": "string",
+      "format": "date-time"
+     }
+    },
+    "required": [
+     "id",
+     "agent",
+     "prompt_count",
+     "running"
+    ]
+   },
+   "Port": {
+    "type": "object",
+    "properties": {
+     "guest_port": {
+      "type": "integer"
+     },
+     "host_port": {
+      "type": "integer"
+     },
+     "hostname": {
+      "type": "string"
+     },
+     "auth": {
+      "enum": [
+       "private",
+       "public"
+      ]
+     }
+    },
+    "required": [
+     "guest_port"
+    ]
+   },
+   "PortURL": {
+    "type": "object",
+    "properties": {
+     "url": {
+      "type": "string"
+     },
+     "auth": {
+      "enum": [
+       "private",
+       "public"
+      ]
+     },
+     "guest_port": {
+      "type": "integer"
+     },
+     "expires_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "token": {
+      "type": "string",
+      "description": "<exp>.<sig>, for the X-Boat-Route-Token header"
+     }
+    },
+    "required": [
+     "url",
+     "auth",
+     "guest_port"
+    ]
+   },
+   "Snapshot": {
+    "type": "object",
+    "additionalProperties": true,
+    "required": [
+     "id"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "vm_id": {
+      "type": "string"
+     },
+     "team": {
+      "type": "string"
+     }
+    }
+   },
+   "Share": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "vm_id": {
+      "type": "string"
+     },
+     "snapshot_id": {
+      "type": "string"
+     },
+     "grantee": {
+      "type": "string"
+     },
+     "expires": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "uses": {
+      "type": "integer"
+     },
+     "created": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "code": {
+      "type": "string",
+      "description": "only in the create response"
+     },
+     "url": {
+      "type": "string",
+      "description": "only in the create response, with -public-url"
+     }
+    },
+    "required": [
+     "id",
+     "snapshot_id",
+     "uses",
+     "created"
+    ]
+   },
+   "Environment": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "team_id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "image": {
+      "type": "string"
+     },
+     "size": {
+      "type": "string"
+     },
+     "setup_script": {
+      "type": "string"
+     },
+     "env": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string"
+      }
+     },
+     "secrets": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "is_default": {
+      "type": "boolean"
+     },
+     "version": {
+      "type": "integer"
+     },
+     "created": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "updated": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "build": {
+      "type": "object",
+      "properties": {
+       "state": {
+        "enum": [
+         "building",
+         "ready",
+         "failed"
+        ]
+       },
+       "version": {
+        "type": "integer"
+       },
+       "vm_id": {
+        "type": "string"
+       },
+       "snapshot_id": {
+        "type": "string"
+       },
+       "error": {
+        "type": "string"
+       },
+       "at": {
+        "type": "string",
+        "format": "date-time"
+       }
+      },
+      "required": [
+       "state",
+       "version",
+       "at"
+      ]
+     }
+    },
+    "required": [
+     "id",
+     "name",
+     "version"
+    ]
+   },
+   "EnvironmentReq": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "image": {
+      "type": "string"
+     },
+     "size": {
+      "type": "string"
+     },
+     "setup_script": {
+      "type": "string"
+     },
+     "env": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string"
+      }
+     },
+     "secrets": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "is_default": {
+      "type": "boolean"
+     }
+    }
+   },
+   "AICredential": {
+    "type": "object",
+    "properties": {
+     "provider": {
+      "type": "string"
+     },
+     "last4": {
+      "type": "string"
+     },
+     "updated": {
+      "type": "string",
+      "format": "date-time"
+     }
+    },
+    "required": [
+     "provider",
+     "last4",
+     "updated"
+    ]
+   },
+   "AIProxy": {
+    "type": "object",
+    "properties": {
+     "enabled": {
+      "type": "boolean"
+     },
+     "available": {
+      "type": "boolean",
+      "description": "false: the server has no -ai-proxy-url"
+     }
+    },
+    "required": [
+     "enabled",
+     "available"
+    ]
+   },
+   "AIUsage": {
+    "type": "object",
+    "properties": {
+     "usage": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "team_id": {
+         "type": "string"
+        },
+        "vm_id": {
+         "type": "string"
+        },
+        "provider": {
+         "type": "string"
+        },
+        "model": {
+         "type": "string"
+        },
+        "requests": {
+         "type": "integer"
+        },
+        "input_tokens": {
+         "type": "integer"
+        },
+        "output_tokens": {
+         "type": "integer"
+        },
+        "updated": {
+         "type": "string",
+         "format": "date-time"
+        }
+       },
+       "required": [
+        "vm_id",
+        "provider",
+        "model",
+        "requests",
+        "input_tokens",
+        "output_tokens"
+       ]
+      }
+     },
+     "totals": {
+      "type": "object",
+      "properties": {
+       "requests": {
+        "type": "integer"
+       },
+       "input_tokens": {
+        "type": "integer"
+       },
+       "output_tokens": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "requests",
+       "input_tokens",
+       "output_tokens"
+      ]
+     }
+    },
+    "required": [
+     "usage",
+     "totals"
+    ]
+   },
+   "Telemetry": {
+    "type": "object",
+    "properties": {
+     "configured": {
+      "type": "boolean"
+     },
+     "endpoint": {
+      "type": "string"
+     },
+     "header_names": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "updated": {
+      "type": "string",
+      "format": "date-time"
+     }
+    },
+    "required": [
+     "configured"
+    ]
    },
    "SSH": {
     "type": "object",
@@ -1875,13 +5561,55 @@
      "jump": {
       "type": "string"
      }
-    }
+    },
+    "required": [
+     "host",
+     "port",
+     "user"
+    ]
+   },
+   "User": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "operator": {
+      "type": "boolean"
+     },
+     "created": {
+      "type": "string",
+      "format": "date-time"
+     }
+    },
+    "required": [
+     "id",
+     "name"
+    ]
+   },
+   "Member": {
+    "type": "object",
+    "properties": {
+     "user_id": {
+      "type": "string"
+     },
+     "role": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "user_id",
+     "role"
+    ]
    },
    "Me": {
     "type": "object",
     "properties": {
      "user": {
-      "type": "object"
+      "$ref": "#/components/schemas/User"
      },
      "team": {
       "type": "object",
@@ -1892,7 +5620,11 @@
        "name": {
         "type": "string"
        }
-      }
+      },
+      "required": [
+       "id",
+       "name"
+      ]
      },
      "role": {
       "type": "string"
@@ -1909,7 +5641,15 @@
      "operator": {
       "type": "boolean"
      }
-    }
+    },
+    "required": [
+     "user",
+     "team",
+     "role",
+     "scopes",
+     "key_id",
+     "operator"
+    ]
    },
    "Team": {
     "type": "object",
@@ -1926,22 +5666,18 @@
      "members": {
       "type": "array",
       "items": {
-       "type": "object",
-       "properties": {
-        "user_id": {
-         "type": "string"
-        },
-        "role": {
-         "type": "string"
-        }
-       }
+       "$ref": "#/components/schemas/Member"
       }
      },
      "created": {
       "type": "string",
       "format": "date-time"
      }
-    }
+    },
+    "required": [
+     "id",
+     "name"
+    ]
    },
    "Key": {
     "type": "object",
@@ -1970,9 +5706,25 @@
      },
      "token": {
       "type": "string",
-      "description": "only in the create response"
+      "description": "only in the create and rotate responses"
+     },
+     "rotated": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "prev_until": {
+      "type": "string",
+      "format": "date-time"
      }
-    }
+    },
+    "required": [
+     "id",
+     "user_id",
+     "team_id",
+     "name",
+     "scopes",
+     "created"
+    ]
    },
    "Webhook": {
     "type": "object",
@@ -1995,9 +5747,19 @@
      },
      "secret": {
       "type": "string",
-      "description": "only in the create response"
+      "description": "only in the create and rotate responses"
+     },
+     "prev_until": {
+      "type": "string",
+      "format": "date-time"
      }
-    }
+    },
+    "required": [
+     "id",
+     "url",
+     "events",
+     "created"
+    ]
    },
    "Delivery": {
     "type": "object",
@@ -2030,32 +5792,17 @@
       "type": "string",
       "format": "date-time"
      }
-    }
-   },
-   "PortURL": {
-    "type": "object",
-    "properties": {
-     "url": {
-      "type": "string"
-     },
-     "auth": {
-      "enum": [
-       "private",
-       "public"
-      ]
-     },
-     "guest_port": {
-      "type": "integer"
-     },
-     "expires_at": {
-      "type": "string",
-      "format": "date-time"
-     },
-     "token": {
-      "type": "string",
-      "description": "<exp>.<sig>, for the X-Boat-Route-Token header"
-     }
-    }
+    },
+    "required": [
+     "id",
+     "webhook_id",
+     "event_id",
+     "event",
+     "attempt",
+     "status",
+     "ok",
+     "at"
+    ]
    }
   },
   "responses": {

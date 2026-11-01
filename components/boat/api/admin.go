@@ -49,13 +49,16 @@ const rotateNote = "new value applies to VMs created or started from now on; run
 	"until restarted, and existing disks, forks and snapshots still contain it. Revoke the old value at its issuer."
 
 type keyView struct {
-	ID      string    `json:"id"`
-	UserID  string    `json:"user_id"`
-	TeamID  string    `json:"team_id"`
-	Name    string    `json:"name"`
-	Scopes  []string  `json:"scopes"`
-	Created time.Time `json:"created"`
-	Token   string    `json:"token,omitempty"` // only on creation
+	ID      string     `json:"id"`
+	UserID  string     `json:"user_id"`
+	TeamID  string     `json:"team_id"`
+	Name    string     `json:"name"`
+	Scopes  []string   `json:"scopes"`
+	Created time.Time  `json:"created"`
+	Token   string     `json:"token,omitempty"` // only on creation and rotation
+	Rotated *time.Time `json:"rotated,omitempty"`
+	// PrevUntil: the previous secret keeps working until then.
+	PrevUntil *time.Time `json:"prev_until,omitempty"`
 }
 
 func viewKey(k *APIKey, token string) keyView {
@@ -63,7 +66,7 @@ func viewKey(k *APIKey, token string) keyView {
 	if sc == nil {
 		sc = []string{}
 	}
-	return keyView{ID: k.ID, UserID: k.UserID, TeamID: k.TeamID, Name: k.Name, Scopes: sc, Created: k.Created, Token: token}
+	return keyView{ID: k.ID, UserID: k.UserID, TeamID: k.TeamID, Name: k.Name, Scopes: sc, Created: k.Created, Token: token, Rotated: k.Rotated, PrevUntil: k.PrevUntil}
 }
 
 // mintKey adds a key to st and returns it with its one-time token.
@@ -255,6 +258,28 @@ func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request, p *principal
 				delete(st.SSHGrants, k)
 			}
 		}
+		for k, e := range st.Environments {
+			if e.TeamID == id {
+				delete(st.Environments, k)
+			}
+		}
+		for k, c := range st.AICreds {
+			if c.TeamID == id {
+				delete(st.AICreds, k)
+			}
+		}
+		for k, v := range st.AIVMs {
+			if v.TeamID == id {
+				delete(st.AIVMs, k)
+			}
+		}
+		for k, sh := range st.SnapShares {
+			if sh.TeamID == id || sh.Grantee == id {
+				delete(st.SnapShares, k)
+			}
+		}
+		delete(st.AIProxyOff, id)
+		delete(st.Telemetry, id)
 		pruneOrphanUsers(st)
 		return nil
 	})
@@ -475,6 +500,76 @@ func (s *server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 		return
 	}
 	writeJSON(w, 201, kv)
+}
+
+// rotateKey replaces a key's secret, keeping its id, scopes and team. The old
+// secret works for overlap_s more (default 24h, 0 = revoke at once).
+func (s *server) rotateKey(w http.ResponseWriter, r *http.Request, p *principal) {
+	var body struct {
+		OverlapS *int64 `json:"overlap_s"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	overlap, ok := overlapFrom(body.OverlapS)
+	if !ok {
+		writeErr(w, r, 400, "invalid_request", "overlap_s must be 0..2592000")
+		return
+	}
+	id := r.PathValue("id")
+	k := s.store.Snapshot().Keys[id]
+	if k == nil || k.TeamID != p.Team.ID || (k.UserID != p.User.ID && !p.has("admin")) {
+		writeErr(w, r, 404, "not_found", "key not found")
+		return
+	}
+	secret := randHex(32)
+	var kv keyView
+	err := s.store.Update(func(st *State) error {
+		cur := st.Keys[id]
+		if cur == nil {
+			return errConflict
+		}
+		now := time.Now().UTC()
+		cur.Rotated = &now
+		cur.PrevSalt, cur.PrevHash, cur.PrevUntil = "", "", nil
+		if overlap > 0 {
+			until := now.Add(overlap)
+			cur.PrevSalt, cur.PrevHash, cur.PrevUntil = cur.Salt, cur.Hash, &until
+		}
+		cur.Salt = randHex(16)
+		cur.Hash = s.keys.HashSecret(cur.Salt, secret)
+		kv = viewKey(cur, tokenPrefix+id+"_"+secret)
+		return nil
+	})
+	if err != nil {
+		s.storeErr(w, r, err)
+		return
+	}
+	writeJSON(w, 200, kv)
+}
+
+func (s *server) countKeyUse(id string) {
+	v, _ := s.keyUse.LoadOrStore(id, &keyUsage{})
+	u := v.(*keyUsage)
+	u.requests.Add(1)
+	u.last.Store(time.Now().Unix())
+}
+
+// keyUsageView reports requests since this process started and the last use.
+func (s *server) keyUsageView(w http.ResponseWriter, r *http.Request, p *principal) {
+	id := r.PathValue("id")
+	k := s.store.Snapshot().Keys[id]
+	if k == nil || k.TeamID != p.Team.ID || (k.UserID != p.User.ID && !p.has("admin")) {
+		writeErr(w, r, 404, "not_found", "key not found")
+		return
+	}
+	out := map[string]any{"id": id, "requests": int64(0)}
+	if v, ok := s.keyUse.Load(id); ok {
+		u := v.(*keyUsage)
+		out["requests"] = u.requests.Load()
+		out["last_used"] = time.Unix(u.last.Load(), 0).UTC()
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *server) deleteKey(w http.ResponseWriter, r *http.Request, p *principal) {

@@ -1,0 +1,336 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Snapshot download, import and sharing. A share grants another team read
+// access, or carries a secret code (a signed link) for anyone holding it.
+// Taking a shared snapshot copies it into the taker's team through boatd's
+// download + import, so tenant isolation in boatd stays as it is. A snapshot
+// holds the VM's disk, so anything on it (secrets in /etc/boat/env included)
+// goes with the share; proxied AI keys do not, they were never on the disk.
+
+const (
+	defaultLinkTTL = 7 * 24 * time.Hour
+	maxLinkTTL     = 30 * 24 * time.Hour
+)
+
+var reShareCode = regexp.MustCompile(`^bsh_([0-9a-f]{16})_([0-9a-f]{64})$`)
+
+// ownSnapshot checks the VM is the caller's and the snapshot is that VM's.
+func (s *server) ownSnapshot(w http.ResponseWriter, r *http.Request, p *principal) (string, bool) {
+	sid := r.PathValue("sid")
+	if !reID.MatchString(sid) {
+		writeErr(w, r, 404, "not_found", "snapshot not found")
+		return "", false
+	}
+	if _, ok := s.ownVM(w, r, p); !ok {
+		return "", false
+	}
+	var list struct {
+		Snapshots []map[string]any `json:"snapshots"`
+	}
+	if err := s.boatd.call(r.Context(), "GET", vmPath(r.PathValue("id"), "snapshots"), nil, &list); err != nil {
+		writeUpstream(w, r, err)
+		return "", false
+	}
+	for _, sn := range list.Snapshots {
+		if str(sn, "id") == sid {
+			return sid, true
+		}
+	}
+	writeErr(w, r, 404, "not_found", "snapshot not found")
+	return "", false
+}
+
+func (s *server) relayDownload(w http.ResponseWriter, r *http.Request, vmID, sid string) {
+	resp, err := s.boatd.do(r.Context(), "GET", vmPath(vmID, "snapshots", url.PathEscape(sid), "download"), nil, "")
+	if err != nil {
+		writeUpstream(w, r, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		writeUpstream(w, r, &boatdError{Status: resp.StatusCode, Body: body})
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.boatsnap"`, sid))
+	if n := resp.Header.Get("Content-Length"); n != "" {
+		w.Header().Set("Content-Length", n)
+	}
+	w.WriteHeader(200)
+	if _, err := io.Copy(w, resp.Body); err != nil && r.Context().Err() == nil {
+		log.Printf("%s: snapshot download %s: %v", info(r).id, sid, err)
+	}
+}
+
+func (s *server) downloadSnapshot(w http.ResponseWriter, r *http.Request, p *principal) {
+	if sid, ok := s.ownSnapshot(w, r, p); ok {
+		s.relayDownload(w, r, r.PathValue("id"), sid)
+	}
+}
+
+func snapName(n string) bool { return n == "" || reVMName.MatchString(n) }
+
+// importInto streams a snapshot archive to boatd under team.
+func (s *server) importInto(r *http.Request, team, name string, body io.Reader) (map[string]any, error) {
+	q := url.Values{"team": {team}}
+	if name != "" {
+		q.Set("name", name)
+	}
+	resp, err := s.boatd.do(r.Context(), "POST", "/v1/snapshots/import?"+q.Encode(), body, "application/octet-stream")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode/100 != 2 {
+		return nil, &boatdError{Status: resp.StatusCode, Body: b}
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// importSnapshot is POST /v1/snapshots/import with the archive as the raw body.
+func (s *server) importSnapshot(w http.ResponseWriter, r *http.Request, p *principal) {
+	name := r.URL.Query().Get("name")
+	if !snapName(name) {
+		writeErr(w, r, 400, "invalid_request", "invalid name")
+		return
+	}
+	out, err := s.importInto(r, p.Team.ID, name, http.MaxBytesReader(w, r.Body, s.cfg.MaxImportBytes))
+	if err != nil {
+		writeUpstream(w, r, err)
+		return
+	}
+	writeJSON(w, 201, out)
+}
+
+type shareView struct {
+	ID         string     `json:"id"`
+	VMID       string     `json:"vm_id"`
+	SnapshotID string     `json:"snapshot_id"`
+	Grantee    string     `json:"grantee,omitempty"`
+	Expires    *time.Time `json:"expires,omitempty"`
+	Uses       int        `json:"uses"`
+	Created    time.Time  `json:"created"`
+	Code       string     `json:"code,omitempty"` // only in the create response
+	URL        string     `json:"url,omitempty"`  // only in the create response
+}
+
+func viewShare(sh *SnapShare) shareView {
+	return shareView{ID: sh.ID, VMID: sh.VMID, SnapshotID: sh.SnapshotID, Grantee: sh.Grantee, Expires: sh.Expires, Uses: sh.Uses, Created: sh.Created}
+}
+
+func (s *server) createShare(w http.ResponseWriter, r *http.Request, p *principal) {
+	var body struct {
+		TeamID string `json:"team_id"`
+		TTLS   int64  `json:"ttl_s"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	ttl := time.Duration(body.TTLS) * time.Second
+	if body.TTLS < 0 || ttl > maxLinkTTL {
+		writeErr(w, r, 400, "invalid_request", "ttl_s must be 0..2592000")
+		return
+	}
+	sid, ok := s.ownSnapshot(w, r, p)
+	if !ok {
+		return
+	}
+	now := time.Now().UTC()
+	sh := &SnapShare{ID: randHex(8), TeamID: p.Team.ID, VMID: r.PathValue("id"), SnapshotID: sid, Created: now}
+	view := shareView{}
+	if body.TeamID != "" {
+		// A team that does not exist gets the same answer as one that does not
+		// want it: 404. Team ids are not secret from their members only.
+		if t := s.store.Snapshot().Teams[body.TeamID]; t == nil || body.TeamID == p.Team.ID {
+			writeErr(w, r, 404, "not_found", "team not found")
+			return
+		}
+		sh.Grantee = body.TeamID
+		if ttl > 0 {
+			until := now.Add(ttl)
+			sh.Expires = &until
+		}
+	} else {
+		if ttl == 0 {
+			ttl = defaultLinkTTL
+		}
+		until := now.Add(ttl)
+		sh.Expires = &until
+		secret := randHex(32)
+		sh.CodeSalt = randHex(16)
+		sh.CodeHash = s.keys.HashSecret(sh.CodeSalt, secret)
+		view.Code = "bsh_" + sh.ID + "_" + secret
+		if s.cfg.PublicURL != "" {
+			view.URL = strings.TrimRight(s.cfg.PublicURL, "/") + "/v1/snapshot-links/" + view.Code + "/download"
+		}
+	}
+	if err := s.store.Update(func(st *State) error { st.SnapShares[sh.ID] = sh; return nil }); err != nil {
+		s.storeErr(w, r, err)
+		return
+	}
+	v := viewShare(sh)
+	v.Code, v.URL = view.Code, view.URL
+	writeJSON(w, 201, v)
+}
+
+func (s *server) listShares(w http.ResponseWriter, r *http.Request, p *principal) {
+	sid, ok := s.ownSnapshot(w, r, p)
+	if !ok {
+		return
+	}
+	out := []shareView{}
+	for _, sh := range s.store.Snapshot().SnapShares {
+		if sh.SnapshotID == sid && sh.TeamID == p.Team.ID {
+			out = append(out, viewShare(sh))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Created.Before(out[j].Created) })
+	writeJSON(w, 200, map[string]any{"shares": out})
+}
+
+func (s *server) revokeShare(w http.ResponseWriter, r *http.Request, p *principal) {
+	sid, ok := s.ownSnapshot(w, r, p)
+	if !ok {
+		return
+	}
+	id := r.PathValue("share")
+	sh := s.store.Snapshot().SnapShares[id]
+	if sh == nil || sh.SnapshotID != sid || sh.TeamID != p.Team.ID {
+		writeErr(w, r, 404, "not_found", "share not found")
+		return
+	}
+	if err := s.store.Update(func(st *State) error { delete(st.SnapShares, id); return nil }); err != nil {
+		s.storeErr(w, r, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func shareLive(sh *SnapShare) bool { return sh.Expires == nil || time.Now().Before(*sh.Expires) }
+
+// sharedWithMe lists grants to the caller's team.
+func (s *server) sharedWithMe(w http.ResponseWriter, r *http.Request, p *principal) {
+	out := []shareView{}
+	for _, sh := range s.store.Snapshot().SnapShares {
+		if sh.Grantee == p.Team.ID && shareLive(sh) {
+			out = append(out, viewShare(sh))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Created.After(out[j].Created) })
+	writeJSON(w, 200, map[string]any{"shares": out})
+}
+
+func (s *server) shareByCode(code string) *SnapShare {
+	m := reShareCode.FindStringSubmatch(code)
+	if m == nil {
+		return nil
+	}
+	sh := s.store.Snapshot().SnapShares[m[1]]
+	if sh == nil || sh.CodeHash == "" || !shareLive(sh) ||
+		!constEq(s.keys.HashSecret(sh.CodeSalt, m[2]), sh.CodeHash) {
+		return nil
+	}
+	return sh
+}
+
+func (s *server) countShareUse(id string) {
+	err := s.store.Update(func(st *State) error {
+		if sh := st.SnapShares[id]; sh != nil {
+			sh.Uses++
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("share %s: count use: %v", id, err)
+	}
+}
+
+// copyShare streams the shared snapshot into team and returns the new snapshot.
+func (s *server) copyShare(r *http.Request, sh *SnapShare, team, name string) (map[string]any, error) {
+	resp, err := s.boatd.do(r.Context(), "GET", vmPath(sh.VMID, "snapshots", url.PathEscape(sh.SnapshotID), "download"), nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return nil, &boatdError{Status: resp.StatusCode, Body: b}
+	}
+	out, err := s.importInto(r, team, name, resp.Body)
+	if err == nil {
+		s.countShareUse(sh.ID)
+	}
+	return out, err
+}
+
+// importShare takes a share: by id for a grant to this team, or by code.
+func (s *server) importShare(w http.ResponseWriter, r *http.Request, p *principal) {
+	var body struct {
+		ShareID string `json:"share_id"`
+		Code    string `json:"code"`
+		Name    string `json:"name"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if !snapName(body.Name) || (body.ShareID == "") == (body.Code == "") {
+		writeErr(w, r, 400, "invalid_request", "give exactly one of share_id or code, and a valid name")
+		return
+	}
+	var sh *SnapShare
+	if body.Code != "" {
+		sh = s.shareByCode(body.Code)
+	} else if cur := s.store.Snapshot().SnapShares[body.ShareID]; cur != nil && cur.Grantee == p.Team.ID && shareLive(cur) {
+		sh = cur
+	}
+	if sh == nil {
+		writeErr(w, r, 404, "not_found", "share not found or expired")
+		return
+	}
+	out, err := s.copyShare(r, sh, p.Team.ID, body.Name)
+	if err != nil {
+		writeUpstream(w, r, err)
+		return
+	}
+	writeJSON(w, 201, out)
+}
+
+// linkDownload is the unauthenticated signed link: the code is the credential.
+func (s *server) linkDownload(w http.ResponseWriter, r *http.Request) {
+	info(r).audit = true
+	ip := r.Header.Get("X-Forwarded-For") // Caddy sets it; the listener is loopback
+	if ip == "" {
+		ip, _, _ = net.SplitHostPort(r.RemoteAddr)
+	}
+	if ok, _ := s.limiter.allow("link:" + ip); !ok {
+		writeErr(w, r, 429, "rate_limited", "rate limit exceeded")
+		return
+	}
+	sh := s.shareByCode(r.PathValue("code"))
+	if sh == nil {
+		writeErr(w, r, 404, "not_found", "link not found or expired")
+		return
+	}
+	s.countShareUse(sh.ID)
+	s.relayDownload(w, r, sh.VMID, sh.SnapshotID)
+}

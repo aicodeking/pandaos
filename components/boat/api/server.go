@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,26 +26,37 @@ type Config struct {
 	Images           []string
 	AllowPrivateHook bool // permit webhook targets on loopback/private nets (dev/tests)
 	MaxFileBytes     int64
-	JumpKeysFile     string // authorized_keys for the ssh jump user; empty disables
-	MaxKeysPerTeam   int    // 0 = unlimited
-	MaxHooksPerTeam  int    // 0 = unlimited
+	JumpKeysFile     string            // authorized_keys for the ssh jump user; empty disables
+	MaxKeysPerTeam   int               // 0 = unlimited
+	MaxHooksPerTeam  int               // 0 = unlimited
+	AIProxyURL       string            // what VMs use to reach the AI proxy; empty = no proxy
+	AIUpstreams      map[string]string // provider base URL overrides (tests)
+	PublicURL        string            // public base URL of this API, for signed snapshot links
+	MaxImportBytes   int64
 	VMDomain         string // port routes are <port>-<vmid>.<VMDomain> (scheme optional, default https)
 	PortURLTTL       time.Duration
 }
 
 type server struct {
-	store   *Store
-	keys    *Keyring
-	boatd   *boatdClient
-	limiter *limiter // per key
-	teamLim *limiter // per team (all keys of a team share it)
-	audit   *auditLog
-	hooks   *dispatcher
-	cfg     Config
-	mux     *http.ServeMux
-	jumpMu  sync.Mutex
+	store    *Store
+	keys     *Keyring
+	boatd    *boatdClient
+	limiter  *limiter // per key
+	teamLim  *limiter // per team (all keys of a team share it)
+	aiLim    *limiter // AI proxy requests per VM
+	aiMeter  *aiMeter
+	aiClient *http.Client
+	otel     *otelExporter // nil = no instance export
+	ctx      context.Context
+	keyUse   sync.Map // key id -> *keyUsage
+	audit    *auditLog
+	hooks    *dispatcher
+	cfg      Config
+	mux      *http.ServeMux
+	jumpMu   sync.Mutex
 	// routeTable lists every registered "METHOD /path" (OpenAPI drift test).
 	routeTable []string
+	observe    func(pattern string, r *http.Request, status int) // OpenAPI drift test
 }
 
 // ---- scopes and roles ----
@@ -107,7 +119,11 @@ func (s *server) authenticate(header string) *principal {
 	}
 	got := s.keys.HashSecret(k.Salt, secret)
 	if subtle.ConstantTimeCompare([]byte(got), []byte(k.Hash)) != 1 {
-		return nil
+		// Rotation overlap: the previous secret works until PrevUntil.
+		if k.PrevUntil == nil || !time.Now().Before(*k.PrevUntil) ||
+			subtle.ConstantTimeCompare([]byte(s.keys.HashSecret(k.PrevSalt, secret)), []byte(k.PrevHash)) != 1 {
+			return nil
+		}
 	}
 	u, t := st.Users[k.UserID], st.Teams[k.TeamID]
 	if u == nil || t == nil {
@@ -200,9 +216,26 @@ func (a *auditLog) write(e auditEntry) {
 type ctxKey struct{}
 
 type reqInfo struct {
-	id    string
-	p     *principal
-	audit bool // audit even though it is a GET (sensitive read)
+	id      string
+	p       *principal
+	audit   bool   // audit even though it is a GET (sensitive read)
+	pattern string // the matched route, for traces and the OpenAPI drift test
+}
+
+// baseCtx outlives requests (env builds).
+func (s *server) baseCtx() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
+func constEq(a, b string) bool { return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
+
+// keyUsage is in-memory per process: requests since start and the last use.
+type keyUsage struct {
+	requests atomic.Int64
+	last     atomic.Int64
 }
 
 func info(r *http.Request) *reqInfo { return r.Context().Value(ctxKey{}).(*reqInfo) }
@@ -242,18 +275,37 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ri := &reqInfo{id: rid}
 	w.Header().Set("X-Request-Id", rid)
 	sw := &statusWriter{ResponseWriter: w}
+	traceID, parent := traceIDs(r.Header.Get("Traceparent"))
 	s.mux.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), ctxKey{}, ri)))
+	if s.otel != nil {
+		attrs := map[string]any{"http.request.method": r.Method, "http.route": ri.pattern, "http.response.status_code": sw.status, "boat.request_id": rid}
+		if ri.p != nil {
+			attrs["boat.team_id"] = ri.p.Team.ID
+		}
+		s.otel.span(traceID, parent, orDefault(ri.pattern, r.Method+" unmatched"), start, time.Now(), sw.status, attrs)
+	}
+	if s.observe != nil {
+		s.observe(ri.pattern, r, sw.status)
+	}
 	if r.Method == http.MethodGet && !ri.audit && sw.status != http.StatusUnauthorized &&
 		sw.status != http.StatusForbidden && sw.status != http.StatusTooManyRequests {
 		return
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	e := auditEntry{Time: start.UTC(), RequestID: rid, Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, Status: sw.status,
+	e := auditEntry{Time: start.UTC(), RequestID: rid, Method: r.Method, Path: auditPath(r), Query: r.URL.RawQuery, Status: sw.status,
 		RemoteIP: ip, Forwarded: r.Header.Get("X-Forwarded-For"), Millis: time.Since(start).Milliseconds()}
 	if ri.p != nil {
 		e.KeyID, e.UserID, e.TeamID = ri.p.Key.ID, ri.p.User.ID, ri.p.Team.ID
 	}
 	s.audit.write(e)
+}
+
+// auditPath keeps a signed link's secret code out of the log.
+func auditPath(r *http.Request) string {
+	if strings.HasPrefix(r.URL.Path, "/v1/snapshot-links/") {
+		return "/v1/snapshot-links/REDACTED/download"
+	}
+	return r.URL.Path
 }
 
 type handlerFunc func(w http.ResponseWriter, r *http.Request, p *principal)
@@ -262,18 +314,30 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request, p *principal)
 // auditedReads are GETs that disclose data or grant access, so they are
 // audited like writes.
 var auditedReads = map[string]bool{
-	"GET /v1/vms/{id}/files":            true,
-	"GET /v1/vms/{id}/desktop":          true,
-	"GET /v1/vms/{id}/ports/{port}/url": true,
-	"GET /v1/secrets":                   true,
-	"GET /v1/keys":                      true,
-	"GET /v1/webhooks/{id}/deliveries":  true,
+	"GET /v1/vms/{id}/files":                    true,
+	"GET /v1/vms/{id}/desktop":                  true,
+	"GET /v1/vms/{id}/ports/{port}/url":         true,
+	"GET /v1/secrets":                           true,
+	"GET /v1/keys":                              true,
+	"GET /v1/webhooks/{id}/deliveries":          true,
+	"GET /v1/vms/{id}/files/list":               true,
+	"GET /v1/vms/{id}/files/search":             true,
+	"GET /v1/vms/{id}/files/info":               true,
+	"GET /v1/vms/{id}/commands/{cid}/logs":      true,
+	"GET /v1/vms/{id}/prompts/{pid}/logs":       true,
+	"GET /v1/vms/{id}/snapshots/{sid}/download": true,
+	"GET /v1/vms/{id}/snapshots/{sid}/shares":   true,
+	"GET /v1/ai/credentials":                    true,
+	"GET /v1/telemetry":                         true,
 }
 
 // handle registers an unauthenticated route.
 func (s *server) handle(pattern string, h http.HandlerFunc) {
 	s.routeTable = append(s.routeTable, pattern)
-	s.mux.HandleFunc(pattern, h)
+	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		info(r).pattern = pattern
+		h(w, r)
+	})
 }
 
 func (s *server) route(pattern, scope string, h handlerFunc) {
@@ -281,6 +345,7 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 	audit := auditedReads[pattern]
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		info(r).audit = audit
+		info(r).pattern = pattern
 		p := s.authenticate(r.Header.Get("Authorization"))
 		if p == nil {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="boat"`)
@@ -288,6 +353,7 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 			return
 		}
 		info(r).p = p
+		s.countKeyUse(p.Key.ID)
 		if ok, wait := s.limiter.allow(p.Key.ID); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 			writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded for this key")
@@ -343,7 +409,13 @@ func writeUpstream(w http.ResponseWriter, r *http.Request, err error) {
 
 const maxJSONBody = 1 << 20
 
+// decodeHook lets the OpenAPI drift test see each route's request struct.
+var decodeHook func(r *http.Request, v any)
+
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	if decodeHook != nil {
+		decodeHook(r, v)
+	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJSONBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil && !errors.Is(err, io.EOF) {

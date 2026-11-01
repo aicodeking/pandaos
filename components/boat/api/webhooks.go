@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -21,11 +22,12 @@ import (
 // ---- handlers ----
 
 type webhookView struct {
-	ID      string    `json:"id"`
-	URL     string    `json:"url"`
-	Events  []string  `json:"events"`
-	Created time.Time `json:"created"`
-	Secret  string    `json:"secret,omitempty"` // only on creation
+	ID        string     `json:"id"`
+	URL       string     `json:"url"`
+	Events    []string   `json:"events"`
+	Created   time.Time  `json:"created"`
+	Secret    string     `json:"secret,omitempty"` // only on creation and rotation
+	PrevUntil *time.Time `json:"prev_until,omitempty"`
 }
 
 func viewHook(h *Webhook, secret string) webhookView {
@@ -33,7 +35,7 @@ func viewHook(h *Webhook, secret string) webhookView {
 	if ev == nil {
 		ev = []string{}
 	}
-	return webhookView{ID: h.ID, URL: h.URL, Events: ev, Created: h.Created, Secret: secret}
+	return webhookView{ID: h.ID, URL: h.URL, Events: ev, Created: h.Created, Secret: secret, PrevUntil: h.PrevUntil}
 }
 
 var reEventFilter = regexp.MustCompile(`^(\*|[a-z_]+(\.[a-z_]+)*(\.\*)?)$`)
@@ -57,8 +59,7 @@ func (s *server) createHook(w http.ResponseWriter, r *http.Request, p *principal
 	if !decode(w, r, &body) {
 		return
 	}
-	u, err := url.Parse(body.URL)
-	if err != nil || u.Host == "" || (u.Scheme != "https" && !(s.cfg.AllowPrivateHook && u.Scheme == "http")) || len(body.URL) > 2048 {
+	if !s.validHookURL(body.URL) {
 		writeErr(w, r, 400, "invalid_request", "url must be an absolute https URL")
 		return
 	}
@@ -88,6 +89,127 @@ func (s *server) createHook(w http.ResponseWriter, r *http.Request, p *principal
 		return
 	}
 	writeJSON(w, 201, viewHook(h, secret))
+}
+
+// getHook returns one webhook.
+func (s *server) getHook(w http.ResponseWriter, r *http.Request, p *principal) {
+	if h, ok := s.teamHook(w, r, p); ok {
+		writeJSON(w, 200, viewHook(h, ""))
+	}
+}
+
+// validHookURL reports whether u is an allowed delivery target.
+func (s *server) validHookURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Host != "" && len(raw) <= 2048 && (u.Scheme == "https" || (s.cfg.AllowPrivateHook && u.Scheme == "http"))
+}
+
+// updateHook changes the URL or event filter; the signing secret stays.
+func (s *server) updateHook(w http.ResponseWriter, r *http.Request, p *principal) {
+	var body struct {
+		URL    *string   `json:"url"`
+		Events *[]string `json:"events"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if body.URL != nil && !s.validHookURL(*body.URL) {
+		writeErr(w, r, 400, "invalid_request", "url must be an absolute https URL")
+		return
+	}
+	if body.Events != nil {
+		for _, e := range *body.Events {
+			if !reEventFilter.MatchString(e) {
+				writeErr(w, r, 400, "invalid_request", "invalid event filter "+e)
+				return
+			}
+		}
+	}
+	h, ok := s.teamHook(w, r, p)
+	if !ok {
+		return
+	}
+	var out Webhook
+	err := s.store.Update(func(st *State) error {
+		cur := st.Webhooks[h.ID]
+		if cur == nil {
+			return errConflict
+		}
+		if body.URL != nil {
+			cur.URL = *body.URL
+		}
+		if body.Events != nil {
+			cur.Events = *body.Events
+		}
+		out = *cur
+		return nil
+	})
+	if err != nil {
+		s.storeErr(w, r, err)
+		return
+	}
+	writeJSON(w, 200, viewHook(&out, ""))
+}
+
+const (
+	defaultOverlap = 24 * time.Hour
+	maxOverlap     = 30 * 24 * time.Hour
+)
+
+// overlapFrom reads overlap_s (default 24h, 0 = no overlap).
+func overlapFrom(v *int64) (time.Duration, bool) {
+	if v == nil {
+		return defaultOverlap, true
+	}
+	d := time.Duration(*v) * time.Second
+	return d, *v >= 0 && d <= maxOverlap
+}
+
+// rotateHook replaces the signing secret. During the overlap, deliveries carry
+// a signature for both secrets (two v1= values).
+func (s *server) rotateHook(w http.ResponseWriter, r *http.Request, p *principal) {
+	var body struct {
+		OverlapS *int64 `json:"overlap_s"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	overlap, ok := overlapFrom(body.OverlapS)
+	if !ok {
+		writeErr(w, r, 400, "invalid_request", "overlap_s must be 0..2592000")
+		return
+	}
+	h, ok := s.teamHook(w, r, p)
+	if !ok {
+		return
+	}
+	secret := "whsec_" + randHex(24)
+	sealed, err := s.keys.Seal([]byte(secret), "webhook/"+h.ID)
+	if err != nil {
+		writeErr(w, r, 500, "crypto_error", "could not encrypt")
+		return
+	}
+	until := time.Now().Add(overlap).UTC()
+	var out Webhook
+	err = s.store.Update(func(st *State) error {
+		cur := st.Webhooks[h.ID]
+		if cur == nil {
+			return errConflict
+		}
+		cur.PrevSealedSecret, cur.PrevUntil = cur.SealedSecret, &until
+		if overlap == 0 {
+			cur.PrevSealedSecret, cur.PrevUntil = "", nil
+		}
+		cur.SealedSecret = sealed
+		out = *cur
+		return nil
+	})
+	if err != nil {
+		s.storeErr(w, r, err)
+		return
+	}
+	v := viewHook(&out, secret)
+	writeJSON(w, 200, v)
 }
 
 func (s *server) teamHook(w http.ResponseWriter, r *http.Request, p *principal) (*Webhook, bool) {
@@ -154,12 +276,19 @@ type dispatcher struct {
 	s       *server
 	client  *http.Client
 	backoff []time.Duration // delay before attempt 2, 3, ...; attempts = len+1
-	sem     chan struct{}
+	sem     chan struct{}   // in-flight HTTP attempts, all teams
+	// Per team: in-flight attempts and pending deliveries, so one team with a
+	// dead endpoint cannot use up the slots or memory of the others.
+	teamInflight int
+	teamPending  int
+	mu           sync.Mutex
+	teamSem      map[string]chan struct{}
+	pending      map[string]int
 }
 
-// ponytail: deliveries are in-memory goroutines (max 64 concurrent); pending
-// retries are lost on restart. Add a persisted outbox if at-least-once across
-// restarts matters.
+// ponytail: deliveries are in-memory goroutines; only an HTTP attempt holds a
+// slot, a retry sleeping does not. Pending retries are lost on restart. Add a
+// persisted outbox if at-least-once across restarts matters.
 func newDispatcher(s *server, allowPrivate bool) *dispatcher {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	if !allowPrivate {
@@ -167,10 +296,12 @@ func newDispatcher(s *server, allowPrivate bool) *dispatcher {
 	}
 	tr := &http.Transport{DialContext: dialer.DialContext, TLSHandshakeTimeout: 10 * time.Second}
 	return &dispatcher{
-		s:       s,
-		client:  &http.Client{Transport: tr, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		backoff: []time.Duration{10 * time.Second, time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour},
-		sem:     make(chan struct{}, 64),
+		s:            s,
+		client:       &http.Client{Transport: tr, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		backoff:      []time.Duration{10 * time.Second, time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour},
+		sem:          make(chan struct{}, 64),
+		teamInflight: 8, teamPending: 1000,
+		teamSem: map[string]chan struct{}{}, pending: map[string]int{},
 	}
 }
 
@@ -214,17 +345,68 @@ func (d *dispatcher) publish(ctx context.Context, ev Event) {
 	}
 }
 
-func (d *dispatcher) deliver(ctx context.Context, h Webhook, ev Event) {
-	d.sem <- struct{}{}
-	defer func() { <-d.sem }()
+// slotTeam is the team's in-flight semaphore.
+func (d *dispatcher) slotTeam(team string) chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c := d.teamSem[team]
+	if c == nil {
+		c = make(chan struct{}, max(d.teamInflight, 1))
+		d.teamSem[team] = c
+	}
+	return c
+}
+
+// addPending reserves a delivery for the team; false = over its limit.
+func (d *dispatcher) addPending(team string, delta int) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if delta > 0 && d.teamPending > 0 && d.pending[team] >= d.teamPending {
+		return false
+	}
+	d.pending[team] += delta
+	return true
+}
+
+// attempt does one POST holding a global and a team slot; the slots are
+// released before any backoff sleep.
+func (d *dispatcher) attempt(ctx context.Context, h Webhook, ev Event, body []byte) (int, error) {
+	team := d.slotTeam(h.TeamID)
+	for _, c := range []chan struct{}{team, d.sem} {
+		select {
+		case c <- struct{}{}:
+			defer func(c chan struct{}) { <-c }(c)
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	// Reread: a rotation during a retry must sign with the current secret.
+	if cur := d.s.store.Snapshot().Webhooks[h.ID]; cur != nil {
+		h = *cur
+	}
 	secret, err := d.s.keys.Open(h.SealedSecret, "webhook/"+h.ID)
 	if err != nil {
-		log.Printf("webhook %s: cannot decrypt secret: %v", h.ID, err)
+		return 0, fmt.Errorf("decrypt signing secret: %w", err)
+	}
+	var older [][]byte
+	if h.PrevUntil != nil && time.Now().Before(*h.PrevUntil) {
+		if old, err := d.s.keys.Open(h.PrevSealedSecret, "webhook/"+h.ID); err == nil {
+			older = append(older, old)
+		}
+	}
+	return d.post(ctx, h, ev, body, secret, older)
+}
+
+func (d *dispatcher) deliver(ctx context.Context, h Webhook, ev Event) {
+	if !d.addPending(h.TeamID, 1) {
+		d.record(Delivery{ID: "dlv_" + randHex(8), WebhookID: h.ID, EventID: ev.ID, Event: ev.Type,
+			Error: "dropped: too many pending deliveries for this team", At: time.Now().UTC()})
 		return
 	}
+	defer d.addPending(h.TeamID, -1)
 	body, _ := json.Marshal(ev)
 	for attempt := 1; ; attempt++ {
-		status, err := d.post(ctx, h, ev, secret, body)
+		status, err := d.attempt(ctx, h, ev, body)
 		ok := err == nil && status/100 == 2
 		rec := Delivery{ID: "dlv_" + randHex(8), WebhookID: h.ID, EventID: ev.ID, Event: ev.Type,
 			Attempt: attempt, Status: status, OK: ok, At: time.Now().UTC()}
@@ -246,7 +428,7 @@ func (d *dispatcher) deliver(ctx context.Context, h Webhook, ev Event) {
 	}
 }
 
-func (d *dispatcher) post(ctx context.Context, h Webhook, ev Event, secret, body []byte) (int, error) {
+func (d *dispatcher) post(ctx context.Context, h Webhook, ev Event, body, secret []byte, older [][]byte) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", h.URL, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
@@ -255,7 +437,7 @@ func (d *dispatcher) post(ctx context.Context, h Webhook, ev Event, secret, body
 	req.Header.Set("User-Agent", "boat-webhooks/1")
 	req.Header.Set("X-Boat-Event", ev.Type)
 	req.Header.Set("X-Boat-Delivery", ev.ID)
-	req.Header.Set("X-Boat-Signature", SignWebhook(secret, time.Now().Unix(), body))
+	req.Header.Set("X-Boat-Signature", SignWebhook(secret, time.Now().Unix(), body, older...))
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return 0, err
@@ -365,6 +547,15 @@ func (d *dispatcher) handleRaw(ctx context.Context, sseType, data string) {
 	}
 	if typ == "vm.deleted" && vmID != "" { // also TTL/operator deletes outside boat-api
 		d.s.forgetVM(vmID)
+	}
+	// Every stop kills the run's AI proxy token (TTL and idle stops included).
+	if typ == "vm.state" && str(raw, "state") == "stopped" && vmID != "" && d.s.store.Snapshot().AIVMs[vmID] != nil {
+		if _, err := d.s.aiBumpVM(vmID, team); err != nil {
+			log.Printf("rotate AI token of %s: %v", vmID, err)
+		}
+	}
+	if strings.HasPrefix(typ, "vm.") && team != "" {
+		d.s.emitVMEvent(ctx, typ, team, vmID, str(raw, "state"))
 	}
 	if typ == "" || team == "" {
 		return

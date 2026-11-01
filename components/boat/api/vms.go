@@ -142,6 +142,11 @@ type createReq struct {
 	Env      map[string]string `json:"env"`
 	// Secrets selects which team secrets the VM gets (absent = all, [] = none).
 	Secrets *[]string `json:"secrets"`
+	// Environment names one (default: the team's default environment); NoEnv opts out.
+	Environment string `json:"environment"`
+	NoEnv       bool   `json:"no_env"`
+	// From: a share code bsh_..., imported into this team first.
+	From string `json:"from"`
 }
 
 func (s *server) validateCreate(c *createReq) string {
@@ -194,12 +199,60 @@ func (s *server) checkSecretNames(team string, names []string) string {
 	return ""
 }
 
+// resolveEnv applies the environment to the create request: its image, size,
+// vars and secret selection fill what the caller did not set.
+func (s *server) resolveEnv(c *createReq, team string) (*Environment, string) {
+	st := s.store.Snapshot()
+	var env *Environment
+	switch {
+	case c.NoEnv && c.Environment != "":
+		return nil, "environment and no_env conflict"
+	case c.NoEnv:
+		return nil, ""
+	case c.Environment != "":
+		if env = envByName(st, team, c.Environment); env == nil {
+			return nil, "unknown environment " + c.Environment // before anything is created
+		}
+	default:
+		if env = defaultEnv(st, team); env == nil {
+			return nil, ""
+		}
+	}
+	if c.Size == "" {
+		c.Size = env.Size
+	}
+	if c.Image == "" {
+		c.Image = env.Image
+	}
+	if c.Secrets == nil && env.Secrets != nil {
+		c.Secrets = env.Secrets
+	}
+	if len(env.Env) > 0 {
+		merged := map[string]string{}
+		for k, v := range env.Env {
+			merged[k] = v
+		}
+		for k, v := range c.Env {
+			merged[k] = v
+		}
+		c.Env = merged
+	}
+	return env, ""
+}
+
 func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	var c createReq
 	if !decode(w, r, &c) {
 		return
 	}
-	if msg := s.validateCreate(&c); msg != "" {
+	env, msg := s.resolveEnv(&c, p.Team.ID)
+	if msg == "" {
+		msg = s.validateCreate(&c)
+	}
+	if msg == "" && c.From != "" && c.Snapshot != "" {
+		msg = "from and snapshot conflict"
+	}
+	if msg != "" {
 		writeErr(w, r, 400, "invalid_request", msg)
 		return
 	}
@@ -211,30 +264,93 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 			return
 		}
 	}
-	env, ok := s.envOrFail(w, r, p, only)
+	vars, ok := s.envOrFail(w, r, p, only)
 	if !ok {
 		return
 	}
 	for k, v := range c.Env { // explicit env overrides team secrets
-		env[k] = v
+		vars[k] = v
+	}
+	if c.From != "" {
+		sh := s.shareByCode(c.From)
+		if sh == nil {
+			writeErr(w, r, 404, "not_found", "share not found or expired")
+			return
+		}
+		snap, err := s.copyShare(r, sh, p.Team.ID, "")
+		if err != nil {
+			writeUpstream(w, r, err)
+			return
+		}
+		c.Snapshot = str(snap, "id")
+	}
+	// A current build means the setup is already on the snapshot.
+	built := env != nil && c.Snapshot == "" && env.Build != nil && env.Build.SnapshotID != "" && env.Build.Version == env.Version
+	if built {
+		c.Snapshot = env.Build.SnapshotID
 	}
 	body := map[string]any{"name": c.Name, "size": c.Size, "image": c.Image, "ttl_s": c.TTLS,
-		"idle_stop_s": c.IdleStopS, "snapshot": c.Snapshot, "team": p.Team.ID, "labels": c.Labels, "env": env}
+		"idle_stop_s": c.IdleStopS, "snapshot": c.Snapshot, "team": p.Team.ID, "labels": c.Labels, "env": vars}
 	var vm VM
 	if err := s.boatd.call(r.Context(), "POST", "/v1/vms", body, &vm); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
+	id := str(vm, "id")
 	if only != nil {
-		if err := s.setVMSecrets(str(vm, "id"), only); err != nil {
+		if err := s.setVMSecrets(id, only); err != nil {
 			// Fail loudly: without the record a later start would inject all secrets.
-			log.Printf("%s: record secret selection for %s: %v; deleting the VM", info(r).id, str(vm, "id"), err)
-			s.boatd.call(r.Context(), "POST", vmPath(str(vm, "id"), "delete"), nil, nil)
+			log.Printf("%s: record secret selection for %s: %v; deleting the VM", info(r).id, id, err)
+			s.boatd.call(r.Context(), "POST", vmPath(id, "delete"), nil, nil)
 			writeErr(w, r, 500, "store_error", "could not record the secret selection")
 			return
 		}
 	}
-	writeJSON(w, 201, publicVM(vm))
+	// The AI proxy token depends on the VM id, so it goes in after create.
+	if ai, err := s.aiEnv(id, p.Team.ID, true); err != nil {
+		log.Printf("%s: AI env for %s: %v", info(r).id, id, err)
+	} else if len(ai) > 0 {
+		s.pushEnv(r, id, vars, ai)
+	}
+	out := publicVM(vm)
+	if env != nil {
+		s.applyEnvToVM(r, p, id, env, built, vars, out)
+	}
+	writeJSON(w, 201, out)
+}
+
+// pushEnv rewrites the VM's /etc/boat/env. boatd's env op replaces the file.
+func (s *server) pushEnv(r *http.Request, vmID string, base, extra map[string]string) {
+	all := map[string]string{}
+	for k, v := range base {
+		all[k] = v
+	}
+	for k, v := range extra {
+		all[k] = v
+	}
+	if err := s.boatd.call(r.Context(), "POST", vmPath(vmID, "env"), map[string]any{"vars": all}, nil); err != nil {
+		log.Printf("%s: set env on %s: %v", info(r).id, vmID, err)
+	}
+}
+
+// applyEnvToVM records the environment and starts its setup unless the VM came
+// from a current build. The setup runs detached; follow it by setup_cmd_id.
+func (s *server) applyEnvToVM(r *http.Request, p *principal, vmID string, env *Environment, built bool, vars map[string]string, out VM) {
+	out["environment"] = env.Name
+	out["from_build"] = built
+	if err := s.store.Update(func(st *State) error { st.VMEnvs[vmID] = env.ID; return nil }); err != nil {
+		log.Printf("%s: record env of %s: %v", info(r).id, vmID, err)
+	}
+	if built || strings.TrimSpace(env.SetupScript) == "" {
+		return
+	}
+	cid, err := s.startDetached(r, p, vmID, "setup", []string{"bash", "-lc", "set -e\n" + env.SetupScript}, vars, "")
+	if err != nil {
+		log.Printf("%s: setup on %s: %v", info(r).id, vmID, err)
+		out["setup_error"] = "could not start the setup script"
+		return
+	}
+	out["setup_cmd_id"] = cid
 }
 
 func (s *server) setVMSecrets(vmID string, names []string) error {
@@ -252,9 +368,20 @@ func (s *server) startVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	if _, ok := s.ownVM(w, r, p); !ok {
 		return
 	}
-	env, ok := s.envOrFail(w, r, p, s.vmSecrets(r.PathValue("id")))
+	id := r.PathValue("id")
+	env, ok := s.envOrFail(w, r, p, s.vmSecrets(id))
 	if !ok {
 		return
+	}
+	// A new token generation per run: tokens copied from a past run are dead.
+	ai, err := s.aiEnv(id, p.Team.ID, true)
+	if err != nil {
+		log.Printf("%s: AI env for %s: %v", info(r).id, id, err)
+		writeErr(w, r, 500, "secrets_unavailable", "cannot prepare AI credentials")
+		return
+	}
+	for k, v := range ai {
+		env[k] = v
 	}
 	s.vmAction(w, r, "start", map[string]any{"env": env})
 }
@@ -301,13 +428,48 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 			log.Printf("%s: copy secret selection to fork %s: %v", info(r).id, str(child, "id"), err)
 		}
 	}
+	childID := str(child, "id")
+	// The child's disk holds the parent's token; give it its own. Its native
+	// agent sessions came along too, so its conversations do as well.
+	if ai, err := s.aiEnv(childID, p.Team.ID, true); err != nil {
+		log.Printf("%s: AI env for fork %s: %v", info(r).id, childID, err)
+	} else if len(ai) > 0 {
+		if vars, err := s.teamEnv(p.Team.ID, s.vmSecrets(childID)); err == nil {
+			s.pushEnv(r, childID, vars, ai)
+		}
+	}
+	s.copyConversations(parent, childID)
 	writeJSON(w, 201, publicVM(child))
+}
+
+func (s *server) copyConversations(parent, child string) {
+	err := s.store.Update(func(st *State) error {
+		for _, c := range st.Conversations[parent] {
+			cp := *c
+			cp.VMID = child
+			st.Conversations[child] = append(st.Conversations[child], &cp)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("copy conversations to %s: %v", child, err)
+	}
 }
 
 // forgetVM drops boat-api state tied to a deleted VM.
 func (s *server) forgetVM(id string) {
 	err := s.store.Update(func(st *State) error {
 		delete(st.VMSecrets, id)
+		delete(st.AIVMs, id)
+		delete(st.Commands, id)
+		delete(st.Prompts, id)
+		delete(st.Conversations, id)
+		delete(st.VMEnvs, id)
+		for k, sh := range st.SnapShares {
+			if sh.VMID == id {
+				delete(st.SnapShares, k)
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -418,6 +580,15 @@ func (s *server) promptVM(w http.ResponseWriter, r *http.Request, p *principal) 
 	env, ok := s.envOrFail(w, r, p, s.vmSecrets(r.PathValue("id")))
 	if !ok {
 		return
+	}
+	ai, err := s.aiEnv(r.PathValue("id"), p.Team.ID, false)
+	if err != nil {
+		log.Printf("%s: AI env: %v", info(r).id, err)
+		writeErr(w, r, 500, "secrets_unavailable", "cannot prepare AI credentials")
+		return
+	}
+	for k, v := range ai { // the proxy token replaces a raw key of the same name
+		env[k] = v
 	}
 	s.streamExec(w, r, execReq{Cmd: build(body.Prompt, body.Model), Env: env, Cwd: body.Cwd, TimeoutS: body.TimeoutS})
 }

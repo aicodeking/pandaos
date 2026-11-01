@@ -113,6 +113,22 @@ func adminInit(args []string) int {
 	return 0
 }
 
+// headerFlag collects repeated k=v flags.
+type headerFlag map[string]string
+
+func (h *headerFlag) String() string { return "" }
+func (h *headerFlag) Set(v string) error {
+	k, val, ok := strings.Cut(v, "=")
+	if !ok {
+		return fmt.Errorf("want k=v")
+	}
+	if *h == nil {
+		*h = headerFlag{}
+	}
+	(*h)[k] = val
+	return nil
+}
+
 func serve(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var c common
@@ -139,6 +155,16 @@ func serve(args []string) int {
 	maxHooks := fs.Int("max-webhooks-per-team", 20, "webhooks per team (0 = unlimited)")
 	vmDomain := fs.String("vm-domain", "", "domain of gateway port routes <port>-<vmid>.<vm-domain> (https; a scheme://host[:port] value is used as is)")
 	portTTL := fs.Duration("port-url-ttl", time.Hour, "default lifetime of private port URLs")
+	aiListen := fs.String("ai-proxy-listen", "", "address serving ONLY the AI proxy to VMs, e.g. 10.200.0.1:8744")
+	aiURL := fs.String("ai-proxy-url", "", "proxy URL as VMs see it (default http://<ai-proxy-listen>)")
+	aiRate := fs.Float64("ai-rate", 20, "AI proxy requests/second per VM (0 = unlimited)")
+	publicURL := fs.String("public-url", "", "this API's public base URL, for signed snapshot links")
+	maxImport := fs.Int64("max-import-bytes", 200<<30, "max snapshot archive size for import")
+	otlp := fs.String("otlp-endpoint", "", "OTLP/HTTP base URL for request traces + VM lifecycle logs")
+	var otlpHeaders headerFlag
+	fs.Var(&otlpHeaders, "otlp-header", "k=v header for -otlp-endpoint (repeatable)")
+	hookTeam := fs.Int("webhook-team-inflight", 8, "webhook HTTP attempts in flight per team")
+	hookPending := fs.Int("webhook-team-pending", 1000, "webhook deliveries pending per team; more are dropped and logged")
 	maxFile := fs.Int64("max-file-bytes", 256<<20, "max upload size for PUT files")
 	fs.Parse(args)
 
@@ -149,7 +175,10 @@ func serve(args []string) int {
 	}
 	cfg := Config{SSHUser: *sshUser, SSHJump: *sshJump, DesktopURL: *desktopURL, DesktopTTL: *desktopTTL,
 		AllowPrivateHook: *allowPrivate, MaxFileBytes: *maxFile, JumpKeysFile: *jumpKeys,
-		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, VMDomain: *vmDomain, PortURLTTL: *portTTL}
+		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, VMDomain: *vmDomain, PortURLTTL: *portTTL, AIProxyURL: *aiURL, PublicURL: *publicURL, MaxImportBytes: *maxImport}
+	if cfg.AIProxyURL == "" && *aiListen != "" {
+		cfg.AIProxyURL = "http://" + *aiListen
+	}
 	for _, im := range strings.Split(*images, ",") {
 		if im = strings.TrimSpace(im); im != "" {
 			cfg.Images = append(cfg.Images, im)
@@ -177,10 +206,21 @@ func serve(args []string) int {
 	}
 	s := newServer(store, kr, newBoatd(*boatd), cfg, newLimiter(*rate, *burst), &auditLog{w: auditW})
 	s.teamLim = newLimiter(*teamRate, *teamBurst)
+	s.aiLim = newLimiter(*aiRate, *aiRate*5)
+	s.hooks.teamInflight, s.hooks.teamPending = *hookTeam, *hookPending
+	if *otlp != "" {
+		s.otel = newOTel(*otlp, otlpHeaders)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	s.ctx = ctx
 	go s.hooks.watch(ctx)
+	go s.otel.run(ctx)
+	go s.aiMeterLoop(ctx)
+	if *aiListen != "" {
+		go s.serveAIProxy(ctx, *aiListen)
+	}
 	go s.syncJumpKeys(ctx)
 	srv := &http.Server{Addr: *listen, Handler: s, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	go func() {
@@ -204,7 +244,11 @@ func newServer(store *Store, kr *Keyring, bd *boatdClient, cfg Config, lim *limi
 	if cfg.SSHUser == "" {
 		cfg.SSHUser = "dev"
 	}
-	s := &server{store: store, keys: kr, boatd: bd, limiter: lim, audit: audit, cfg: cfg, mux: http.NewServeMux()}
+	if cfg.MaxImportBytes == 0 {
+		cfg.MaxImportBytes = 200 << 30
+	}
+	s := &server{store: store, keys: kr, boatd: bd, limiter: lim, audit: audit, cfg: cfg, mux: http.NewServeMux(),
+		aiMeter: newAIMeter(), aiClient: newAIClient()}
 	s.hooks = newDispatcher(s, cfg.AllowPrivateHook)
 	s.routes()
 	return s
@@ -240,6 +284,64 @@ func (s *server) routes() {
 	s.route("GET /v1/vms/{id}/snapshots", "vms:read", s.proxySnapshots)
 	s.route("POST /v1/vms/{id}/snapshots", "vms:write", s.proxySnapshots)
 	s.route("DELETE /v1/vms/{id}/snapshots/{sid}", "vms:write", s.proxySnapshots)
+	s.route("POST /v1/vms/{id}/resize", "vms:write", s.resizeVM)
+	s.route("GET /v1/vms/{id}/usage", "vms:read", s.vmUsage)
+	s.route("GET /v1/events", "vms:read", s.streamEvents)
+
+	s.route("POST /v1/vms/{id}/commands", "exec", s.startCommand)
+	s.route("GET /v1/vms/{id}/commands", "exec", s.listCommands)
+	s.route("GET /v1/vms/{id}/commands/{cid}", "exec", s.commandStatus)
+	s.route("GET /v1/vms/{id}/commands/{cid}/logs", "exec", s.commandLogs)
+	s.route("POST /v1/vms/{id}/commands/{cid}/signal", "exec", s.signalCommand)
+	s.route("DELETE /v1/vms/{id}/commands/{cid}", "exec", s.stopCommand)
+	s.route("GET /v1/vms/{id}/command-history", "exec", s.commandHistory)
+	s.route("GET /v1/vms/{id}/processes", "exec", s.listProcesses)
+
+	s.route("GET /v1/vms/{id}/files/list", "exec", s.listFiles)
+	s.route("DELETE /v1/vms/{id}/files", "exec", s.deleteFile)
+	s.route("POST /v1/vms/{id}/files/move", "exec", s.moveFile)
+	s.route("GET /v1/vms/{id}/files/search", "exec", s.searchFiles)
+	s.route("GET /v1/vms/{id}/files/info", "exec", s.fileInfo)
+	s.route("POST /v1/vms/{id}/files/folder", "exec", s.makeFolder)
+	s.route("POST /v1/vms/{id}/files/permissions", "exec", s.chmodFile)
+
+	s.route("POST /v1/vms/{id}/prompts", "exec", s.startPrompt)
+	s.route("GET /v1/vms/{id}/prompts", "exec", s.listPrompts)
+	s.route("GET /v1/vms/{id}/prompts/{pid}", "exec", s.getPrompt)
+	s.route("GET /v1/vms/{id}/prompts/{pid}/logs", "exec", s.promptLogs)
+	s.route("POST /v1/vms/{id}/prompts/{pid}/steer", "exec", s.steerPrompt)
+	s.route("POST /v1/vms/{id}/prompts/{pid}/interrupt", "exec", s.interruptPrompt)
+	s.route("GET /v1/vms/{id}/conversations", "exec", s.listConversations)
+
+	s.route("GET /v1/vms/{id}/snapshots/{sid}/download", "exec", s.downloadSnapshot)
+	s.route("POST /v1/vms/{id}/snapshots/{sid}/shares", "admin", s.createShare)
+	s.route("GET /v1/vms/{id}/snapshots/{sid}/shares", "admin", s.listShares)
+	s.route("DELETE /v1/vms/{id}/snapshots/{sid}/shares/{share}", "admin", s.revokeShare)
+	s.route("POST /v1/snapshots/import", "vms:write", s.importSnapshot)
+	s.route("POST /v1/snapshots/import-share", "vms:write", s.importShare)
+	s.route("GET /v1/shared-snapshots", "vms:read", s.sharedWithMe)
+	s.handle("GET /v1/snapshot-links/{code}/download", s.linkDownload)
+
+	s.route("GET /v1/environments", "vms:read", s.listEnvs)
+	s.route("POST /v1/environments", "admin", s.createEnv)
+	s.route("GET /v1/environments/{id}", "vms:read", s.getEnv)
+	s.route("PUT /v1/environments/{id}", "admin", s.updateEnv)
+	s.route("DELETE /v1/environments/{id}", "admin", s.deleteEnv)
+	s.route("POST /v1/environments/{id}/build", "admin", s.buildEnv)
+
+	s.route("GET /v1/ai/credentials", "admin", s.listAICreds)
+	s.route("PUT /v1/ai/credentials/{provider}", "admin", s.putAICred)
+	s.route("DELETE /v1/ai/credentials/{provider}", "admin", s.deleteAICred)
+	s.route("GET /v1/ai/proxy", "vms:read", s.getAIProxy)
+	s.route("PUT /v1/ai/proxy", "admin", s.putAIProxy)
+	s.route("GET /v1/ai/usage", "vms:read", s.teamAIUsage)
+	s.route("GET /v1/vms/{id}/ai-usage", "vms:read", s.vmAIUsage)
+	s.route("PUT /v1/vms/{id}/ai-access", "admin", s.setAIAccess)
+
+	s.route("GET /v1/telemetry", "admin", s.getTelemetry)
+	s.route("PUT /v1/telemetry", "admin", s.putTelemetry)
+	s.route("DELETE /v1/telemetry", "admin", s.deleteTelemetry)
+
 	s.route("POST /v1/vms/{id}/ssh", "exec", s.sshVM)
 	s.route("GET /v1/vms/{id}/desktop", "exec", s.desktopVM)
 
@@ -253,6 +355,8 @@ func (s *server) routes() {
 	s.route("GET /v1/keys", "", s.listKeys)
 	s.route("POST /v1/keys", "", s.createKey)
 	s.route("DELETE /v1/keys/{id}", "", s.deleteKey)
+	s.route("POST /v1/keys/{id}/rotate", "", s.rotateKey)
+	s.route("GET /v1/keys/{id}/usage", "", s.keyUsageView)
 
 	s.route("GET /v1/secrets", "vms:read", s.listSecrets)
 	s.route("PUT /v1/secrets/{name}", "admin", s.putSecret)
@@ -260,7 +364,10 @@ func (s *server) routes() {
 
 	s.route("GET /v1/webhooks", "admin", s.listHooks)
 	s.route("POST /v1/webhooks", "admin", s.createHook)
+	s.route("GET /v1/webhooks/{id}", "admin", s.getHook)
+	s.route("PATCH /v1/webhooks/{id}", "admin", s.updateHook)
 	s.route("DELETE /v1/webhooks/{id}", "admin", s.deleteHook)
+	s.route("POST /v1/webhooks/{id}/rotate", "admin", s.rotateHook)
 	s.route("GET /v1/webhooks/{id}/deliveries", "admin", s.hookDeliveries)
 	s.route("POST /v1/webhooks/{id}/test", "admin", s.testHook)
 }
