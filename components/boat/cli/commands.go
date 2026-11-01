@@ -343,9 +343,13 @@ func cmdSSH(a *app, args []string) error {
 	if err := a.c.call("POST", vmPath(s(vm, "id"), "ssh"), obj{"public_key": pub}, &info); err != nil {
 		return err
 	}
-	argv := []string{"ssh", "-p", s(info, "port"), "-o", "StrictHostKeyChecking=accept-new"}
+	// VM ips are reused after a delete and every VM has its own host keys, so
+	// known_hosts is keyed by VM id: a new VM on an old ip is not a "changed key".
+	argv := []string{"ssh", "-p", s(info, "port"), "-o", "StrictHostKeyChecking=accept-new",
+		"-o", "HostKeyAlias=boat-" + s(vm, "id")}
 	if j := s(info, "jump"); j != "" {
-		argv = append(argv, "-o", "ProxyCommand=ssh -W %h:%p "+sshJumpArgs(j))
+		// accept-new here too: with no tty the inner ssh cannot ask about the jump host.
+		argv = append(argv, "-o", "ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -W %h:%p "+sshJumpArgs(j))
 	}
 	argv = append(argv, s(info, "user")+"@"+s(info, "host"))
 	argv = append(argv, extra...)

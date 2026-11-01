@@ -204,7 +204,7 @@ func TestSSHExecArgv(t *testing.T) {
 	if code := a.run([]string{"ssh", "dev", "--", "uptime"}); code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	want := "ssh -p 22 -o StrictHostKeyChecking=accept-new -o ProxyCommand=ssh -W %h:%p -p 2222 boat@gw.example ubuntu@10.0.0.5 uptime"
+	want := "ssh -p 22 -o StrictHostKeyChecking=accept-new -o HostKeyAlias=boat-vm1 -o ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -W %h:%p -p 2222 boat@gw.example ubuntu@10.0.0.5 uptime"
 	if strings.Join(argv, " ") != want {
 		t.Errorf("argv %q", strings.Join(argv, " "))
 	}
