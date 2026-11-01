@@ -147,6 +147,8 @@ func (m *Manager) syncSnapshot(id string) {
 			return // restored or deleted meanwhile
 		}
 	}
+	unlock := m.lock(id) // not racing Delete, which removes the dir vm.json lives in
+	defer unlock()
 	m.update(id, "", func(x *VM) { x.SnapSynced = x.HasSnapshot })
 }
 

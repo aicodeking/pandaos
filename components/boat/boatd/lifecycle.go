@@ -468,6 +468,9 @@ func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 	for _, s := range m.Snapshots(id) {
 		m.DeleteSnapshot(id, s.ID)
 	}
+	m.mu.Lock()
+	delete(m.dirty, id) // flushDirty must not write into the dir being removed
+	m.mu.Unlock()
 	if err := m.removeVMDir(id); err != nil {
 		return v, err
 	}
