@@ -65,20 +65,23 @@ jobs:
         run: .github/scripts/nix-retry.sh build.log nix build --impure -f tests/standalone.nix ${{ matrix.test }} -L --no-link
 
   # A real VM under the real NixOS module, through switch, boatd restart, reboot.
-  # Waits for e2e, which builds and caches the guest image for this source.
+  # Not `needs: e2e`: a job waiting on another was cancelled when a newer run queued.
   real-vm:
-    needs: e2e
-    if: ${{ !cancelled() }}
     permissions:
       contents: read
     name: boat-real
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
+    env:
+      OUT: /mnt/guest-out
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo systemctl stop docker docker.socket
+          echo '{"data-root": "/mnt/docker"}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
           sudo mkdir -p /mnt/guest-out /mnt/guest-test && sudo chown "$(id -u):$(id -g)" /mnt/guest-out /mnt/guest-test
           df -h / /mnt
       - name: Enable KVM
@@ -87,9 +90,10 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      - name: Restore guest image
+        id: guest
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
-          fail-on-cache-miss: true
           path: |
             /mnt/guest-out/vmlinux
             /mnt/guest-out/rootfs-slim.ext4.zst
@@ -97,6 +101,11 @@ jobs:
             /mnt/guest-out/size-*.txt
             /mnt/guest-out/manifest-*.txt
           key: boat-guest-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py') }}
+      - name: Build the slim guest image (no cache yet for this source)
+        if: steps.guest.outputs.cache-hit != 'true'
+        run: |
+          components/boat/guest/build.sh kernel
+          components/boat/guest/build.sh rootfs slim
       - name: Unpack guest image
         run: |
           cp /mnt/guest-out/vmlinux /mnt/guest-test/vmlinux
