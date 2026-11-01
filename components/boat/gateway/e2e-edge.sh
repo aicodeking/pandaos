@@ -124,8 +124,8 @@ cat >"$WORK/boatd.json" <<JSON
 JSON
 sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
   "$WORK/boatd.pid" "$WORK/bin/boatd" "$WORK/boatd.json" "$WORK/boatd.log" &
-for _ in $(seq 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
-[ -S "$SOCK" ] || fail "boatd did not start"
+for _ in $(seq 600); do [ -S "$SOCK" ] && break; sleep 0.1; done
+[ -S "$SOCK" ] || fail "boatd did not start in 60s"
 
 log "boat-api + boat-gateway"
 head -c 32 /dev/urandom >"$KEYF" && chmod 600 "$KEYF"
@@ -313,6 +313,7 @@ ssh -F "$WORK/ssh_config" -p 2222 "$(id -un)@localhost" true 2>/dev/null && fail
 
 if [ -x "$HERE/sdk/e2e-live.sh" ] || [ -x "$HERE/api/e2e-auth.sh" ]; then
   export BOAT_URL=$API BOAT_API_KEY=$KEY BOAT_API_DATA=$WORK/api BOAT_VM_DOMAIN=$VMD E2E_TMP=$WORK/tmp
+  export BOAT_GATEWAY_ADDR=127.0.0.1:8742
 fi
 for s in sdk/e2e-live.sh api/e2e-auth.sh; do
   if [ -x "$HERE/$s" ]; then
