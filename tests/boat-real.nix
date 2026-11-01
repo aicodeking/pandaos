@@ -103,7 +103,8 @@ pkgs.testers.runNixOSTest {
               "mkdir -p /var/lib/boat/images/ubuntu-24.04",
               "cp --sparse=always ${guest}/vmlinux /var/lib/boat/images/ubuntu-24.04/vmlinux",
               "cp --sparse=always ${guest}/rootfs-slim.ext4 /var/lib/boat/images/ubuntu-24.04/rootfs.ext4",
-              "chmod -R a+rX /var/lib/boat/images",
+              # As boat-images leaves them; files from the Nix store are read-only.
+              "chmod 0644 /var/lib/boat/images/ubuntu-24.04/vmlinux /var/lib/boat/images/ubuntu-24.04/rootfs.ext4",
           )
           token = json.loads(machine.succeed("boat-admin init -user me -team ops 2>/dev/null"))["token"]
           machine.wait_for_open_port(8740)
