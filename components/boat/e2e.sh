@@ -53,9 +53,7 @@ cleanup() {
   for f in boatd api gateway hooks; do
     [ -f "$WORK/$f.log" ] && { echo "--- $f.log (tail)"; tail -n 60 "$WORK/$f.log"; }
   done
-  for f in "$STATE"/vms/*/firecracker.log; do
-    [ -f "$f" ] && { echo "--- $f (tail)"; sudo tail -n 30 "$f"; }
-  done
+  sudo sh -c 'for f in "$1"/vms/*/firecracker.log; do [ -f "$f" ] && { echo "--- $f (tail)"; tail -n 30 "$f"; }; done' _ "$STATE"
 }
 trap cleanup EXIT
 
@@ -145,6 +143,17 @@ boat whoami
 team=$(boat whoami --json | jq -r .team.id)
 [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/id_ed25519
 
+# diag NAME IP: guest + host network/ssh state, for a failed connectivity check
+diag() {
+  set +e
+  echo "--- diag $1 ($2)"
+  boat exec "$1" -- sudo bash -c 'systemctl --no-pager status ssh | head -20; ss -ltnp; ip addr; ip route;
+    ls -la /home/dev/.ssh; cat /home/dev/.ssh/authorized_keys; ls -l /etc/ssh/ssh_host_*; journalctl -b --no-pager -u ssh | tail -20'
+  ping -c 2 -W 1 "$2"; ip -br addr; ip neigh; sudo nft list ruleset | head -80
+  ssh -vv -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 "dev@$2" true 2>&1 | tail -25
+  set -e
+}
+
 # vm_json NAME -> the VM object from `boat list`
 vm_json() { boat list --json | jq -c --arg n "$1" 'select(.name == $n)'; }
 field() { vm_json "$1" | jq -r ".$2"; }
@@ -186,7 +195,7 @@ id_a=$(jq -r .id <<<"$vm") ip_a=$(jq -r .ip <<<"$vm")
 ssh_ok() { ssh -q -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 "dev@$1" true; }
 boat ssh e2e-a --json >/dev/null # authorizes ~/.ssh/id_ed25519.pub for dev
 for _ in $(seq 300); do ssh_ok "$ip_a" && break; sleep 0.2; done
-ssh_ok "$ip_a" || fail "ssh dev@$ip_a"
+ssh_ok "$ip_a" || { diag e2e-a "$ip_a"; fail "ssh dev@$ip_a"; }
 ssh_ready_s=$(secs "$t" "$(now)")
 echo "create ${create_s}s, ssh-ready ${ssh_ready_s}s"
 
