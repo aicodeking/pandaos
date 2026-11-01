@@ -132,7 +132,7 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 
 ## Security model
 
-- **VM isolation.** Each VM is a KVM guest run by Firecracker (a minimal Rust VMM) inside the jailer: its own uid/gid (from 900000), a chroot, a mount namespace, its own cgroup under `boatd.service`, and seccomp. A guest root exploit must escape KVM, then the jailed, unprivileged Firecracker process.
+- **VM isolation.** Each VM is a KVM guest run by Firecracker (a minimal Rust VMM) inside the jailer: its own uid/gid (from 900000), a chroot, a mount namespace, its own cgroup under `boat-vms`, outside `boatd.service`, so a boatd crash spares the VMs, and seccomp. A guest root exploit must escape KVM, then the jailed, unprivileged Firecracker process.
 - **Tenant network isolation.** Every VM has its own tap on `boatbr0`. nftables drops tap-to-tap traffic, except within a team that has `allowIntraTeam`, and NAT is outbound only. VMs reach the host only on the firewall's open ports (80/443/22/2222), never 127.0.0.1 services.
 - **Web isolation.** Every VM's desktop and every port route has its own origin and host-only `__Host-` cookies, and credentials are HMAC-bound to the VM (and port). Port routes are private by default. With a separate registrable `vmDomain`, tenant apps cannot touch `api.`/`desktop.` cookies either. `api.D` uses bearer tokens, not cookies.
 - **Host services.** boatd is the only root daemon. boat-api runs as `boat`; boat-gateway, which faces the internet, runs as its own `boat-gateway` with no access to boatd's socket (0660 `root:boat`, in a 0751 directory) or to boat-api's data. Both have no capabilities, `ProtectSystem=strict`, a syscall filter and MemoryDenyWriteExecute. `/internal/*` is never published. boatd and boat-api have `OOMScoreAdjust=-900` and each Firecracker 500, so the host OOM killer takes a VM before them. boatbr0 never accepts IPv6 router advertisements, so a VM cannot reconfigure the host. Firecracker is pinned to the release e2e tests (v1.17.0).
@@ -241,7 +241,7 @@ Workflow `boat-e2e`, on a GitHub KVM runner with real Firecracker (jailer on) an
 3. `gateway/e2e-edge.sh`: real Caddy with its internal CA and the jump sshd on 2222 in front of a fresh stack, over verified TLS: private and public routes, per-VM desktop origins, **VM A's Origin refused on VM D's desktop including the websocket upgrade**, the desktop websocket's first frame, `ssh -J`, a **boatd stop (snapshots VMs) followed by a different boatd binary (resumes them): same `boot_id`, guest server and route still up**, the dashboard in a real browser, `sdk/e2e-live.sh`, `api/e2e-auth.sh`.
 4. `build iso-server`.
 
-`nix flake check` (VM tests with stubs for boatd and boat-api unless noted):
+NixOS VM tests, with stubs for boatd and boat-api unless noted (`boat-install` and `boat-ops` are jobs in `boat-e2e`; run one with `nix build --impure -f tests/standalone.nix boat-ops`; `boat-module` is in `nix flake check`):
 
 - `boat-install`: boots the `iso-server` modules under UEFI, runs `panda-install` with every server flag on two blank disks, boots the disk: `local.nix`, `disk.nix`, the data mount, sealed keys, `panda-health`, and **real** boat-api, gateway, Caddy and `boat-admin` over TLS.
 - `boat-ops`: `switch` between two prebuilt generations with a stub VM running: boatd untouched, boat-api moved, health passes, `boat_reboot_pending` turns on, a boatd restart snapshots and resumes; real restic backup, restore to a scratch dir, master key recovery.

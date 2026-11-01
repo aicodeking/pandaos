@@ -16,6 +16,8 @@ on:
       - nixos/profiles/server.nix
       - nixos/installer/**
       - nixos/modules/iso.nix
+      - tests/boat-*.nix
+      - tests/standalone.nix
       - .github/workflows/boat-e2e.yml
   workflow_dispatch:
 
@@ -28,6 +30,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Heavy NixOS tests with a runner each, not in the shared `nix flake check`.
+  vm-tests:
+    permissions:
+      contents: read
+    name: ${{ matrix.test }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [boat-install, boat-ops]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+            fallback = true
+            connect-timeout = 15
+      - uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4 # v9
+        continue-on-error: true
+      - name: nix build ${{ matrix.test }}
+        run: .github/scripts/nix-retry.sh build.log nix build --impure -f tests/standalone.nix ${{ matrix.test }} -L --no-link
+
   # The ISO that ships the server profile: ci.yml builds the other two.
   iso-server:
     permissions:

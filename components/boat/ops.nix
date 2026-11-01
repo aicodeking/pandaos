@@ -22,7 +22,7 @@ let
     d=${boat.dataDir} b=${boat.dataDir}/.backup
     drop() {
       [ -d "$b" ] || return 0
-      find "$b" -mindepth 1 -depth -inum 256 -type d -exec btrfs subvolume delete -q {} + 2>/dev/null || true
+      find "$b" -mindepth 1 -depth -inum 256 -type d -exec btrfs -q subvolume delete {} +
       rm -rf "$b"
     }
     drop

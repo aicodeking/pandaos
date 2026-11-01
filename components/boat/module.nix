@@ -37,6 +37,7 @@ let
     };
   };
 
+  aiProxyPort = 8744;
   credFile = "${cfg.dataDir}/secrets/boat-master-key.cred";
   masterCred = "boat-master-key:${credFile}";
   desktopCredFile = "${cfg.dataDir}/secrets/boat-desktop-key.cred";
@@ -131,6 +132,7 @@ let
     runDir = "/run/boat";
     socket = "/run/boat/boatd.sock";
     socketGroup = "boat";
+    inherit aiProxyPort;
     firecracker = lib.getExe' cfg.firecrackerPackage "firecracker";
     jailer = lib.getExe' cfg.firecrackerPackage "jailer";
     bridge = "boatbr0";
@@ -153,6 +155,8 @@ let
     "-desktop-key-file" "%d/boat-desktop-key"
     "-ssh-jump-keys-file" "${cfg.dataDir}/ssh/jump_authorized_keys"
     "-vm-domain" cfg.vmDomain
+    # Only the AI proxy, on the bridge, for VMs (boatd opens aiProxyPort to them).
+    "-ai-proxy-listen" "10.200.0.1:${toString aiProxyPort}"
   ]
   ++ lib.optionals cfg.sshGateway.enable [ "-ssh-jump" "jump@ssh.${cfg.domain}:${toString cfg.sshGateway.port}" ]
   ++ lib.optionals (imageIds != [ ]) [ "-images" (lib.concatStringsSep "," imageIds) ];
@@ -474,7 +478,7 @@ in
       restartIfChanged = false;
       stopIfChanged = false;
       path = [
-        cfg.firecrackerPackage pkgs.iproute2 pkgs.nftables pkgs.conntrack-tools pkgs.coreutils pkgs.procps
+        cfg.firecrackerPackage pkgs.iproute2 pkgs.nftables pkgs.conntrack-tools pkgs.coreutils pkgs.procps pkgs.gnutar pkgs.zstd
         pkgs.e2fsprogs pkgs.btrfs-progs pkgs.util-linux
       ];
       # VM disks live there: never start on (or write to) the bare mountpoint.
@@ -491,8 +495,8 @@ in
         # The host OOM killer should take a VM, not the manager of all of them.
         # boatd sets each Firecracker's oom_score_adj back up (they inherit this).
         OOMScoreAdjust = -900;
-        # jailer puts each Firecracker in a child cgroup of this unit.
-        Delegate = true;
+        # VMs live in boatd's own cgroup tree (boat-vms, at the cgroup root), so
+        # a boatd crash spares them. Do not set ProtectControlGroups here.
         # Root: jailer needs chroot/mknod/setuid/namespaces, boatd needs
         # CAP_NET_ADMIN for taps and nftables. Firecracker itself runs jailed
         # (own uid, chroot, seccomp). Sandbox what does not break that.

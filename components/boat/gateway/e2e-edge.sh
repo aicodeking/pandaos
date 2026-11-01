@@ -298,7 +298,7 @@ ck=$(awk '$6 == "__Host-boat_gw" {print $6 "=" $7}' "$djar" | head -1)
 [ "$(hc "https://$id_a.desktop.$D/?${link#*\?}")" = 403 ] || fail "VM D's link accepted on VM A's origin"
 [ "$(hc "https://$id_d.desktop.$D/")" = 401 ] || fail "desktop open without a cookie"
 log "cross-origin: a page on VM A must not use the browser's session for VM D (same-site, so SameSite does not help)"
-WS=(-H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==")
+WS=(-H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Protocol: binary")
 [ "$(hc "https://$id_d.desktop.$D/" -b "$ck" -H "Origin: https://$id_a.desktop.$D")" = 403 ] || fail "request with VM A's Origin reached VM D's desktop"
 [ "$(hc "https://$id_d.desktop.$D/websockify" -b "$ck" -H "Origin: https://$id_a.desktop.$D" "${WS[@]}")" = 403 ] || fail "websocket with VM A's Origin reached VM D's desktop"
 [ "$(hc "https://$id_d.desktop.$D/" -b "$ck" -H "Sec-Fetch-Site: same-site" -H "Sec-Fetch-Mode: no-cors")" = 403 ] || fail "same-site subresource request reached VM D's desktop"
