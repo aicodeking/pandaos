@@ -27,6 +27,17 @@ function gatewayGet(addr, url, token) {
   });
 }
 
+// The route appears when boatd rewrites routes.json; poll until it answers as wanted.
+async function gatewayWait(addr, url, want, token) {
+  let status = 0;
+  for (let i = 0; i < 20; i++) {
+    status = await gatewayGet(addr, url, token);
+    if (want.includes(status)) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return status;
+}
+
 const boat = new Boat();
 const prefix = `${process.env.BOAT_LIVE_PREFIX || "sdk-live"}-ts-${randomBytes(3).toString("hex")}`;
 const made = [];
@@ -38,15 +49,17 @@ try {
   const res = await boat.run(vm.id, ["echo", "boat-live"]);
   check(res.exitCode === 0 && res.stdout.trim() === "boat-live", "exec echo");
 
-  await boat.run(vm.id, ["bash", "-c", "nohup python3 -m http.server 8080 >/dev/null 2>&1 &"]);
+  await boat.run(vm.id, ["bash", "-c", "setsid nohup python3 -m http.server 8080 >/dev/null 2>&1 </dev/null & sleep 1"]);
   const port = await boat.addPort(vm.id, 8080);
   check(port.auth === "private", "port 8080 is private by default");
   const pu = await boat.portUrl(vm.id, 8080, { ttlS: 600 });
   check(pu.url.includes("boat_sig=") && pu.token, "private port url carries a token");
   const gw = process.env.BOAT_GATEWAY_ADDR;
   if (gw) {
-    check([401, 403].includes(await gatewayGet(gw, pu.url)), "gateway refuses the route without a token");
-    check((await gatewayGet(gw, pu.url, pu.token)) === 200, "gateway serves the route with the token");
+    const refused = await gatewayWait(gw, pu.url, [401, 403]);
+    check([401, 403].includes(refused), `gateway refuses the route without a token (${refused})`);
+    const served = await gatewayWait(gw, pu.url, [200], pu.token);
+    check(served === 200, `gateway serves the route with the token (${served})`);
   }
 
   const child = await boat.fork(vm.id, { name: `${prefix}-fork` });

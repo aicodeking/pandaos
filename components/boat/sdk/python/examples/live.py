@@ -3,6 +3,7 @@ import http.client
 import os
 import secrets
 import sys
+import time
 import urllib.parse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -25,6 +26,17 @@ def gateway_get(addr, url, token=None):
     return conn.getresponse().status
 
 
+def gateway_wait(addr, url, want, token=None, tries=20):
+    """The route appears when boatd rewrites routes.json; poll until it answers as wanted."""
+    status = 0
+    for _ in range(tries):
+        status = gateway_get(addr, url, token)
+        if status in want:
+            return status
+        time.sleep(1)
+    return status
+
+
 boat = Boat()
 prefix = os.environ.get("BOAT_LIVE_PREFIX", "sdk-live") + "-py-" + secrets.token_hex(3)
 made = []
@@ -36,15 +48,17 @@ try:
     res = boat.run(vm.id, ["echo", "boat-live"])
     check(res.exit_code == 0 and res.stdout.strip() == b"boat-live", "exec echo")
 
-    boat.run(vm.id, ["bash", "-c", "nohup python3 -m http.server 8080 >/dev/null 2>&1 &"])
+    boat.run(vm.id, ["bash", "-c", "setsid nohup python3 -m http.server 8080 >/dev/null 2>&1 </dev/null & sleep 1"])
     port = boat.add_port(vm.id, 8080)
     check(port.get("auth") == "private", "port 8080 is private by default")
     pu = boat.port_url(vm.id, 8080, ttl_s=600)
     check("boat_sig=" in pu["url"] and pu.get("token"), "private port url carries a token")
     gw = os.environ.get("BOAT_GATEWAY_ADDR")
     if gw:
-        check(gateway_get(gw, pu["url"]) in (401, 403), "gateway refuses the route without a token")
-        check(gateway_get(gw, pu["url"], pu["token"]) == 200, "gateway serves the route with the token")
+        st = gateway_wait(gw, pu["url"], (401, 403))
+        check(st in (401, 403), "gateway refuses the route without a token (%d)" % st)
+        st = gateway_wait(gw, pu["url"], (200,), pu["token"])
+        check(st == 200, "gateway serves the route with the token (%d)" % st)
 
     child = boat.fork(vm.id, name=prefix + "-fork")
     made.append(child.id)
