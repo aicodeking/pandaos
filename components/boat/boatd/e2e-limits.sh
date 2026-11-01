@@ -206,8 +206,7 @@ transfer() { curl -fsS --max-time 60 -o /dev/null -w '%{speed_download}' "http:/
 transfer >/dev/null # drains nft's one-second token bucket
 capped=$(transfer) # back to back: the steady rate
 restart_boatd "$(cfg_with 'del(.egressMbit)' nocap)"
-untransfer >/dev/null # drains nft's one-second token bucket
-capped=$(transfer) # back to back: the steady rate
+uncapped=$(transfer)
 restart_boatd "$WORK/boatd.json"
 capped_mbit=$(mbps "$capped") uncapped_mbit=$(mbps "$uncapped")
 echo "egress: cap ${EGRESS_MBIT} Mbit/s, measured ${capped_mbit} Mbit/s; without the cap ${uncapped_mbit} Mbit/s"
