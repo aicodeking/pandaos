@@ -19,7 +19,9 @@ permissions: {}
 
 concurrency:
   group: boat-e2e-${{ github.ref }}
-  cancel-in-progress: true
+  # Several people push to main: let a running e2e finish so it gives a real
+  # result. GitHub keeps only the newest waiting run per group.
+  cancel-in-progress: false
 
 jobs:
   e2e:
