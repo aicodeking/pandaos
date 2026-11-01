@@ -152,19 +152,19 @@ headless Chrome through the real link and web client at 1920x1080, on a 4-core G
 runner that also hosts the VM, with software rendering (llvmpipe), software encoding
 and software decoding. "Shown" counts paints where the canvas pixels changed, which is
 what a viewer sees. "Decoded" counts WebCodecs frames, and is 0 in image mode. Ranges
-over three CI runs (41326922291, 41328850520, 41332202705); glxgears was the source
-and was not the limit.
+over five CI runs (41326922291, 41328850520, 41332202705, 41333827937, 41336650348),
+which vary by runner; glxgears was the source and was not the limit.
 
 | 1080p desktop, 2 vCPU VM, direct to the guest | shown fps | decoded fps | Mbps |
 |---|---|---|---|
-| Fullscreen motion, stock KasmVNC client settings | 19.0-20.2 | - | 6.5-7.0 |
-| Fullscreen motion, preset 3, JPEG/WebP | 20.8-24.6 | - | 7.2-8.5 |
-| **Fullscreen motion, preset 3, H.264 (default)** | **26.6-29.6** | 34.4-35.8 | 19.9-20.6 |
-| 400x400 window moving, preset 3, JPEG/WebP | 55.6-59.2 | - | 3.7-3.8 |
-| **400x400 window moving, preset 3, H.264 (default)** | **40.3-45.8** | 57.2-58.3 | 8.9-9.0 |
+| Fullscreen motion, stock KasmVNC client settings | 18.4-23.8 | - | 6.5-8.3 |
+| Fullscreen motion, preset 3, JPEG/WebP | 20.8-25.6 | - | 7.2-8.9 |
+| **Fullscreen motion, preset 3, H.264 (default)** | **26.6-30.0** | 34.4-36.4 | 19.9-20.9 |
+| 400x400 window moving, preset 3, JPEG/WebP | 51.2-59.2 | - | 3.5-3.8 |
+| **400x400 window moving, preset 3, H.264 (default)** | **40.3-47.0** | 54.5-58.3 | 8.5-9.0 |
 
 Through the TLS edge (Caddy + gateway, default-size VM), default H.264, fullscreen:
-**34.0-34.7 shown, 47.2-49.4 decoded, 25.4-26.5 Mbps.**
+**34.0-41.9 shown, 47.2-53.9 decoded, 25.4-28.4 Mbps.**
 
 Earlier versions of this file claimed 44-62 fps. That was wrong: it counted raw 8bpp
 RFB updates at the server, not what a browser shows, and the range was too generous
@@ -184,7 +184,7 @@ Why these settings:
   to image mode, and it falls back by itself if the browser cannot decode H.264.
 - Lowering the source's priority, the client's stream-quality setting and a tuned
   JPEG profile moved fullscreen by no more than a few fps, so none are used.
-- The limit looks like CPU. Decoded fps was 34-36 on 2 vCPU and about 47 on a
+- The limit looks like CPU. Decoded fps was 34-36 on 2 vCPU and 47-54 on a
   default-size VM, on a runner with no spare cores. More cores or a VA-API GPU should
   help; neither is measured here.
 - Not WebRTC: Selkies would use the same x264 on the same cores, and needs TURN and
