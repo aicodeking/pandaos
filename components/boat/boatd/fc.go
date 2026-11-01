@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -164,6 +165,7 @@ func (p realProcs) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 	if p.cfg.Jailer == "" {
 		done := make(chan struct{})
 		go func() { <-exited; close(done) }()
+		setOOMScore(cmd.Process.Pid)
 		return cmd.Process.Pid, done, nil
 	}
 	// --new-pid-ns: the jailer forks firecracker as pid 1 of a new pid
@@ -214,7 +216,18 @@ func waitPidFile(path string, exited <-chan error) (int, error) {
 	return 0, fmt.Errorf("jailer wrote no pid file %s", path)
 }
 
+// vmOOMScoreAdj: boatd.service runs at OOMScoreAdjust=-900 and children inherit
+// it. Under memory pressure a VM must die before boatd or the host.
+const vmOOMScoreAdj = "500"
+
+func setOOMScore(pid int) {
+	if err := os.WriteFile(fmt.Sprintf("/proc/%d/oom_score_adj", pid), []byte(vmOOMScoreAdj), 0); err != nil {
+		log.Printf("pid %d: oom_score_adj: %v", pid, err)
+	}
+}
+
 func (p realProcs) Adopt(pid int, id string) <-chan struct{} {
+	setOOMScore(pid) // also re-applied to VMs a restarted boatd takes over
 	done := make(chan struct{})
 	go func() {
 		for p.Alive(pid, id) {

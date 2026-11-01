@@ -106,6 +106,7 @@ sudo ip netns list | grep -q "^boat$(vmf "$p1" index)" || fail "no netns for p1"
 [ "$(cat "/sys/fs/cgroup/boat-e2e/$p1/memory.max")" = $(((2048 + 256) * 1048576)) ] || fail "memory.max: $(cat "/sys/fs/cgroup/boat-e2e/$p1/memory.max")"
 grep -q '^max 100000$\|^300000 100000$' "/sys/fs/cgroup/boat-e2e/$p1/cpu.max" || fail "cpu.max: $(cat "/sys/fs/cgroup/boat-e2e/$p1/cpu.max")"
 [ "$(stat -c %u "/proc/$pid")" -ge 900000 ] || fail "firecracker not running as a jail uid"
+[ "$(sudo cat "/proc/$pid/oom_score_adj")" = 500 ] || fail "oom_score_adj: $(sudo cat "/proc/$pid/oom_score_adj")"
 
 log "host e2e: isolation"
 sudo ip netns add e2e-ext

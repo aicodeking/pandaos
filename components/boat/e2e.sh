@@ -367,6 +367,7 @@ boat rm e2e-a --json >/dev/null
 # idle stop, restart reconcile, disk floor, docker.
 # shellcheck source=boatd/e2e-host.sh
 . "$HERE/boatd/e2e-host.sh"
+: "${stop2_s:?}" "${stop3_s:?}" "${resume2_s:?}" "${fork2_s:?}" "${forkq_s:?}" "${perf_fail=}" # set by e2e-host.sh
 
 mib() { echo $(( $(stat -c %s "$1") / 1048576 )); }
 zst() { if [ -f "$1" ]; then mib "$1"; else echo null; fi; }
