@@ -32,6 +32,9 @@ func TestAgentAllowlist(t *testing.T) {
 	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/agent", map[string]any{"op": "file_list", "path": "/nope"}, &out); c != 404 {
 		t.Fatalf("missing path: %d", c)
 	}
+	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/agent", map[string]any{"op": "cmd_status", "cmd_id": "nope"}, &out); c != 404 {
+		t.Fatalf("unknown cmd_id: %d", c)
+	}
 	m.Stop(context.Background(), v.ID, "")
 	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/agent", map[string]any{"op": "cmd_list"}, &out); c != 409 {
 		t.Fatalf("stopped VM: %d", c)

@@ -113,7 +113,7 @@ func (e *agentErr) Error() string { return "guest agent: " + e.msg }
 
 func (e *agentErr) notFound() bool {
 	m := strings.ToLower(e.msg)
-	return strings.Contains(m, "no such file") || strings.Contains(m, "not found")
+	return strings.Contains(m, "no such") || strings.Contains(m, "not found")
 }
 
 // agentRaw sends one request and returns its single final reply line.

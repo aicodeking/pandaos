@@ -352,6 +352,8 @@ func (f *fakeFC) agentConn(c net.Conn) {
 			send(map[string]any{"ok": true, "port": 6080})
 		case "cmd_start":
 			send(map[string]any{"ok": true, "cmd_id": "c1"})
+		case "cmd_status":
+			send(map[string]any{"error": "No such command: 'nope'"})
 		case "file_list":
 			send(map[string]any{"error": "open /nope: No such file or directory"})
 		case "sync":

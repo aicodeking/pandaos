@@ -20,8 +20,13 @@
 #                 memory; VMs inside it are killed and cold-boot on restart
 #   ENOSPC        a really full small btrfs: refusals, clean stop, recovery
 
-DEFAULT_CREATE_MAX=${E2E_DEFAULT_CREATE_MAX:-20}
-DEFAULT_STOP_MAX=${E2E_DEFAULT_STOP_MAX:-40}
+# Measured on GitHub's ubuntu runner (run 41315786226): create 3.07 s, first stop
+# with 2 GiB dirty 11.64 s, stop with 200 MiB dirty 2.25 s, fork 1.58 s. The gates
+# are about twice that: they catch regressions, not runner noise. The first stop
+# is bound by the disk (2 GiB+ of pages to write).
+DEFAULT_CREATE_MAX=${E2E_DEFAULT_CREATE_MAX:-8}
+DEFAULT_STOP_MAX=${E2E_DEFAULT_STOP_MAX:-25}
+DEFAULT_STOP2_MAX=${E2E_DEFAULT_STOP2_MAX:-5}
 
 cfg_with() { jq "$1" "$WORK/boatd.json" >"$WORK/boatd-$2.json"; echo "$WORK/boatd-$2.json"; }
 put_file() { curl -fsS --unix-socket "$SOCK" -X PUT --data-binary "@$3" "http://boatd/v1/vms/$1/files?path=$2&mode=755" >/dev/null; }
@@ -46,13 +51,17 @@ echo "default size: create ${dcreate_s}s, first stop ${dstop_s}s (2 GiB dirty), 
 check_max default_create "$dcreate_s" "$DEFAULT_CREATE_MAX"
 check_max default_stop1 "$dstop_s" "$DEFAULT_STOP_MAX"
 check_max default_resume "$dresume_s" "$RESUME_MAX"
-check_max default_stop2 "$dstop2_s" "$STOP_MAX"
-check_max default_fork "$dfork_s" "$FORK_MAX"
+check_max default_stop2 "$dstop2_s" "$DEFAULT_STOP2_MAX"
+check_max default_fork "$dfork_s" "$((FORK_MAX + 1))"
 # Nested KVM spike: what the host offers and what the guest sees (a measurement, not a gate).
 nested_host=$(cat /sys/module/kvm_intel/parameters/nested /sys/module/kvm_amd/parameters/nested 2>/dev/null | head -1 || true)
 nested_guest=$(bx "$d1" 'grep -cwE "vmx|svm" /proc/cpuinfo || true')
 kvm_guest=$(bx "$d1" 'test -e /dev/kvm && echo yes || echo no')
 echo "nested KVM: host nested=${nested_host:-absent}, guest cpus with vmx/svm=$nested_guest, guest /dev/kvm=$kvm_guest"
+if [ "$kvm_guest" = yes ]; then # the kernel has KVM: does it work under Firecracker?
+  kvm_guest=$(bx "$d1" "python3 -c \"import fcntl,os; f=os.open('/dev/kvm',os.O_RDWR); assert fcntl.ioctl(f,0xAE00)==12; os.close(fcntl.ioctl(f,0xAE01,0)); print('works')\"" || echo broken)
+  echo "nested KVM: KVM_CREATE_VM in the guest: $kvm_guest"
+fi
 bd DELETE "/v1/vms/$d2" >/dev/null
 
 log "limits e2e: resize"

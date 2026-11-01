@@ -294,4 +294,4 @@ runDir/routes.json
 
 ## 5. Measured deviations
 
-- **Nested KVM**: not offered. See the e2e `METRIC` fields `nestedHost`, `nestedGuestCpus`, `nestedGuestKvm`. The guest kernel is built without KVM (`guest/kernel/docker.config`), and exposing VMX/SVM would also need a Firecracker CPU template and a host with nested virtualization enabled.
+- **Nested KVM**: measured in e2e (`METRIC` fields `nestedHost`, `nestedGuestCpus`, `nestedGuestKvm`). On a host with `nested=1`, Firecracker 1.17 passes VMX/SVM to the guest with no CPU template (run 41315786226: 4 of 4 vCPUs). `/dev/kvm` in the guest then depends only on the guest kernel's config, and on the host enabling nested virtualization. Firecracker does not save KVM nested state, so do not expect a stop snapshot or fork taken while a nested VM runs to restore that nested VM.
