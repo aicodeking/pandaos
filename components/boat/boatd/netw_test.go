@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -64,6 +65,33 @@ func TestAddressing(t *testing.T) {
 	if c.ipFor(258) != "10.200.1.2" || c.gateway().String() != "10.200.0.1" || macFor(258) != "06:00:0a:c8:01:02" ||
 		c.ipv6For(258) != "2001:db8:1::102" || c.ipv6Gateway() != "2001:db8:1::1" || tapFor(65534) != "bt65534" {
 		t.Fatal(c.ipFor(258), macFor(258), c.ipv6For(258))
+	}
+}
+
+func TestFirewallFailureFailsClosed(t *testing.T) {
+	m, h := newTestManager(t, nil)
+	ctx := t.Context()
+	a, err := m.Create(ctx, CreateReq{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Stop(ctx, a.ID, "")
+	h.mu.Lock()
+	h.nftErr = errors.New("nft: syntax error")
+	h.mu.Unlock()
+	if _, err := m.Create(ctx, CreateReq{Name: "b"}); err == nil {
+		t.Fatal("VM created without its firewall rules")
+	}
+	if _, err := m.Start(ctx, a.ID, nil); err == nil {
+		t.Fatal("VM started without its firewall rules")
+	}
+	for _, v := range m.list("") {
+		if v.State == Running {
+			t.Fatalf("%s running unfiltered", v.Name)
+		}
+		if h.Alive(v.PID, v.ID) {
+			t.Fatalf("%s process left running", v.Name)
+		}
 	}
 }
 

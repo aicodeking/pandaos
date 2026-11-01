@@ -121,7 +121,7 @@ fi
 cat >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":$jailer,"jailerArgs":$jargs,"cgroupParent":"boat-e2e","reflink":"always",
- "bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e","ipv6Prefix":"fd42:b0a7::/64","reapIntervalS":5,
+ "bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e","ipv6Prefix":"fd42:b0a7::/64","reapIntervalS":5,"egressMbit":2000,
  "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},
  "defaultTeam":{"maxVMs":$MAX_VMS}}
 JSON

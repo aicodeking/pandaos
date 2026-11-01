@@ -24,12 +24,13 @@ import (
 // guest agent on root/v.sock whose filesystem is a JSON map stored in the
 // VM's rootfs.ext4, so reflink copies (fork, snapshots) are really exercised.
 type fakeHost struct {
-	mu    sync.Mutex
-	next  int
-	vms   map[int]*fakeFC // by pid
-	cmds  []string
-	nft   string
-	idleS float64
+	mu     sync.Mutex
+	next   int
+	vms    map[int]*fakeFC // by pid
+	cmds   []string
+	nft    string
+	nftErr error
+	idleS  float64
 }
 
 func newFakeHost() *fakeHost { return &fakeHost{next: 1000, vms: map[int]*fakeFC{}} }
@@ -39,6 +40,10 @@ func (h *fakeHost) run(stdin, name string, args ...string) error {
 	h.cmds = append(h.cmds, name+" "+strings.Join(args, " "))
 	if name == "nft" {
 		h.nft = stdin
+		if h.nftErr != nil {
+			defer h.mu.Unlock()
+			return h.nftErr
+		}
 	}
 	h.mu.Unlock()
 	if name == "btrfs" && len(args) == 3 && args[0] == "subvolume" {

@@ -108,6 +108,11 @@ grep -q '^max 100000$\|^300000 100000$' "/sys/fs/cgroup/boat-e2e/$p1/cpu.max" ||
 [ "$(stat -c %u "/proc/$pid")" -ge 900000 ] || fail "firecracker not running as a jail uid"
 [ "$(sudo cat "/proc/$pid/oom_score_adj")" = 500 ] || fail "oom_score_adj: $(sudo cat "/proc/$pid/oom_score_adj")"
 
+rules=$(sudo nft list table inet boat)
+grep -q 'meta skuid 900000-965534 drop' <<<"$rules" || fail "jail uid output rule not loaded"
+grep -q 'limit rate over' <<<"$rules" || fail "egress rate rule not loaded"
+[ "$(cat "/sys/fs/cgroup/boat-e2e/$p1/pids.max")" = 256 ] || fail "pids.max: $(cat "/sys/fs/cgroup/boat-e2e/$p1/pids.max")"
+
 log "host e2e: isolation"
 sudo ip netns add e2e-ext
 sudo ip link add e2eh type veth peer name e2ee netns e2e-ext
@@ -137,6 +142,10 @@ blocked "$p1" "$(tcp 10.200.0.1 8743)" # host services via the gateway
 blocked "$p1" "$(tcp "$host_ip" 8743)" # ... via the host's own address
 blocked "$p1" "$(tcp 10.200.0.1 8740)" # boat-api port
 blocked "$p1" 'curl -fsS --max-time 4 -H Metadata:true "http://169.254.169.254/metadata/instance?api-version=2021-02-01"'
+# Control: the host (not subject to the VM policy) reaches the same SMTP port and
+# the VM resolves the name, so a pass below is the egress rule, not the network.
+timeout 8 bash -c '</dev/tcp/smtp.gmail.com/587' || fail "control: host cannot reach smtp.gmail.com:587"
+bx "$p1" 'getent hosts smtp.gmail.com >/dev/null' || fail "control: p1 cannot resolve smtp.gmail.com"
 blocked "$p1" "$(tcp smtp.gmail.com 587)"
 blocked "$p1" "$(tcp smtp.gmail.com 465)"
 

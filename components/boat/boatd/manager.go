@@ -283,17 +283,21 @@ func (m *Manager) removeVMDir(id string) error {
 	return os.RemoveAll(m.vmDir(id))
 }
 
-// syncNet reloads nftables and routes.json from the current VM set.
-func (m *Manager) syncNet() {
+// syncNet reloads nftables and routes.json from the current VM set. An nft
+// error means the isolation rules are not in force: callers starting a VM must
+// fail rather than run it unfiltered.
+func (m *Manager) syncNet() error {
 	m.netMu.Lock()
 	defer m.netMu.Unlock()
 	vms := m.list("")
-	if err := m.run(ruleset(m.cfg, vms), "nft", "-f", "-"); err != nil {
+	err := m.run(ruleset(m.cfg, vms), "nft", "-f", "-")
+	if err != nil {
 		log.Printf("nft: %v", err)
 	}
-	if err := writeRoutes(m.cfg, vms); err != nil {
-		log.Printf("routes: %v", err)
+	if rerr := writeRoutes(m.cfg, vms); rerr != nil {
+		log.Printf("routes: %v", rerr)
 	}
+	return err
 }
 
 func (m *Manager) touch(id string) {

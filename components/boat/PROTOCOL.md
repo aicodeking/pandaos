@@ -240,12 +240,14 @@ runDir/routes.json
   - **NAT**: masquerade `10.200.0.0/16` out of non-bridge interfaces. A hairpin masquerade lets a VM reach a sibling's public port.
   - **Bridge anti-spoofing** per tap: the source MAC, IPv4, ARP sender IP and IPv6 (assigned address, link-local, `::`) must match. Because of this, a fork is silent until `set_identity` gives it its own MAC and IP.
   - **Bridge isolation**: tap → tap traffic is dropped (ARP is allowed). The exception is taps in the same team when that team has `allowIntraTeam`.
+- nftables failures fail closed: boatd refuses to start, and a create, fork or start fails (the VM is killed) if its rules cannot be loaded; port changes report the error.
 - Releasing or reusing an address flushes its conntrack entries (`conntrack -D`).
 - Requirements: `br_netfilter` must not be loaded (`bridge-nf-call-iptables=1` would send bridged frames through the inet hooks). `ip_forward` is set by the module and by boatd.
 
 ### Isolation of the hypervisor
 
 - **Jailer mode (default when `jailer` is set)**: each VM runs under the Firecracker jailer as its own uid/gid `jailUidBase + n` (default 900000+n), chrooted to its VM root, with its own netns (`--netns`, so firecracker sees only `tap0`) and pid namespace (`--new-pid-ns`). The jailer creates the device nodes. Its cgroup is a child of `cgroupParent`, or of boatd's own delegated cgroup; in that case boatd moves itself into a `boatd` leaf so it can enable the controllers. Limits: `memory.max` = RAM + `vmOverheadMiB` (256), `cpu.max` = vCPUs + 1, `pids.max` = 256. If the controllers cannot be enabled, boatd logs it and VMs run without limits. Firecracker's built-in seccomp filters are on, as they are by default. The VM's files and tap are owned by that uid, so a compromised VMM cannot read other VMs' disks or memory.
+- Firecracker runs at `oom_score_adj` 500 (set on launch and on adoption), while the unit keeps boatd at -900, so under memory pressure VMs die before boatd or the host.
 - **No-jailer mode** (`jailer: ""`, used by the unit tests and for development): firecracker runs through `nsenter` in the VM's netns as `fcUid`/`fcGid` with cwd = VM root, plus its built-in seccomp and no cgroup limits. All VMs then share one uid, which is weaker isolation. Do not use it in production.
 - boatd itself runs as root (taps, nftables, jailer). It treats the guest agent as untrusted: reply lines are capped at 8 MiB, the JSON is decoded strictly, and guest output only reaches the caller of exec/files.
 - Input validated at the API boundary: names, team, image (no path traversal: `^[a-z0-9][a-z0-9._-]{0,63}$`), labels, env names, absolute file paths, octal modes, ports 1-65535, and JSON bodies of at most 1 MiB.

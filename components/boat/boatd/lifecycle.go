@@ -160,7 +160,9 @@ func (m *Manager) bootNew(ctx context.Context, v VM, restore bool, env map[strin
 		return m.fail(v.ID, err)
 	}
 	t1 := time.Now()
-	m.syncNet() // its anti-spoof rules and route
+	if err := m.syncNet(); err != nil { // its anti-spoof rules and route
+		return m.fail(v.ID, err)
+	}
 	log.Printf("%s: boot=%dms net=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
 	return m.initGuest(ctx, v, env, true, restore)
 }
@@ -389,10 +391,12 @@ func (m *Manager) Start(ctx context.Context, id string, env map[string]string) (
 		restore = false
 		v, err = m.boot(ctx, v, false)
 	}
+	if err == nil {
+		err = m.syncNet()
+	}
 	if err != nil {
 		return m.fail(id, err)
 	}
-	m.syncNet()
 	return m.initGuest(ctx, v, env, false, restore)
 }
 
@@ -505,8 +509,7 @@ func (m *Manager) AddPort(id string, guest int, public bool) (Port, error) {
 	if err != nil {
 		return Port{}, err
 	}
-	m.syncNet()
-	return p, nil
+	return p, m.syncNet()
 }
 
 func (m *Manager) freePortLocked() (int, error) {
@@ -535,7 +538,7 @@ func (m *Manager) RemovePort(id string, guest int) error {
 		v.Ports = out
 	})
 	if err == nil {
-		m.syncNet()
+		err = m.syncNet() // the port stays open until the rules load: tell the caller
 	}
 	return err
 }

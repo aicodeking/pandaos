@@ -51,7 +51,9 @@ func serve(cfgPath string) error {
 	if err != nil {
 		return err
 	}
-	m.syncNet()
+	if err := m.syncNet(); err != nil {
+		return fmt.Errorf("firewall rules not loaded, refusing to start: %w", err)
+	}
 	m.resumeAll(context.Background())
 	ln, err := listenSocket(cfg)
 	if err != nil {
