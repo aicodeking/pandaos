@@ -1,8 +1,14 @@
 # boat: self-hosted agent VMs on a dedicated server
 
+> **Status: pre-release.** No tagged release has shipped it. Do not offer it to untrusted tenants until
+> you have done the [operator checklist](#operator-checklist) **and** had an external penetration test.
+> It has had internal review rounds only, and those kept finding serious bugs: the latest was a cross-tenant
+> desktop takeover through a same-site websocket. It is single-host, and it is not API-compatible with
+> boat.dev (see [parity](#feature-parity-with-boatdev)).
+
 `boat` turns one dedicated server into a self-hosted alternative to boat.dev.
 Each agent gets a persistent Firecracker microVM, and you get an API, a CLI,
-SDKs, ssh, port URLs, a browser desktop, forks and snapshots. The server
+SDKs, a web dashboard, ssh, port URLs, a browser desktop, forks and snapshots. The server
 profile (`nixos/profiles/server.nix`) is headless PandaOS with
 `services.boat.enable = true`.
 
@@ -12,7 +18,7 @@ profile (`nixos/profiles/server.nix`) is headless PandaOS with
 | `boat-api` | `components/boat/api` | REST API on 127.0.0.1:8740 (keys, teams, secrets, webhooks, metering, link minting). User `boat`. |
 | `boat` | `components/boat/cli`, `sdk` | CLI (`--json` everywhere) and the Python/TypeScript SDKs. |
 | guest | `components/boat/guest` | Ubuntu 24.04 rootfs + kernel with `boat-agent`; the `full` image adds a KasmVNC desktop on guest port 6080. |
-| gateway | `components/boat/gateway` | Caddy (TLS), `boat-gateway` (port routes, desktops) and the ssh jump host. |
+| gateway | `components/boat/gateway` | Caddy (TLS), `boat-gateway` (port routes, desktops; its own uid, no access to boatd), the ssh jump host, and the static dashboard at `https://api.<domain>/`. |
 | module | `components/boat/module.nix`, `ops.nix` | NixOS options and units: the above plus reboot detection, maintenance reboots, backups. |
 
 ## Operator checklist
@@ -20,13 +26,14 @@ profile (`nixos/profiles/server.nix`) is headless PandaOS with
 Before you hand out API keys:
 
 1. **Hardware with KVM.** `ls /dev/kvm` in the rescue system. Without it, boatd refuses to start (`boatd: /dev/kvm is missing ...`, exit 78, no restart loop).
-2. **Two domains.** Pick a base domain (`boat.example.com`) and a **separate registrable domain for tenant port routes** (`boatvms.example.net`, or a name under a suffix on the [Public Suffix List](https://publicsuffix.org/)). Set it as `services.boat.vmDomain`. The default, `vm.<domain>`, works, but then a tenant's app is a sibling of `api.` and the desktops and can set cookies on the parent domain.
+2. **Separate domains for tenant content.** Pick a base domain (`boat.example.com`) and a **different registrable domain** for what tenants control: `vmDomain` (port routes) and `desktopDomain` (desktop pages), e.g. `boatvms.example.net` and `desktop.boatvms.example.net`, or names under a suffix on the [Public Suffix List](https://publicsuffix.org/). With the defaults (`vm.<domain>`, `desktop.<domain>`) a tenant's page is same-site with `api.<domain>` and can set cookies on the parent domain. A rebuild warns about this until you fix it. Tenants' origins are always same-site with each other unless the VM domain is on the PSL; the gateway's Origin checks cover that, see below.
 3. **DNS** (see below), including both wildcards.
-4. **TLS.** A DNS-01 provider for the wildcards, or accept the HTTP-01 fallback's limits.
-5. **Backups.** Set `services.boat.backup` to a restic repository you control, keep the repository password off the box, and keep an offline copy of the master key (see "Secrets").
+4. **TLS with DNS-01.** Set `gateway.dnsProvider`. Without it, a tenant creating routes can exhaust your Let's Encrypt limit, after which new certificates fail for everyone; the module refuses to evaluate unless you set `gateway.allowOnDemandTLS = true` (the installer does, since it has no DNS credentials, and every rebuild warns about it).
+5. **Backups.** Set `services.boat.backup` to a restic repository you control, keep the repository password off the box, and keep an offline copy of both sealed keys (see "Secrets"). A backup alone does not restore secrets on a new host. Test a restore.
 6. **Reboot schedule.** Turn on `services.boat.maintenance.reboot` (default: Sunday 04:00, only when a reboot is pending), or watch `boat_reboot_pending` and reboot by hand.
-7. **Abuse policy.** You are the hosting provider for everything your tenants run: public port URLs, outbound traffic from your IPs, mail, scanning and mining. Publish an acceptable-use policy, keep `abuse@` working for your provider (Hetzner and OVH forward complaints and can null-route the server), keep team quotas tight, and give keys only to people you trust. boatd drops outbound SMTP (25/465/587) unless `boatdSettings.allowSMTP = true`, and can cap each VM's egress (`boatdSettings.egressMbit`).
+7. **Abuse policy.** You are the hosting provider for everything your tenants run: public port URLs, outbound traffic from your IPs, mail, scanning and mining. Publish an acceptable-use policy, keep `abuse@` working for your provider (Hetzner and OVH forward complaints and can null-route the server), keep team quotas tight (defaults: 10 running VMs, 50 total, 32 vCPU, 64 GiB RAM, 1000 GiB disk, 100 snapshots, 50 routes), and give keys only to people you trust. boatd drops outbound SMTP (25/465/587) unless `boatdSettings.allowSMTP = true`, and can cap each VM's egress (`boatdSettings.egressMbit`).
 8. **Monitoring.** node-exporter is on :9100 (not opened in the firewall). It includes the textfile metric `boat_reboot_pending`. Usage per team is at `GET /v1/usage`.
+9. **External penetration test** before untrusted tenants. Nobody outside this project has reviewed it.
 
 ## Install on a dedicated server (Hetzner, OVH)
 
@@ -67,7 +74,7 @@ Before you hand out API keys:
      maintenance.reboot = true;
    };
    ```
-5. **First admin key:** run `sudo boat-admin init -user me -team ops`. It prints an owner API key once. boat-admin runs `boat-api admin init` as `boat` with the sealed master key. Then run `boat login --url https://api.boat.example.com --key ...`.
+5. **First admin key:** run `sudo boat-admin init -user me -team ops`. It prints an owner API key once. boat-admin runs `boat-api admin init` as `boat` with the sealed master key, then restarts boat-api. Then run `boat login --url https://api.boat.example.com --key ...`.
 
 ### DNS records
 
@@ -82,7 +89,7 @@ Before you hand out API keys:
 ### TLS
 
 - **Wildcards via DNS-01 (recommended).** Set `gateway.dnsProvider` and use a Caddy build with the matching [caddy-dns](https://github.com/caddy-dns) plugin. Caddy then gets `*.<desktopDomain>` and `*.<vmDomain>` certificates, so the provider must manage both zones. New VMs and ports work instantly, and their names stay out of Certificate Transparency logs.
-- **HTTP-01 fallback.** Leave `dnsProvider = null`. Caddy then gets one certificate per desktop and per port URL on the first request, after asking boat-gateway (127.0.0.1:8743) whether that host is live. The costs: a few seconds' wait on first use; Let's Encrypt's limit of 50 certificates per registered domain per week (a separate `vmDomain` gives routes their own budget); and every name is published in CT logs.
+- **HTTP-01 fallback, not for production.** Set `gateway.allowOnDemandTLS = true`. Caddy then gets one certificate per desktop and per port URL on the first request, after asking boat-gateway (127.0.0.1:8743) whether that host is live. The costs: a few seconds' wait on first use; every name is published in CT logs; and Let's Encrypt's limit of 50 certificates per registered domain per week is shared, so **one tenant creating routes can stop new certificates for everyone**. `quotas.maxPorts` limits this but does not remove it.
 
 ### IPv6 subnet routing
 
@@ -111,6 +118,8 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 ```
 
 - **One origin per VM.** Each desktop is `<id>.desktop.D` and each port route is `<port>-<id>.<vmDomain>`. Session cookies are `__Host-` prefixed: host-only, `Secure`, `Path=/`, `HttpOnly`. Browsers refuse a `__Host-` cookie that carries a `Domain`, so a page on another VM's origin can neither read nor plant one. Desktop cookies are `SameSite=Strict`. A browser withholds a Strict cookie on the redirects of a navigation that began on another site, so for `Sec-Fetch-Site: cross-site` the gateway answers with a small same-origin page that starts a fresh navigation; everything else gets a 302. Every VM's credential is bound to its id by the HMAC: VM A's cookie or link gets 401/403 on VM B's origin. This is checked in the e2e.
+- **Origin checks.** All VM origins are same-site with each other, so `SameSite` does not stop a page on VM A from sending B's cookie along, for example on `wss://<B>.desktop.D/`. The gateway therefore refuses (403) a desktop request whose `Origin` is not exactly its own origin, any desktop request marked `Sec-Fetch-Site: same-site` or `cross-site` unless it carries a signed link, and framing (`frame-ancestors 'self'`). A private port route accepts its cookie only from its own origin or another port of the same VM, and from top-level navigations; a program sending `X-Boat-Route-Token` is not limited, since it holds the token itself. Consequence: `<img>` or `<script>` from one private port of a VM to another is refused, so use relative paths or a public port. Desktops cannot be embedded in an iframe on another origin.
+- **Dashboard.** Static files from `components/boat/dashboard/web`, served from the read-only Nix store at `https://api.D/`, on the same origin as the API, with a strict CSP (`default-src 'self'`, no framing). `/v1/*` and `/healthz` go to boat-api; `/internal/*` is 404. It holds the user's API key in the browser, which is why it is never on a tenant-controlled origin.
 - **Desktop links.** `GET /v1/vms/<id>/desktop` returns `https://desktop.D/<id>?exp&sig` (sig = `hex(HMAC-SHA256(key, "<id>.<exp>"))`, 5 min by default). The gateway 302s it to `https://<id>.desktop.D/?exp&sig`, which checks the signature, sets `__Host-boat_gw` and drops the signature from the URL. Toward the guest, the gateway removes the client's `boat_*`/`__Host-boat_*` cookies and sends `boat_desktop=hex(HMAC(key, "guest-desktop.<id>"))`. boat-api starts the guest desktop with that same token.
 - **Port routes are private by default.** A route needs a token: `token = <exp>.hex(HMAC(key, "route.<port>-<id>.<exp>"))`, minted by `GET /v1/vms/<id>/ports/<port>/url` (`boat ports url VM PORT`). Programs send it as `X-Boat-Route-Token`; browsers open `…/?boat_exp&boat_sig` once, which sets the host-only `__Host-boat_route` (SameSite=Lax). A port is reachable without a token only if added with `--public`, which boatd lists in routes.json `"public"`. When the list is missing, routes stay private (fail-closed). Tokens and cookies never reach the VM.
 - **Live routes.** boat-gateway (Go stdlib, websockets included) re-reads `/run/boat/routes.json` whenever its mtime or size changes, so new VMs and ports never reload Caddy.
@@ -126,16 +135,16 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 - **VM isolation.** Each VM is a KVM guest run by Firecracker (a minimal Rust VMM) inside the jailer: its own uid/gid (from 900000), a chroot, a mount namespace, its own cgroup under `boatd.service`, and seccomp. A guest root exploit must escape KVM, then the jailed, unprivileged Firecracker process.
 - **Tenant network isolation.** Every VM has its own tap on `boatbr0`. nftables drops tap-to-tap traffic, except within a team that has `allowIntraTeam`, and NAT is outbound only. VMs reach the host only on the firewall's open ports (80/443/22/2222), never 127.0.0.1 services.
 - **Web isolation.** Every VM's desktop and every port route has its own origin and host-only `__Host-` cookies, and credentials are HMAC-bound to the VM (and port). Port routes are private by default. With a separate registrable `vmDomain`, tenant apps cannot touch `api.`/`desktop.` cookies either. `api.D` uses bearer tokens, not cookies.
-- **Host services.** boatd is the only root daemon. boat-api and boat-gateway run as `boat` with no capabilities, `ProtectSystem=strict`, a syscall filter and MemoryDenyWriteExecute. `/internal/*` is never published. The boatd socket is 0660 `root:boat`. boatd and boat-api have `OOMScoreAdjust=-900`, so the host OOM killer takes a VM before them. Both carry `RequiresMountsFor=/var/lib/boat`.
-- **Secrets.** Tenant secrets and webhook keys are AES-256-GCM sealed under boat-api's master key. That key exists on disk only as a systemd credential (`/var/lib/boat/secrets/boat-master-key.cred`), encrypted with the TPM2 when present plus the host key `/var/lib/systemd/credential.secret`, and handed to boat-api with `LoadCredentialEncrypted`. An older plaintext `master.key` is sealed, verified and deleted on upgrade. **Keep an offline copy:** `sudo systemd-creds decrypt --name=boat-master-key /var/lib/boat/secrets/boat-master-key.cred - | base64`. Without it, a new motherboard (TPM) or a lost credential.secret makes sealed secrets unreadable. API keys are stored as salted HMACs. The desktop/route HMAC key (`secrets/desktop.key`, 0600 `boat`) never leaves the host. Caddy's DNS token belongs in `gateway.environmentFile`.
+- **Host services.** boatd is the only root daemon. boat-api runs as `boat`; boat-gateway, which faces the internet, runs as its own `boat-gateway` with no access to boatd's socket (0660 `root:boat`, in a 0751 directory) or to boat-api's data. Both have no capabilities, `ProtectSystem=strict`, a syscall filter and MemoryDenyWriteExecute. `/internal/*` is never published. boatd and boat-api have `OOMScoreAdjust=-900` and each Firecracker 500, so the host OOM killer takes a VM before them. boatbr0 never accepts IPv6 router advertisements, so a VM cannot reconfigure the host. Firecracker is pinned to the release e2e tests (v1.17.0).
+- **Secrets.** Tenant secrets and webhook keys are AES-256-GCM sealed under boat-api's master key. That key and the desktop/route HMAC key exist on disk only as systemd credentials (`/var/lib/boat/secrets/*.cred`, directory 0700 root), encrypted with the TPM2 when present plus the host key `/var/lib/systemd/credential.secret`, and handed to the services with `LoadCredentialEncrypted`. Plaintext keys from older installs are sealed, verified and deleted on upgrade. Backups contain only the sealed files, so **a backup alone cannot decrypt anything on another host. Keep offline copies:** `sudo systemd-creds decrypt --name=boat-master-key /var/lib/boat/secrets/boat-master-key.cred - | base64` (same for `boat-desktop-key`). API keys are stored as salted HMACs. Caddy's DNS token belongs in `gateway.environmentFile`.
 - **Host hardening** comes from PandaOS: nftables, key-only ssh, sshguard, sysctl hardening, daily updates with health-check rollback.
-- **Not defended:** a malicious server admin; side channels between VMs on shared cores (no core pinning); one team saturating the disk (no IOPS limits) or, without `egressMbit`, the uplink; and abuse from your IPs beyond what your policy and quotas stop.
+- **Not defended:** a malicious server admin; side channels between VMs on shared cores (no core pinning); one team saturating the disk (no IOPS limits) or, without `egressMbit`, the uplink; a full compromise of the host through a KVM or Firecracker bug (no second layer beyond the jailer); and abuse from your IPs beyond what your policy and quotas stop.
 
 ### Tenant model
 
 - **Teams** own VMs, secrets, webhooks and keys. A key belongs to one user in one team and has scopes (`vms:read`, `vms:write`, `exec`, `admin`). Admins manage members and secrets.
 - A team sees and reaches only its own VMs: API objects are filtered by team, nftables blocks other teams' VMs, jump grants list only the team's VM IPs, and every desktop link and route token is bound to one VM.
-- **Quotas** (`services.boat.quotas`, per-team overrides in boatd) cap VMs, vCPU and memory. Metering (`/v1/usage`) records VM-seconds per size and snapshot-days per team. There is no billing.
+- **Quotas** (`services.boat.quotas`, per-team overrides with `boatdSettings.teams`) cap running and total VMs, vCPU, memory, disk, snapshots and routes, all finite by default. Metering (`/v1/usage`) records VM-seconds per size and snapshot-days per team. There is no billing.
 
 ## Upgrades and reboots
 
@@ -152,69 +161,105 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 1. Each run (default 03:00, `Persistent`) takes **read-only btrfs snapshots**: `/var/lib/boat` as `.backup/top`, and every nested subvolume (each VM's directory, with boatd's `btrfsQgroups`) as `.backup/sub/<path>`. A btrfs snapshot does not include nested subvolumes, so each one is snapshotted on its own. Each VM's disk and memory snapshot is crash-consistent; the API database and sealed master key come with `top`.
 2. restic uploads the snapshots (images excluded; they are re-downloadable), the btrfs snapshots are deleted, and `pruneOpts` apply (7 daily, 4 weekly, 6 monthly).
 
-Restore onto a fresh boat host:
+Restore onto a fresh boat host (`checks.boat-ops` runs the restic restore into a scratch directory and the key recovery; it does not restart real VMs from a restore):
 1. Stop boatd and boat-api.
 2. `restic restore latest --target /tmp/r`, then copy `/tmp/r/var/lib/boat/.backup/top/.` and each `.backup/sub/<path>` back to `/var/lib/boat/<path>` (`cp -a --reflink=auto`).
-3. Restore the master key: `systemd-creds encrypt --name=boat-master-key <key> /var/lib/boat/secrets/boat-master-key.cred`.
+3. Reseal both keys from your offline copies, because the `.cred` files in the backup open only on the old host: `base64 -d copy | sudo systemd-creds encrypt --with-key=auto --name=boat-master-key - /var/lib/boat/secrets/boat-master-key.cred`, and the same for `boat-desktop-key`.
 4. Start boatd and boat-api again.
 
 Test a restore before you need one.
 
 ## Feature parity with boat.dev
 
-| Feature | Here | Notes |
-|---|---|---|
-| Create / delete VMs | yes | `boat new`, sizes and images from the module |
-| Stop / start | yes | the disk persists |
-| Pause / resume (memory) | yes | stop → start restores memory (same `boot_id`; e2e) |
-| Fork | yes | reflink, near-instant; new hostname, IP, machine-id, ssh host keys |
-| Snapshots | yes | create / list / delete, `new --snapshot` |
-| ssh | yes | ProxyJump via `ssh.<domain>:2222` (`boat ssh`); IP target, not `<vmid>@host` |
-| scp / files | yes | `boat scp` via the files API; `scp -J` works |
-| Ports | yes | `https://<port>-<id>.<vmDomain>`, **private by default** (token/cookie), `--public` to open |
-| Public IPs | partial | IPv6 per VM with `ipv6Prefix`; IPv4 only from `publicIPv4Pool`, otherwise NAT + host port forwards |
-| Desktop (browser) | yes | KasmVNC (`full` image), one origin per VM, signed links |
-| Prompt (run an agent) | yes | `boat prompt` |
-| CLI with JSON | yes | `--json` |
-| REST API | yes | `components/boat/api/openapi.json` |
-| SDKs | yes | Python, TypeScript |
-| Webhooks | yes | HMAC-signed, delivery log, test |
-| API keys, scopes | yes | |
-| Secrets | yes | sealed at rest, injected as env vars |
-| Teams, quotas | yes | |
-| Auto-stop on idle / TTL | yes | `idle_stop_s`, `ttl_s` |
-| Metering | yes | `/v1/usage`: VM-seconds by size, snapshot-days |
-| Backups | yes | restic of btrfs snapshots (operator-run) |
-| Billing | no | metering only; no payments, invoices or plans |
-| Regions | N/A | one server is one region |
-| HA / live migration | no | single host |
-| GPUs | no | Firecracker has no PCI passthrough |
+Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list, read on 2026-11-01. **yes** = works and is exercised by the `boat-e2e` workflow on real VMs. **unit** = implemented, tested only against a fake boatd or a stub. **partial** = a smaller version. **no** = missing. **n/a** = does not apply to self-hosting. Features that boat.dev documents and this table omits should be read as **no**.
 
-### What the `boat-e2e` workflow proves
+**Not drop-in.** The API is `/v1/vms`, not `/api/v1/sandboxes`, without boat.dev's `ok`/`type` envelope or cursor pagination, and the SDKs are this project's own, not `boat-sdk` or `@boatdev/sdk`. Code written against boat.dev has to be ported.
 
-Both parts run on a GitHub KVM runner with real Firecracker (jailer on) and the real guest image.
+| boat.dev area | Feature | Here | Notes |
+|---|---|---|---|
+| Sandboxes | create, list, get, delete | yes | `boat new/list/rm` |
+| | update (PATCH), recover, share/unshare | no | |
+| | stop, resume | yes | `boat stop/start`, memory restored (same `boot_id`); the command is `start`, not `resume` |
+| | fork | yes | new hostname, IP, machine-id, host keys, entropy |
+| | per-sandbox usage | unit | `GET /v1/vms/{id}/usage` |
+| | `current` shortcut, `boat onboard`, sign up from an agent | no | keys come from the operator |
+| Commands | exec with output | yes | |
+| | detached commands, attach, stop, logs, history, `ps` | partial | API routes exist (`/commands`, `/command-history`, `/processes`); no CLI verbs yet |
+| Files | read, write | yes | `boat scp` |
+| | delete, list, info, search, folder, move, permissions | unit | API only |
+| | find in files, replace, upload/download URLs, artifacts | no | |
+| Connect | ssh | yes | through the jump host; IP target; no `boat ssh-config` for editors |
+| | VS Code, Cursor | partial | works with a hand-written `ProxyJump`; not automated |
+| | desktop in the browser | yes | KasmVNC (`full` image), websocket and first frame checked |
+| | browser-only view, record to MP4, custom wallpaper | no | |
+| | embed desktop in an iframe | no | refused on purpose, see Origin checks |
+| Public URLs | HTTPS port URL, token protection | yes | private by default |
+| | raw TCP | yes | `--public` host port |
+| | raw UDP, rename subdomain, stable names across forks | no | |
+| | firewall rules per sandbox | no | SMTP blocked, `egressMbit` cap, operator-wide only |
+| Long-running | TTL and idle auto-stop | yes | |
+| | extend the deadline, prompts pushing it out | no | |
+| | systemd services across stop/resume | yes | memory restore keeps all processes; boat.dev restarts services instead |
+| Environments | image, setup script, env vars, secret selection, versions | unit | `/v1/environments`; no CLI verbs |
+| | repo cloning, secret files, private registries, safe-for-third-parties, per-org access | no | |
+| Snapshots | create, list, delete, new from snapshot | yes | memory + disk |
+| | share code, download, import | unit | |
+| | browse file tree, retention rules | no | |
+| Machines | sizes | yes | operator-defined |
+| | resize | unit | `POST /v1/vms/{id}/resize` |
+| | nested virtualization, fail-fast | no | |
+| | Docker in the sandbox | yes | `full` image |
+| Agents | `boat prompt` | yes | with a stub agent; real agent only if CI has a key (`e2e-agent-from-env.sh` otherwise reports SKIPPED) |
+| | harnesses | partial | Claude Code, Codex, OpenCode preinstalled; boat.dev lists seven |
+| | async prompts, steer, interrupt, conversations | unit | |
+| | AI credentials, keep-keys-out proxy, usage, block | unit | one credential per provider and team, no profiles or backup accounts |
+| | computer use, MCP server, skills, llms.txt | no | not integrated in boat (PandaOS has `panda-cu` separately) |
+| API and SDKs | REST + OpenAPI, Python, TypeScript | yes | own schema, see above |
+| | CLI with `--json` | yes | far fewer verbs than boat.dev's CLI |
+| | pagination, `Idempotency-Key` | no | |
+| Keys | create, list, revoke, scopes | yes | |
+| | rotate, per-key usage | unit | |
+| Webhooks | signed, delivery log, test | yes | |
+| | rotate, update | unit | |
+| Monitoring | OpenTelemetry | unit | |
+| Teams | teams, members, quotas | yes | no invites, seats or shared wallets |
+| Dashboard | web UI | partial | new; its browser smoke test runs in the edge e2e; has not been reviewed |
+| Security | isolation, tokenized URLs | yes | see Security model |
+| | data retention, zero data retention, GDPR erasure tooling | no | you are the data controller |
+| | SOC 2, status page, regions | n/a | your host |
+| Billing | metering | yes | `/v1/usage`; no prices |
+| | plans, wallets, invoices, trial | no | |
+| Integrations | Harbor, Eve adapters, Windows apps recipes | no | |
+| Hosted service | reliability, support, capacity | n/a | you run it: one host, no HA |
 
-1. `components/boat/e2e.sh` drives every feature through the `boat` CLI: new (slim/full), exec, ssh, scp, egress, secrets, ports, stop/start as memory restore, fork, snapshots, prompt, desktop, quota (429), TTL, signed webhooks, usage, rm.
-2. `components/boat/gateway/e2e-edge.sh` puts **real Caddy with its internal CA (`tls internal`)** and the **jump sshd on 2222** (module settings and filter) in front of a fresh stack. Every check runs over verified TLS:
-   - a private route gets 401 without a token and 200 with one (header, and link → host-only cookie); a token for another port gets 401; a public route gets 200;
-   - the desktop link moves to `<id>.desktop.D`, its `__Host-` cookie is host-only, and VM D's cookie/link get 401/403 on VM A's origin;
-   - `ssh -J jump@localhost:2222 dev@<vm>` and `boat ssh` through it work; the jump host gives no shell, refuses targets without a grant and other users on 2222, and the grant and routes are gone after `boat rm`;
-   - it then calls `guest/desktop-check.sh` (desktop websocket + a frame), `sdk/e2e-live.sh` and `api/e2e-auth.sh` against that stack. Any of the three that is missing is reported as a workflow warning, not a pass.
+### What the tests prove
 
-`checks.boat-module` (NixOS VM, stubs for boatd and boat-api) proves the module itself: units, the sealed master key loaded into boat-api, the data-disk guard, the reboot metric, Caddy + gateway over TLS (private/public routes, per-VM desktop origins) and the jump host.
+Workflow `boat-e2e`, on a GitHub KVM runner with real Firecracker (jailer on) and the real guest image:
 
-`boatd/e2e-host.sh` (sourced by `e2e.sh`) adds host phases: fork memory and entropy, the jail, network isolation, IPv6 (a ULA prefix), idle auto-stop, boatd restart re-adopting VMs, the free-space floor, docker in the full image and btrfs qgroups.
+1. `components/boat/e2e.sh` + `boatd/e2e-host.sh`: every CLI feature above marked yes, plus host phases (jail, network isolation, IPv6 with a ULA prefix, idle stop, boatd restart re-adopting VMs, free-space floor, Docker, qgroups).
+2. `guest/test-in-vm.sh`: guest checks.
+3. `gateway/e2e-edge.sh`: real Caddy with its internal CA and the jump sshd on 2222 in front of a fresh stack, over verified TLS: private and public routes, per-VM desktop origins, **VM A's Origin refused on VM D's desktop including the websocket upgrade**, the desktop websocket's first frame, `ssh -J`, a **boatd stop (snapshots VMs) followed by a different boatd binary (resumes them): same `boot_id`, guest server and route still up**, the dashboard in a real browser, `sdk/e2e-live.sh`, `api/e2e-auth.sh`.
+4. `build iso-server`.
 
-Not covered by any automated test: public IPv4, a real ACME/DNS-01 issuance, `boat-admin`, backup/restore, maintenance reboots, a real TPM, and installing with `panda-install --profile server --data-disk`. `iso-server` is built but not booted.
+`nix flake check` (VM tests with stubs for boatd and boat-api unless noted):
+
+- `boat-install`: boots the `iso-server` modules under UEFI, runs `panda-install` with every server flag on two blank disks, boots the disk: `local.nix`, `disk.nix`, the data mount, sealed keys, `panda-health`, and **real** boat-api, gateway, Caddy and `boat-admin` over TLS.
+- `boat-ops`: `switch` between two prebuilt generations with a stub VM running: boatd untouched, boat-api moved, health passes, `boat_reboot_pending` turns on, a boatd restart snapshots and resumes; real restic backup, restore to a scratch dir, master key recovery.
+- `boat-module`: units, sealed keys, gateway uid, data-disk guard, Caddy + gateway over TLS, Origin refusals, dashboard, jump host.
+
+**Not tested by anything:** a real NixOS `switch` with real Firecracker VMs (the two halves above are separate; test VMs cannot reliably run Firecracker), `local.nix` taking effect after the first rebuild, real ACME/DNS-01, a real TPM, public IPv4, maintenance reboots, restoring a backup into a running service, and two tenants' real browsers.
+
+The fps numbers in `guest/README.md` are raw 8bpp updates measured in CI on 2 vCPU with a synthetic animation. They show how fast the server produces frames, not what a user sees through a browser and an internet link.
 
 ## Honest gaps
 
+- **Unreviewed:** no external penetration test. See the status note at the top.
 - **One host:** no HA, migration or cross-host scheduling.
 - **No GPUs, no nested KVM** in guests (Docker works).
+- **Not API-compatible with boat.dev**, and much of the surface above is **unit** or **no**.
 - **SSH UX** is `-J jump@… dev@<ip>` (wrapped by `boat ssh`).
 - **Egress controls are basic:** SMTP is blocked by default and egress can be capped per VM (`egressMbit`), but there are no IOPS limits, no per-team egress budget and no destination filtering.
-- **HTTP-01 fallback:** CT-log exposure, rate limits, first-request delay.
-- **The master key** is bound to this host's TPM/host key. Keep the offline copy, or a hardware change loses sealed secrets.
+- **The sealed keys** are bound to this host's TPM/host key. Keep the offline copies, or a hardware change loses sealed secrets and invalidates desktop and route links.
 - **Guest images** are not pinned by default: `services.boat.images` is empty until you set the URLs and hashes of a release (`boat-guest-*`, `boat_guest_SHA256SUMS`). No tagged release has published them yet; until one does, build them with `components/boat/guest/build.sh` and copy them to `/var/lib/boat/images/<id>/`.
 - **Metrics:** host metrics and `boat_reboot_pending` only; per-VM numbers come from `/v1/usage`.
 

@@ -128,6 +128,11 @@ jobs:
           go-version-file: components/boat/boatd/go.mod
           cache: false
 
+      # dashboard/e2e.sh drives a real browser with Node 22's built-in WebSocket.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
       - name: e2e
         run: components/boat/e2e.sh "$OUT" 2>&1 | tee e2e.log; test "${PIPESTATUS[0]}" = 0
 
@@ -139,6 +144,9 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           E2E_WORK: /mnt/boat-edge
+          # Optional: without them sdk/e2e-agent-from-env.sh prints SKIPPED, not a pass.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: components/boat/gateway/e2e-edge.sh "$OUT" 2>&1 | tee -a e2e.log; test "${PIPESTATUS[0]}" = 0
 
       - name: Metrics

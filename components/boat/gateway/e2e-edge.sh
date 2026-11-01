@@ -136,6 +136,7 @@ api_args=(-data "$WORK/api" -listen 127.0.0.1:8740 -boatd "$SOCK" -rate 0 -image
   -ssh-jump "jump@localhost:2222" -ssh-jump-keys-file "$WORK/ssh/jump_authorized_keys")
 help=$(boat-api serve -h 2>&1 || true)
 if [[ $help == *-vm-domain* ]]; then api_args+=(-vm-domain "$VMD"); fi
+if [[ $help == *-ai-proxy-listen* ]]; then api_args+=(-ai-proxy-listen 10.200.0.1:8744); fi
 boat-api serve "${api_args[@]}" >"$WORK/api.log" 2>&1 &
 PIDS+=($!)
 boat-gateway -listen 127.0.0.1:8742 -ask-listen 127.0.0.1:8743 -domain "$D" -vm-domain "$VMD" \
@@ -153,10 +154,23 @@ cat >"$WORK/Caddyfile" <<EOF
 }
 api.$D {
 	tls internal
-	handle /internal/* {
-		respond 404
+	route {
+		handle /internal/* {
+			respond 404
+		}
+		handle /v1/* {
+			reverse_proxy 127.0.0.1:8740
+		}
+		handle /healthz {
+			reverse_proxy 127.0.0.1:8740
+		}
+		handle {
+			root * $HERE/dashboard/web
+			header Content-Security-Policy "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+			try_files {path} /index.html
+			file_server
+		}
 	}
-	reverse_proxy 127.0.0.1:8740
 }
 desktop.$D, *.desktop.$D, *.$VMD {
 	tls internal
@@ -344,7 +358,7 @@ if [ -x "$HERE/sdk/e2e-live.sh" ] || [ -x "$HERE/api/e2e-auth.sh" ]; then
   export BOAT_URL=$API BOAT_API_KEY=$KEY BOAT_API_DATA=$WORK/api BOAT_VM_DOMAIN=$VMD E2E_TMP=$WORK/tmp
   export BOAT_GATEWAY_ADDR=127.0.0.1:8742
 fi
-for s in sdk/e2e-live.sh api/e2e-auth.sh; do
+for s in sdk/e2e-live.sh api/e2e-auth.sh sdk/e2e-agent-from-env.sh; do
   if [ -x "$HERE/$s" ]; then
     log "$s"
     "$HERE/$s" || fail "$s"
@@ -352,6 +366,17 @@ for s in sdk/e2e-live.sh api/e2e-auth.sh; do
     warn "components/boat/$s not present yet"
   fi
 done
+
+if [ -f "$HERE/dashboard/web/index.html" ]; then
+  log "dashboard: served read-only at https://api.$D/, same origin as the API (real browser)"
+  page=$(curl -sS -D - --cacert "$CA" --connect-to "::127.0.0.1:443" "https://api.$D/")
+  grep -qi "frame-ancestors 'none'" <<<"$page" && grep -qi '<html' <<<"$page" || fail "dashboard page: $page"
+  [ "$(hc "https://api.$D/v1/me" -H "Authorization: Bearer $KEY")" = 200 ] || fail "API behind the dashboard"
+  grep -q "api.$D" /etc/hosts || echo "127.0.0.1 api.$D" | sudo tee -a /etc/hosts >/dev/null
+  BOAT_URL=https://api.$D BOAT_KEY=$KEY BOAT_INSECURE=1 BOAT_E2E_REQUIRE_BROWSER=1 "$HERE/dashboard/e2e.sh" || fail "dashboard/e2e.sh"
+else
+  warn "components/boat/dashboard/web not present yet"
+fi
 
 log "rm: the VM's jump grant and routes go away"
 boat rm edge-a --json >/dev/null

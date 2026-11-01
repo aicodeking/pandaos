@@ -93,8 +93,8 @@ in
     };
     dashboardDir = mkOption {
       type = types.nullOr types.path;
-      default = if builtins.pathExists ../dashboard/index.html then ../dashboard else null;
-      defaultText = lib.literalExpression "../dashboard, when it has an index.html";
+      default = if builtins.pathExists ../dashboard/web/index.html then ../dashboard/web else null;
+      defaultText = lib.literalExpression "../dashboard/web, when it exists";
       description = ''
         Static web dashboard, served read-only from the Nix store at `https://api.<domain>/`
         (same origin as the API, which it calls with the user's key). Null: no dashboard.
