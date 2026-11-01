@@ -334,7 +334,7 @@ bd DELETE "/v1/vms/$d1" >/dev/null
 
 log "limits e2e: a really full disk (small btrfs)"
 SMALL=/var/lib/boat-e2e-small
-truncate -s 8G "$WORK/small.img" && mkfs.btrfs -q -f "$WORK/small.img"
+truncate -s 7G "$WORK/small.img" && mkfs.btrfs -q -f "$WORK/small.img"
 sudo mkdir -p "$SMALL" && sudo mount -o loop "$WORK/small.img" "$SMALL"
 sudo mkdir -p "$SMALL/images/slim"
 sudo cp --sparse=always "$STATE/images/slim/vmlinux" "$STATE/images/slim/rootfs.ext4" "$SMALL/images/slim/"
@@ -346,7 +346,7 @@ bx "$fill" 'head -c 7G /dev/urandom >/home/dev/fill; sync' >/dev/null 2>&1 || tr
 sudo sync
 avail=$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')
 echo "small btrfs after the fill: ${avail} MiB available"
-[ "$avail" -lt 1024 ] || fail "the fill left $avail MiB: the disk never got full"
+[ "$avail" -lt 100 ] || fail "the fill left $avail MiB: the host disk never got full"
 curl -fsS --unix-socket "$SOCK" http://boatd/v1/health >/dev/null || fail "boatd died on ENOSPC"
 [ "$(bdcode POST /v1/vms '{"name":"over","team":"lim"}')" = 507 ] || fail "create on a full disk: $(cat "$WORK/tmp/bd.out")"
 [ "$(bdcode POST "/v1/vms/$fill/snapshots" '{}')" = 507 ] || fail "snapshot on a full disk: $(cat "$WORK/tmp/bd.out")"
