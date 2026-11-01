@@ -115,7 +115,7 @@ members=$(tar --zstd -tf "$WORK/tmp/exp.tar.zst")
 grep -qx rootfs.ext4 <<<"$members" || fail "export has no disk: $members"
 echo "export ${export_s}s, $(($(stat -c %s "$WORK/tmp/exp.tar.zst") >> 20)) MiB"
 [ "$(bdcode GET "/v1/vms/vm-nope/snapshots/$exp/download")" = 404 ] || fail "export of another VM's snapshot"
-imported() { curl -fsS --unix-socket "$SOCK" -X POST --data-binary "@$1" "http://boatd/v1/snapshots/import?team=lim&name=$2"; }
+imported() { curl -fsS --unix-socket "$SOCK" -X POST -T "$1" "http://boatd/v1/snapshots/import?team=lim&name=$2"; }
 in1=$(imported "$WORK/tmp/exp.tar.zst" signed)
 [ "$(jq -r .has_mem <<<"$in1")" = true ] || fail "signed import lost its memory: $in1"
 i1=$(newvm "{\"name\":\"i1\",\"team\":\"lim\",\"snapshot\":\"$(jq -r .id <<<"$in1")\"}")
@@ -134,7 +134,7 @@ i2=$(newvm "{\"name\":\"i2\",\"team\":\"lim\",\"snapshot\":\"$(jq -r .id <<<"$in
 # A path-traversal archive is refused and leaves nothing behind.
 tar -cf "$WORK/tmp/evil.tar" -P --transform 's,.*,../../evil,' "$WORK/tmp/df0"
 zstd -qf "$WORK/tmp/evil.tar" -o "$WORK/tmp/evil.tar.zst"
-[ "$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "$SOCK" -X POST --data-binary "@$WORK/tmp/evil.tar.zst" "http://boatd/v1/snapshots/import?team=lim")" = 400 ] || fail "traversal archive accepted"
+[ "$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "$SOCK" -X POST -T "$WORK/tmp/evil.tar.zst" "http://boatd/v1/snapshots/import?team=lim")" = 400 ] || fail "traversal archive accepted"
 rm -f "$WORK"/tmp/*.tar.zst "$WORK/tmp/evil.tar"
 for s in "$(jq -r .id <<<"$in1")" "$(jq -r .id <<<"$in2")"; do bd DELETE "/v1/snapshots/$s" >/dev/null; done
 bd DELETE "/v1/vms/$i2" >/dev/null
