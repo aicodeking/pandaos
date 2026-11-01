@@ -36,6 +36,7 @@ PIDS=()
 cleanup() {
   set +e
   for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done
+  sudo pkill -9 -x firecracker # first: else boatd's SIGTERM handler snapshots every VM
   if [ -f "$WORK/boatd.pid" ]; then
     sudo kill "$(cat "$WORK/boatd.pid")" 2>/dev/null
     for _ in $(seq 100); do sudo kill -0 "$(cat "$WORK/boatd.pid")" 2>/dev/null || break; sleep 0.2; done
@@ -297,8 +298,9 @@ desktop_s=$(secs "$t" "$(now)")
 u=$(jq -r .url <<<"$d")
 [[ $u == "http://desktop.$DOMAIN:8742/$id_d?exp="* ]] || fail "desktop url: $d"
 gw=(--connect-to "desktop.$DOMAIN:8742:127.0.0.1:8742" --max-time 20)
-hdr=$(curl -sS -D - -o /dev/null "${gw[@]}" "$u")
-cookie=$(grep -i '^set-cookie: boat_gw=' <<<"$hdr" | sed 's/^[^:]*: //; s/;.*//' | tr -d '\r')
+# Follow the link like a browser: /<id>?sig -> /<id>/?sig (Set-Cookie) -> /<id>/
+hdr=$(curl -sS -L -D - -o /dev/null "${gw[@]}" "$u" || true)
+cookie=$( (grep -i '^set-cookie: boat_gw=' <<<"$hdr" || true) | sed 's/^[^:]*: //; s/;.*//' | tr -d '\r')
 [ -n "$cookie" ] || fail "desktop link gave no cookie: $hdr"
 # The cookie is Secure (Caddy serves https in production); send it by hand over http.
 code=$(curl -sS -o "$WORK/tmp/desktop.html" -w '%{http_code}' -b "$cookie" "${gw[@]}" "http://desktop.$DOMAIN:8742/$id_d/")
