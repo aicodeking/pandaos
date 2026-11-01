@@ -25,7 +25,7 @@ Before you hand out API keys:
 4. **TLS.** A DNS-01 provider for the wildcards, or accept the HTTP-01 fallback's limits.
 5. **Backups.** Set `services.boat.backup` to a restic repository you control, keep the repository password off the box, and keep an offline copy of the master key (see "Secrets").
 6. **Reboot schedule.** Turn on `services.boat.maintenance.reboot` (default: Sunday 04:00, only when a reboot is pending), or watch `boat_reboot_pending` and reboot by hand.
-7. **Abuse policy.** You are the hosting provider for everything your tenants run: public port URLs, outbound traffic from your IPs, mail, scanning and mining. Publish an acceptable-use policy, keep `abuse@` working for your provider (Hetzner and OVH forward complaints and can null-route the server), keep team quotas tight, and give keys only to people you trust. boat has no outbound rate limits or port 25 block yet; add an nftables rule if you need one (see "Honest gaps").
+7. **Abuse policy.** You are the hosting provider for everything your tenants run: public port URLs, outbound traffic from your IPs, mail, scanning and mining. Publish an acceptable-use policy, keep `abuse@` working for your provider (Hetzner and OVH forward complaints and can null-route the server), keep team quotas tight, and give keys only to people you trust. boatd drops outbound SMTP (25/465/587) unless `boatdSettings.allowSMTP = true`, and can cap each VM's egress (`boatdSettings.egressMbit`).
 8. **Monitoring.** node-exporter is on :9100 (not opened in the firewall). It includes the textfile metric `boat_reboot_pending`. Usage per team is at `GET /v1/usage`.
 
 ## Install on a dedicated server (Hetzner, OVH)
@@ -124,7 +124,7 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 - **Host services.** boatd is the only root daemon. boat-api and boat-gateway run as `boat` with no capabilities, `ProtectSystem=strict`, a syscall filter and MemoryDenyWriteExecute. `/internal/*` is never published. The boatd socket is 0660 `root:boat`. boatd and boat-api have `OOMScoreAdjust=-900`, so the host OOM killer takes a VM before them. Both carry `RequiresMountsFor=/var/lib/boat`.
 - **Secrets.** Tenant secrets and webhook keys are AES-256-GCM sealed under boat-api's master key. That key exists on disk only as a systemd credential (`/var/lib/boat/secrets/boat-master-key.cred`), encrypted with the TPM2 when present plus the host key `/var/lib/systemd/credential.secret`, and handed to boat-api with `LoadCredentialEncrypted`. An older plaintext `master.key` is sealed, verified and deleted on upgrade. **Keep an offline copy:** `sudo systemd-creds decrypt --name=boat-master-key /var/lib/boat/secrets/boat-master-key.cred - | base64`. Without it, a new motherboard (TPM) or a lost credential.secret makes sealed secrets unreadable. API keys are stored as salted HMACs. The desktop/route HMAC key (`secrets/desktop.key`, 0600 `boat`) never leaves the host. Caddy's DNS token belongs in `gateway.environmentFile`.
 - **Host hardening** comes from PandaOS: nftables, key-only ssh, sshguard, sysctl hardening, daily updates with health-check rollback.
-- **Not defended:** a malicious server admin; side channels between VMs on shared cores (no core pinning); one team saturating the uplink or disk (no bandwidth/IOPS limits); and abuse from your IPs beyond what your policy and quotas stop.
+- **Not defended:** a malicious server admin; side channels between VMs on shared cores (no core pinning); one team saturating the disk (no IOPS limits) or, without `egressMbit`, the uplink; and abuse from your IPs beyond what your policy and quotas stop.
 
 ### Tenant model
 
@@ -144,12 +144,12 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 
 `services.boat.backup` (restic, to a repository you provide):
 
-1. Each run (default 03:00, `Persistent`) takes a **read-only btrfs snapshot** of `/var/lib/boat`, so VM disks, memory snapshots, the API database and the sealed master key are consistent to one instant (crash-consistent).
-2. restic uploads the snapshot (images excluded; they are re-downloadable), the btrfs snapshot is deleted, and `pruneOpts` apply (7 daily, 4 weekly, 6 monthly).
+1. Each run (default 03:00, `Persistent`) takes **read-only btrfs snapshots**: `/var/lib/boat` as `.backup/top`, and every nested subvolume (each VM's directory, with boatd's `btrfsQgroups`) as `.backup/sub/<path>`. A btrfs snapshot does not include nested subvolumes, so each one is snapshotted on its own. Each VM's disk and memory snapshot is crash-consistent; the API database and sealed master key come with `top`.
+2. restic uploads the snapshots (images excluded; they are re-downloadable), the btrfs snapshots are deleted, and `pruneOpts` apply (7 daily, 4 weekly, 6 monthly).
 
 Restore onto a fresh boat host:
 1. Stop boatd and boat-api.
-2. `restic restore latest --target /` (the paths are `/var/lib/boat/.backup/...`; move them into `/var/lib/boat`).
+2. `restic restore latest --target /tmp/r`, then copy `/tmp/r/var/lib/boat/.backup/top/.` and each `.backup/sub/<path>` back to `/var/lib/boat/<path>` (`cp -a --reflink=auto`).
 3. Restore the master key: `systemd-creds encrypt --name=boat-master-key <key> /var/lib/boat/secrets/boat-master-key.cred`.
 4. Start boatd and boat-api again.
 
@@ -205,7 +205,7 @@ Not covered: idle auto-stop, IPv6 and public IPv4, cross-team network isolation 
 - **One host:** no HA, migration or cross-host scheduling.
 - **No GPUs, no nested KVM** in guests (Docker works).
 - **SSH UX** is `-J jump@… dev@<ip>` (wrapped by `boat ssh`).
-- **No egress controls:** no bandwidth/IOPS limits, no port-25 block, no per-team egress rate limit. Add nftables rules for your abuse policy.
+- **Egress controls are basic:** SMTP is blocked by default and egress can be capped per VM (`egressMbit`), but there are no IOPS limits, no per-team egress budget and no destination filtering.
 - **HTTP-01 fallback:** CT-log exposure, rate limits, first-request delay.
 - **The master key** is bound to this host's TPM/host key. Keep the offline copy, or a hardware change loses sealed secrets.
 - **Guest images** must be published (URL + sha256) for `boat-images`. Until then, build them with `components/boat/guest/build.sh` and copy them to `/var/lib/boat/images/<id>/`.

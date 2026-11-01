@@ -110,7 +110,8 @@ let
     inherit (cfg) sizes defaultSize;
     defaultTeam = cfg.quotas;
   }
-  // lib.optionalAttrs (imageIds != [ ]) { defaultImage = lib.head imageIds; };
+  // lib.optionalAttrs (imageIds != [ ]) { defaultImage = lib.head imageIds; }
+  // cfg.boatdSettings;
 
   apiArgs = [
     "serve"
@@ -257,6 +258,12 @@ in
       type = types.port;
       default = 8740;
       description = "boat-api listens on 127.0.0.1 only; Caddy publishes it as api.<domain>.";
+    };
+    boatdSettings = mkOption {
+      type = types.attrsOf types.anything;
+      default = { };
+      example = { egressMbit = 200; btrfsQgroups = true; idleStopS = 3600; teams.ci = { maxVMs = 50; }; };
+      description = "Extra keys merged into /etc/boat/boatd.json (see boatd/config.go); they win over the module's.";
     };
     stopTimeoutSec = mkOption {
       type = types.ints.positive;

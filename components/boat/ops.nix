@@ -11,6 +11,31 @@ let
   boat = config.services.boat;
   inherit (lib) mkOption types;
   mcfg = boat.maintenance;
+
+  # Read-only snapshots for the backup: dataDir itself as .backup/top, and
+  # every nested subvolume (each VM dir is one with btrfsQgroups) as
+  # .backup/sub/<path>, since a btrfs snapshot does not include nested
+  # subvolumes. Each VM is crash-consistent to its own instant.
+  snapScript = pkgs.writeShellScript "boat-backup-snap" ''
+    set -euo pipefail
+    export PATH=${lib.makeBinPath [ pkgs.btrfs-progs pkgs.coreutils pkgs.findutils ]}
+    d=${boat.dataDir} b=${boat.dataDir}/.backup
+    drop() {
+      [ -d "$b" ] || return 0
+      find "$b" -mindepth 1 -depth -inum 256 -type d -exec btrfs subvolume delete -q {} + 2>/dev/null || true
+      rm -rf "$b"
+    }
+    drop
+    [ "$1" = drop ] && exit 0
+    mkdir -m 0700 "$b"
+    btrfs subvolume snapshot -r "$d" "$b/top" >/dev/null
+    find "$d" -mindepth 1 -maxdepth 4 \( -path "$b" -prune \) -o \( -inum 256 -type d -print0 \) |
+      while IFS= read -r -d "" s; do
+        rel=''${s#"$d"/}
+        mkdir -p "$b/sub/$(dirname "$rel")"
+        btrfs subvolume snapshot -r "$s" "$b/sub/$rel" >/dev/null
+      done
+  '';
   bcfg = boat.backup;
   metricsDir = "/var/lib/boat-metrics";
   startedWith = "/run/boat/started-with";
@@ -155,18 +180,13 @@ in
         inherit (bcfg) repository passwordFile environmentFile pruneOpts;
         initialize = true;
         paths = [ "${boat.dataDir}/.backup" ];
-        exclude = [ "${boat.dataDir}/.backup/images" ];
+        exclude = [ "${boat.dataDir}/.backup/top/images" ];
         timerConfig = {
           OnCalendar = bcfg.onCalendar;
           Persistent = true;
         };
-        backupPrepareCommand = ''
-          ${pkgs.btrfs-progs}/bin/btrfs subvolume delete ${boat.dataDir}/.backup 2>/dev/null || true
-          ${pkgs.btrfs-progs}/bin/btrfs subvolume snapshot -r ${boat.dataDir} ${boat.dataDir}/.backup
-        '';
-        backupCleanupCommand = ''
-          ${pkgs.btrfs-progs}/bin/btrfs subvolume delete ${boat.dataDir}/.backup
-        '';
+        backupPrepareCommand = "${snapScript} take";
+        backupCleanupCommand = "${snapScript} drop";
       };
       systemd.services.restic-backups-boat.unitConfig.RequiresMountsFor = boat.dataDir;
     })
