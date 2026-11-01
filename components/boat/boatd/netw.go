@@ -134,8 +134,12 @@ func flushConntrack(run runner, ips ...string) {
 		if ip == "" {
 			continue
 		}
-		run("", "conntrack", "-D", "-s", ip) // exit 1 = nothing to delete
-		run("", "conntrack", "-D", "-d", ip)
+		family := "ipv4"
+		if strings.Contains(ip, ":") {
+			family = "ipv6"
+		}
+		run("", "conntrack", "-D", "-f", family, "-s", ip) // exit 1 = nothing to delete
+		run("", "conntrack", "-D", "-f", family, "-d", ip)
 	}
 }
 

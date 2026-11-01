@@ -41,10 +41,12 @@ func serve(cfgPath string) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("boatd %s starting: bridge %s, stateDir %s", version, cfg.Bridge, cfg.StateDir)
 	if err := setupBridge(cfg, execRunner); err != nil {
 		return fmt.Errorf("bridge: %w", err)
 	}
 	setupCgroups(&cfg)
+	log.Printf("cgroups: parent %q, limits %v", cfg.CgroupParent, cfg.cgroupLimits)
 	m, err := newManager(cfg, execRunner, realProcs{cfg})
 	if err != nil {
 		return err

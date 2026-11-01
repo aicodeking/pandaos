@@ -372,7 +372,7 @@ func TestDiskFloor(t *testing.T) {
 }
 
 func TestBtrfsQgroups(t *testing.T) {
-	m, h := newTestManager(t, func(c *Config) { c.BtrfsQgroups = true })
+	m, h := newTestManager(t, func(c *Config) { c.BtrfsQgroups, c.IPv6Prefix = true, "fd42::/64" })
 	v, err := m.Create(context.Background(), CreateReq{})
 	if err != nil {
 		t.Fatal(err)
@@ -382,8 +382,11 @@ func TestBtrfsQgroups(t *testing.T) {
 		t.Fatal(h.cmds)
 	}
 	m.Delete(context.Background(), v.ID)
-	if !h.ran("btrfs subvolume delete "+m.vmDir(v.ID)) || exists(m.vmDir(v.ID)) || !h.ran("conntrack -D -s "+v.IP) {
+	if !h.ran("btrfs subvolume delete "+m.vmDir(v.ID)) || exists(m.vmDir(v.ID)) || !h.ran("conntrack -D -f ipv4 -s "+v.IP) {
 		t.Fatal("subvolume/conntrack not cleaned up")
+	}
+	if !h.ran("conntrack -D -f ipv6 -d " + v.IPv6) {
+		t.Fatal("ipv6 conntrack not flushed")
 	}
 }
 

@@ -44,7 +44,7 @@ restart_boatd() { # CONFIG: SIGKILL boatd (no snapshot-all), start it with CONFI
   for _ in $(seq 50); do sudo kill -0 "$(cat "$WORK/boatd.pid")" 2>/dev/null || break; sleep 0.1; done
   sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >>"$4" 2>&1' _ \
     "$WORK/boatd.pid" "$WORK/bin/boatd" "$1" "$WORK/boatd.log" &
-  for _ in $(seq 100); do curl -fs --unix-socket "$SOCK" http://boatd/v1/health >/dev/null && return; sleep 0.1; done
+  for _ in $(seq 600); do curl -fs --unix-socket "$SOCK" http://boatd/v1/health >/dev/null && return; sleep 0.1; done
   fail "boatd did not come back"
 }
 
@@ -108,6 +108,10 @@ sudo ip addr add 10.250.0.1/24 dev e2eh && sudo ip -6 addr add fd99::1/64 dev e2
 sudo ip -n e2e-ext addr add 10.250.0.2/24 dev e2ee && sudo ip -n e2e-ext -6 addr add fd99::2/64 dev e2ee nodad
 sudo ip -n e2e-ext link set e2ee up && sudo ip -n e2e-ext link set lo up
 sudo ip -n e2e-ext route add default via 10.250.0.1 && sudo ip -n e2e-ext -6 route add default via fd99::1
+# Runner only: docker may leave ip6tables FORWARD at DROP (a NixOS boat host has no ip6tables rules).
+if command -v ip6tables >/dev/null; then
+  sudo ip6tables -I FORWARD -o boatbr0 -j ACCEPT && sudo ip6tables -I FORWARD -i boatbr0 -j ACCEPT
+fi
 sudo ip netns exec e2e-ext python3 -m http.server 8000 --bind :: >/dev/null 2>&1 &
 python3 -m http.server 8743 --bind 0.0.0.0 >/dev/null 2>&1 &
 PIDS+=($!)

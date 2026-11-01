@@ -52,6 +52,8 @@ cleanup() {
   sudo pkill -f 'http.server 8000'
   sudo iptables -D FORWARD -i boatbr0 -j ACCEPT 2>/dev/null
   sudo iptables -D FORWARD -o boatbr0 -j ACCEPT 2>/dev/null
+  sudo ip6tables -D FORWARD -i boatbr0 -j ACCEPT 2>/dev/null
+  sudo ip6tables -D FORWARD -o boatbr0 -j ACCEPT 2>/dev/null
   sudo sh -c 'for f in "$1"/vms/*/firecracker.log; do [ -f "$f" ] && { echo "--- $f (tail)"; tail -n 30 "$f"; }; done' _ "$STATE"
   mountpoint -q "$STATE" && sudo umount -l "$STATE"
   sudo rmdir /sys/fs/cgroup/boat-e2e 2>/dev/null
@@ -109,6 +111,7 @@ for v in slim full; do
   sudo cp --sparse=always "$GUEST/rootfs-$v.ext4" "$STATE/images/$v/rootfs.ext4"
 done
 
+sudo sync # the images: else boatd's first btrfs commit (quota enable) waits for them
 log "boatd (root)"
 jailer='""' jargs='[]'
 if [ "$JAILER" = 1 ]; then
@@ -124,7 +127,7 @@ cat >"$WORK/boatd.json" <<JSON
 JSON
 sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
   "$WORK/boatd.pid" "$WORK/bin/boatd" "$WORK/boatd.json" "$WORK/boatd.log" &
-for _ in $(seq 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
+for _ in $(seq 1200); do [ -S "$SOCK" ] && break; sleep 0.1; done # first start: btrfs quota enable commits
 [ -S "$SOCK" ] || fail "boatd did not start"
 curl -fsS --unix-socket "$SOCK" http://boatd/v1/health >/dev/null || fail "boatd socket not usable by $(id -un)"
 
