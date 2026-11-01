@@ -473,6 +473,7 @@ func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 	}
 	m.mu.Lock()
 	delete(m.vms, id)
+	delete(m.dirty, id)
 	delete(m.dones, id)
 	delete(m.active, id)
 	m.mu.Unlock()

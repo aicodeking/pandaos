@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -50,6 +51,9 @@ type Manager struct {
 
 	statfs func(path string) (free, total uint64, err error)
 
+	dirty     map[string]bool // VMs whose vm.json is behind (ENOSPC)
+	saveState func(dir string, v VM) error
+
 	exportArgv func(dir string, files []string) []string
 	unpackArgv []string // stdin tar.zst -> stdout tar
 	hostMem    int      // MiB available to VMs before overcommit (RAM - reserve)
@@ -67,7 +71,8 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 		now:   func() time.Time { return time.Now().UTC() },
 		vms:   map[string]VM{}, snaps: map[string]Snapshot{}, locks: map[string]*sync.Mutex{},
 		dones: map[string]<-chan struct{}{}, active: map[string]time.Time{}, statfs: statfs,
-		exportArgv: tarZstdArgv, unpackArgv: []string{"zstd", "-dcq"}}
+		exportArgv: tarZstdArgv, unpackArgv: []string{"zstd", "-dcq"}, dirty: map[string]bool{},
+		saveState: func(dir string, v VM) error { return writeJSONAtomic(filepath.Join(dir, "vm.json"), v, 0o600) }}
 	m.hostMem, m.hostCPU = cfg.HostMemMiB, cfg.HostCPUs
 	if m.hostMem == 0 {
 		m.hostMem = hostMemMiB()
@@ -175,8 +180,15 @@ func (m *Manager) commitLocked(old, nv VM, reason string) error {
 	if nv.State == Running && old.State != Running {
 		nv.StartedAt = &now
 	}
-	if err := writeJSONAtomic(filepath.Join(m.vmDir(nv.ID), "vm.json"), nv, 0o600); err != nil {
+	if err := m.saveState(m.vmDir(nv.ID), nv); errors.Is(err, syscall.ENOSPC) {
+		// A full disk (a tenant can cause one) must not lock anyone out of stopping
+		// or deleting a VM: memory stays right, flushDirty retries the file.
+		log.Printf("%s: state not persisted, disk full", nv.ID)
+		m.dirty[nv.ID] = true
+	} else if err != nil {
 		return err
+	} else {
+		delete(m.dirty, nv.ID)
 	}
 	m.vms[nv.ID] = nv
 	if old.State == Running && nv.State != Running && old.StartedAt != nil {
@@ -454,6 +466,18 @@ const (
 	logTailBytes   = 1 << 20
 	logRotateEvery = time.Second
 )
+
+// flushDirty retries state writes that hit a full disk.
+func (m *Manager) flushDirty() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id := range m.dirty {
+		v, ok := m.vms[id]
+		if !ok || m.saveState(m.vmDir(id), v) == nil {
+			delete(m.dirty, id)
+		}
+	}
+}
 
 func (m *Manager) rotateLogs() {
 	for _, v := range m.list("") {

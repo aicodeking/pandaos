@@ -82,6 +82,7 @@ func serve(cfgPath string) error {
 				return
 			case <-t.C:
 				m.rotateLogs()
+				m.flushDirty()
 			}
 		}
 	}()

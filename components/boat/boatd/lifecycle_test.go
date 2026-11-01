@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -412,6 +413,54 @@ func TestCopyExtents(t *testing.T) {
 	// Holes keep the base where the filesystem reports them (APFS/btrfs/ext4 do at 4K+).
 	if b[0] != 'x' && b[0] != 0 {
 		t.Fatalf("byte 0 = %q", b[0])
+	}
+}
+
+func TestFullDiskKeepsControlPlane(t *testing.T) {
+	m, _ := newTestManager(t, nil)
+	ctx := context.Background()
+	v, err := m.Create(ctx, CreateReq{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := m.saveState
+	m.mu.Lock()
+	m.saveState = func(string, VM) error { return fmt.Errorf("write: %w", syscall.ENOSPC) }
+	m.mu.Unlock()
+	st, err := m.Stop(ctx, v.ID, "")
+	if err != nil || st.State != Stopped {
+		t.Fatalf("stop on a full disk: %+v %v", st, err)
+	}
+	var onDisk VM
+	readJSON(filepath.Join(m.vmDir(v.ID), "vm.json"), &onDisk)
+	if onDisk.State == Stopped {
+		t.Fatal("test proves nothing: the file was written")
+	}
+	m.flushDirty() // still full
+	m.mu.Lock()
+	dirty := m.dirty[v.ID]
+	m.saveState = real
+	m.mu.Unlock()
+	if !dirty {
+		t.Fatal("failed write not remembered")
+	}
+	m.flushDirty()
+	readJSON(filepath.Join(m.vmDir(v.ID), "vm.json"), &onDisk)
+	if onDisk.State != Stopped {
+		t.Fatalf("state not flushed: %s", onDisk.State)
+	}
+	// A non-ENOSPC failure still reports.
+	m.mu.Lock()
+	m.saveState = func(string, VM) error { return errors.New("boom") }
+	m.mu.Unlock()
+	if _, err := m.update(v.ID, "", func(x *VM) { x.Error = "x" }); err == nil {
+		t.Fatal("real write errors must surface")
+	}
+	m.mu.Lock()
+	m.saveState = real
+	m.mu.Unlock()
+	if _, err := m.Delete(ctx, v.ID); err != nil || exists(m.vmDir(v.ID)) {
+		t.Fatalf("delete: %v", err)
 	}
 }
 
