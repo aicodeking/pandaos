@@ -155,12 +155,15 @@ func (m *Manager) chownRoot(v VM) error {
 // bootNew starts a freshly materialized VM and gives the guest its identity.
 func (m *Manager) bootNew(ctx context.Context, v VM, restore bool, env map[string]string) (VM, error) {
 	t0 := time.Now()
+	if err := m.syncNet(); err != nil { // anti-spoof rules are in force before its first frame
+		return m.fail(v.ID, err)
+	}
 	v, err := m.boot(ctx, v, restore)
 	if err != nil {
 		return m.fail(v.ID, err)
 	}
 	t1 := time.Now()
-	if err := m.syncNet(); err != nil { // its anti-spoof rules and route
+	if err := m.syncNet(); err != nil { // routes: it is running now
 		return m.fail(v.ID, err)
 	}
 	log.Printf("%s: boot=%dms net=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
@@ -221,7 +224,7 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 			os.Remove(filepath.Join(root, vmstate))
 		}
 	} else if err == nil {
-		err = fc.boot(ctx, v, m.bootArgs(v), m.cfg.DiffSnapshots)
+		err = fc.boot(ctx, v, m.bootArgs(v), m.cfg.DiffSnapshots, m.cfg)
 	}
 	if err != nil {
 		m.killWait(v.ID, pid)
@@ -260,6 +263,13 @@ func (m *Manager) initGuest(ctx context.Context, v VM, env map[string]string, id
 	t2 := time.Now()
 	if err == nil && restored {
 		m.syncClock(ctx, sock)
+		if v.DiskGrown {
+			if gerr := m.growGuestDisk(ctx, v); gerr != nil {
+				log.Printf("%s: grow disk after restore: %v", v.ID, gerr)
+			} else {
+				v, _ = m.update(v.ID, "", func(x *VM) { x.DiskGrown = false })
+			}
+		}
 	}
 	if err == nil && len(env) > 0 {
 		_, err = agentCall(ctx, sock, map[string]any{"op": "set_env", "vars": env})
@@ -438,7 +448,6 @@ func (m *Manager) Fork(ctx context.Context, id, name, team string) (VM, error) {
 	if err != nil {
 		return m.fail(c.ID, err)
 	}
-	m.syncNet()
 	return m.bootNew(ctx, c, withMem, nil)
 }
 
@@ -451,7 +460,7 @@ func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 	}
 	m.killWait(id, v.PID)
 	delVMNet(m.run, v)
-	flushConntrack(m.run, v.IP, v.IPv6, v.PublicIP)
+	m.flushConntrack(v.IP, v.IPv6, v.PublicIP)
 	if m.cfg.CgroupParent != "" {
 		os.Remove(filepath.Join("/sys/fs/cgroup", m.cfg.CgroupParent, id)) // the jailer's (empty) cgroup
 	}
@@ -475,6 +484,7 @@ func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 
 // AddPort exposes guest_port: always as a gateway hostname route, and with
 // public=true also as a raw TCP host port (DNAT from portMin..portMax).
+// Re-adding a port sets its visibility: public=false makes it private again.
 func (m *Manager) AddPort(id string, guest int, public bool) (Port, error) {
 	if guest < 1 || guest > 65535 {
 		return Port{}, errf(400, "port must be 1-65535")
@@ -494,8 +504,14 @@ func (m *Manager) AddPort(id string, guest int, public bool) (Port, error) {
 		}
 	}
 	var err error
-	if public && p.HostPort == 0 {
+	closed := Port{}
+	if idx < 0 {
+		err = m.portQuotaLocked(nv)
+	}
+	if err == nil && public && p.HostPort == 0 {
 		p.HostPort, err = m.freePortLocked()
+	} else if !public && p.HostPort != 0 {
+		closed, p.HostPort = p, 0
 	}
 	if err == nil {
 		if idx >= 0 {
@@ -509,7 +525,28 @@ func (m *Manager) AddPort(id string, guest int, public bool) (Port, error) {
 	if err != nil {
 		return Port{}, err
 	}
-	return p, m.syncNet()
+	err = m.syncNet()
+	if closed.GuestPort != 0 {
+		m.flushPort(old, closed)
+	}
+	return p, err
+}
+
+// portQuotaLocked: one more port on v, within maxPortsPerVM and the team's maxPorts?
+func (m *Manager) portQuotaLocked(v VM) error {
+	if lim := m.cfg.MaxPortsPerVM; lim > 0 && len(v.Ports) >= lim {
+		return errf(http.StatusTooManyRequests, "quota: a VM may expose %d ports", lim)
+	}
+	n := 1
+	for _, o := range m.vms {
+		if o.Team == v.Team {
+			n += len(o.Ports)
+		}
+	}
+	if lim := m.cfg.team(v.Team).MaxPorts; lim > 0 && n > lim {
+		return errf(http.StatusTooManyRequests, "quota: team %s may expose %d ports", v.Team, lim)
+	}
+	return nil
 }
 
 func (m *Manager) freePortLocked() (int, error) {
@@ -528,17 +565,23 @@ func (m *Manager) freePortLocked() (int, error) {
 }
 
 func (m *Manager) RemovePort(id string, guest int) error {
-	_, err := m.update(id, "", func(v *VM) {
+	closed := Port{}
+	v, err := m.update(id, "", func(v *VM) {
 		out := []Port{}
 		for _, p := range v.Ports {
 			if p.GuestPort != guest {
 				out = append(out, p)
+			} else {
+				closed = p
 			}
 		}
 		v.Ports = out
 	})
 	if err == nil {
 		err = m.syncNet() // the port stays open until the rules load: tell the caller
+	}
+	if closed.GuestPort != 0 {
+		m.flushPort(v, closed)
 	}
 	return err
 }

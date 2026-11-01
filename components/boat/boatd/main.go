@@ -73,6 +73,18 @@ func serve(cfgPath string) error {
 			}
 		}
 	}()
+	go func() {
+		t := time.NewTicker(logRotateEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				m.rotateLogs()
+			}
+		}
+	}()
 	srv := &http.Server{Handler: m.routes(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -90,56 +102,87 @@ func serve(cfgPath string) error {
 	return nil
 }
 
-// setupCgroups picks the jailer's parent cgroup (cgroupParent, a legacy
-// --parent-cgroup in jailerArgs, else boatd's own delegated cgroup) and
-// enables memory/pids/cpu for the per-VM children. cgroup v2 forbids
-// processes in a cgroup that delegates controllers, so when the parent is our
-// own cgroup boatd first moves itself into a "boatd" leaf.
+// setupCgroups enables memory/pids/cpu/io for the per-VM children of
+// cgroupParent (or a legacy --parent-cgroup in jailerArgs).
 func setupCgroups(c *Config) {
 	if c.Jailer == "" {
 		return
 	}
 	if i := slices.Index(c.JailerArgs, "--parent-cgroup"); i >= 0 && i+1 < len(c.JailerArgs) {
-		if c.CgroupParent == "" {
-			c.CgroupParent = c.JailerArgs[i+1]
-		}
+		c.CgroupParent = c.JailerArgs[i+1]
 		c.JailerArgs = slices.Delete(slices.Clone(c.JailerArgs), i, i+2)
 	}
-	own := ownCgroup()
 	if c.CgroupParent == "" {
-		c.CgroupParent = own
-	}
-	if c.CgroupParent == "" {
-		log.Printf("cgroups: no cgroup v2 parent; VMs run without memory/cpu/pids limits")
+		log.Printf("cgroups: no cgroup parent; VMs run without memory/cpu/pids limits")
 		return
 	}
-	base := filepath.Join("/sys/fs/cgroup", c.CgroupParent)
-	if c.CgroupParent == own {
-		leaf := filepath.Join(base, "boatd")
-		if err := os.MkdirAll(leaf, 0o755); err == nil {
-			os.WriteFile(filepath.Join(leaf, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0)
+	// The parent lives outside boatd's unit: a crash of boatd then kills neither
+	// the VMs nor their memory (KillMode=mixed kills only the unit's cgroup), and
+	// the next boatd re-adopts them. Every ancestor must enable the controllers.
+	parts := strings.Split(strings.Trim(c.CgroupParent, "/"), "/")
+	dir := "/sys/fs/cgroup"
+	for _, part := range parts {
+		if err := enableControllers(dir); err != nil {
+			log.Printf("cgroups: %s: %v; VMs run without limits", dir, err)
+			return
+		}
+		dir = filepath.Join(dir, part)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("cgroups: %v; VMs run without limits", err)
+			return
 		}
 	}
-	os.MkdirAll(base, 0o755)
-	if err := os.WriteFile(filepath.Join(base, "cgroup.subtree_control"), []byte("+memory +pids +cpu"), 0); err != nil {
-		log.Printf("cgroups: cannot delegate controllers under %s: %v; VMs run without limits", base, err)
+	if err := enableControllers(dir); err != nil {
+		log.Printf("cgroups: %s: %v; VMs run without limits", dir, err)
 		return
 	}
 	c.cgroupLimits = true
+	c.stateDisk = stateDisk(c.StateDir)
 }
 
-// ownCgroup is boatd's cgroup v2 path (Delegate=yes); jailed VMs go below it.
-func ownCgroup() string {
-	b, err := os.ReadFile("/proc/self/cgroup")
+// enableControllers: io is optional (only io.max needs it), the others are not.
+func enableControllers(dir string) error {
+	ctl := filepath.Join(dir, "cgroup.subtree_control")
+	if err := os.WriteFile(ctl, []byte("+memory +pids +cpu"), 0); err != nil {
+		return err
+	}
+	if err := os.WriteFile(ctl, []byte("+io"), 0); err != nil {
+		log.Printf("cgroups: %s: no io controller: %v", dir, err)
+	}
+	return nil
+}
+
+// stateDisk returns "major:minor" of the whole disk under dir, as io.max wants
+// it ("" if unknown): btrfs's st_dev is anonymous, so go through the mount source.
+func stateDisk(dir string) string {
+	b, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
 		return ""
 	}
+	best, source := "", ""
 	for _, l := range strings.Split(string(b), "\n") {
-		if p, ok := strings.CutPrefix(l, "0::/"); ok && p != "" {
-			return p
+		pre, post, ok := strings.Cut(l, " - ")
+		f, g := strings.Fields(pre), strings.Fields(post)
+		if !ok || len(f) < 5 || len(g) < 2 {
+			continue
+		}
+		if mp := f[4]; (dir == mp || mp == "/" || strings.HasPrefix(dir, mp+"/")) && len(mp) >= len(best) {
+			best, source = mp, g[1]
 		}
 	}
-	return ""
+	var st syscall.Stat_t
+	if source == "" || syscall.Stat(source, &st) != nil {
+		return ""
+	}
+	dev := uint64(st.Rdev)
+	id := fmt.Sprintf("%d:%d", (dev>>8)&0xfff, (dev&0xff)|((dev>>12)&0xfff00))
+	sys := "/sys/dev/block/" + id
+	if _, err := os.Stat(sys + "/partition"); err == nil { // io.max takes whole disks only
+		if p, err := os.ReadFile(sys + "/../dev"); err == nil {
+			return strings.TrimSpace(string(p))
+		}
+	}
+	return id
 }
 
 // listenSocket: mode 0660, group socketGroup (boat-api's), so only root and

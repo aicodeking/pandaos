@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -84,6 +86,13 @@ func setupBridge(c Config, run runner) error {
 			return err
 		}
 	}
+	// A tenant must not be able to configure the host: no RAs or redirects on
+	// the bridge. Absent only when the host has IPv6 off, which has no such risk.
+	for _, k := range []string{"accept_ra=0", "accept_redirects=0", "autoconf=0"} {
+		if err := run("", "sysctl", "-qw", "net.ipv6.conf."+c.Bridge+"."+k); err != nil {
+			log.Printf("bridge: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -127,9 +136,20 @@ func delVMNet(run runner, v VM) {
 	run("", "ip", "link", "del", v.Tap)
 }
 
+// conntrackDel deletes matching flows. conntrack exits 1 when nothing matched;
+// anything else means stale flows survive, so it is logged and counted
+// (/v1/health conntrack_flush_errors).
+func (m *Manager) conntrackDel(args ...string) {
+	err := m.run("", "conntrack", append([]string{"-D"}, args...)...)
+	if err != nil && !strings.Contains(err.Error(), "0 flow entries") {
+		m.ctFlushErrs.Add(1)
+		log.Printf("conntrack: %v", err)
+	}
+}
+
 // flushConntrack drops tracked flows of an IP being released or reused, so a
 // new VM never inherits a previous owner's NAT/established state.
-func flushConntrack(run runner, ips ...string) {
+func (m *Manager) flushConntrack(ips ...string) {
 	for _, ip := range ips {
 		if ip == "" {
 			continue
@@ -138,8 +158,19 @@ func flushConntrack(run runner, ips ...string) {
 		if strings.Contains(ip, ":") {
 			family = "ipv6"
 		}
-		run("", "conntrack", "-D", "-f", family, "-s", ip) // exit 1 = nothing to delete
-		run("", "conntrack", "-D", "-f", family, "-d", ip)
+		m.conntrackDel("-f", family, "-s", ip)
+		m.conntrackDel("-f", family, "-d", ip)
+	}
+}
+
+// flushPort drops the flows of a port that stopped being public: established
+// connections would otherwise outlive the rule that allowed them.
+func (m *Manager) flushPort(v VM, p Port) {
+	if p.HostPort > 0 {
+		m.conntrackDel("-f", "ipv4", "-p", "tcp", "--dport", strconv.Itoa(p.HostPort))
+	}
+	if v.IPv6 != "" {
+		m.conntrackDel("-f", "ipv6", "-d", v.IPv6, "-p", "tcp", "--dport", strconv.Itoa(p.GuestPort))
 	}
 }
 
@@ -161,12 +192,24 @@ func ruleset(c Config, vms []VM) string {
 	w("  chain input {\n    type filter hook input priority 0; policy accept;")
 	w("    iifname %q ct state established,related accept", br)
 	w("    iifname %q ip daddr %s meta l4proto { udp, tcp } th dport 53 accept", br, gw)
+	if c.AIProxyPort > 0 {
+		w("    iifname %q ip daddr %s tcp dport %d accept", br, gw, c.AIProxyPort)
+	}
 	w("    iifname %q icmp type { echo-request, destination-unreachable, time-exceeded } accept", br)
+	w("    iifname %q icmpv6 type { nd-router-advert, nd-redirect } drop", br)
 	w("    iifname %q meta l4proto ipv6-icmp accept", br)
 	w("    iifname %q drop\n  }", br)
 
 	w("  chain forward {\n    type filter hook forward priority 0; policy accept;")
 	w("    ct state established,related accept")
+	if c.CtPerVM > 0 { // ponytail: counts restart on each reload; share a dynamic set if bursts matter
+		for _, v := range vms {
+			w("    iifname %q ip saddr %s ct count over %d drop", br, v.IP, c.CtPerVM)
+			if v.IPv6 != "" {
+				w("    iifname %q ip6 saddr %s ct count over %d drop", br, v.IPv6, c.CtPerVM)
+			}
+		}
+	}
 	w("    oifname %q ct status dnat accept", br)
 	for _, v := range vms { // IPv6 inbound: published ports only
 		for _, p := range v.Ports {
@@ -180,11 +223,6 @@ func ruleset(c Config, vms []VM) string {
 	w("    iifname %q ip6 daddr { %s } drop", br, strings.Join(privateV6, ", "))
 	if !c.AllowSMTP {
 		w("    iifname %q tcp dport { 25, 465, 587 } drop", br)
-	}
-	if c.EgressMbit > 0 {
-		for _, v := range vms {
-			w("    iifname %q limit rate over %d kbytes/second drop", v.Tap, c.EgressMbit*125)
-		}
 	}
 	w("  }")
 	if c.Jailer != "" { // a VMM escaping into the host netns still can't reach host services
@@ -237,8 +275,21 @@ func ruleset(c Config, vms []VM) string {
 	for i, t := range names {
 		w("  set team%d { type ifname; elements = { %s }; } # %s", i, strings.Join(teams[t], ", "), strings.ReplaceAll(t, "\n", ""))
 	}
-	w("  chain prerouting {\n    type filter hook prerouting priority 0; policy accept;")
+	known := make([]string, 0, len(vms))
 	for _, v := range vms {
+		known = append(known, fmt.Sprintf("%q", v.Tap))
+	}
+	w("  chain prerouting {\n    type filter hook prerouting priority 0; policy accept;")
+	w("    iifname \"bt*\" icmpv6 type { nd-router-advert, nd-redirect } counter drop")
+	if len(known) > 0 { // a port with no rules yet (or left behind) passes nothing
+		w("    iifname \"bt*\" iifname != { %s } drop", strings.Join(known, ", "))
+	} else {
+		w("    iifname \"bt*\" drop")
+	}
+	for _, v := range vms {
+		if c.EgressMbit > 0 { // L2: the L3 hooks only see boatbr0, not the VM's port
+			w("    iifname %q limit rate over %d kbytes/second drop", v.Tap, c.EgressMbit*125)
+		}
 		w("    iifname %q ether saddr != %s drop", v.Tap, v.MAC)
 		w("    iifname %q ether type arp arp saddr ip != %s drop", v.Tap, v.IP)
 		w("    iifname %q ether type ip ip saddr != %s drop", v.Tap, v.IP)

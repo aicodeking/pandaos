@@ -415,6 +415,154 @@ func TestCopyExtents(t *testing.T) {
 	}
 }
 
+func TestCmdlineAlive(t *testing.T) {
+	const id = "vm-1"
+	run := []byte("1 (fire) cracker) S 1 2 3")
+	for _, c := range []struct {
+		name, cmdline, stat string
+		want                bool
+	}{
+		{"named", "firecracker\x00--id\x00vm-1\x00", "1 (firecracker) S 1", true},
+		{"pid reused", "bash\x00-c\x00x\x00", "1 (bash) S 1", false},
+		{"mid exec: empty cmdline, still running", "", string(run), true},
+		{"zombie", "", "1 (firecracker) Z 1", false},
+		{"dead", "", "1 (firecracker) X 1", false},
+		{"unreadable stat", "", "", false},
+	} {
+		if got := cmdlineAlive([]byte(c.cmdline), []byte(c.stat), id); got != c.want {
+			t.Errorf("%s: %v", c.name, got)
+		}
+	}
+}
+
+func TestRotateLog(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "firecracker.log")
+	if err := rotateLog(p); err != nil {
+		t.Fatal(err) // no file yet
+	}
+	os.WriteFile(p, []byte("small"), 0o600)
+	if rotateLog(p); !exists(p) || exists(p+".1") {
+		t.Fatal("rotated a small log")
+	}
+	b := append(bytes.Repeat([]byte("x"), logCapBytes), []byte("TAIL")...)
+	os.WriteFile(p, b, 0o600)
+	if err := rotateLog(p); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(p); st.Size() != 0 {
+		t.Fatalf("not truncated: %d", st.Size())
+	}
+	tail, _ := os.ReadFile(p + ".1")
+	if len(tail) != logTailBytes || !bytes.HasSuffix(tail, []byte("TAIL")) {
+		t.Fatalf("tail %d bytes", len(tail))
+	}
+}
+
+func TestRulesBeforeBoot(t *testing.T) {
+	m, h := newTestManager(t, nil)
+	ctx := context.Background()
+	a, _ := m.Create(ctx, CreateReq{Team: "t"})
+	s, err := m.CreateSnapshot(ctx, a.ID, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := m.Create(ctx, CreateReq{Team: "t", Snapshot: s.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := m.Fork(ctx, a.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []VM{a, c, f} {
+		if !strings.Contains(h.nftAtStart[v.ID], `iifname "`+v.Tap+`" ether saddr != `+v.MAC) {
+			t.Errorf("%s started before its rules were loaded", v.ID)
+		}
+	}
+}
+
+func TestPortsCapsAndPrivate(t *testing.T) {
+	m, h := newTestManager(t, func(c *Config) {
+		c.MaxPortsPerVM = 2
+		c.Teams = map[string]TeamPolicy{"t": {MaxPorts: 3}}
+	})
+	ctx := context.Background()
+	a, _ := m.Create(ctx, CreateReq{Team: "t"})
+	b, _ := m.Create(ctx, CreateReq{Team: "t"})
+	var ae *apiErr
+	p, err := m.AddPort(a.ID, 80, true)
+	if err != nil || p.HostPort == 0 {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if _, err := m.AddPort(a.ID, 81, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddPort(a.ID, 82, false); !errors.As(err, &ae) || ae.code != 429 {
+		t.Fatalf("per-VM cap: %v", err)
+	}
+	if _, err := m.AddPort(b.ID, 80, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddPort(b.ID, 81, false); !errors.As(err, &ae) || ae.code != 429 {
+		t.Fatalf("team cap: %v", err)
+	}
+	// Re-adding is not a new port, and public:false really closes it.
+	q, err := m.AddPort(a.ID, 80, false)
+	if err != nil || q.HostPort != 0 {
+		t.Fatalf("not private: %+v %v", q, err)
+	}
+	if strings.Contains(h.nft, fmt.Sprintf("dport %d dnat", p.HostPort)) {
+		t.Fatal("DNAT survived")
+	}
+	if !h.ran(fmt.Sprintf("conntrack -D -f ipv4 -p tcp --dport %d", p.HostPort)) {
+		t.Fatal("flows of the closed port not flushed")
+	}
+	h.mu.Lock()
+	h.ctErr = errors.New("conntrack: not found")
+	h.mu.Unlock()
+	m.Delete(ctx, b.ID)
+	if m.ctFlushErrs.Load() == 0 {
+		t.Fatal("conntrack failure not counted")
+	}
+	h.mu.Lock()
+	h.ctErr = errors.New("conntrack v1.4: 0 flow entries have been deleted.")
+	h.mu.Unlock()
+	before := m.ctFlushErrs.Load()
+	m.Delete(ctx, a.ID)
+	if m.ctFlushErrs.Load() != before {
+		t.Fatal("nothing-to-delete counted as a failure")
+	}
+}
+
+func TestResumeAfterCrash(t *testing.T) {
+	m, h := newTestManager(t, nil)
+	ctx := context.Background()
+	v, _ := m.Create(ctx, CreateReq{Name: "crashed"})
+	stopped, _ := m.Create(ctx, CreateReq{Name: "stopped"})
+	m.Stop(ctx, stopped.ID, "")
+	// As under KillMode=mixed without an outside cgroup: boatd and firecracker die together.
+	cfg := m.cfg
+	dead := newFakeHost()
+	dead.next = h.next + 100
+	m2, err := newManager(cfg, dead.run, dead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, _ := m2.get(v.ID)
+	if x.State != Stopped || !x.ResumeOnBoot || x.HasSnapshot {
+		t.Fatalf("%+v", x)
+	}
+	if y, _ := m2.get(stopped.ID); y.ResumeOnBoot {
+		t.Fatal("a VM the user stopped must stay stopped")
+	}
+	m2.resumeAll(ctx)
+	eventually(t, "cold resume", func() bool { y, _ := m2.get(v.ID); return y.State == Running && y.AgentReady })
+	if y, _ := m2.get(stopped.ID); y.State != Stopped {
+		t.Fatal("stopped VM resumed")
+	}
+	h.Kill(v.PID)
+}
+
 func TestSnapshotDurability(t *testing.T) {
 	m, h := newTestManager(t, nil)
 	ctx := context.Background()

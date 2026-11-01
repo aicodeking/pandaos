@@ -1,4 +1,4 @@
-{ lib, buildGoModule, makeWrapper, coreutils, iproute2, nftables, procps, conntrack-tools, btrfs-progs, util-linux }:
+{ lib, buildGoModule, makeWrapper, coreutils, iproute2, nftables, procps, conntrack-tools, btrfs-progs, util-linux, gnutar, zstd }:
 
 buildGoModule {
   pname = "boatd";
@@ -10,7 +10,7 @@ buildGoModule {
   # firecracker/jailer paths come from /etc/boat/boatd.json; nsenter (util-linux)
   # is only used without the jailer.
   postInstall = ''
-    wrapProgram $out/bin/boatd --prefix PATH : ${lib.makeBinPath [ coreutils iproute2 nftables procps conntrack-tools btrfs-progs util-linux ]}
+    wrapProgram $out/bin/boatd --prefix PATH : ${lib.makeBinPath [ coreutils iproute2 nftables procps conntrack-tools btrfs-progs util-linux gnutar zstd ]}
   '';
   meta = {
     description = "boat VM manager: Firecracker microVMs with snapshots, forks, NAT and a guest agent";

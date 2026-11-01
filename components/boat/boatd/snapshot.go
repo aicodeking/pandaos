@@ -306,7 +306,10 @@ func (m *Manager) DeleteSnapshot(vmID, sid string) error {
 
 // ---- storage: committed bytes, free-space floor, accounting ----
 
-func vmCommit(v VM) int64 { return int64(v.DiskGiB)<<30 + int64(v.MemMiB)<<20 }
+// vmCommit: disk + mem file + the capped log and its rotated tail.
+func vmCommit(v VM) int64 {
+	return int64(v.DiskGiB)<<30 + int64(v.MemMiB)<<20 + logCapBytes + logTailBytes
+}
 
 func snapCommit(s Snapshot) int64 {
 	b := int64(s.DiskGiB) << 30

@@ -23,6 +23,7 @@ API=http://127.0.0.1:8740
 DOMAIN=boat.test
 HOOK_PORT=9911
 MAX_VMS=4 # team quota (defaultTeam.maxVMs)
+EGRESS_MBIT=400 # per-VM cap; boatd/e2e-limits.sh measures it
 
 [ -e /dev/kvm ] || { echo "e2e: /dev/kvm missing" >&2; exit 1; }
 [ "$(id -u)" != 0 ] || { echo "e2e: run as a normal user with sudo (boat-api/CLI are unprivileged)" >&2; exit 1; }
@@ -49,6 +50,12 @@ cleanup() {
   sudo nft delete table bridge boat 2>/dev/null
   for n in $(ip netns list 2>/dev/null | awk '/^boat[0-9]|^e2e-ext/{print $1}'); do sudo ip netns del "$n"; done
   sudo ip link del e2eh 2>/dev/null
+  sudo ip link del bt65000 2>/dev/null
+  sudo ip netns del e2e-rogue 2>/dev/null
+  sudo systemctl stop boatd-e2e 2>/dev/null
+  sudo systemctl reset-failed boatd-e2e 2>/dev/null
+  mountpoint -q /var/lib/boat-e2e-small && sudo umount -l /var/lib/boat-e2e-small
+  sudo pkill -f 'http.server 8001'
   sudo pkill -f 'http.server 8000'
   sudo iptables -D FORWARD -i boatbr0 -j ACCEPT 2>/dev/null
   sudo iptables -D FORWARD -o boatbr0 -j ACCEPT 2>/dev/null
@@ -68,7 +75,7 @@ mkdir -p "$WORK/bin" "$WORK/dl" "$WORK/run" "$WORK/api" "$WORK/tmp"
 
 log "tools"
 missing=()
-for c in jq:jq nft:nftables mkfs.btrfs:btrfs-progs curl:curl ssh:openssh-client ssh-keyscan:openssh-client conntrack:conntrack; do
+for c in jq:jq nft:nftables mkfs.btrfs:btrfs-progs curl:curl ssh:openssh-client ssh-keyscan:openssh-client conntrack:conntrack zstd:zstd; do
   command -v "${c%%:*}" >/dev/null || missing+=("${c#*:}")
 done
 [ ${#missing[@]} = 0 ] || { sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" >/dev/null; }
@@ -121,8 +128,8 @@ fi
 cat >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":$jailer,"jailerArgs":$jargs,"cgroupParent":"boat-e2e","reflink":"always",
- "bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e","ipv6Prefix":"fd42:b0a7::/64","reapIntervalS":5,"egressMbit":2000,
- "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},
+ "bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e","ipv6Prefix":"fd42:b0a7::/64","reapIntervalS":5,"egressMbit":$EGRESS_MBIT,"ioMaxMBps":800,"memOvercommit":2,
+ "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8},"default":{"vcpu":4,"mem_mib":8192,"disk_gib":16}},
  "defaultTeam":{"maxVMs":$MAX_VMS}}
 JSON
 sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
@@ -368,6 +375,8 @@ boat rm e2e-a --json >/dev/null
 # shellcheck source=boatd/e2e-host.sh
 . "$HERE/boatd/e2e-host.sh"
 : "${stop2_s:?}" "${stop3_s:?}" "${resume2_s:?}" "${fork2_s:?}" "${forkq_s:?}" "${perf_fail=}" # set by e2e-host.sh
+: "${dcreate_s:?}" "${dstop_s:?}" "${dresume_s:?}" "${dstop2_s:?}" "${dfork_s:?}" "${capped_mbit:?}" "${uncapped_mbit:?}" "${serial_rate:?}" # e2e-limits.sh
+: "${nested_guest:?}" "${kvm_guest:?}" "${nested_host=}"
 
 mib() { echo $(( $(stat -c %s "$1") / 1048576 )); }
 zst() { if [ -f "$1" ]; then mib "$1"; else echo null; fi; }
@@ -378,9 +387,15 @@ echo "METRIC $(jq -nc \
   --argjson fu "$(mib "$GUEST/rootfs-full.ext4")" --argjson slz "$(zst "$GUEST/rootfs-slim.ext4.zst")" \
   --argjson fuz "$(zst "$GUEST/rootfs-full.ext4.zst")" --argjson vs "$vm_seconds" \
   --argjson hs1 "$stop2_s" --argjson hs2 "$stop3_s" --argjson hr "$resume2_s" --argjson hf "$fork2_s" --argjson hq "$forkq_s" \
+  --argjson dc "$dcreate_s" --argjson ds "$dstop_s" --argjson dr "$dresume_s" --argjson ds2 "$dstop2_s" --argjson df "$dfork_s" \
+  --argjson ec "$capped_mbit" --argjson eu "$uncapped_mbit" --argjson sr "$serial_rate" --argjson ng "$nested_guest" \
+  --arg nh "${nested_host:-absent}" --arg kg "$kvm_guest" \
   '{test: "boat-e2e", createReadyS: $c, sshReadyS: $s, forkS: $f, stopS: $st, resumeS: $r,
     newFromSnapshotS: $sn, desktopS: $d, kernelMB: $k, slimImageMB: $sl, fullImageMB: $fu,
     slimZstMB: $slz, fullZstMB: $fuz, usageVmSeconds: $vs,
-    hostStopFirstS: $hs1, hostStopDiffS: $hs2, hostResumeS: $hr, hostForkS: $hf, hostForkQgroupsS: $hq}')"
+    hostStopFirstS: $hs1, hostStopDiffS: $hs2, hostResumeS: $hr, hostForkS: $hf, hostForkQgroupsS: $hq,
+    defaultCreateS: $dc, defaultStop1S: $ds, defaultResumeS: $dr, defaultStop2S: $ds2, defaultForkS: $df,
+    egressCappedMbit: $ec, egressUncappedMbit: $eu, serialBytesPerS: $sr,
+    nestedHost: $nh, nestedGuestCpus: $ng, nestedGuestKvm: $kg}')"
 [ -z "$perf_fail" ] || fail "timing targets: $perf_fail"
 echo "e2e: PASS"

@@ -34,13 +34,15 @@ func (m *Manager) routes() *http.ServeMux {
 			}
 			code := http.StatusOK
 			if r.Method == "POST" && (strings.HasSuffix(pattern, "/v1/vms") || strings.HasSuffix(pattern, "/fork") ||
-				strings.HasSuffix(pattern, "snapshots") || strings.HasSuffix(pattern, "/ports")) {
+				strings.HasSuffix(pattern, "snapshots") || strings.HasSuffix(pattern, "/import") || strings.HasSuffix(pattern, "/ports")) {
 				code = http.StatusCreated
 			}
 			writeJSON(w, code, v)
 		})
 	}
-	h("GET /v1/health", func(*http.Request) (any, error) { return map[string]bool{"ok": true}, nil })
+	h("GET /v1/health", func(*http.Request) (any, error) {
+		return map[string]any{"ok": true, "conntrack_flush_errors": m.ctFlushErrs.Load()}, nil
+	})
 	h("POST /v1/vms", func(r *http.Request) (any, error) {
 		var req CreateReq
 		if err := decode(r, &req); err != nil {
@@ -83,6 +85,14 @@ func (m *Manager) routes() *http.ServeMux {
 			return nil, err
 		}
 		return m.agentPass(r, map[string]any{"op": "set_env", "vars": b.Vars})
+	})
+	h("POST /v1/vms/{id}/agent", m.agentHandler)
+	h("POST /v1/vms/{id}/resize", func(r *http.Request) (any, error) {
+		var b ResizeReq
+		if err := decode(r, &b); err != nil {
+			return nil, err
+		}
+		return m.Resize(r.Context(), r.PathValue("id"), b)
 	})
 	h("POST /v1/vms/{id}/desktop", func(r *http.Request) (any, error) {
 		var b struct{ Action, Token string }
@@ -133,6 +143,13 @@ func (m *Manager) routes() *http.ServeMux {
 	h("DELETE /v1/vms/{id}/snapshots/{sid}", func(r *http.Request) (any, error) {
 		return map[string]bool{"ok": true}, m.DeleteSnapshot(r.PathValue("id"), r.PathValue("sid"))
 	})
+	h("GET /v1/snapshots", func(r *http.Request) (any, error) {
+		return map[string]any{"snapshots": m.snapshotsOfTeam(r.URL.Query().Get("team"))}, nil
+	})
+	h("POST /v1/snapshots/import", func(r *http.Request) (any, error) {
+		q := r.URL.Query()
+		return m.ImportSnapshot(r.Context(), r.Body, q.Get("team"), q.Get("name"), q.Get("image"), q.Get("size"))
+	})
 	h("POST /v1/snapshots", func(r *http.Request) (any, error) {
 		var b struct {
 			VMID string `json:"vm_id"`
@@ -150,6 +167,7 @@ func (m *Manager) routes() *http.ServeMux {
 		return map[string]bool{"ok": true}, m.DeleteSnapshot(s.VMID, r.PathValue("sid"))
 	})
 	h("GET /v1/usage", func(r *http.Request) (any, error) { return m.usageHandler(r) })
+	mux.HandleFunc("GET /v1/vms/{id}/snapshots/{sid}/download", m.exportHandler)
 	mux.HandleFunc("POST /v1/vms/{id}/exec", m.execHandler)
 	mux.HandleFunc("GET /v1/vms/{id}/files", m.getFileHandler)
 	mux.HandleFunc("PUT /v1/vms/{id}/files", m.putFileHandler)

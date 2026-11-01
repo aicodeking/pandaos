@@ -94,15 +94,38 @@ func (c *fcClient) restore(ctx context.Context, trackDirty bool) error {
 	})
 }
 
-func (c *fcClient) boot(ctx context.Context, v VM, bootArgs string, trackDirty bool) error {
+// tokenBucket is a Firecracker rate limiter refilled every second; nil when unlimited.
+func rateLimiter(bytesPerS, opsPerS int64) map[string]any {
+	rl := map[string]any{}
+	if bytesPerS > 0 {
+		rl["bandwidth"] = map[string]int64{"size": bytesPerS, "refill_time": 1000}
+	}
+	if opsPerS > 0 {
+		rl["ops"] = map[string]int64{"size": opsPerS, "refill_time": 1000}
+	}
+	if len(rl) == 0 {
+		return nil
+	}
+	return rl
+}
+
+func (c *fcClient) boot(ctx context.Context, v VM, bootArgs string, trackDirty bool, cfg Config) error {
+	drive := map[string]any{"drive_id": "rootfs", "path_on_host": diskFile, "is_root_device": true, "is_read_only": false}
+	if rl := rateLimiter(int64(cfg.DiskMBps)<<20, int64(cfg.DiskIOPS)); rl != nil {
+		drive["rate_limiter"] = rl
+	}
+	nic := map[string]any{"iface_id": "eth0", "guest_mac": v.MAC, "host_dev_name": guestTap}
+	if rl := rateLimiter(int64(cfg.IngressMbit)*125000, 0); rl != nil {
+		nic["rx_rate_limiter"] = rl
+	}
 	steps := []struct {
 		path string
 		body any
 	}{
 		{"/boot-source", map[string]string{"kernel_image_path": kernFile, "boot_args": bootArgs}},
-		{"/drives/rootfs", map[string]any{"drive_id": "rootfs", "path_on_host": diskFile, "is_root_device": true, "is_read_only": false}},
+		{"/drives/rootfs", drive},
 		{"/machine-config", map[string]any{"vcpu_count": v.VCPU, "mem_size_mib": v.MemMiB, "smt": false, "track_dirty_pages": trackDirty}},
-		{"/network-interfaces/eth0", map[string]string{"iface_id": "eth0", "guest_mac": v.MAC, "host_dev_name": guestTap}},
+		{"/network-interfaces/eth0", nic},
 		{"/vsock", map[string]any{"guest_cid": 3, "uds_path": vsockUDS}},
 		{"/actions", map[string]string{"action_type": "InstanceStart"}},
 	}
@@ -174,7 +197,28 @@ func (p realProcs) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 	if err != nil {
 		return 0, nil, err
 	}
+	p.setIOMax(v.ID)
 	return pid, p.Adopt(pid, v.ID), nil
+}
+
+// setIOMax writes the VM cgroup's io.max. It is not a --cgroup flag because the
+// jailer rejects values that contain "=".
+func (p realProcs) setIOMax(id string) {
+	c := p.cfg
+	if !c.cgroupLimits || c.stateDisk == "" || (c.IOMaxMBps == 0 && c.IOMaxIOPS == 0) {
+		return
+	}
+	val := c.stateDisk
+	if c.IOMaxMBps > 0 {
+		b := int64(c.IOMaxMBps) << 20
+		val += fmt.Sprintf(" rbps=%d wbps=%d", b, b)
+	}
+	if c.IOMaxIOPS > 0 {
+		val += fmt.Sprintf(" riops=%d wiops=%d", c.IOMaxIOPS, c.IOMaxIOPS)
+	}
+	if err := os.WriteFile(filepath.Join("/sys/fs/cgroup", c.CgroupParent, id, "io.max"), []byte(val), 0); err != nil {
+		log.Printf("%s: io.max: %v", id, err)
+	}
 }
 
 // jailerArgs: per-VM uid/gid, chroot, netns, new pid ns and a cgroup with
@@ -241,7 +285,32 @@ func (p realProcs) Adopt(pid int, id string) <-chan struct{} {
 // Alive: pid exists and its cmdline names this VM (guards against pid reuse).
 func (realProcs) Alive(pid int, id string) bool {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	return err == nil && bytes.Contains(b, []byte("\x00"+id+"\x00"))
+	if err != nil {
+		return false
+	}
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	return err == nil && cmdlineAlive(b, stat, id)
+}
+
+// cmdlineAlive judges /proc/<pid>/{cmdline,stat}. An empty cmdline is not death:
+// it is also what a process shows mid-exec, between the old image and the new
+// one's arguments, and the jailer's child is exactly there when Start polls it.
+// Treating that as an exit marked healthy VMs stopped. Only a zombie or a dead
+// process counts (its stat state is Z, X or x).
+func cmdlineAlive(cmdline, stat []byte, id string) bool {
+	if len(cmdline) > 0 {
+		return bytes.Contains(cmdline, []byte("\x00"+id+"\x00"))
+	}
+	// stat is "pid (comm) S ...": comm may hold spaces and parens, so use the last ')'.
+	i := bytes.LastIndexByte(stat, ')')
+	if i < 0 || i+2 >= len(stat) {
+		return false
+	}
+	switch stat[i+2] {
+	case 'Z', 'X', 'x':
+		return false
+	}
+	return true
 }
 
 func (realProcs) Kill(pid int) { syscall.Kill(pid, syscall.SIGKILL) }

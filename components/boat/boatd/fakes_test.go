@@ -24,13 +24,15 @@ import (
 // guest agent on root/v.sock whose filesystem is a JSON map stored in the
 // VM's rootfs.ext4, so reflink copies (fork, snapshots) are really exercised.
 type fakeHost struct {
-	mu     sync.Mutex
-	next   int
-	vms    map[int]*fakeFC // by pid
-	cmds   []string
-	nft    string
-	nftErr error
-	idleS  float64
+	mu         sync.Mutex
+	next       int
+	vms        map[int]*fakeFC // by pid
+	cmds       []string
+	nft        string
+	nftErr     error
+	ctErr      error
+	nftAtStart map[string]string // ruleset in force when each VM's process started
+	idleS      float64
 }
 
 func newFakeHost() *fakeHost { return &fakeHost{next: 1000, vms: map[int]*fakeFC{}} }
@@ -46,6 +48,11 @@ func (h *fakeHost) run(stdin, name string, args ...string) error {
 		}
 	}
 	h.mu.Unlock()
+	if name == "conntrack" {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.ctErr
+	}
 	if name == "btrfs" && len(args) == 3 && args[0] == "subvolume" {
 		if args[1] == "create" {
 			return os.Mkdir(args[2], 0o711)
@@ -95,6 +102,12 @@ type fakeFC struct {
 
 func (h *fakeHost) Start(v VM, root string, uid, gid int) (int, <-chan struct{}, error) {
 	f := &fakeFC{h: h, id: v.ID, root: root, done: make(chan struct{})}
+	h.mu.Lock()
+	if h.nftAtStart == nil {
+		h.nftAtStart = map[string]string{}
+	}
+	h.nftAtStart[v.ID] = h.nft
+	h.mu.Unlock()
 	ln, err := net.Listen("unix", filepath.Join(root, apiSock))
 	if err != nil {
 		return 0, nil, err
@@ -337,6 +350,10 @@ func (f *fakeFC) agentConn(c net.Conn) {
 			send(map[string]bool{"ok": true})
 		case "desktop":
 			send(map[string]any{"ok": true, "port": 6080})
+		case "cmd_start":
+			send(map[string]any{"ok": true, "cmd_id": "c1"})
+		case "file_list":
+			send(map[string]any{"error": "open /nope: No such file or directory"})
 		case "sync":
 			send(map[string]bool{"ok": true})
 		case "reseed":

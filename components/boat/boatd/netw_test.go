@@ -29,6 +29,11 @@ func TestRuleset(t *testing.T) {
 		`set team0 { type ifname; elements = { "bt2", "bt3" }; }`,
 		"iifname @team0 oifname @team0 accept",
 		`iifname "bt*" oifname "bt*" drop`,
+		`iifname "bt*" icmpv6 type { nd-router-advert, nd-redirect } counter drop`,
+		`iifname "boatbr0" icmpv6 type { nd-router-advert, nd-redirect } drop`,
+		`iifname "bt*" iifname != { "bt2", "bt3", "bt300" } drop`,
+		`iifname "boatbr0" ip saddr 10.200.0.2 ct count over 32768 drop`,
+		`iifname "boatbr0" ip6 saddr 2001:db8:1::2 ct count over 32768 drop`,
 		`iifname "boatbr0" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12,`,
 		`iifname "boatbr0" ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8, 64:ff9b:1::/48 } drop`,
 		`iifname "boatbr0" tcp dport { 25, 465, 587 } drop`,
@@ -45,11 +50,25 @@ func TestRuleset(t *testing.T) {
 	if strings.Contains(rs, "dport 3000 accept") || strings.Contains(rs, "ip6 daddr 2001:db8:1::/64 accept") || strings.Contains(rs, "skuid") {
 		t.Errorf("unpublished v6 port open, whole prefix open, or jail-uid rule without a jailer\n%s", rs)
 	}
+	if strings.Contains(rs, "dport 8744") {
+		t.Error("AI proxy port open by default")
+	}
+	c.AIProxyPort = 8744
+	if !strings.Contains(ruleset(c, vms), `iifname "boatbr0" ip daddr 10.200.0.1 tcp dport 8744 accept`) {
+		t.Error("AI proxy port not opened")
+	}
 	c.Jailer, c.AllowSMTP, c.EgressMbit = "/bin/jailer", true, 100
 	rs = ruleset(c, vms)
-	if !strings.Contains(rs, "meta skuid 900000-965534 drop") || strings.Contains(rs, "dport { 25") ||
-		!strings.Contains(rs, `iifname "bt2" limit rate over 12500 kbytes/second drop`) {
-		t.Errorf("jailer/smtp/egress options\n%s", rs)
+	if !strings.Contains(rs, "meta skuid 900000-965534 drop") || strings.Contains(rs, "dport { 25") {
+		t.Errorf("jailer/smtp options\n%s", rs)
+	}
+	// The policer must sit in the bridge table: on the L3 hooks iifname is boatbr0.
+	_, bridge, _ := strings.Cut(rs, "table bridge boat {")
+	if !strings.Contains(bridge, `iifname "bt2" limit rate over 12500 kbytes/second drop`) {
+		t.Errorf("egress cap not in the bridge table\n%s", bridge)
+	}
+	if strings.Contains(ruleset(c, nil), `iifname != {`) || !strings.Contains(ruleset(c, nil), "    iifname \"bt*\" drop\n") {
+		t.Errorf("no VMs: every bt* port must drop\n%s", ruleset(c, nil))
 	}
 	if strings.Contains(rs, "dport 0") || strings.Contains(rs, "bt300\", ") {
 		t.Errorf("port without host_port forwarded, or red team in blue set\n%s", rs)

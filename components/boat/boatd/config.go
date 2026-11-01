@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // Size is a VM shape. DiskGiB is the sparse disk the rootfs is grown to.
@@ -28,6 +29,7 @@ type TeamPolicy struct {
 	MaxTotalVMs    int  `json:"maxTotalVMs"`
 	MaxSnapshots   int  `json:"maxSnapshots"`
 	MaxDiskGiB     int  `json:"maxDiskGiB"`
+	MaxPorts       int  `json:"maxPorts"` // ports across the team's VMs
 	AllowIntraTeam bool `json:"allowIntraTeam"`
 }
 
@@ -71,15 +73,28 @@ type Config struct {
 	HostMemMiB     int     `json:"hostMemMiB"`     // 0 = /proc/meminfo
 	HostCPUs       int     `json:"hostCPUs"`       // 0 = runtime.NumCPU
 	VMOverheadMiB  int     `json:"vmOverheadMiB"`  // cgroup memory.max = VM RAM + this
-	CgroupParent   string  `json:"cgroupParent"`   // jailer --parent-cgroup; "" = boatd's own (Delegate=yes)
+	CgroupParent   string  `json:"cgroupParent"`   // jailer --parent-cgroup, outside boatd's unit so VMs survive a crash
 	BtrfsQgroups   bool    `json:"btrfsQgroups"`   // each VM dir is a subvolume with an exclusive-bytes limit
 	DiffSnapshots  bool    `json:"diffSnapshots"`  // dirty-page snapshots merged onto a reflinked base
 
 	// Egress policy.
-	AllowSMTP  bool `json:"allowSMTP"`  // else tcp 25/465/587 out is dropped
-	EgressMbit int  `json:"egressMbit"` // per-VM egress cap; 0 = none
+	AllowSMTP   bool `json:"allowSMTP"`   // else tcp 25/465/587 out is dropped
+	AIProxyPort int  `json:"aiProxyPort"` // gateway port VMs may reach (boat-api's AI proxy); 0 = closed
+	EgressMbit  int  `json:"egressMbit"`  // per-VM egress cap (bridge policer); 0 = none
+
+	// Per-VM limits. 0 = none. Firecracker limiters apply from the next cold boot
+	// (a restored VM keeps those saved in its snapshot).
+	IngressMbit   int  `json:"ingressMbit"`   // Firecracker rx rate limiter
+	DiskMBps      int  `json:"diskMBps"`      // Firecracker drive rate limiter
+	DiskIOPS      int  `json:"diskIOPS"`      // ... operations
+	IOMaxMBps     int  `json:"ioMaxMBps"`     // cgroup io.max on stateDir's disk (rbps+wbps)
+	IOMaxIOPS     int  `json:"ioMaxIOPS"`     // ... riops+wiops
+	CtPerVM       int  `json:"ctPerVM"`       // new forwarded connections refused past this many tracked
+	MaxPortsPerVM int  `json:"maxPortsPerVM"` // routes + public ports of one VM
+	ResumeCrashed bool `json:"resumeCrashed"` // cold-boot VMs that were running when boatd/the host died
 
 	cgroupLimits bool                  // set at startup when the cgroup controllers could be delegated
+	stateDisk    string                // "major:minor" of stateDir's disk, for io.max
 	Teams        map[string]TeamPolicy `json:"teams"`
 	DefaultTeam  TeamPolicy            `json:"defaultTeam"`
 }
@@ -118,6 +133,13 @@ func defaultConfig() Config {
 		HostReserveMiB: 1024,
 		VMOverheadMiB:  256,
 		DiffSnapshots:  true,
+		CgroupParent:   "boat-vms",
+		DiskMBps:       1000,
+		DiskIOPS:       50000,
+		CtPerVM:        32768,
+		MaxPortsPerVM:  32,
+		ResumeCrashed:  true,
+		DefaultTeam:    TeamPolicy{MaxTotalVMs: 100, MaxSnapshots: 200, MaxDiskGiB: 4096, MaxPorts: 512},
 		Sizes: map[string]Size{
 			"small":   {2, 4096, 51},
 			"default": {4, 8192, 51},
@@ -178,6 +200,14 @@ func (c Config) validate() error {
 	}
 	if c.MemOvercommit <= 0 || c.CPUOvercommit <= 0 || c.MinFreePct < 0 || c.MinFreePct > 90 || c.MinFreeGiB < 0 || c.ReapS < 1 {
 		return fmt.Errorf("memOvercommit/cpuOvercommit must be > 0, minFreePct 0-90, minFreeGiB >= 0, reapIntervalS >= 1")
+	}
+	for _, n := range []int{c.AIProxyPort, c.EgressMbit, c.IngressMbit, c.DiskMBps, c.DiskIOPS, c.IOMaxMBps, c.IOMaxIOPS, c.CtPerVM, c.MaxPortsPerVM} {
+		if n < 0 {
+			return fmt.Errorf("limits must be >= 0")
+		}
+	}
+	if strings.HasPrefix(c.CgroupParent, "/") || strings.Contains(c.CgroupParent, "..") {
+		return fmt.Errorf("cgroupParent must be relative to /sys/fs/cgroup")
 	}
 	if !filepath.IsAbs(c.StateDir) || !filepath.IsAbs(c.RunDir) {
 		return fmt.Errorf("stateDir and runDir must be absolute")

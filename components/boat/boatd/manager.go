@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -44,9 +46,14 @@ type Manager struct {
 	active map[string]time.Time // last exec/file/desktop seen by boatd
 	netMu  sync.Mutex
 
-	statfs  func(path string) (free, total uint64, err error)
-	hostMem int // MiB available to VMs before overcommit (RAM - reserve)
-	hostCPU int
+	ctFlushErrs atomic.Int64 // conntrack flushes that failed: stale flows may survive
+
+	statfs func(path string) (free, total uint64, err error)
+
+	exportArgv func(dir string, files []string) []string
+	unpackArgv []string // stdin tar.zst -> stdout tar
+	hostMem    int      // MiB available to VMs before overcommit (RAM - reserve)
+	hostCPU    int
 }
 
 func newManager(cfg Config, run runner, p procs) (*Manager, error) {
@@ -59,7 +66,8 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 		usage: &ledger{path: filepath.Join(cfg.StateDir, "usage.jsonl")},
 		now:   func() time.Time { return time.Now().UTC() },
 		vms:   map[string]VM{}, snaps: map[string]Snapshot{}, locks: map[string]*sync.Mutex{},
-		dones: map[string]<-chan struct{}{}, active: map[string]time.Time{}, statfs: statfs}
+		dones: map[string]<-chan struct{}{}, active: map[string]time.Time{}, statfs: statfs,
+		exportArgv: tarZstdArgv, unpackArgv: []string{"zstd", "-dcq"}}
 	m.hostMem, m.hostCPU = cfg.HostMemMiB, cfg.HostCPUs
 	if m.hostMem == 0 {
 		m.hostMem = hostMemMiB()
@@ -250,7 +258,7 @@ func (m *Manager) alloc(v VM, st State) (VM, error) {
 	if err := m.makeVMDir(v); err != nil {
 		return VM{}, err
 	}
-	flushConntrack(m.run, v.IP, v.IPv6, v.PublicIP) // a previous owner's flows
+	m.flushConntrack(v.IP, v.IPv6, v.PublicIP) // a previous owner's flows
 	if err := m.commitLocked(VM{}, v, "created"); err != nil {
 		m.removeVMDir(v.ID)
 		return VM{}, err
@@ -369,8 +377,12 @@ func (m *Manager) reconcile() error {
 		for _, f := range []string{snapState, snapDiff, memNew} {
 			os.Remove(filepath.Join(root, f))
 		}
+		nv := m.deadState(v)
+		// It was running and nobody stopped it: boatd or the host died. Its memory
+		// is gone; bring it back cold from its disk (see resumeAll).
+		nv.ResumeOnBoot = nv.ResumeOnBoot || (v.State == Running && !alive && nv.State == Stopped && m.cfg.ResumeCrashed)
 		m.mu.Lock()
-		err := m.commitLocked(v, m.deadState(v), "boatd restart")
+		err := m.commitLocked(v, nv, "boatd restart")
 		m.mu.Unlock()
 		if err != nil {
 			return err
@@ -404,6 +416,8 @@ func (m *Manager) watch(id string, pid int, done <-chan struct{}) {
 	if err != nil || v.PID != pid || v.State != Running {
 		return
 	}
+	log.Printf("%s: firecracker pid %d exited on its own", id, pid)
+	m.procs.Kill(pid) // never leave a VM running behind a "stopped" record
 	delVMNet(m.run, v)
 	if _, err := m.update(id, "exited", func(v *VM) {
 		v.State, v.PID, v.HasSnapshot, v.AgentReady = Stopped, 0, false, false
@@ -430,6 +444,46 @@ func (m *Manager) killWait(id string, pid int) {
 	case <-time.After(10 * time.Second):
 		log.Printf("%s: pid %d did not exit after SIGKILL", id, pid)
 	}
+}
+
+// Guest serial and VMM logs go to firecracker.log through an O_APPEND file, so
+// it needs no reader and survives a boatd restart; rotateLogs keeps it bounded:
+// past logCapBytes the tail moves to firecracker.log.1 and the file is truncated.
+const (
+	logCapBytes    = 16 << 20
+	logTailBytes   = 1 << 20
+	logRotateEvery = time.Second
+)
+
+func (m *Manager) rotateLogs() {
+	for _, v := range m.list("") {
+		if v.State != Stopped && v.State != Error {
+			if err := rotateLog(filepath.Join(m.vmDir(v.ID), "firecracker.log")); err != nil {
+				log.Printf("%s: log: %v", v.ID, err)
+			}
+		}
+	}
+}
+
+func rotateLog(path string) error {
+	st, err := os.Stat(path)
+	if err != nil || st.Size() <= logCapBytes {
+		return nil // no file yet
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	tail := make([]byte, logTailBytes)
+	n, err := f.ReadAt(tail, st.Size()-logTailBytes)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if err := os.WriteFile(path+".1", tail[:n], 0o600); err != nil {
+		return err
+	}
+	return os.Truncate(path, 0)
 }
 
 // stopAll snapshots every running VM in parallel (service stop / host reboot).

@@ -23,6 +23,7 @@
 # shellcheck disable=SC2154 # host_ip, PIDS come from e2e.sh
 FORK_MAX=${E2E_FORK_MAX:-2}
 STOP_MAX=${E2E_STOP_MAX:-3}
+RESUME_MAX=${E2E_RESUME_MAX:-5}
 
 bd() { curl -fsS --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json' ${3:+-d "$3"}; }
 bdcode() { curl -s -o "$WORK/tmp/bd.out" -w '%{http_code}' --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json' ${3:+-d "$3"}; }
@@ -198,6 +199,9 @@ bx "$dk" 'for i in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; 
   fail "docker hello-world"
 bd DELETE "/v1/vms/$dk" >/dev/null
 bd DELETE "/v1/vms/$p1" >/dev/null
+
+# shellcheck source=boatd/e2e-limits.sh
+. "$HERE/boatd/e2e-limits.sh"
 
 log "host e2e: btrfs qgroups"
 jq '.btrfsQgroups = true' "$WORK/boatd.json" >"$WORK/boatd-q.json"
