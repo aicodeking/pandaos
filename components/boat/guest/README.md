@@ -204,6 +204,9 @@ Additions to the PROTOCOL.md contract (all optional):
   regenerated. If both requests carry `generation` (boatd's restore counter), they
   must match. A request that fails validation does not use up the reseed; a
   failure after validation does, so the host reseeds again before a retry.
+- Host keys are ed25519 and ecdsa only. RSA keygen took a random 59-555 ms per key on
+  an M-series Mac (the other two: ~25 ms), which showed up as `identity=349-1208ms`
+  on forks in CI. No RSA host key means a client that only accepts RSA can't connect.
 - `set_env` writes `/etc/boat/env` (`export K='v'` lines), 0600, owned by `dev` so
   that dev's login shells (`/etc/profile.d/boat-env.sh`) and bash (`/etc/bash.bashrc`)
   can source it.
@@ -213,7 +216,7 @@ Additions to the PROTOCOL.md contract (all optional):
 
 ## Tests
 
-- `cd agent && python3 -m unittest -v test_boat_agent`: 19 tests over a socketpair
+- `cd agent && python3 -m unittest -v test_boat_agent`: 20 tests over a socketpair
   (exec streaming/exit/stdin/env/cwd/tty/3 MB output/timeout + group kill,
   set_env, chunked put/get, validation, reseed gating set_identity, sync, the
   desktop token check and proxy, and `desktop-check.sh` end to end through the

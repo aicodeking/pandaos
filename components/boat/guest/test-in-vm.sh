@@ -169,7 +169,7 @@ boat "$IDENT" >/dev/null || fail "set_identity"
 [[ $(vexec 30 root hostname) == boat-fork-1 ]] || fail "hostname"
 [[ $(vexec 30 root cat /etc/machine-id) != "$mid_before" ]] || fail "machine-id not regenerated"
 keys_after=$(hostkeys)
-[[ $(wc -l <<<"$keys_after") -ge 3 ]] || fail "expected rsa, ecdsa and ed25519 host keys"
+[[ $(wc -l <<<"$keys_after") == 2 ]] || fail "expected exactly the ed25519 and ecdsa host keys: $keys_after"
 [[ -z $(comm -12 <(echo "$keys_before") <(echo "$keys_after")) ]] || fail "a host key was not regenerated"
 vexec 30 root grep -q 8.8.8.8 /etc/resolv.conf || fail "dns"
 rm -f "$W/known"; "${SSH[@]}" "dev@$GUEST_IP" true || fail "ssh after set_identity"

@@ -45,6 +45,7 @@ DESKTOP_BACKEND = ("127.0.0.1", 6081)  # KasmVNC websocket/http, local only
 DESKTOP_UNIT = "boat-desktop.service"
 DESKTOP_DISPLAY = ":1"
 TOKEN_COOKIE = "boat_desktop"
+HOST_KEY_TYPES = ("ed25519", "ecdsa")  # keep in sync with rootfs sshd HostKey lines
 
 ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HOSTNAME = re.compile(r"^(?=.{1,63}$)[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$")
@@ -436,12 +437,19 @@ def write_atomic(path, text, mode):
     os.replace(tmp, path)
 
 
+def regenerate_host_keys(ssh_dir):
+    """Replace every host key. No RSA: its keygen costs a random 0.1-1 s on each fork."""
+    for name in os.listdir(ssh_dir):
+        if name.startswith("ssh_host_"):
+            os.unlink(os.path.join(ssh_dir, name))
+    for key_type in HOST_KEY_TYPES:
+        run(["ssh-keygen", "-q", "-t", key_type, "-N", "",
+             "-f", os.path.join(ssh_dir, "ssh_host_%s_key" % key_type)])
+
+
 def regenerate_secrets():
     write_atomic("/etc/machine-id", uuid.uuid4().hex + "\n", 0o444)
-    for name in os.listdir("/etc/ssh"):
-        if name.startswith("ssh_host_"):
-            os.unlink(os.path.join("/etc/ssh", name))
-    run(["ssh-keygen", "-A"])
+    regenerate_host_keys("/etc/ssh")
     run(["systemctl", "restart", "ssh.service"], check=False)  # also revives a failed sshd
 
 

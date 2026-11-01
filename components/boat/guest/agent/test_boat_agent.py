@@ -210,6 +210,21 @@ class AgentTest(unittest.TestCase):
         finally:
             agent.RANDOM_DEV = saved
 
+    def test_host_keys_regenerated_without_rsa(self):
+        d = os.path.join(self.tmp, "ssh")
+        os.mkdir(d)
+        for name in ("ssh_host_rsa_key", "ssh_host_rsa_key.pub", "ssh_host_ed25519_key", "sshd_config"):
+            with open(os.path.join(d, name), "w") as f:
+                f.write("old")
+        agent.regenerate_host_keys(d)
+        self.assertEqual(sorted(os.listdir(d)),
+                         ["ssh_host_ecdsa_key", "ssh_host_ecdsa_key.pub", "ssh_host_ed25519_key",
+                          "ssh_host_ed25519_key.pub", "sshd_config"])
+        with open(os.path.join(d, "ssh_host_ed25519_key")) as f:
+            self.assertIn("OPENSSH PRIVATE KEY", f.read())
+        with open(os.path.join(d, "sshd_config")) as f:
+            self.assertEqual(f.read(), "old")
+
     def test_sync(self):
         self.assertEqual(self.c.call({"op": "sync"}), {"ok": True})
 
