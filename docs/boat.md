@@ -231,7 +231,7 @@ Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list
 | | update | unit | |
 | Monitoring | OpenTelemetry | unit | `boat telemetry`; exporting to a real collector is untested |
 | Teams | teams, members, quotas | yes | no invites, seats or shared wallets |
-| Dashboard | web UI | partial | new; its browser smoke test runs in the edge e2e; has not been reviewed |
+| Dashboard | web UI | partial | new; sign-in and VM list covered by a browser smoke test; less than boat.dev's |
 | Security | isolation, tokenized URLs | yes | see Security model |
 | | data retention, zero data retention, GDPR erasure tooling | no | you are the data controller |
 | | SOC 2, status page, regions | n/a | your host |
@@ -246,7 +246,7 @@ Workflow `boat-e2e`, on a GitHub KVM runner with real Firecracker (jailer on) an
 
 1. `components/boat/e2e.sh` + `boatd/e2e-host.sh`: every CLI feature above marked yes, plus host phases (jail, network isolation, IPv6 with a ULA prefix, idle stop, boatd restart re-adopting VMs, free-space floor, Docker, qgroups).
 2. `guest/test-in-vm.sh`: guest checks.
-3. `gateway/e2e-edge.sh`: real Caddy with its internal CA and the jump sshd on 2222 in front of a fresh stack, over verified TLS: private and public routes, per-VM desktop origins, **VM A's Origin refused on VM D's desktop including the websocket upgrade**, the desktop websocket's first frame, `ssh -J`, a **boatd stop (snapshots VMs) followed by a different boatd binary (resumes them): same `boot_id`, guest server and route still up**, the dashboard in a real browser, `sdk/e2e-live.sh`, `api/e2e-auth.sh`.
+3. `gateway/e2e-edge.sh`: real Caddy with its internal CA and the jump sshd on 2222 in front of a fresh stack, over verified TLS: private and public routes, per-VM desktop origins, **VM A's Origin refused on VM D's desktop including the websocket upgrade**, the desktop websocket's first frame, `ssh -J`, a **boatd stop (snapshots VMs) followed by a different boatd binary (resumes them): same `boot_id`, guest server and route still up**, the dashboard page and CSP through Caddy, `dashboard/e2e.sh` (its smoke test in real Chrome, served by its own test server with the same CSP against this API, not through Caddy), `sdk/e2e-live.sh`, `api/e2e-auth.sh`.
 4. `build iso-server`.
 
 NixOS VM tests, with stubs for boatd and boat-api unless noted (`boat-install` and `boat-ops` are jobs in `boat-e2e`; run one with `nix build --impure -f tests/standalone.nix boat-ops`; `boat-module` is in `nix flake check`):

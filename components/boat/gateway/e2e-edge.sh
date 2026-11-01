@@ -376,6 +376,8 @@ if [ -f "$HERE/dashboard/web/index.html" ]; then
   grep -qi "frame-ancestors 'none'" <<<"$page" && grep -qi '<html' <<<"$page" || fail "dashboard page: $page"
   [ "$(hc "https://api.$D/v1/me" -H "Authorization: Bearer $KEY")" = 200 ] || fail "API behind the dashboard"
   grep -q "api.$D" /etc/hosts || echo "127.0.0.1 api.$D" | sudo tee -a /etc/hosts >/dev/null
+  # Ubuntu 24.04 confines user namespaces, which Chrome's sandbox needs.
+  sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
   BOAT_URL=https://api.$D BOAT_KEY=$KEY BOAT_INSECURE=1 BOAT_E2E_REQUIRE_BROWSER=1 soft dashboard/e2e.sh "$HERE/dashboard/e2e.sh"
 else
   warn "components/boat/dashboard/web not present yet"
