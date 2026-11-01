@@ -57,11 +57,16 @@ boatd also writes `/run/boat/routes.json` for boat-gateway (see the last section
 | `GET /v1/vms/{id}/files?path=/abs` | | raw bytes (404 if missing) |
 | `POST /v1/vms/{id}/env` | `{vars:{K:V}}` | agent reply (`/etc/boat/env`) |
 | `POST /v1/vms/{id}/desktop` | `{action:"start\|stop\|status", token?}` | agent reply |
+| `POST /v1/vms/{id}/agent` | `{op, ...}`, allowlisted guest ops (see section 2) | guest's final reply |
+| `POST /v1/vms/{id}/resize` | `{size?, disk_gib?, discard_memory?}` | VM |
 | `POST /v1/vms/{id}/ports` | `{port` (or `guest_port`)`, public?}` | 201, Port |
 | `DELETE /v1/vms/{id}/ports?port=N` | | `{"ok":true}` |
 | `GET /v1/vms/{id}/snapshots` | | `{"snapshots":[Snapshot…]}` |
 | `POST /v1/vms/{id}/snapshots` | `{name?}` | 201, Snapshot |
 | `DELETE /v1/vms/{id}/snapshots/{sid}` | | `{"ok":true}` |
+| `GET /v1/vms/{id}/snapshots/{sid}/download` | | tar.zst stream |
+| `GET /v1/snapshots[?team=]` | | `{"snapshots":[Snapshot…]}` |
+| `POST /v1/snapshots/import?team=&name=[&image=&size=]` | tar.zst stream | 201, Snapshot |
 | `POST /v1/snapshots` | `{vm_id, name?}` | 201, Snapshot |
 | `DELETE /v1/snapshots/{sid}` | | `{"ok":true}` |
 | `GET /v1/events[?team=&after=seq]` | | SSE stream (see below) |
@@ -89,8 +94,10 @@ Notes:
   - Stopped parent: boatd copies the stop snapshot, or only the disk if there is none.
   - Then boatd restores the child on its own tap and sends `set_identity` with the child's IP, MAC and hostname. The agent also regenerates machine-id and ssh host keys.
   - `team`, if given, must equal the parent's team, else 404.
+- **resize**: vCPU and RAM change only on a stopped VM (409 while running), and only through a cold boot. A memory snapshot cannot change shape, so a VM with a stop snapshot also needs `discard_memory:true` (409 otherwise). The disk grows at any time and never shrinks: `disk_gib` below the current size is 400, and a `size` with a smaller disk keeps the larger one. A running guest sees the new disk at once (`PATCH /drives`, `resize2fs`); a stopped one on its next start.
+- **snapshot export/import**: `download` streams GNU sparse tar.zst, manifest first. Firecracker does not validate `vmstate`, so memory crosses only under an HMAC from this host's key (`stateDir/export.key`, covering the snapshot metadata and the SHA-256 of vmstate, mem and kernel). Anything else is treated as a tenant upload: the disk is kept (only the guest kernel parses it), vmstate, memory and kernel are dropped, and the snapshot cold-boots on the local image's kernel (`image`, `size` choose it). Import accepts only the expected regular files, each once and within a size cap; other members are 400. It stops below the free-space floor. Imported snapshots have an empty `vm_id` and outlive VM deletes. boatd trusts `team`: boat-api enforces it.
 - **delete** kills the VM and removes its dir, its tap and its snapshots.
-- **ports**: every port gets a gateway hostname route, `<guest_port>-<id>.vm.<domain>`; the `hostname` field holds the label before `.vm.<domain>`. With `public:true` the port also gets a raw TCP `host_port` from `portMin..portMax` (20000-40000), DNATed to `ip:guest_port`.
+- **ports**: re-adding a port sets its visibility, so `public:false` closes a published port and flushes its flows. Limits: `maxPortsPerVM` (default 32), team `maxPorts` (default 512), both 429. Every port gets a gateway hostname route, `<guest_port>-<id>.vm.<domain>`; the `hostname` field holds the label before `.vm.<domain>`. With `public:true` the port also gets a raw TCP `host_port` from `portMin..portMax` (20000-40000), DNATed to `ip:guest_port`.
 - **quotas**: see "Admission and storage limits" below.
 
 ### exec stream
@@ -156,6 +163,15 @@ Framing:
 | `set_env` | `{"op":"set_env","vars":{"K":"V"}}` | `{"ok":true,"count":N}` |
 | `desktop` | `{"op":"desktop","action":"start\|stop\|status","token"?:"…"}` | `{"ok":true,"port":6080,…}` |
 | `shutdown` | `{"op":"shutdown"}` | `{"ok":true}`, then the guest syncs and reboots (= firecracker exits) |
+| `cmd_start` | `{"op":"cmd_start","argv":[…],"env"?:{},"cwd"?:"/","user"?:"dev"}` | `{"ok":true,"cmd_id":"…"}` |
+| `cmd_list` | `{"op":"cmd_list"}` | `{"ok":true,"cmds":[status…]}` |
+| `cmd_status` | `{"op":"cmd_status","cmd_id":"…"}` | `{"ok":true,"cmd_id","argv","state":"running\|exited\|lost","pid","exit"?,"signal"?,"started","ended"?}` |
+| `cmd_logs` | `{"op":"cmd_logs","cmd_id":"…","offset"?:0,"limit"?:1048576}` | `{"ok":true,"data_b64","offset","next_offset","size","truncated","running"}` |
+| `cmd_signal` | `{"op":"cmd_signal","cmd_id":"…","signal":"TERM"}` | `{"ok":true}` |
+| `file_list` | `{"op":"file_list","path":"/abs"}` | `{"ok":true,"entries":[{name,type,size,mode,mtime}],"truncated"}` |
+| `file_delete` | `{"op":"file_delete","path":"/abs","recursive"?:false}` | `{"ok":true}` |
+| `file_move` | `{"op":"file_move","from":"/a","to":"/b","overwrite"?:false}` | `{"ok":true}` |
+| `file_search` | `{"op":"file_search","path":"/abs","query":"…","limit"?:100,"regex"?:false}` | `{"ok":true,"matches":[{path,line,text}],"truncated"}` |
 | `reseed` | `{"op":"reseed","entropy_b64":"<32..4096 bytes>","generation"?:N}` | `{"ok":true,"bytes":n}` |
 | `sync` | `{"op":"sync"}` | `{"ok":true}` after sync(2) |
 
@@ -169,6 +185,7 @@ Semantics:
   - Chunks go to `<path>.boat-part`. `offset` must equal the bytes received so far, and `offset:0` truncates.
   - The chunk with `last:true` sets the mode (an octal string or an int), sets the owner (default: like the parent dir), and renames the file into place.
   - boatd sends 1 MiB chunks.
+- **cmd_\***, **file_\***: the ops `POST /v1/vms/{id}/agent` passes through; nothing else is allowed there. Commands outlive the connection. Log offsets are absolute in the merged stdout+stderr stream, with the newest ~64 MiB kept; `cmd_logs` `limit` is at most 4 MiB. `state:"lost"` means the supervisor died, for example across a reboot. `file_delete` refuses `/`, and a non-empty directory without `recursive`. An unknown `cmd_id` or missing path gives an error containing "No such" (404).
 - **reseed**: the agent credits the bytes to the kernel pool with `RNDADDENTROPY`, then forces a CRNG reseed with `RNDRESEEDCRNG`. boatd sends 64 bytes from its own `crypto/rand` right before every `set_identity`, that is, for every new VM (create, fork, from-snapshot). `set_identity` refuses to run unless a reseed came after the previous `set_identity`, and each reseed is good for one `set_identity`. A snapshot holds the parent's used-up state, so siblings forked from one snapshot each derive their machine-id and host keys from fresh entropy. In addition, Firecracker ≥ 1.10 (x86_64) bumps VMGenID on every snapshot load, and the 6.1 `vmgenid` driver reseeds the kernel CRNG at that point; that event is invisible to userspace. Old agents reply `unknown op`, which boatd logs and ignores.
 - **sync**: flushes every guest filesystem. boatd calls it before each pause/snapshot (stop, fork, named snapshot). For agents without this op, it falls back to `exec ["sync"]` as root.
 - **set_identity**
@@ -214,7 +231,11 @@ runDir/routes.json
 - **Team quotas** (`teams.<team>` or `defaultTeam`, 429): `maxVMs`, `maxVCPU`, `maxMemMiB` count active VMs. `maxTotalVMs` counts VMs in any state. `maxSnapshots` counts snapshots. `maxDiskGiB` limits committed storage: each VM's disk + RAM size, and each snapshot's disk (+ RAM size if it has memory).
 - **Host admission** (503): active VM RAM across all teams may not exceed (`hostMemMiB`, default MemTotal, minus `hostReserveMiB`, default 1024) × `memOvercommit` (default 1.0). Active vCPUs may not exceed `hostCPUs` × `cpuOvercommit` (default 4.0). Enforced on create, fork and start.
 - **Free-space floor** (507): create is refused when stateDir's free space is below the larger of `minFreeGiB` (5) and `minFreePct` (10%); fork and snapshot also require room for the VM's RAM. A stop below that level skips the snapshot and shuts the guest down cleanly (`has_snapshot:false`, the next start is a cold boot).
-- **btrfs qgroups** (`btrfsQgroups`, default off): each VM dir is a subvolume with an exclusive-bytes limit of disk + 2 × RAM + 1 GiB. Past it, the guest's disk writes fail instead of filling the host. Reflinked data shared with the image or parent does not count.
+- **Defaults are finite**: `defaultTeam` starts at `maxTotalVMs` 100, `maxSnapshots` 200, `maxDiskGiB` 4096, `maxPorts` 512. Keys under `teams.<team>` replace these: 0 there means unlimited.
+- **btrfs qgroups** (`btrfsQgroups`, default off because they slow reflinks: fork 1.31 s without, 3.25 s with, run 41305928387): each VM dir is a subvolume with an exclusive-bytes limit of disk + 2 × RAM + 1 GiB. Past it, the guest's disk writes fail instead of filling the host. Reflinked data shared with the image or parent does not count.
+- **Per-VM limits**: `diskMBps` (default 1000) and `diskIOPS` (50000) are Firecracker drive limiters, `ingressMbit` its rx limiter (these apply from the next cold boot; a restored VM keeps those in its snapshot). `ioMaxMBps`/`ioMaxIOPS` set cgroup `io.max` on stateDir's disk (default off). `ctPerVM` (default 32768) refuses new forwarded connections past that count; counts restart whenever the rules reload, so it is a limit on bursts between VM changes, not an absolute one.
+- **Logs**: guest serial and VMM output go to `firecracker.log` (O_APPEND, so no reader is needed and a boatd restart does not disturb it). boatd checks it every second and past 16 MiB moves the last 1 MiB to `firecracker.log.1` and truncates. Bytes written while boatd is down are bounded only by the disk until it returns. Both files count in `/v1/usage`, and `vmCommit` reserves room for them.
+- `GET /v1/health` reports `conntrack_flush_errors`: flushes that failed, so stale flows may survive.
 - `GET /v1/usage` adds `storage[]` per team (`vms`, `snapshots`, `committed_bytes`, `vm_apparent_bytes`, `vm_allocated_bytes`, `snapshot_apparent_bytes`, `snapshot_allocated_bytes`) and, when not filtered by team, `disk` (`free_bytes`, `total_bytes`, `floor_bytes`). Allocated bytes count reflinked extents once per file, so they are an upper bound.
 
 ### Reconcile and restart
@@ -222,24 +243,29 @@ runDir/routes.json
 - On startup, boatd reads every `vm.json`:
   - a VM in `running` whose firecracker PID is alive (checked through `/proc/<pid>/cmdline`, which contains the VM id) is re-adopted;
   - a VM in any other active state is killed and marked `stopped`. Half-written snapshots are deleted. `has_snapshot` is set only when both files exist. A VM whose disk is missing goes to `error`.
-- Firecracker is a detached process in its own pid namespace, so it survives a boatd crash, and the next boatd re-adopts it. The unit stop is different: the unit uses `KillMode=mixed`, so on SIGTERM boatd snapshots every running VM in parallel. It sets `resume_on_boot` on them and restarts them on its next start, including after a host reboot. `TimeoutStopSec` must cover writing the dirty RAM of all VMs to disk.
+- VM cgroups live under `cgroupParent` (default `boat-vms`, at the cgroup root), outside boatd's unit, so a boatd crash under `KillMode=mixed` touches neither the VMs nor their memory, and the next boatd re-adopts them.
+- A VM that was running but whose process is gone (a host crash, or a `cgroupParent` inside the unit) gets `resume_on_boot` and cold-boots from its disk (`resumeCrashed`, default on). A VM the user stopped stays stopped.
+- A clean unit stop is different: the unit uses `KillMode=mixed`, so on SIGTERM boatd snapshots every running VM in parallel. It sets `resume_on_boot` on them and restarts them on its next start, including after a host reboot. `TimeoutStopSec` must cover writing the dirty RAM of all VMs to disk.
 
 ### Networking
 
+- `boatbr0` has `accept_ra=0`, `accept_redirects=0`, `autoconf=0`, and tenant RAs and redirects are dropped at L2 and L3, so a VM cannot configure the host.
 - Bridge `boatbr0` has `10.200.0.1/16`. Each VM gets slot n (2..65534):
   - IP `10.200.n>>8.n&255`
   - MAC `06:00:0a:c8:hi:lo`
   - netns `boat<n>` holding `tap0` (owned by the VM's uid), bridged to `veth0`, whose peer `bt<n>` is the VM's port on `boatbr0`
 - Optional `ipv6Prefix` (routed to the host): the bridge gets `prefix::1`, and VM n gets `prefix::n` (on-link prefix length). Inbound IPv6 is limited to established/related traffic and ports published with `public:true`.
-- Optional `publicIPv4` pool: 1:1 DNAT/SNAT. The address stays with the VM until the VM is deleted. The upstream network must route these addresses to the host.
+- Optional `publicIPv4` pool: 1:1 DNAT/SNAT, so every port of such a VM is reachable (unlike IPv6, where only published ports are). The address stays with the VM until the VM is deleted. The upstream network must route these addresses to the host.
 - nftables: boatd regenerates the tables `inet boat` and `bridge boat` from the VM list and loads them atomically (`nft -f -`) on every change.
   - **Host input from VMs**: only DNS to the gateway, ICMP/ICMPv6, and established traffic. Everything else is dropped.
   - **Forward into boatbr0**: established traffic, DNAT (port forwards, public IPv4) and published IPv6 ports. Everything else is dropped.
-  - **Egress from VMs**: dropped to RFC 1918, `100.64.0.0/10`, loopback, `169.254.0.0/16` (metadata), `192.0.0.0/24`, `198.18.0.0/15`, `0.0.0.0/8`, `224.0.0.0/3`, and IPv6 `::1`, `fc00::/7` (ULA, including `fd00:ec2::254`), `fe80::/10`, `ff00::/8`, `64:ff9b:1::/48`. TCP 25/465/587 is dropped unless `allowSMTP`. `egressMbit` adds a per-VM cap (default none).
+  - **Egress from VMs**: dropped to RFC 1918, `100.64.0.0/10`, loopback, `169.254.0.0/16` (metadata), `192.0.0.0/24`, `198.18.0.0/15`, `0.0.0.0/8`, `224.0.0.0/3`, and IPv6 `::1`, `fc00::/7` (ULA, including `fd00:ec2::254`), `fe80::/10`, `ff00::/8`, `64:ff9b:1::/48`. TCP 25/465/587 is dropped unless `allowSMTP`. `egressMbit` adds a per-VM cap (default none), policed in the bridge table on the VM's port.
   - **Jail uids**: output from uids `jailUidBase`..`jailUidBase+65534` in the host netns is dropped.
   - **NAT**: masquerade `10.200.0.0/16` out of non-bridge interfaces. A hairpin masquerade lets a VM reach a sibling's public port.
   - **Bridge anti-spoofing** per tap: the source MAC, IPv4, ARP sender IP and IPv6 (assigned address, link-local, `::`) must match. Because of this, a fork is silent until `set_identity` gives it its own MAC and IP.
   - **Bridge isolation**: tap → tap traffic is dropped (ARP is allowed). The exception is taps in the same team when that team has `allowIntraTeam`.
+- Rules load before a VM boots, including from a snapshot or a fork. A `bt*` port with no rules passes nothing.
+- `aiProxyPort` (default 0, closed) opens one TCP port on the gateway to VMs, for boat-api's AI proxy.
 - nftables failures fail closed: boatd refuses to start, and a create, fork or start fails (the VM is killed) if its rules cannot be loaded; port changes report the error.
 - Releasing or reusing an address flushes its conntrack entries (`conntrack -D`).
 - Requirements: `br_netfilter` must not be loaded (`bridge-nf-call-iptables=1` would send bridged frames through the inet hooks). `ip_forward` is set by the module and by boatd.
@@ -263,3 +289,9 @@ runDir/routes.json
 - `public` lists the guest ports published with `public:true`; the gateway requires a route token for every other port.
 - Lists only running VMs. Rewritten atomically on every VM, port or state change.
 - The gateway routes `<port>-<id>.vm.<domain>` to `ip:port` for the listed ports, and routes the desktop to `ip:desktopPort`.
+
+---
+
+## 5. Measured deviations
+
+- **Nested KVM**: not offered. See the e2e `METRIC` fields `nestedHost`, `nestedGuestCpus`, `nestedGuestKvm`. The guest kernel is built without KVM (`guest/kernel/docker.config`), and exposing VMX/SVM would also need a Firecracker CPU template and a host with nested virtualization enabled.
