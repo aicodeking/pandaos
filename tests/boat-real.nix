@@ -25,6 +25,8 @@ let
 in
 pkgs.testers.runNixOSTest {
   name = "boat-real";
+  # Everything inside the VM is very slow here: see bootTimeoutS.
+  globalTimeout = 7000;
   nodes.machine =
     { lib, ... }:
     {
@@ -56,8 +58,9 @@ pkgs.testers.runNixOSTest {
           disk_gib = 6;
         };
         defaultSize = "t";
-        # Firecracker runs three virtualisation levels down here.
-        boatdSettings.bootTimeoutS = 300;
+        # Firecracker runs three virtualisation levels down here (runner, this
+        # test VM, the guest), where a guest boot takes many minutes.
+        boatdSettings.bootTimeoutS = 1500;
       };
       specialisation.next.configuration.services.boat = {
         boatdPackage = lib.mkForce (next boatd);
@@ -80,13 +83,13 @@ pkgs.testers.runNixOSTest {
           return machine.succeed("pgrep -x firecracker || true").split()
 
 
-      def in_vm(cmd, timeout=300):
+      def in_vm(cmd, timeout=900):
           return machine.succeed(f"boat exec real -- bash -c {shlex.quote(cmd)}", timeout=timeout).strip()
 
 
       def assert_vm_kept(label):
           # Same kernel instance, same process, same file: it was not rebooted or re-created.
-          machine.wait_until_succeeds("boat list --json | jq -e 'select(.name == \"real\" and .state == \"running\")'", timeout=600)
+          machine.wait_until_succeeds("boat list --json | jq -e 'select(.name == \"real\" and .state == \"running\")'", timeout=1700)
           assert in_vm("cat /proc/sys/kernel/random/boot_id") == vm_boots["boot_id"], f"{label}: the VM rebooted"
           assert in_vm("cat /home/dev/marker") == "still-here", f"{label}: file lost"
           in_vm(f"kill -0 {vm_boots['pid']}")
@@ -112,7 +115,7 @@ pkgs.testers.runNixOSTest {
 
       with subtest("a real VM boots under the jailer"):
           start = time.monotonic()
-          vm = json.loads(machine.succeed("boat new --name real --json", timeout=600))
+          vm = json.loads(machine.succeed("boat new --name real --json", timeout=1700))
           boot_sec = round(time.monotonic() - start, 1)
           assert vm["state"] == "running", vm
           assert fc_pids(), "no firecracker process"
@@ -143,7 +146,7 @@ pkgs.testers.runNixOSTest {
 
       with subtest("restart boatd onto the new binary: snapshot and resume"):
           start = time.monotonic()
-          machine.succeed("systemctl restart boatd.service", timeout=600)
+          machine.succeed("systemctl restart boatd.service", timeout=1200)
           assert fc_pids() != fc_before, "firecracker was not replaced"
           assert_vm_kept("after boatd restart")
           restart_sec = round(time.monotonic() - start, 1)
