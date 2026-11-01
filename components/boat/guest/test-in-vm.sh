@@ -261,7 +261,8 @@ if [[ $VARIANT == full ]]; then
     boat '{"op":"desktop","action":"stop"}' >/dev/null
     reply=$(boat '{"op":"desktop","action":"start"}') || fail "row $name: start: $reply"
     link="$base/?token=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["token"])' "$reply")"
-    anim=$(python3 -c 'import json,sys; print(json.dumps({"op":"exec","argv":["boat-desktop-animate","12",sys.argv[1]],"timeout_s":20}))' "$mode")
+    # ${ROW_NICE:+...}: a source that yields the CPU instead of starving the encoder
+    anim=$(python3 -c 'import json,sys; print(json.dumps({"op":"exec","argv":sys.argv[1:],"timeout_s":20}))' ${ROW_NICE:+nice -n 19} boat-desktop-animate 12 "$mode")
     log="$W/row-$name.log"
     ( while :; do python3 "$W/boat.py" "$W/vsock.sock" "$anim" 2>/dev/null || sleep 1; done ) >"$W/row-$name.anim" &
     local animpid=$!
@@ -280,6 +281,15 @@ if [[ $VARIANT == full ]]; then
     browser_row q3_60fps_image_small "$image_js" "" small
     browser_row default_h264_small "$default_js" "$default_args" small
     browser_row default_h264 "$default_js" "$default_args" full
+    tuned_image_js='for (const [k, v] of Object.entries({video_quality:"10", stream_mode:"-1025", framerate_image_mode:"60", framerate:"60", enable_webp:"false", jpeg_video_quality:"5", dynamic_quality_min:"3", dynamic_quality_max:"7", video_scaling:"0", video_time:"1", video_area:"30", max_video_resolution_x:"1920", max_video_resolution_y:"1080"})) localStorage.setItem(k, v);'
+    h264_q35_js='localStorage.setItem("video_quality","3");localStorage.setItem("stream_mode","-1027");localStorage.setItem("video_stream_quality","35");'
+    h264_q51_js='localStorage.setItem("video_quality","3");localStorage.setItem("stream_mode","-1027");localStorage.setItem("video_stream_quality","51");'
+    ROW_NICE=1 browser_row nice_q3_image "$image_js" "" full
+    ROW_NICE=1 browser_row nice_tuned_image "$tuned_image_js" "" full
+    ROW_NICE=1 browser_row nice_h264 "$default_js" "$default_args" full
+    ROW_NICE=1 browser_row nice_h264_q35 "$h264_q35_js" "$default_args" full
+    ROW_NICE=1 browser_row nice_h264_q51 "$h264_q51_js" "$default_args" full
+    browser_row default_h264_last "$default_js" "$default_args" full  # leaves defaults in place
   else
     printf '\033[33mWARN\033[0m no Chrome on this host, so no browser rows\n'
     reply=$(boat '{"op":"desktop","action":"start"}') || fail "desktop start: $reply"
