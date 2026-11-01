@@ -103,9 +103,11 @@ jobs:
         run: components/boat/e2e.sh "$OUT" 2>&1 | tee e2e.log; test "${PIPESTATUS[0]}" = 0
 
       - name: guest checks in a VM (test-in-vm.sh)
+        if: ${{ !cancelled() }} # independent of e2e: every run reports all three
         run: sudo -E components/boat/guest/test-in-vm.sh "$OUT/vmlinux" "$OUT/rootfs-full.ext4" 2>&1 | tee -a e2e.log; test "${PIPESTATUS[0]}" = 0
 
       - name: e2e edge (Caddy TLS, private routes, desktop origins, ssh jump)
+        if: ${{ !cancelled() }}
         env:
           E2E_WORK: /mnt/boat-edge
         run: components/boat/gateway/e2e-edge.sh "$OUT" 2>&1 | tee -a e2e.log; test "${PIPESTATUS[0]}" = 0
