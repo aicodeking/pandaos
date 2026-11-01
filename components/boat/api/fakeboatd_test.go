@@ -29,6 +29,14 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 	mux.HandleFunc("POST /v1/vms", func(w http.ResponseWriter, r *http.Request) {
 		var in map[string]any
 		json.NewDecoder(r.Body).Decode(&in)
+		switch in["size"] {
+		case "", nil:
+			in["size"] = "default" // boatd's defaultSize
+		case "small", "default", "large", "xlarge":
+		default:
+			writeJSON(w, 400, map[string]string{"error": fmt.Sprintf("unknown size %q", in["size"])})
+			return
+		}
 		f.mu.Lock()
 		f.n++
 		id := fmt.Sprintf("vm%d", f.n)

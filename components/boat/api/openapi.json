@@ -1578,12 +1578,8 @@
     ]
    },
    "Size": {
-    "enum": [
-     "small",
-     "default",
-     "large",
-     "xlarge"
-    ]
+    "type": "string",
+    "description": "A size name from the server's boatd config (default: small, default, large, xlarge); omitted = the server's defaultSize"
    },
    "VM": {
     "type": "object",

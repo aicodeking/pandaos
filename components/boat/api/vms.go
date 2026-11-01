@@ -16,7 +16,6 @@ import (
 )
 
 var (
-	sizes     = []string{"small", "default", "large", "xlarge"}
 	reVMName  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	reID      = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 	reEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
@@ -135,11 +134,9 @@ func (s *server) validateCreate(c *createReq) string {
 	if c.Name != "" && !reVMName.MatchString(c.Name) {
 		return "name must be lowercase letters, digits and dashes (max 63)"
 	}
-	if c.Size == "" {
-		c.Size = "default"
-	}
-	if !slices.Contains(sizes, c.Size) {
-		return "size must be one of " + strings.Join(sizes, ", ")
+	// Sizes are boatd's config; boatd rejects unknown ones, "" = its defaultSize.
+	if c.Size != "" && !reVMName.MatchString(c.Size) {
+		return "invalid size"
 	}
 	if c.Image == "" && len(s.cfg.Images) > 0 {
 		c.Image = s.cfg.Images[0]

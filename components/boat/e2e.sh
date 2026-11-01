@@ -40,7 +40,7 @@ cleanup() {
     sudo kill "$(cat "$WORK/boatd.pid")" 2>/dev/null
     for _ in $(seq 100); do sudo kill -0 "$(cat "$WORK/boatd.pid")" 2>/dev/null || break; sleep 0.2; done
   fi
-  sudo pkill -9 -f "firecracker --id vm-"
+  sudo pkill -9 -x firecracker # -f would match this sudo itself
   sleep 0.5
   for t in $(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -E '^bt[0-9]+$'); do sudo ip link del "$t"; done
   sudo ip link del boatbr0 2>/dev/null
