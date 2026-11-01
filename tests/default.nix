@@ -385,6 +385,16 @@ in
   panda-mem-tools = import ../components/mem/vmtest.nix { inherit pkgs self; };
   agent-clis = import ../components/agent-clis/vmtest.nix { inherit pkgs self; };
   panda-cu = import ../components/computer-use/vmtest.nix { inherit pkgs self; };
+  boat-module = import ../components/boat/vmtest.nix { inherit pkgs self; };
+  # Builds (and so `go test`s, in checkPhase) the real boat packages.
+  boat-packages = pkgs.linkFarmFromDrvs "boat-packages" (
+    map (n: self.packages.${pkgs.stdenv.hostPlatform.system}.${n}) [
+      "boatd"
+      "boat-api"
+      "boat"
+      "boat-gateway"
+    ]
+  );
 
   mem = pkgs.testers.runNixOSTest {
     name = "mem";

@@ -123,10 +123,12 @@
             ./components/checkpoint/module.nix
             ./components/sysmcp/module.nix
             ./components/computer-use/module.nix
+            ./components/boat/module.nix
           ];
         };
         headless = ./nixos/profiles/headless.nix;
         desktop = ./nixos/profiles/desktop.nix;
+        server = ./nixos/profiles/server.nix;
       };
 
       nixosConfigurations = {
@@ -136,6 +138,10 @@
         };
         desktop = mkPandaSystem {
           profile = "desktop";
+          modules = [ ./nixos/installer/target.nix ];
+        };
+        server = mkPandaSystem {
+          profile = "server";
           modules = [ ./nixos/installer/target.nix ];
         };
       };
@@ -153,6 +159,10 @@
           ];
           vm-headless = (mkPandaSystem { profile = "headless"; inherit system; }).config.system.build.vm;
           panda-cu = pkgs.callPackage ./components/computer-use/package.nix { };
+          boatd = pkgs.callPackage ./components/boat/boatd/package.nix { };
+          boat-api = pkgs.callPackage ./components/boat/api/package.nix { };
+          boat = pkgs.callPackage ./components/boat/cli/package.nix { };
+          boat-gateway = pkgs.callPackage ./components/boat/gateway/package.nix { };
           panda-install = pkgs.callPackage ./nixos/installer/package.nix {
             inherit flakeUrl revision flakeLock;
             systems = lib.genAttrs [ "headless" "desktop" ] (installable system);
