@@ -174,7 +174,7 @@ class Cdp:
         return r["result"].get("value")
 
 
-def start_chrome(chrome, profile):
+def start_chrome(chrome, profile, link):
     argv = [chrome, "--headless=new", "--no-sandbox", "--no-first-run", "--remote-debugging-port=0",
             "--user-data-dir=" + profile, "--window-size=%d,%d" % (VIEW_W, VIEW_H),
             "--ignore-certificate-errors", "--disable-background-timer-throttling",
@@ -183,7 +183,14 @@ def start_chrome(chrome, profile):
     rules = resolver_rules()
     if rules:
         argv.insert(1, "--host-resolver-rules=" + rules)
-    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+    u = urlsplit(link)
+    if u.scheme == "http":
+        # WebCodecs needs a secure context. Production links are https; this is for
+        # direct test runs against a guest's http://IP:6080.
+        argv.insert(1, "--unsafely-treat-insecure-origin-as-secure=http://%s" % u.netloc)
+    # Chrome's crash handler dies without a usable HOME (CI steps may not have one).
+    env = dict(os.environ, HOME=profile, XDG_CONFIG_HOME=profile, XDG_CACHE_HOME=profile)
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, env=env,
                             stderr=open(os.path.join(profile, "chrome.log"), "wb"))
     port_file = os.path.join(profile, "DevToolsActivePort")
     end = time.monotonic() + 30
@@ -217,8 +224,10 @@ def wait_for_stream(cdp):
                 return
             before = b["changed"] if b["cw"] else None
         time.sleep(1)
-    die("no desktop frames in %d s at %s; page errors: %s"
-        % (CONNECT_TIMEOUT_S, cdp.eval("location.href"), cdp.eval("JSON.stringify((window.__boat||{}).errors)")))
+    die("no desktop frames in %d s at %s; probe %s; canvases %s; secure=%s; text: %s"
+        % (CONNECT_TIMEOUT_S, cdp.eval("location.href"), cdp.eval("JSON.stringify(window.__boat)"),
+           cdp.eval("JSON.stringify([...document.querySelectorAll('canvas')].map(c => [c.id, c.width, c.height]))"),
+           cdp.eval("isSecureContext"), cdp.eval("document.body.innerText.slice(0, 300)")))
 
 
 def measure(link, secs):
@@ -228,7 +237,7 @@ def measure(link, secs):
     profile = tempfile.mkdtemp(prefix="boat-fps-")
     proc = None
     try:
-        proc, cdp = start_chrome(chrome, profile)
+        proc, cdp = start_chrome(chrome, profile, link)
         cdp.call("Page.enable")
         cdp.call("Runtime.enable")
         cdp.call("Page.addScriptToEvaluateOnNewDocument", source=PROBE)
