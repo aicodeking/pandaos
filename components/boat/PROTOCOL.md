@@ -169,7 +169,7 @@ Semantics:
   - boatd sends 1 MiB chunks.
 - **set_identity**
   - The agent sets the MAC (link down, set address, up), flushes and adds IPv4 (and IPv6), sets the default route(s), `/etc/resolv.conf`, hostname and `/etc/hosts`.
-  - It **always** regenerates `/etc/machine-id` and the ssh host keys, then try-restarts sshd.
+  - It **always** regenerates `/etc/machine-id` and the ssh host keys, then restarts sshd (which also starts one that had failed).
   - It saves the identity to `/etc/boat/identity.json` and re-applies it at every boot, which overrides the kernel `ip=`.
   - boatd sends it once for each new VM (create, fork, from-snapshot), never on start.
 - **set_env** writes `/etc/boat/env` (mode 0600, owner the exec user) as `export K='V'` lines. It is meant for team secrets.

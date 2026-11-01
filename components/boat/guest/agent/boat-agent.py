@@ -414,7 +414,7 @@ def regenerate_secrets():
         if name.startswith("ssh_host_"):
             os.unlink(os.path.join("/etc/ssh", name))
     run(["ssh-keygen", "-A"])
-    run(["systemctl", "try-restart", "ssh.service"], check=False)
+    run(["systemctl", "restart", "ssh.service"], check=False)  # also revives a failed sshd
 
 
 def op_set_identity(req, send):
