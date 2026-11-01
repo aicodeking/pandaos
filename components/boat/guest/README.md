@@ -99,7 +99,7 @@ old slim image.
 | docker.io + compose v2, git, gh, build-essential, python3, tmux, ripgrep, jq, openssh-server | yes | yes |
 | Node.js 26.13.0 LTS + npm, Bun 1.4.4, rustup 1.29.2 (stable, minimal, for `dev`) | yes | yes |
 | claude-code 2.1.316, codex 0.166.0, opencode 1.19.5 (npm, global) | yes | yes |
-| XFCE 4.18 + xfce4-terminal, Ghostty 1.3.1, KasmVNC 1.5.2, Mesa llvmpipe, glxgears, xdotool | no | yes |
+| XFCE 4.18 + xfce4-terminal, Ghostty 1.3.1, KasmVNC 1.5.2, libav (H.264), Mesa llvmpipe, glxgears, xdotool | no | yes |
 | Google Chrome stable, code-server 4.144.0 | no | yes |
 
 Exact versions of everything land in `out/manifest-<variant>.txt`; sizes in
@@ -112,7 +112,7 @@ Sizes (MiB, CI build):
 | slim, before trimming | 3027 | 4144 | 907 |
 | full, before trimming | 4548 | 5823 | 1353 |
 | slim, now | 2821 | 3065 | 842 |
-| full, now (with Ghostty + Mesa added) | 4406 | 4698 | 1313 |
+| full, now (with Ghostty, Mesa and H.264 libraries added) | 4508 | 4803 | 1348 |
 
 Trimming: tight ext4 packing (above); dpkg excludes for docs/man/info/locales;
 opencode's unused `x64-baseline` and musl binaries (npm installs both CPU variants,
@@ -143,11 +143,62 @@ Keys go in with `put_file /home/dev/.ssh/authorized_keys`.
 
 ## Desktop: KasmVNC
 
-KasmVNC over Selkies-GStreamer: Selkies is smoother on a good link, but WebRTC
-media needs UDP or a TURN server, which a host HTTP reverse proxy and a signed URL
-cannot carry. KasmVNC is one HTTP + WebSocket port, so the host proxies it like any
-other URL. Xvnc runs with `-FrameRate 60` and still does up to 60 fps with WebP/JPEG and dynamic quality, much
-smoother than noVNC + x11vnc.
+KasmVNC over Selkies-GStreamer: WebRTC media needs UDP or a TURN server, which a
+host HTTP reverse proxy and a signed URL cannot carry. KasmVNC is one HTTP + WebSocket
+port, so the host proxies it like any other URL.
+
+**1080p60 is not what we measure on CI.** Numbers from `desktop-browser-fps.py`:
+headless Chrome through the real link and web client at 1920x1080, on a 4-core GitHub
+runner that also hosts the VM, with software rendering (llvmpipe), software encoding
+and software decoding. "Shown" counts paints where the canvas pixels changed, which is
+what a viewer sees. "Decoded" counts WebCodecs frames, and is 0 in image mode. Two CI
+runs (41326922291, 41328850520); glxgears was the source and was not the limit.
+
+| 1080p desktop, 2 vCPU VM, direct to the guest | shown fps | decoded fps | Mbps |
+|---|---|---|---|
+| Fullscreen motion, stock KasmVNC client settings | 19.0-19.2 | - | 6.5-6.6 |
+| Fullscreen motion, preset 3, JPEG/WebP | 21.0-24.6 | - | 7.3-8.5 |
+| **Fullscreen motion, preset 3, H.264 (default)** | **27.4-29.6** | 34.4-35.8 | 19.9-20.6 |
+| 400x400 window moving, preset 3, JPEG/WebP | 55.6-59.2 | - | 3.7-3.8 |
+| **400x400 window moving, preset 3, H.264 (default)** | **40.3-45.8** | 58.2-58.3 | 9.0 |
+
+Through the TLS edge (Caddy + gateway, default-size VM), default H.264, fullscreen:
+**34.0-34.7 shown, 47.2-47.7 decoded, 25.4-25.8 Mbps.**
+
+Earlier versions of this file claimed 44-62 fps. That was wrong: it counted raw 8bpp
+RFB updates at the server, not what a browser shows, and the range was too generous
+even for that. `desktop-check.sh` still prints that rate as `desktop_raw_8bpp_fps`
+(16-19 in fullscreen).
+
+Why these settings:
+- The stock client asks for 24 fps at 960x540 in video mode: its `video_quality` 2
+  preset overrides the server's `-FrameRate 60`. `boat-defaults.js` seeds preset 3
+  (60 fps, 1080p) before the client starts. A choice saved in the browser wins.
+- **Encoder: software H.264** (`-videoCodec h264`, client `stream_mode` -1027, x264
+  `ultrafast`), decoded by WebCodecs. KasmVNC dlopens `libavcodec.so` and has no H.264
+  without it, which costs about 105 MiB of the full image. H.264 beats JPEG/WebP on
+  fullscreen motion, and a user's machine usually decodes it in hardware, which CI
+  cannot show. The costs: 2.5x the bandwidth and softer text than image mode, and fewer
+  shown frames in the small-window case above. The client's settings panel can switch
+  to image mode, and it falls back by itself if the browser cannot decode H.264.
+- Lowering the source's priority, the client's stream-quality setting and a tuned
+  JPEG profile moved fullscreen by no more than a few fps, so none are used.
+- The limit looks like CPU. Decoded fps was 34-36 on 2 vCPU and about 47 on a
+  default-size VM, on a runner with no spare cores. More cores or a VA-API GPU should
+  help; neither is measured here.
+- Not WebRTC: Selkies would use the same x264 on the same cores, and needs TURN and
+  gateway support that the host does not have. It was not built or measured. KasmVNC's
+  `enable_webrtc` UDP path needs a UDP route to the guest, which is also absent.
+
+The gate: `desktop-check.sh` fails below 20 shown fps or under 1920 wide
+(`MIN_BROWSER_FPS`). That is just above stock settings' 19 fps on this hardware, so it
+catches a slide back to them. It is not a quality target.
+
+Auth: no RFB or HTTP auth on Xvnc (`-SecurityTypes None -disableBasicAuth`). Its ports
+(5901, 6081) listen on loopback only, and anything that can reach those already runs
+inside the VM, where `dev` has sudo. The way in is the agent's proxy, which requires
+the cookie on every connection including the websocket (a query token only buys the
+cookie redirect) and rejects any `Origin` that does not match `Host`.
 
 `desktop start` starts `boat-desktop.service` (Xvnc `:1` with XFCE, as `dev`,
 web client + websocket on **127.0.0.1:6081 only**) and the agent's token proxy on
@@ -177,6 +228,15 @@ and the connection stays usable.
 | `shutdown` | | `{ok}`, then the VM reboots and Firecracker exits |
 | `reseed` | `entropy_b64` (32-4096 bytes), `generation?` | `{ok, bytes}` |
 | `sync` | | `{ok}` after `sync(2)`, i.e. every filesystem flushed (boatd calls it before pause) |
+| `cmd_start` | `argv, env?, cwd?, user? ("dev")` | `{ok, cmd_id}` |
+| `cmd_list` | | `{ok, cmds: [status...]}` |
+| `cmd_status` | `cmd_id` | `{ok, cmd_id, argv, state, running, pid, started, ended?, exit?, signal?}` |
+| `cmd_logs` | `cmd_id, offset? (0), limit? (1 MiB, max 4 MiB)` | `{ok, data_b64, offset, next_offset, size, truncated, running}` |
+| `cmd_signal` | `cmd_id, signal` ("TERM", "SIGTERM" or a number) | `{ok}` |
+| `file_list` | `path` | `{ok, entries: [{name, type, size, mode, mtime}], truncated}` |
+| `file_delete` | `path, recursive? (false)` | `{ok}` |
+| `file_move` | `from, to, overwrite? (false)` | `{ok}` |
+| `file_search` | `path, query, limit? (100, max 1000), content? (true), regex? (false)` | `{ok, matches: [{path, line?, text?}], truncated}` |
 
 Additions to the PROTOCOL.md contract (all optional):
 - `exec.user` (default `dev`; `"root"` for root). The command runs in its own
@@ -211,6 +271,20 @@ Additions to the PROTOCOL.md contract (all optional):
   on forks in CI. With RSA gone and sshd no longer awaited, one CI run measured
   `identity` at 0-326 ms (mostly under 100 ms) and a fork at 0.90 s. No RSA host key
   means a client that only accepts RSA can't connect.
+- `cmd_*`: a detached command runs under its own double-forked supervisor, so an agent
+  restart doesn't touch it, and a snapshot keeps it like any process. Everything lives
+  in `/var/lib/boat/cmds/<cmd_id>` (root only). The start spec, which holds the
+  environment, is deleted once started. The env is the same as `exec`: `/etc/boat/env`,
+  then the request's `env`. `state` is `running`, `exited` or `lost` (its supervisor is
+  gone, for example after a reboot). Logs merge stdout and stderr and keep the newest
+  32-64 MiB; offsets are absolute, and an offset that rotated away moves forward with
+  `truncated: true`. The newest 100 finished commands are kept. A running command holds
+  `idle_s` at 0. `cmd_signal` signals the process group and refuses once the command
+  has exited, so background children it left behind can't be signalled this way.
+- `file_*` run as root, like `put_file`. `file_delete` does not follow symlinks and
+  refuses `/` and top-level system directories. `file_move` treats `to` as the exact
+  destination. `file_search` uses ripgrep (so `.gitignore` applies): a fixed string by
+  default; `content: false` matches a case-insensitive substring of file names.
 - `set_env` writes `/etc/boat/env` (`export K='v'` lines), 0600, owned by `dev` so
   that dev's login shells (`/etc/profile.d/boat-env.sh`) and bash (`/etc/bash.bashrc`)
   can source it.
@@ -220,7 +294,7 @@ Additions to the PROTOCOL.md contract (all optional):
 
 ## Tests
 
-- `cd agent && python3 -m unittest -v test_boat_agent`: 21 tests over a socketpair
+- `cd agent && python3 -m unittest -v test_boat_agent`: 55 tests over a socketpair
   (exec streaming/exit/stdin/env/cwd/tty/3 MB output/timeout + group kill,
   set_env, chunked put/get, validation, reseed gating set_identity, sync, the
   desktop token check and proxy, and `desktop-check.sh` end to end through the
@@ -230,14 +304,12 @@ Additions to the PROTOCOL.md contract (all optional):
   and `-k` also apply to the websocket, as does `$SSL_CA`). It then opens
   `<page>/websockify`, does the RFB handshake (security None, raw 8bpp), and passes
   on the first FramebufferUpdate. It counts non-empty updates for SECONDS and prints
-  `METRIC desktop_first_frame_ms` and `METRIC desktop_fps`. `$ANIMATE_CMD` runs
-  first in the background, e.g. `boat exec VM -- boat-desktop-animate 10`
-  (glxgears on llvmpipe, with an xdotool-moved window as fallback). Measured in CI
-  on 2 vCPU, 1920x1080, glxgears at 400x400, over 8 runs: 44-62 fps, counting both
-  direct runs against the guest's token proxy and runs through the TLS edge; first
-  frame 136-211 ms.
-  Those are raw 8bpp updates, not the browser's encoded stream, so they show how fast
-  the server produces frames, not what a user sees.
+  `METRIC desktop_first_frame_ms` and `METRIC desktop_raw_8bpp_fps`, then runs
+  `desktop-browser-fps.py` if Chrome is present. `$ANIMATE_CMD` loops in the
+  background, e.g. `boat exec VM -- boat-desktop-animate 10`
+  (glxgears on llvmpipe, with an xdotool-moved window as fallback).
+- `./desktop-browser-fps.py LINK [SECONDS]`: the browser measurement described under
+  Desktop. Needs Chrome or Chromium; `$CURL_OPTS` becomes Chrome's resolver rules.
 - `./test-in-vm.sh [vmlinux] [rootfs.ext4]`: needs `/dev/kvm` and sudo (tap + NAT).
   Downloads Firecracker v1.17.0 (sha-pinned) unless `FIRECRACKER` is set, boots the
   image with an 8 GB disk, and checks health, exec (user, exit code, timeout),

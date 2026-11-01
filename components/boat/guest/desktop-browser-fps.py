@@ -13,7 +13,8 @@ cookies, the real KasmVNC web client) and over SECONDS counts:
   desktop_browser_stream_mbps   bytes the websocket delivered
 
 Env: CHROME (path), CURL_OPTS (--resolve/--connect-to become Chrome's resolver rules),
-WARMUP_S (10: let the stream settle), MIN_FPS (fail below this; default 0).
+WARMUP_S (10: let the stream settle), MIN_FPS (when set, fail below this or if the
+stream is not full width; default 0).
 Certificate errors are ignored: this measures frames, it does not test TLS.
 """
 import base64
@@ -281,6 +282,8 @@ def main():
     floor = float(os.environ.get("MIN_FPS", "0"))
     if fps < floor:
         die("%.1f fps is below the floor of %.1f" % (fps, floor))
+    if floor and max(b["w"] if b["decoded"] > a["decoded"] else 0, b["cw"]) < VIEW_W:
+        die("the stream is not %d wide; back to the client's low-resolution defaults?" % VIEW_W)
 
 
 if __name__ == "__main__":

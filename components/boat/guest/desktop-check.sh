@@ -23,7 +23,9 @@ set -euo pipefail
 LINK=${1:?usage: desktop-check.sh LINK [SECONDS]}
 SECS=${2:-5}
 HERE=$(cd "$(dirname "$0")" && pwd)
-MIN_BROWSER_FPS=${MIN_BROWSER_FPS:-0}
+# Above the 19 fps of KasmVNC's stock client settings on the same CI hardware, so
+# sliding back to them fails. Not a target: see README.md for what is measured.
+MIN_BROWSER_FPS=${MIN_BROWSER_FPS:-20}
 W=$(mktemp -d)
 trap 'rm -rf "$W"; [[ -n ${anim:-} ]] && kill "$anim" 2>/dev/null; true' EXIT
 
