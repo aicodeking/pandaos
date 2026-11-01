@@ -341,7 +341,10 @@ sudo cp --sparse=always "$STATE/images/slim/vmlinux" "$STATE/images/slim/rootfs.
 sudo sync
 restart_boatd "$(cfg_with ".stateDir = \"$SMALL\" | .minFreeGiB = 1 | .minFreePct = 0" small)"
 fill=$(newvm '{"name":"fill","team":"lim"}')
-# Past what the host has: the guest gets I/O errors, not the host.
+# Past what the host has: the guest gets I/O errors, not the host. Grow the guest's
+# filesystem first, or the fill ends on its ENOSPC (first boot grows it in the background).
+bx "$fill" 'resize2fs /dev/vda' >/dev/null 2>&1 || true
+[ "$(bx "$fill" 'df --output=size -BG / | tail -1' | tr -d ' G')" -ge 7 ] || fail "guest filesystem did not reach its disk size"
 bx "$fill" 'head -c 7G /dev/urandom >/home/dev/fill; sync' >/dev/null 2>&1 || true
 sudo sync
 avail=$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')
