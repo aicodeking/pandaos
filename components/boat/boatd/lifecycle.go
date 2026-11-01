@@ -154,11 +154,14 @@ func (m *Manager) chownRoot(v VM) error {
 
 // bootNew starts a freshly materialized VM and gives the guest its identity.
 func (m *Manager) bootNew(ctx context.Context, v VM, restore bool, env map[string]string) (VM, error) {
+	t0 := time.Now()
 	v, err := m.boot(ctx, v, restore)
 	if err != nil {
 		return m.fail(v.ID, err)
 	}
+	t1 := time.Now()
 	m.syncNet() // its anti-spoof rules and route
+	log.Printf("%s: boot=%dms net=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
 	return m.initGuest(ctx, v, env, true, restore)
 }
 
@@ -237,7 +240,9 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 // agent_ready stays false.
 func (m *Manager) initGuest(ctx context.Context, v VM, env map[string]string, identity, restored bool) (VM, error) {
 	sock := filepath.Join(m.root(v.ID), vsockUDS)
+	t0 := time.Now()
 	err := waitAgent(ctx, sock, time.Duration(m.cfg.BootTimeoutS)*time.Second)
+	t1 := time.Now()
 	if err == nil && identity {
 		m.reseed(ctx, v, sock)
 	}
@@ -250,12 +255,14 @@ func (m *Manager) initGuest(ctx context.Context, v VM, env map[string]string, id
 		}
 		_, err = agentCall(ctx, sock, id)
 	}
+	t2 := time.Now()
 	if err == nil && restored {
 		m.syncClock(ctx, sock)
 	}
 	if err == nil && len(env) > 0 {
 		_, err = agentCall(ctx, sock, map[string]any{"op": "set_env", "vars": env})
 	}
+	log.Printf("%s: guest init agent=%dms identity=%dms clock+env=%dms", v.ID, t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), time.Since(t2).Milliseconds())
 	msg := ""
 	if err != nil {
 		msg = err.Error()
