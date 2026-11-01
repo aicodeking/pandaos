@@ -243,7 +243,7 @@ if [[ $VARIANT == full ]]; then
   pass "desktop: KasmVNC on :$port, token -> cookie, backend local-only"
 
   # The proxy guards the websocket too, whatever the HTTP path did.
-  WSH=(-H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==")
+  WSH=(-H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Protocol: binary")
   wscode() { curl -s -m 5 --http1.1 -o /dev/null -w '%{http_code}' "${WSH[@]}" "$@" || true; }
   [[ $(wscode "$base/websockify") == 403 ]] || fail "websocket without the cookie"
   [[ $(wscode "$base/websockify?token=$tok") == 403 ]] || fail "websocket with only the query token"
