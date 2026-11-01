@@ -4,7 +4,7 @@
 #
 #   desktop-check.sh LINK [SECONDS=5]
 #
-# 1. curl follows LINK's redirects with a cookie jar ($CURL_OPTS is added, e.g.
+# 1. curl follows LINK's redirects and meta refreshes with a cookie jar ($CURL_OPTS is added, e.g.
 #    "--cacert ca.pem --resolve h:443:127.0.0.1" or "--connect-to h:p:127.0.0.1:p").
 # 2. Opens the KasmVNC websocket at <final page>/websockify with the cookies
 #    (python3 stdlib; --resolve/--connect-to/--cacert/-k in CURL_OPTS and
@@ -22,11 +22,29 @@ SECS=${2:-5}
 W=$(mktemp -d)
 trap 'rm -rf "$W"; [[ -n ${anim:-} ]] && kill "$anim" 2>/dev/null; true' EXIT
 
-# shellcheck disable=SC2086
-read -r final code < <(curl -sS -L --max-redirs 10 --max-time 30 -c "$W/jar" -b "$W/jar" \
-  ${CURL_OPTS:-} -o "$W/page.html" -w '%{url_effective} %{http_code}\n' "$LINK")
-[[ $code == 200 ]] || { echo "desktop-check: $LINK ended at $final with HTTP $code" >&2; exit 1; }
-grep -qi '<html' "$W/page.html" || { echo "desktop-check: $final is not an html page" >&2; exit 1; }
+# The gateway answers the signed link with a 200 meta-refresh page (so its
+# session cookie survives the cross-site entry); a browser follows that too.
+meta_refresh() {
+  python3 -I - "$1" "$2" <<'PY'
+import html, re, sys
+from urllib.parse import urljoin
+m = re.search(r"""<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["']\s*\d+\s*;\s*url=([^"'>]+)""",
+              open(sys.argv[2], errors="replace").read(), re.I)
+if m:
+    print(urljoin(sys.argv[1], html.unescape(m.group(1).strip())))
+PY
+}
+url=$LINK
+for _ in 1 2 3 4 5; do
+  # shellcheck disable=SC2086
+  read -r final code < <(curl -sS -L --max-redirs 10 --max-time 30 -c "$W/jar" -b "$W/jar" \
+    ${CURL_OPTS:-} -o "$W/page.html" -w '%{url_effective} %{http_code}\n' "$url")
+  [[ $code == 200 ]] || { echo "desktop-check: $url ended at $final with HTTP $code" >&2; exit 1; }
+  url=$(meta_refresh "$final" "$W/page.html")
+  [[ -n $url ]] || break
+done
+[[ -z $url ]] || { echo "desktop-check: too many meta refreshes, last $url" >&2; exit 1; }
+grep -qiE '<html|<!doctype html' "$W/page.html" || { echo "desktop-check: $final is not an html page" >&2; exit 1; }
 echo "desktop-check: page $final (HTTP $code)"
 
 if [[ -n ${ANIMATE_CMD:-} ]]; then

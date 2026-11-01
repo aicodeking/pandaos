@@ -284,6 +284,10 @@ def fake_kasmvnc(listener, frames_per_s=50):
             head = b""
             while b"\r\n\r\n" not in head:
                 head += c.recv(4096)
+            if b"meta=1" in head.split(b"\r\n")[0]:  # the gateway's session page
+                body = b'<!doctype html><meta http-equiv="refresh" content="0;url=/"><a href="/">x</a>'
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(body), body))
+                return
             if b"Upgrade: websocket" not in head:
                 c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n<html></html>")
                 return
@@ -338,7 +342,7 @@ class DesktopCheckTest(unittest.TestCase):
         srv = agent.start_proxy(port=0, backend_addr=backend.getsockname(), host="127.0.0.1")
         agent._desktop["token"] = tok = "d" * 32
         try:
-            link = "http://127.0.0.1:%d/?token=%s" % (srv.getsockname()[1], tok)
+            link = "http://127.0.0.1:%d/?token=%s&meta=1" % (srv.getsockname()[1], tok)
             r = subprocess.run(["bash", os.path.join(HERE, "..", "desktop-check.sh"), link, "1"],
                                capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

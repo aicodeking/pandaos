@@ -111,6 +111,8 @@ Sizes (MiB, CI build):
 |---|---|---|---|
 | slim, before trimming | 3027 | 4144 | 907 |
 | full, before trimming | 4548 | 5823 | 1353 |
+| slim, now | 2821 | 3065 | 842 |
+| full, now (with Ghostty + Mesa added) | 4406 | 4698 | 1313 |
 
 Trimming: tight ext4 packing (above); dpkg excludes for docs/man/info/locales;
 opencode's unused `x64-baseline` and musl binaries (npm installs both CPU variants,
@@ -123,8 +125,10 @@ Choices:
 - **Ghostty** has no official build for Ubuntu 24.04: Ubuntu packages it from
   26.04, and the snap needs snapd. The full image installs the community noble
   .deb that the Ghostty docs list (mkasberg/ghostty-ubuntu 1.3.1, sha256-pinned).
-  It renders with Mesa llvmpipe (software GL 4.5) under Xvnc. `test-in-vm.sh`
-  checks that it starts a shell and stays up (`METRIC ghostty_llvmpipe_ok`).
+  It renders with Mesa llvmpipe (measured in CI: GL 4.5, Mesa 25.2.8, LLVM 20.1.2)
+  under Xvnc. `test-in-vm.sh` checks that it starts a shell and stays up
+  (`METRIC ghostty_llvmpipe_ok`, currently 1). That proves it starts, not how fast
+  it renders.
   xfce4-terminal stays the XFCE default terminal.
 - **VS Code: code-server only.** The `code-server@.service` unit from the deb is
   installed, not enabled: `sudo systemctl enable --now code-server@dev` (it listens
@@ -213,14 +217,17 @@ Additions to the PROTOCOL.md contract (all optional):
   set_env, chunked put/get, validation, reseed gating set_identity, sync, the
   desktop token check and proxy, and `desktop-check.sh` end to end through the
   real token proxy to a fake KasmVNC).
-- `./desktop-check.sh LINK [SECONDS]`: follows the link's redirects with curl and
-  a cookie jar (`$CURL_OPTS` is added; `--resolve`, `--connect-to`, `--cacert`
+- `./desktop-check.sh LINK [SECONDS]`: follows the link's redirects and meta
+  refreshes with curl and a cookie jar (`$CURL_OPTS` is added; `--resolve`, `--connect-to`, `--cacert`
   and `-k` also apply to the websocket, as does `$SSL_CA`). It then opens
   `<page>/websockify`, does the RFB handshake (security None, raw 8bpp), and passes
   on the first FramebufferUpdate. It counts non-empty updates for SECONDS and prints
   `METRIC desktop_first_frame_ms` and `METRIC desktop_fps`. `$ANIMATE_CMD` runs
   first in the background, e.g. `boat exec VM -- boat-desktop-animate 10`
-  (glxgears on llvmpipe, with an xdotool-moved window as fallback).
+  (glxgears on llvmpipe, with an xdotool-moved window as fallback). Measured in CI
+  directly against the guest's token proxy, 2 vCPU, 1920x1080, glxgears at 400x400:
+  46.4 fps, first frame 158 ms. Those are raw 8bpp updates, not the browser's encoded
+  stream, so they show how fast the server produces frames, not what a user sees.
 - `./test-in-vm.sh [vmlinux] [rootfs.ext4]`: needs `/dev/kvm` and sudo (tap + NAT).
   Downloads Firecracker v1.17.0 (sha-pinned) unless `FIRECRACKER` is set, boots the
   image with an 8 GB disk, and checks health, exec (user, exit code, timeout),
