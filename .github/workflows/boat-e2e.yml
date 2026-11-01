@@ -100,6 +100,9 @@ jobs:
       - name: e2e
         run: components/boat/e2e.sh "$OUT" 2>&1 | tee e2e.log; test "${PIPESTATUS[0]}" = 0
 
+      - name: guest checks in a VM (test-in-vm.sh)
+        run: sudo -E components/boat/guest/test-in-vm.sh "$OUT/vmlinux" "$OUT/rootfs-full.ext4" 2>&1 | tee -a e2e.log; test "${PIPESTATUS[0]}" = 0
+
       - name: e2e edge (Caddy TLS, private routes, desktop origins, ssh jump)
         env:
           E2E_WORK: /mnt/boat-edge

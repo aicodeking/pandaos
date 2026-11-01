@@ -287,7 +287,8 @@ ck=$(awk '$6 == "__Host-boat_gw" {print $6 "=" $7}' "$djar" | head -1)
 if [ -x "$HERE/guest/desktop-check.sh" ]; then
   log "guest/desktop-check.sh: websocket + one frame"
   link=$(boat desktop edge-d --json | jq -r .url)
-  CURL_OPTS="--cacert $CA --connect-to ::127.0.0.1:443" SSL_CA=$CA E2E_CONNECT=127.0.0.1:443 \
+  CURL_OPTS="--cacert $CA --connect-to ::127.0.0.1:443" SSL_CA=$CA \
+    ANIMATE_CMD="boat exec edge-d -- boat-desktop-animate 10" \
     "$HERE/guest/desktop-check.sh" "$link" || fail "desktop-check.sh"
 else
   warn "components/boat/guest/desktop-check.sh not present yet"
