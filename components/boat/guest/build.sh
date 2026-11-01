@@ -96,7 +96,7 @@ build_rootfs() {
   rm -f "$img"
   docker export "$cid" | docker run --rm -i -v "$OUT:/out" -e IMG="/out/rootfs-$variant.ext4" \
     "$BUILDER_IMAGE" bash -euo pipefail -c '
-    apt-get update -qq && apt-get install -y -qq --no-install-recommends e2fsprogs >/dev/null
+    apt-get update -qq && apt-get install -y -qq --no-install-recommends e2fsprogs zerofree >/dev/null
     mkdir /r && tar -x -C /r --numeric-owner
     # Files docker bind-mounts at runtime come out empty; set them for a VM.
     rm -f /r/.dockerenv /r/etc/resolv.conf
@@ -106,13 +106,24 @@ build_rootfs() {
     : > /r/etc/machine-id
     rm -f /r/etc/ssh/ssh_host_*
     printf "/dev/vda / ext4 defaults,noatime 0 1\n" > /r/etc/fstab
+    echo "--- largest dirs (MiB) ---" >&2
+    du -xm -d3 /r | sort -n | tail -40 >&2
     used=$(du -sm /r | cut -f1)
-    size=$(( used + used / 5 + 512 ))
-    truncate -s "${size}M" "$IMG"
-    mkfs.ext4 -q -F -L boatroot -E root_owner=0:0 -d /r "$IMG"
-    e2fsck -fy "$IMG" >/dev/null || [ $? -le 1 ]
-    resize2fs -M "$IMG" >/dev/null       # shrink to the minimum; first boot grows it
-    e2fsck -fy "$IMG" >/dev/null || [ $? -le 1 ]
+    files=$(find /r -xdev | wc -l)
+    # Tight fit: content + 3% + journal/metadata; grow 5% per retry if mkfs runs
+    # out of room. No reserved blocks; first boot grows the fs to the disk.
+    # (resize2fs -M overestimates its minimum and never shrank this image.)
+    size=$(( used * 103 / 100 + 160 ))
+    for try in 1 2 3 4 5 6 7 8 9 10; do
+      rm -f "$IMG"; truncate -s "${size}M" "$IMG"
+      if mkfs.ext4 -q -F -m 0 -J size=64 -N $(( files * 6 / 5 + 16384 )) -L boatroot \
+           -E root_owner=0:0 -d /r "$IMG" 2>/tmp/mkfs.err; then break; fi
+      [ "$try" = 10 ] && { cat /tmp/mkfs.err >&2; exit 1; }
+      size=$(( size * 105 / 100 ))
+    done
+    zerofree "$IMG"                              # no stale data in free blocks
+    e2fsck -fy -E discard "$IMG" >/dev/null || [ $? -le 1 ]   # punch free blocks: sparse file
+    echo "files=$files"
     echo "content_mib=$used"
   ' | tee "$OUT/size-$variant.txt"
   docker rm -f "$cid" >/dev/null

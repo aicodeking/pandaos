@@ -62,6 +62,13 @@ Gaps in the Firecracker config that `docker.config` fills: `NFT_MASQ`, `NFT_REDI
 `NFT_FIB_IPV4`, `IP_VS` (+rr, nfct, xt ipvs; swarm/overlay service VIPs),
 `MACVLAN`, `IPVLAN`, `DUMMY`, `CGROUP_MISC`, `CRYPTO_USER_API_HASH`.
 
+Required for fork safety and checked by the build: `ACPI` + `VMGENID`. Firecracker
+(>= 1.10, x86_64) exposes a VMGenID ACPI device; 1.17 fixed its HID so the 6.1
+driver binds (`test-in-vm.sh` checks `/sys/bus/acpi/drivers/vmgenid/`). On restore
+the driver mixes the new generation ID into the CRNG. On 6.1 it gives userspace no
+signal (no uevent, no sysfs value; those came in later kernels), so the agent
+cannot detect a restore by itself. That is why `reseed` exists (see below).
+
 Gaps left on purpose: `KVM` (no nested VMs), AppArmor/SELinux (docker runs
 without an LSM profile; the VM is the boundary), modules (`modprobe` warnings from
 docker/iptables are harmless).
@@ -78,27 +85,47 @@ Interface naming is off (`99-default.link -> /dev/null`) so the NIC is `eth0`.
 `/etc/resolv.conf -> /proc/net/pnp` until `set_identity` writes a real one.
 No ssh host keys or machine-id are baked in; they are made at first boot.
 `boat-growfs.service` runs `resize2fs /dev/vda` every boot (idempotent; forks may
-get bigger disks). The image is shrunk with `resize2fs -M` after build.
+get bigger disks).
+
+Packing: the exported tree goes into an ext4 sized to content + 3% + 160 MiB
+(64 MiB journal, no reserved blocks, inodes = files x 1.2 + 16k), growing 5% per
+retry if mkfs runs out of room. Then `zerofree` and `e2fsck -E discard` keep free
+blocks zero and sparse. `resize2fs -M` was dropped: its minimum estimate equals the
+full size (`resize2fs -P`), so it never shrank anything. That was ~1.1 GB of the
+old slim image.
 
 | | slim | full |
 |---|---|---|
 | docker.io + compose v2, git, gh, build-essential, python3, tmux, ripgrep, jq, openssh-server | yes | yes |
 | Node.js 26.13.0 LTS + npm, Bun 1.4.4, rustup 1.29.2 (stable, minimal, for `dev`) | yes | yes |
 | claude-code 2.1.316, codex 0.166.0, opencode 1.19.5 (npm, global) | yes | yes |
-| XFCE 4.18 + xfce4-terminal, KasmVNC 1.5.2 | no | yes |
+| XFCE 4.18 + xfce4-terminal, Ghostty 1.3.1, KasmVNC 1.5.2, Mesa llvmpipe, glxgears, xdotool | no | yes |
 | Google Chrome stable, code-server 4.144.0 | no | yes |
 
 Exact versions of everything land in `out/manifest-<variant>.txt`; sizes in
 `out/size-<variant>.txt` (`content_mib`, `image_mib`, `zst_mib`).
 
-**Sizes: not measured yet.** The image has not been built (the dev machine is an
-arm64 Mac with no x86 docker). The first CI run fills them in. Rough estimate:
-slim ~3.5 GB, full ~5.5 GB uncompressed.
+Sizes (MiB, CI build):
+
+| | content | raw ext4 | zstd -10 |
+|---|---|---|---|
+| slim, before trimming | 3027 | 4144 | 907 |
+| full, before trimming | 4548 | 5823 | 1353 |
+
+Trimming: tight ext4 packing (above); dpkg excludes for docs/man/info/locales;
+opencode's unused `x64-baseline` and musl binaries (npm installs both CPU variants,
+214 MB each; postinstall hardlinks the chosen one into `bin/`); rustup's download
+and tmp dirs and root's caches. Rust stays on the `minimal` profile. There is one
+Node toolchain (code-server's bundled Node excepted). The codex binary is already
+stripped. The build log prints the 40 largest directories for the next round.
 
 Choices:
-- **Terminal: xfce4-terminal, not Ghostty.** Ghostty has no Ubuntu package and
-  needs OpenGL 3.3; the VM only has llvmpipe. foot is Wayland-only and alacritty
-  also needs GL, so neither fits an X/VNC session.
+- **Ghostty** has no official build for Ubuntu 24.04: Ubuntu packages it from
+  26.04, and the snap needs snapd. The full image installs the community noble
+  .deb that the Ghostty docs list (mkasberg/ghostty-ubuntu 1.3.1, sha256-pinned).
+  It renders with Mesa llvmpipe (software GL 4.5) under Xvnc. `test-in-vm.sh`
+  checks that it starts a shell and stays up (`METRIC ghostty_llvmpipe_ok`).
+  xfce4-terminal stays the XFCE default terminal.
 - **VS Code: code-server only.** The `code-server@.service` unit from the deb is
   installed, not enabled: `sudo systemctl enable --now code-server@dev` (it listens
   on 127.0.0.1:8080 with password auth from `~/.config/code-server/config.yaml`).
@@ -115,7 +142,7 @@ Keys go in with `put_file /home/dev/.ssh/authorized_keys`.
 KasmVNC over Selkies-GStreamer: Selkies is smoother on a good link, but WebRTC
 media needs UDP or a TURN server, which a host HTTP reverse proxy and a signed URL
 cannot carry. KasmVNC is one HTTP + WebSocket port, so the host proxies it like any
-other URL. It still does up to 60 fps with WebP/JPEG and dynamic quality, much
+other URL. Xvnc runs with `-FrameRate 60` and still does up to 60 fps with WebP/JPEG and dynamic quality, much
 smoother than noVNC + x11vnc.
 
 `desktop start` starts `boat-desktop.service` (Xvnc `:1` with XFCE, as `dev`,
@@ -144,6 +171,8 @@ and the connection stays usable.
 | `set_env` | `vars` | `{ok, count}` |
 | `desktop` | `action: start\|stop\|status, token?` | `{ok, port, token, path}` / `{ok}` / `{ok, running, port}` |
 | `shutdown` | | `{ok}`, then the VM reboots and Firecracker exits |
+| `reseed` | `entropy_b64` (32-4096 bytes), `generation?` | `{ok, bytes}` |
+| `sync` | | `{ok}` after `sync(2)`, i.e. every filesystem flushed (boatd calls it before pause) |
 
 Additions to the PROTOCOL.md contract (all optional):
 - `exec.user` (default `dev`; `"root"` for root). The command runs in its own
@@ -162,6 +191,14 @@ Additions to the PROTOCOL.md contract (all optional):
   route, `/etc/resolv.conf`, hostname and `/etc/hosts`, a new `/etc/machine-id` and
   new ssh host keys (sshd is restarted). It is saved to `/etc/boat/identity.json`
   and re-applied when the agent starts, so it wins over the cmdline `ip=` on reboot.
+- `reseed` credits the bytes to the kernel pool (`RNDADDENTROPY`, entropy = 8 bits
+  per byte), then forces a CRNG reseed (`RNDRESEEDCRNG`). Each reseed **arms exactly
+  one `set_identity`**, which refuses (`reseed required ...`) unless armed. A
+  snapshot captures the parent's disarmed state, so every created, forked or
+  restored VM needs a fresh host reseed before its ssh host keys and machine-id are
+  regenerated. If both requests carry `generation` (boatd's restore counter), they
+  must match. A request that fails validation does not use up the reseed; a
+  failure after validation does, so the host reseeds again before a retry.
 - `set_env` writes `/etc/boat/env` (`export K='v'` lines), 0600, owned by `dev` so
   that dev's login shells (`/etc/profile.d/boat-env.sh`) and bash (`/etc/bash.bashrc`)
   can source it.
@@ -171,14 +208,27 @@ Additions to the PROTOCOL.md contract (all optional):
 
 ## Tests
 
-- `cd agent && python3 -m unittest -v test_boat_agent`: 14 tests over a socketpair
+- `cd agent && python3 -m unittest -v test_boat_agent`: 18 tests over a socketpair
   (exec streaming/exit/stdin/env/cwd/tty/3 MB output/timeout + group kill,
-  set_env, chunked put/get, validation, the desktop token check and proxy end to end).
+  set_env, chunked put/get, validation, reseed gating set_identity, sync, the
+  desktop token check and proxy, and `desktop-check.sh` end to end through the
+  real token proxy to a fake KasmVNC).
+- `./desktop-check.sh LINK [SECONDS]`: follows the link's redirects with curl and
+  a cookie jar (`$CURL_OPTS` is added; `--resolve`, `--connect-to`, `--cacert`
+  and `-k` also apply to the websocket, as does `$SSL_CA`). It then opens
+  `<page>/websockify`, does the RFB handshake (security None, raw 8bpp), and passes
+  on the first FramebufferUpdate. It counts non-empty updates for SECONDS and prints
+  `METRIC desktop_first_frame_ms` and `METRIC desktop_fps`. `$ANIMATE_CMD` runs
+  first in the background, e.g. `boat exec VM -- boat-desktop-animate 10`
+  (glxgears on llvmpipe, with an xdotool-moved window as fallback).
 - `./test-in-vm.sh [vmlinux] [rootfs.ext4]`: needs `/dev/kvm` and sudo (tap + NAT).
   Downloads Firecracker v1.17.0 (sha-pinned) unless `FIRECRACKER` is set, boots the
   image with an 8 GB disk, and checks health, exec (user, exit code, timeout),
   disk growth, a 3 MiB put/get, ssh key login + sudo and sshd's password/root
-  settings, set_env in exec and login shells, set_identity (hostname, machine-id,
-  host keys, DNS, ssh after), `docker run hello-world`, the agent CLIs and tool
-  versions, idle_s, the desktop (403 without the token, 302 + cookie, page served,
-  6081 not reachable from the host; slim: refused), and shutdown.
+  settings, set_env in exec and login shells, vmgenid bound, set_identity refused
+  without a reseed and with a used-up one, then hostname, machine-id, every host key
+  type, DNS and ssh afterwards, sync, `docker run hello-world`, the agent CLIs and
+  tool versions, idle_s, the desktop (403 without the token, 302 + cookie, page
+  served, 6081 not reachable from the host, `desktop-check.sh` fps with glxgears,
+  the Ghostty llvmpipe check, code-server on 127.0.0.1:8080; slim: refused), and
+  shutdown.

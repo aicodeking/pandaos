@@ -18,7 +18,13 @@ ARG OPENCODE_VERSION=1.19.5
 ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-# The docker base image is "minimized" (no man pages); keep it that way.
+# Size: no docs/man/info/translations from any package (copyright files stay).
+RUN printf '%s\n' 'path-exclude=/usr/share/doc/*' 'path-include=/usr/share/doc/*/copyright' \
+      'path-exclude=/usr/share/man/*' 'path-exclude=/usr/share/info/*' 'path-exclude=/usr/share/groff/*' \
+      'path-exclude=/usr/share/lintian/*' 'path-exclude=/usr/share/linda/*' \
+      'path-exclude=/usr/share/locale/*' 'path-include=/usr/share/locale/locale.alias' \
+      > /etc/dpkg/dpkg.cfg.d/boat-excludes
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus udev kmod iproute2 iputils-ping iptables \
       ca-certificates curl wget gnupg openssh-server openssh-client sudo \
@@ -41,12 +47,17 @@ RUN curl -fsSLo /tmp/bun.zip https://github.com/oven-sh/bun/releases/download/bu
  && unzip -j /tmp/bun.zip 'bun-linux-x64/bun' -d /usr/local/bin && ln -s bun /usr/local/bin/bunx \
  && rm /tmp/bun.zip && bun --version
 
-# Agent CLIs.
+# Agent CLIs. npm installs every libc/CPU-matching variant (opencode: x64 and
+# x64-baseline, 214 MB each); postinstall hardlinks the chosen one into bin/,
+# so the unused variants are deleted.
 RUN npm install -g --no-fund --no-audit \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
       @openai/codex@${CODEX_VERSION} \
       opencode-ai@${OPENCODE_VERSION} \
- && npm cache clean --force && claude --version && codex --version && opencode --version
+ && npm cache clean --force \
+ && find /usr/local/lib/node_modules -type d \( -name 'opencode-linux-x64-baseline*' \
+      -o -name 'opencode-linux-x64-musl' -o -name 'claude-code-linux-x64-musl' \) -prune -exec rm -rf {} + \
+ && claude --version && codex --version && opencode --version
 
 # User `dev` (uid 1000): passwordless sudo, docker group, ssh keys only.
 # The Ubuntu image ships a uid-1000 `ubuntu` user; drop it.
@@ -60,7 +71,8 @@ RUN curl -fsSLo /tmp/rustup-init https://static.rust-lang.org/rustup/archive/${R
  && echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c - \
  && chmod 755 /tmp/rustup-init \
  && su dev -c '/tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain stable' \
- && rm /tmp/rustup-init && su dev -c '~/.cargo/bin/rustc --version'
+ && rm -rf /tmp/rustup-init /home/dev/.rustup/downloads /home/dev/.rustup/tmp \
+ && su dev -c '~/.cargo/bin/rustc --version'
 
 COPY rootfs/ /
 COPY agent/boat-agent.py /usr/local/lib/boat/boat-agent.py
@@ -77,7 +89,7 @@ RUN chmod 0440 /etc/sudoers.d/dev && visudo -cf /etc/sudoers.d/dev \
       e2scrub_reap.service systemd-networkd-wait-online.service cloud-init.target \
  && systemctl set-default multi-user.target \
  && rm -f /etc/ssh/ssh_host_* && : > /etc/machine-id \
- && rm -rf /var/lib/apt/lists/* /var/cache/* /var/log/*.log /tmp/* /root/.npm
+ && rm -rf /var/lib/apt/lists/* /var/cache/* /var/log/*.log /tmp/* /root/.npm /root/.cache /home/dev/.cache
 
 # ------------------------------------------------------------------ full
 FROM slim AS full
@@ -87,13 +99,25 @@ ARG KASMVNC_SHA256=89a5d1fbe9e032b122202be158a2b25f15c97e0a5b8dcf92a5e6835c7b7b2
 ARG CODE_SERVER_VERSION=4.144.0
 ARG CODE_SERVER_SHA256=45f5533b502edac68b7eb09c5cec44fd281f80264af9a87fde0bfb2c5e190615
 
-# XFCE (no recommends: no screensaver/locker), terminal, idle probe, fonts.
-# Ghostty is not shipped: no Ubuntu package and it needs OpenGL 3.3, which the
-# VM only has through llvmpipe. xfce4-terminal is the desktop terminal.
+ARG GHOSTTY_DEB=ghostty_1.3.1-0.ppa2_amd64_24.04.deb
+ARG GHOSTTY_URL=https://github.com/mkasberg/ghostty-ubuntu/releases/download/1.3.1-0-ppa2
+ARG GHOSTTY_SHA256=478d440153ef544426418efc7d6d8901715359f452c46be29071901a94b8cd47
+
+# XFCE (no recommends: no screensaver/locker), terminals, idle probe, fonts,
+# Mesa (llvmpipe: software GL 4.5 for Ghostty/glxgears under Xvnc), and the
+# fps test helpers (glxgears, xdotool).
+# Ghostty: no official build for Ubuntu 24.04 (Ubuntu ships it from 26.04; the
+# snap needs snapd), so this is the community .deb the Ghostty docs list,
+# pinned by sha256.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings thunar \
       xfce4-terminal dbus-x11 x11-utils x11-xserver-utils xprintidle \
       fonts-dejavu-core fonts-liberation adwaita-icon-theme \
+      libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-utils xdotool \
+ && curl -fsSLo /tmp/ghostty.deb "${GHOSTTY_URL}/${GHOSTTY_DEB}" \
+ && echo "${GHOSTTY_SHA256}  /tmp/ghostty.deb" | sha256sum -c - \
+ && apt-get install -y --no-install-recommends /tmp/ghostty.deb \
+ && ghostty --version \
  && curl -fsSLo /tmp/kasmvnc.deb https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_ubuntu_noble_${KASMVNC_VERSION}_amd64.deb \
  && echo "${KASMVNC_SHA256}  /tmp/kasmvnc.deb" | sha256sum -c - \
  && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb \
@@ -110,5 +134,5 @@ RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor
  && google-chrome --version
 
 COPY rootfs-full/ /
-RUN chmod 755 /usr/local/bin/boat-desktop-session \
+RUN chmod 755 /usr/local/bin/boat-desktop-session /usr/local/bin/boat-desktop-animate \
  && rm -rf /var/cache/* /var/log/*.log /tmp/*

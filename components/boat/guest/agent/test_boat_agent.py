@@ -159,6 +159,48 @@ class AgentTest(unittest.TestCase):
             self.assertIn("error", self.c.call(dict(good, **{k: v})), k)
         self.assertEqual(agent.validate_identity(good)["dns"], ["1.1.1.1"])
 
+    def test_reseed_gates_set_identity(self):
+        fed, calls = [], []
+        saved = agent.rnd_ioctl, agent.apply_network, agent.regenerate_secrets, agent.IDENTITY_FILE
+        agent.rnd_ioctl = fed.append
+        agent.apply_network = lambda ident: calls.append("net")
+        agent.regenerate_secrets = lambda: calls.append("keys")
+        agent.IDENTITY_FILE = os.path.join(self.tmp, "identity.json")
+        agent._reseed.update(armed=False, generation=None)
+        ident = {"op": "set_identity", "hostname": "vm-1", "ipv4_cidr": "10.0.0.2/30",
+                 "gw": "10.0.0.1", "dns": ["1.1.1.1"]}
+        try:
+            self.assertIn("reseed required", self.c.call(ident)["error"])
+            self.assertEqual(calls, [])
+            self.assertIn("error", self.c.call({"op": "reseed", "entropy_b64": "eA=="}))  # too short
+            m = self.c.call({"op": "reseed", "entropy_b64": base64.b64encode(b"\x01" * 64).decode()})
+            self.assertEqual((m, fed), ({"ok": True, "bytes": 64}, [b"\x01" * 64]))
+            # a bad request must not use up the reseed
+            self.assertIn("error", self.c.call(dict(ident, hostname="bad!")))
+            self.assertEqual(self.c.call(ident), {"ok": True})
+            self.assertEqual(calls, ["net", "keys"])
+            self.assertIn("reseed required", self.c.call(ident)["error"])  # used up
+            # generation must match when given
+            self.c.call({"op": "reseed", "entropy_b64": base64.b64encode(b"\x02" * 32).decode(),
+                         "generation": 7})
+            self.assertIn("generation", self.c.call(dict(ident, generation=6))["error"])
+            self.assertEqual(self.c.call(dict(ident, generation=7)), {"ok": True})
+        finally:
+            agent.rnd_ioctl, agent.apply_network, agent.regenerate_secrets, agent.IDENTITY_FILE = saved
+
+    def test_reseed_ioctl_error_is_reported(self):
+        saved = agent.RANDOM_DEV
+        agent.RANDOM_DEV = os.path.join(self.tmp, "not-a-random-device")
+        open(agent.RANDOM_DEV, "w").close()
+        try:
+            m = self.c.call({"op": "reseed", "entropy_b64": base64.b64encode(b"\x00" * 32).decode()})
+            self.assertIn("reseed:", m["error"])  # ENOTTY on a regular file
+        finally:
+            agent.RANDOM_DEV = saved
+
+    def test_sync(self):
+        self.assertEqual(self.c.call({"op": "sync"}), {"ok": True})
+
     def test_desktop_bad_action(self):
         self.assertIn("error", self.c.call({"op": "desktop", "action": "dance"}))
 
@@ -211,6 +253,106 @@ class DesktopProxyTest(unittest.TestCase):
         finally:
             agent._desktop["token"] = None
             srv.close()
+
+
+def fake_kasmvnc(listener, frames_per_s=50):
+    """A KasmVNC stand-in: serves an html page and RFB (security None) over a websocket."""
+    import hashlib
+    import struct
+
+    def ws_send(c, payload):
+        n = len(payload)
+        hdr = bytes([0x82]) + (bytes([n]) if n < 126 else bytes([126]) + struct.pack(">H", n)
+                               if n < 65536 else bytes([127]) + struct.pack(">Q", n))
+        c.sendall(hdr + payload)
+
+    def ws_recv(c, buf):
+        while True:
+            if len(buf) >= 6:
+                n = buf[1] & 0x7F
+                if len(buf) >= 6 + n:
+                    mask, data = buf[2:6], buf[6:6 + n]
+                    del buf[:6 + n]
+                    return bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+            chunk = c.recv(65536)
+            if not chunk:
+                raise EOFError
+            buf += chunk
+
+    def serve(c):
+        with c:
+            head = b""
+            while b"\r\n\r\n" not in head:
+                head += c.recv(4096)
+            if b"Upgrade: websocket" not in head:
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n<html></html>")
+                return
+            key = [l.split(b":", 1)[1].strip() for l in head.split(b"\r\n")
+                   if l.lower().startswith(b"sec-websocket-key")][0]
+            acc = base64.b64encode(hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+                                   .digest()).decode()
+            c.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                       "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n" % acc).encode())
+            buf = bytearray()
+            try:
+                ws_send(c, b"RFB 003.008\n")
+                ws_recv(c, buf)
+                ws_send(c, b"\x01\x01")
+                ws_recv(c, buf)
+                ws_send(c, struct.pack(">I", 0))
+                ws_recv(c, buf)                                    # ClientInit
+                ws_send(c, struct.pack(">HH16sI", 64, 32, b"\0" * 16, 4) + b"fake")
+                while True:
+                    msg = ws_recv(c, buf)
+                    if msg[0] == 3:                                # FramebufferUpdateRequest
+                        inc = msg[1]
+                        w, h = (8, 8) if inc else (64, 32)
+                        if inc:
+                            time.sleep(1.0 / frames_per_s)
+                        ws_send(c, struct.pack(">BxHHHHHi", 0, 1, 0, 0, w, h, 0) + b"\x07" * (w * h))
+            except (EOFError, OSError):
+                pass
+
+    def loop():
+        while True:
+            try:
+                c, _ = listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=serve, args=(c,), daemon=True).start()
+    threading.Thread(target=loop, daemon=True).start()
+
+
+class DesktopCheckTest(unittest.TestCase):
+    """desktop-check.sh through the agent's real token proxy to a fake KasmVNC."""
+
+    def test_desktop_check_end_to_end(self):
+        import shutil
+        import subprocess
+        if not shutil.which("curl"):
+            self.skipTest("curl not installed")
+        backend = socket.socket()
+        backend.bind(("127.0.0.1", 0))
+        backend.listen(8)
+        fake_kasmvnc(backend)
+        srv = agent.start_proxy(port=0, backend_addr=backend.getsockname(), host="127.0.0.1")
+        agent._desktop["token"] = tok = "d" * 32
+        try:
+            link = "http://127.0.0.1:%d/?token=%s" % (srv.getsockname()[1], tok)
+            r = subprocess.run(["bash", os.path.join(HERE, "..", "desktop-check.sh"), link, "1"],
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("METRIC desktop_first_frame_ms=", r.stdout)
+            fps = float(r.stdout.split("METRIC desktop_fps=")[1].split()[0])
+            self.assertGreater(fps, 10, r.stdout)
+            bad = subprocess.run(["bash", os.path.join(HERE, "..", "desktop-check.sh"),
+                                  link.replace(tok, "x" * 32), "1"],
+                                 capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(bad.returncode, 0)
+        finally:
+            agent._desktop["token"] = None
+            srv.close()
+            backend.close()
 
 
 if __name__ == "__main__":

@@ -154,17 +154,28 @@ boat '{"op":"set_env","vars":{"BOAT_TEST":"a b"}}' >/dev/null || fail "set_env"
 [[ $("${SSH[@]}" "dev@$GUEST_IP" 'bash -lc "printf %s \"\$BOAT_TEST\""') == "a b" ]] || fail "set_env in login shell"
 pass "set_env (exec + login shell)"
 
-# ---- 7. set_identity (as after a fork: same IP here, new name/mac/ids)
+# ---- 7. reseed + set_identity (as after a fork: same IP here, new name/mac/ids)
+vmgenid=$(vexec 30 root sh -c 'ls /sys/bus/acpi/drivers/vmgenid/ 2>/dev/null | grep -E "VMGENCTR|QEMUVGID" | head -1')
+[[ -n $vmgenid ]] || fail "vmgenid driver not bound (CONFIG_VMGENID + Firecracker VMGenID)"
+pass "vmgenid bound: $vmgenid"
+hostkeys() { vexec 30 root sh -c 'cat /etc/ssh/ssh_host_*_key.pub | sort'; }
 mid_before=$(vexec 30 root cat /etc/machine-id)
-key_before=$(vexec 30 root cat /etc/ssh/ssh_host_ed25519_key.pub)
-boat "{\"op\":\"set_identity\",\"hostname\":\"boat-fork-1\",\"ipv4_cidr\":\"$GUEST_IP/30\",\"gw\":\"$HOST_IP\",\"dns\":[\"8.8.8.8\"],\"mac\":\"$GUEST_MAC\"}" \
-  >/dev/null || fail "set_identity"
+keys_before=$(hostkeys)
+IDENT="{\"op\":\"set_identity\",\"hostname\":\"boat-fork-1\",\"ipv4_cidr\":\"$GUEST_IP/30\",\"gw\":\"$HOST_IP\",\"dns\":[\"8.8.8.8\"],\"mac\":\"$GUEST_MAC\"}"
+[[ $(boat "$IDENT" 2>&1) == *"reseed required"* ]] || fail "set_identity without reseed was not refused"
+boat "{\"op\":\"reseed\",\"entropy_b64\":\"$(head -c 64 /dev/urandom | base64 -w0)\"}" >/dev/null || fail "reseed"
+boat "$IDENT" >/dev/null || fail "set_identity"
+[[ $(boat "$IDENT" 2>&1) == *"reseed required"* ]] || fail "a reseed was usable twice"
 [[ $(vexec 30 root hostname) == boat-fork-1 ]] || fail "hostname"
 [[ $(vexec 30 root cat /etc/machine-id) != "$mid_before" ]] || fail "machine-id not regenerated"
-[[ $(vexec 30 root cat /etc/ssh/ssh_host_ed25519_key.pub) != "$key_before" ]] || fail "host keys not regenerated"
+keys_after=$(hostkeys)
+[[ $(wc -l <<<"$keys_after") -ge 3 ]] || fail "expected rsa, ecdsa and ed25519 host keys"
+[[ -z $(comm -12 <(echo "$keys_before") <(echo "$keys_after")) ]] || fail "a host key was not regenerated"
 vexec 30 root grep -q 8.8.8.8 /etc/resolv.conf || fail "dns"
 rm -f "$W/known"; "${SSH[@]}" "dev@$GUEST_IP" true || fail "ssh after set_identity"
-pass "set_identity (hostname, machine-id, host keys, dns, network up)"
+pass "reseed gates set_identity; hostname, machine-id, all host keys, dns, network"
+boat '{"op":"sync"}' >/dev/null || fail "sync"
+pass "sync"
 
 # ---- 8. docker + agent CLIs
 hello=$(vexec 300 dev docker run --rm hello-world 2>&1) || fail "docker run hello-world: $hello"
@@ -196,6 +207,35 @@ if [[ $VARIANT == full ]]; then
   [[ $(boat '{"op":"desktop","action":"status"}') == *'"running": true'* ]] || fail "desktop status"
   vexec 30 dev env DISPLAY=:1 xdpyinfo >/dev/null 2>&1 || fail "X display :1"
   pass "desktop: KasmVNC on :$port, token -> cookie, backend local-only"
+
+  # websocket + RFB through the token proxy, fps with glxgears running
+  anim=$(python3 -c 'import json; print(json.dumps({"op":"exec","argv":["boat-desktop-animate","12"],"timeout_s":20}))')
+  ANIMATE_CMD="python3 $W/boat.py $W/vsock.sock '$anim'" \
+    "$HERE/desktop-check.sh" "$base/?token=$tok" 5 | tee "$W/desktop-check.log" || fail "desktop-check"
+  pass "desktop stream: $(grep -h '^METRIC' "$W/desktop-check.log" | tr '\n' ' ')"
+  vexec 30 dev env DISPLAY=:1 glxinfo -B 2>&1 | grep -E 'OpenGL (renderer|core profile version)' || true
+
+  # Ghostty under llvmpipe: does it start a shell in a window and stay up?
+  vexec 30 root rm -f /tmp/ghostty-ok
+  gh_rc=0
+  vexec 20 dev env DISPLAY=:1 timeout 8 ghostty -e sh -c 'echo ok > /tmp/ghostty-ok; sleep 30' \
+    >"$W/ghostty.log" 2>&1 || gh_rc=$?
+  if [[ $gh_rc == 124 ]] && vexec 10 root test -s /tmp/ghostty-ok; then
+    echo "METRIC ghostty_llvmpipe_ok=1"; pass "ghostty runs on llvmpipe (shell started, alive after 8 s)"
+  else
+    echo "METRIC ghostty_llvmpipe_ok=0"
+    printf '\033[33mWARN\033[0m ghostty did not run (rc=%s):\n' "$gh_rc"; tail -n 30 "$W/ghostty.log"
+  fi
+
+  # code-server (installed, not enabled by default)
+  vexec 30 root systemctl start code-server@dev >/dev/null || fail "start code-server@dev"
+  for _ in $(seq 60); do
+    cs=$(vexec 10 dev curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ 2>/dev/null) && [[ $cs =~ ^(200|302)$ ]] && break
+    sleep 1
+  done
+  [[ $cs =~ ^(200|302)$ ]] || fail "code-server not reachable on 127.0.0.1:8080 (HTTP $cs)"
+  pass "code-server reachable (HTTP $cs)"
+  vexec 30 root systemctl stop code-server@dev >/dev/null || true
   boat '{"op":"desktop","action":"stop"}' >/dev/null
 else
   boat '{"op":"desktop","action":"start"}' >/dev/null 2>&1 && fail "slim image has a desktop"

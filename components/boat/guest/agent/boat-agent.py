@@ -6,6 +6,7 @@ requests in sequence. Replies are JSON lines. Errors are {"error": "..."}.
 See ../README.md for the op reference.
 """
 import base64
+import fcntl
 import grp
 import hmac
 import ipaddress
@@ -18,6 +19,7 @@ import select
 import shlex
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -52,6 +54,15 @@ STARTED = time.monotonic()
 _activity = {"last": time.monotonic(), "running": 0}
 _activity_lock = threading.Lock()
 _desktop = {"token": None, "proxy": None}
+# A reseed arms exactly one set_identity. A snapshot captures the parent's
+# disarmed state, so every restored child needs a fresh reseed first.
+_reseed = {"armed": False, "generation": None}
+_reseed_lock = threading.Lock()
+
+RANDOM_DEV = "/dev/random"
+RNDADDENTROPY = 0x40085203   # _IOW('R', 0x03, int[2])
+RNDRESEEDCRNG = 0x5207       # _IO('R', 0x07)
+ENTROPY_MIN, ENTROPY_MAX = 32, 4096
 
 
 class OpError(Exception):
@@ -417,11 +428,53 @@ def regenerate_secrets():
     run(["systemctl", "restart", "ssh.service"], check=False)  # also revives a failed sshd
 
 
+def rnd_ioctl(data):
+    """Credit `data` to the kernel pool, then force a CRNG reseed (needs root)."""
+    fd = os.open(RANDOM_DEV, os.O_WRONLY)
+    try:
+        fcntl.ioctl(fd, RNDADDENTROPY, struct.pack("ii", len(data) * 8, len(data)) + data)
+        fcntl.ioctl(fd, RNDRESEEDCRNG)
+    finally:
+        os.close(fd)
+
+
+def op_reseed(req, send):
+    data = b64d(req.get("entropy_b64"))
+    if not ENTROPY_MIN <= len(data) <= ENTROPY_MAX:
+        raise OpError("entropy must be %d..%d bytes" % (ENTROPY_MIN, ENTROPY_MAX))
+    try:
+        rnd_ioctl(data)
+    except OSError as e:
+        raise OpError("reseed: %s" % e)
+    with _reseed_lock:
+        _reseed.update(armed=True, generation=req.get("generation"))
+    send({"ok": True, "bytes": len(data)})
+
+
+def take_reseed(req):
+    """Consume the pending reseed, or refuse: new keys need fresh host entropy."""
+    with _reseed_lock:
+        if not _reseed["armed"]:
+            raise OpError("reseed required before set_identity (no fresh entropy since "
+                          "the last restore/set_identity)")
+        gen = req.get("generation")
+        if gen is not None and gen != _reseed["generation"]:
+            raise OpError("reseed generation %r != set_identity generation %r"
+                          % (_reseed["generation"], gen))
+        _reseed.update(armed=False, generation=None)
+
+
+def op_sync(req, send):
+    os.sync()  # flushes every mounted filesystem; boatd calls this before pause
+    send({"ok": True})
+
+
 def op_set_identity(req, send):
     ident = validate_identity(req)
+    take_reseed(req)
     apply_network(ident)
     regenerate_secrets()
-    os.makedirs(BOAT_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(IDENTITY_FILE), exist_ok=True)
     write_atomic(IDENTITY_FILE, json.dumps(ident), 0o600)
     send({"ok": True})
 
@@ -619,7 +672,7 @@ def op_shutdown(req, send):
 
 OPS = {"health": op_health, "exec": op_exec, "put_file": op_put_file,
        "get_file": op_get_file, "set_identity": op_set_identity, "set_env": op_set_env,
-       "desktop": op_desktop, "shutdown": op_shutdown}
+       "desktop": op_desktop, "shutdown": op_shutdown, "reseed": op_reseed, "sync": op_sync}
 
 
 def handle_conn(conn):

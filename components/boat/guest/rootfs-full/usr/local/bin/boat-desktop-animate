@@ -1,0 +1,32 @@
+#!/bin/bash
+# Keep the desktop busy for N seconds (default 10) so a stream fps measurement
+# means something: glxgears on Mesa llvmpipe, or, if GL is unavailable, an
+# xdotool-moved window. Prints which one ran.
+set -u
+secs=${1:-10}
+export DISPLAY=${DISPLAY:-:1}
+
+timeout "$secs" glxgears -geometry 400x400+100+100 >/dev/null 2>&1 &
+gears=$!
+sleep 1
+if kill -0 "$gears" 2>/dev/null; then
+  echo "animate: glxgears $secs s"
+  wait "$gears"
+  exit 0
+fi
+
+echo "animate: glxgears unavailable, moving a window with xdotool"
+xfce4-terminal --geometry 40x10+0+0 --title boat-animate --hold -x true &
+term=$!
+for _ in $(seq 50); do
+  win=$(xdotool search --name boat-animate 2>/dev/null | head -1) && [ -n "$win" ] && break
+  sleep 0.1
+done
+end=$(( $(date +%s) + secs - 1 ))
+x=0
+while [ "$(date +%s)" -lt "$end" ]; do
+  x=$(( (x + 8) % 1200 ))
+  xdotool windowmove "$win" "$x" 200
+  sleep 0.016
+done
+kill "$term" 2>/dev/null
