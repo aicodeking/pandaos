@@ -97,6 +97,9 @@ else
   [ -n "$cid" ] && [ "$cid" != null ] || fail "cmd_start gave no cmd_id"
   sleep 1
   bd POST "/v1/vms/$d1/agent" "{\"op\":\"cmd_logs\",\"cmd_id\":\"$cid\"}" | jq -r .data_b64 | base64 -d | grep -q agent-ok || fail "cmd_logs"
+  bd POST "/v1/vms/$d1/stop" >/dev/null # a detached command survives a snapshot stop/start
+  bd POST "/v1/vms/$d1/start" '{}' >/dev/null
+  [ "$(bd POST "/v1/vms/$d1/agent" "{\"op\":\"cmd_status\",\"cmd_id\":\"$cid\"}" | jq -r .state)" = running ] || fail "cmd_start's command did not survive a snapshot"
   bd POST "/v1/vms/$d1/agent" "{\"op\":\"cmd_signal\",\"cmd_id\":\"$cid\",\"signal\":\"KILL\"}" >/dev/null
   [ "$(bdcode POST "/v1/vms/$d1/agent" '{"op":"cmd_status","cmd_id":"nope"}')" = 404 ] || fail "unknown cmd_id: $(cat "$WORK/tmp/bd.out")"
 fi
@@ -108,7 +111,8 @@ exp=$(bd POST "/v1/vms/$d1/snapshots" '{"name":"exp"}' | jq -r .id)
 t=$(now)
 curl -fsS --unix-socket "$SOCK" -o "$WORK/tmp/exp.tar.zst" "http://boatd/v1/vms/$d1/snapshots/$exp/download"
 export_s=$(secs "$t" "$(now)")
-tar --zstd -tf "$WORK/tmp/exp.tar.zst" | grep -qx rootfs.ext4 || fail "export has no disk"
+members=$(tar --zstd -tf "$WORK/tmp/exp.tar.zst")
+grep -qx rootfs.ext4 <<<"$members" || fail "export has no disk: $members"
 echo "export ${export_s}s, $(($(stat -c %s "$WORK/tmp/exp.tar.zst") >> 20)) MiB"
 [ "$(bdcode GET "/v1/vms/vm-nope/snapshots/$exp/download")" = 404 ] || fail "export of another VM's snapshot"
 imported() { curl -fsS --unix-socket "$SOCK" -X POST --data-binary "@$1" "http://boatd/v1/snapshots/import?team=lim&name=$2"; }

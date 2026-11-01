@@ -111,7 +111,7 @@ grep -q '^max 100000$\|^300000 100000$' "/sys/fs/cgroup/boat-e2e/$p1/cpu.max" ||
 
 rules=$(sudo nft list table inet boat)
 grep -q 'meta skuid 900000-965534 drop' <<<"$rules" || fail "jail uid output rule not loaded"
-sudo nft list table bridge boat | grep -q 'limit rate over' || fail "egress rate rule not loaded"
+grep -q 'limit rate over' <<<"$(sudo nft list table bridge boat)" || fail "egress rate rule not loaded"
 [ "$(cat "/sys/fs/cgroup/boat-e2e/$p1/pids.max")" = 256 ] || fail "pids.max: $(cat "/sys/fs/cgroup/boat-e2e/$p1/pids.max")"
 
 log "host e2e: isolation"
