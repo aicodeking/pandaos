@@ -220,6 +220,23 @@ def feed_stdin(sink, data):
     threading.Thread(target=go, daemon=True).start()
 
 
+def drain_in_background(pipe):
+    """Discard output until the last writer exits, then close the pipe.
+
+    Closing it at once would kill a backgrounded child (`server &`) with SIGPIPE
+    on its next log line, after exec has already reported success.
+    """
+    def go():
+        try:
+            while os.read(pipe.fileno(), 65536):
+                pass
+        except OSError:
+            pass
+        finally:
+            pipe.close()  # via the file object, never by raw fd (no double close)
+    threading.Thread(target=go, daemon=True).start()
+
+
 def kill_group(proc, sig):
     try:
         os.killpg(proc.pid, sig)
@@ -240,9 +257,9 @@ def op_exec(req, send):
     finally:
         if proc.stdout is None:  # tty: we own the master fd
             os.close(next(iter(fds)))
-        else:  # pipes: close via their file objects, never by raw fd (no double close)
-            proc.stdout.close()
-            proc.stderr.close()
+        else:
+            drain_in_background(proc.stdout)
+            drain_in_background(proc.stderr)
         touch(-1)
     rc = proc.wait()
     res = {"exit": rc if rc >= 0 else 128 - rc}
@@ -267,7 +284,7 @@ def pump(proc, fds, send, deadline):
         if exited_at is None and proc.poll() is not None:
             exited_at = now
         if exited_at is not None and now - exited_at > DRAIN_GRACE_S:
-            break  # ponytail: background children keep their pipes; we stop reading
+            break  # background children keep their pipes; drain_in_background takes over
         ready, _, _ = select.select(list(fds), [], [], 0.1)
         for fd in ready:
             try:

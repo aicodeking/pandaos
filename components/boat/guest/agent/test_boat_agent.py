@@ -103,6 +103,18 @@ class AgentTest(unittest.TestCase):
         time.sleep(3.5)
         self.assertFalse(os.path.exists(marker), "background child survived the group kill")
 
+    def test_exec_background_child_survives_writing_after_exit(self):
+        # `server &` must not die of SIGPIPE on its first log line after exec returns.
+        marker = os.path.join(self.tmp, "alive")
+        t0 = time.monotonic()
+        _, _, end = self.c.exec(
+            argv=["sh", "-c", "(sleep 2; echo log; echo log >&2; touch %s) & exit 0" % marker],
+            timeout_s=10)
+        self.assertEqual(end["exit"], 0)
+        self.assertLess(time.monotonic() - t0, 2, "exec must not wait for the background child")
+        time.sleep(2.5)
+        self.assertTrue(os.path.exists(marker), "background child died writing to a closed pipe")
+
     def test_exec_tty(self):
         out, _, end = self.c.exec(argv=["sh", "-c", "test -t 1 && echo tty"], tty=True,
                                   timeout_s=10)

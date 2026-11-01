@@ -186,7 +186,8 @@ Additions to the PROTOCOL.md contract (all optional):
   command reports `exit` = 128 + signal. With `tty: true`, output is one `stdout`
   stream; stdin (if any) is followed by ^D.
   After the main process exits, the agent reads for 1 s more and then reports
-  `exit`, even if a backgrounded child still holds the pipe.
+  `exit`, even if a backgrounded child still holds the pipe. Later output from that
+  child is discarded, so `server &` keeps running and doesn't die of SIGPIPE.
 - `put_file`: chunks append at `offset` (must equal the bytes received so far) into
   `<path>.boat-part`, which is renamed onto `path` on the `last` chunk. Missing
   parent dirs are created. Owner is the parent directory's owner unless `owner`
@@ -212,7 +213,7 @@ Additions to the PROTOCOL.md contract (all optional):
 
 ## Tests
 
-- `cd agent && python3 -m unittest -v test_boat_agent`: 18 tests over a socketpair
+- `cd agent && python3 -m unittest -v test_boat_agent`: 19 tests over a socketpair
   (exec streaming/exit/stdin/env/cwd/tty/3 MB output/timeout + group kill,
   set_env, chunked put/get, validation, reseed gating set_identity, sync, the
   desktop token check and proxy, and `desktop-check.sh` end to end through the
