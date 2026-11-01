@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -78,9 +80,10 @@ func anyCookie(r *http.Request, name string, check func(string) error) error {
 }
 
 // setSession sets a host-only cookie and moves on to target. Normally a 302.
-// But a SameSite=Strict cookie set during a navigation that started on another
-// site is withheld on its redirects, so in that one case (the browser says
-// Sec-Fetch-Site: cross-site) a same-origin page starts a fresh navigation.
+// But a navigation that began on another origin keeps that context across its
+// redirects: a Strict cookie would be withheld (cross-site), and checkOrigin
+// would refuse it (same-site). So there a same-origin page starts a fresh
+// navigation.
 func setSession(w http.ResponseWriter, r *http.Request, name, value string, exp time.Time, same http.SameSite, target string) {
 	http.SetCookie(w, &http.Cookie{
 		Name: name, Value: value, Path: "/", Expires: exp,
@@ -88,13 +91,61 @@ func setSession(w http.ResponseWriter, r *http.Request, name, value string, exp 
 	})
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	if r.Header.Get("Sec-Fetch-Site") != "cross-site" {
+	if site := r.Header.Get("Sec-Fetch-Site"); site == "" || site == "none" || site == "same-origin" {
 		http.Redirect(w, r, target, http.StatusFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	t := html.EscapeString(target)
 	fmt.Fprintf(w, `<!doctype html><meta http-equiv="refresh" content="0;url=%s"><a href="%s">Continue</a>`+"\n", t, t)
+}
+
+// originHost parses an Origin header into scheme and host:port with the
+// scheme's default port removed. "null" and garbage give ok=false.
+func originHost(origin string) (scheme, host string, ok bool) {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", "", false
+	}
+	return u.Scheme, canonHost(u.Scheme, u.Host), true
+}
+
+func canonHost(scheme, host string) string {
+	host = strings.ToLower(host)
+	if h, p, err := net.SplitHostPort(host); err == nil &&
+		((scheme == "https" && p == "443") || (scheme == "http" && p == "80")) {
+		return h
+	}
+	return host
+}
+
+// checkOrigin stops another origin from using this browser's session cookie.
+// Every VM origin shares a registrable domain with its siblings, so SameSite
+// does not help: a page on VM A can open wss://<B>... with B's cookie attached.
+// So: an Origin header must be this request's own origin, or one allowed by
+// sameTenant. Without Origin (no-cors GETs and navigations) Sec-Fetch-Site says
+// where it came from; only top-level navigations may come from elsewhere, and
+// the session's own checks still apply to them.
+func checkOrigin(r *http.Request, sameTenant func(host string) bool) error {
+	if o := r.Header.Get("Origin"); o != "" {
+		s, h, ok := originHost(o)
+		switch {
+		case !ok:
+			return errors.New("bad Origin")
+		case s == scheme(r) && h == canonHost(s, r.Host):
+			return nil
+		case sameTenant != nil && sameTenant(hostOnly(h)):
+			return nil
+		}
+		return errors.New("request from another origin")
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-site", "cross-site":
+		if r.Header.Get("Sec-Fetch-Mode") != "navigate" || r.Header.Get("Sec-Fetch-Dest") != "document" {
+			return errors.New("embedded request from another origin")
+		}
+	}
+	return nil
 }
 
 // loadKey mirrors boat-api's LoadMasterKey: 32 raw bytes or 64 hex chars.

@@ -1,0 +1,159 @@
+# boat operations on a host (stub boatd and boat-api; real units, restic, btrfs):
+#
+# - Update: `switch` between two prebuilt generations while "VMs" run. boatd and
+#   its children keep running (restartIfChanged = false), boat-api moves to the
+#   new version, panda-health passes, the pending-reboot metric turns on, and a
+#   boatd restart then snapshots and resumes.
+#   This proves the unit behaviour. Real VMs through a boatd stop and restart
+#   are in gateway/e2e-edge.sh, on a runner where Firecracker works.
+# - Backup and restore: a real restic repository, restored into a scratch dir;
+#   nested VM subvolumes included, images excluded, no plaintext key in the
+#   backup, and the master key recoverable the documented way.
+{ pkgs, self, t }:
+let
+  stubBoatd =
+    version:
+    pkgs.writeShellScriptBin "boatd" ''
+      export PATH=${pkgs.lib.makeBinPath [ pkgs.coreutils ]}
+      d=/var/lib/boat/stub
+      mkdir -p $d
+      echo "${version}" >$d/boatd-version
+      # A "VM": a child that must outlive a generation switch.
+      if [ -e $d/snapshotted ]; then echo "${version}" >$d/resumed-by; fi
+      sleep infinity &
+      vm=$!
+      echo "$vm" >$d/vm.pid
+      trap 'echo "${version}" >$d/snapshotted; kill $vm; exit 0' TERM
+      wait $vm
+    '';
+  stubApi =
+    version:
+    pkgs.writeShellScriptBin "boat-api" ''
+      echo "${version}" >/var/lib/boat/api/version
+      exec ${pkgs.python3}/bin/python3 -m http.server --bind 127.0.0.1 8740 --directory /etc/boat
+    '';
+  stubCli = pkgs.writeShellScriptBin "boat" "echo stub";
+  pw = pkgs.writeText "restic-pass" "test-repository-password";
+in
+pkgs.testers.runNixOSTest {
+  name = "boat-ops";
+  nodes.machine =
+    { lib, ... }:
+    {
+      imports = [
+        self.nixosModules.default
+        self.nixosModules.server
+      ];
+      pandaos.firstboot.enable = false;
+      networking.hostName = lib.mkForce "machine";
+      virtualisation = {
+        memorySize = 2048;
+        emptyDiskImages = [ 4096 ];
+        fileSystems."/var/lib/boat" = {
+          device = "/dev/vdb";
+          fsType = "btrfs";
+          autoFormat = true;
+        };
+      };
+      environment.systemPackages = [ pkgs.btrfs-progs pkgs.restic ];
+      services.boat = {
+        requireKvm = false;
+        boatdPackage = lib.mkDefault (stubBoatd "v1");
+        apiPackage = lib.mkDefault (stubApi "v1");
+        cliPackage = stubCli;
+        backup = {
+          enable = true;
+          repository = "/var/backup/restic";
+          passwordFile = "${pw}";
+        };
+      };
+      specialisation.v2.configuration.services.boat = {
+        boatdPackage = stubBoatd "v2";
+        apiPackage = stubApi "v2";
+      };
+    };
+
+  testScript =
+    { nodes, ... }:
+    let
+      health = "${nodes.machine.system.build.panda-health}/bin/panda-health";
+    in
+    t.prelude
+    + ''
+      machine.wait_for_unit("multi-user.target")
+      for unit in ["boatd", "boat-api", "boat-gateway", "caddy"]:
+          machine.wait_for_unit(f"{unit}.service")
+      machine.wait_for_file("/var/lib/boat/stub/vm.pid")
+      read = lambda f: machine.succeed(f"cat {f}").strip()
+      main_pid = lambda: machine.succeed("systemctl show -P MainPID boatd.service").strip()
+
+      with subtest("switch to the next generation with VMs running"):
+          assert read("/var/lib/boat/api/version") == "v1"
+          boatd_before, vm_before = main_pid(), read("/var/lib/boat/stub/vm.pid")
+          machine.succeed("systemctl start boat-reboot-check.service")
+          assert "boat_reboot_pending 0" in read("/var/lib/boat-metrics/boat.prom")
+
+          machine.succeed("/run/current-system/specialisation/v2/bin/switch-to-configuration test >&2")
+
+          assert main_pid() == boatd_before, "the switch restarted boatd"
+          machine.succeed(f"kill -0 {vm_before}")
+          assert read("/var/lib/boat/stub/boatd-version") == "v1"
+          machine.fail("test -e /var/lib/boat/stub/snapshotted")
+          machine.wait_until_succeeds("grep -qx v2 /var/lib/boat/api/version")
+          machine.succeed("${health} --wait 60")
+
+      with subtest("the reboot check reports what is still old"):
+          machine.succeed("systemctl start boat-reboot-check.service")
+          prom = read("/var/lib/boat-metrics/boat.prom")
+          assert "boat_reboot_pending 1" in prom and "boatd-or-firecracker" in prom, prom
+          assert "boatd" in read("/run/boat/reboot-pending")
+
+      with subtest("restarting boatd applies it: snapshot, then resume on the new version"):
+          machine.succeed("systemctl restart boatd.service")
+          assert read("/var/lib/boat/stub/snapshotted") == "v1"
+          machine.wait_until_succeeds("grep -qx v2 /var/lib/boat/stub/resumed-by")
+          machine.fail(f"kill -0 {vm_before}")
+          machine.succeed("systemctl start boat-reboot-check.service")
+          assert "boat_reboot_pending 0" in read("/var/lib/boat-metrics/boat.prom")
+
+      with subtest("backup: real restic, nested subvolumes, no leftovers"):
+          machine.succeed(
+              "btrfs subvolume create /var/lib/boat/vmsub",
+              "echo vm-disk-data >/var/lib/boat/vmsub/rootfs.ext4",
+              "mkdir -p /var/lib/boat/images/x && echo image >/var/lib/boat/images/x/vmlinux",
+              "echo api-db >/var/lib/boat/api/store.json",
+              "systemctl start restic-backups-boat.service",
+          )
+          machine.wait_until_fails("test -e /var/lib/boat/.backup", timeout=60)
+
+      with subtest("restore into a scratch dir"):
+          env = "RESTIC_REPOSITORY=/var/backup/restic RESTIC_PASSWORD_FILE=${pw}"
+          machine.succeed(f"{env} restic restore latest --target /tmp/r >&2")
+          r = "/tmp/r/var/lib/boat/.backup"
+          assert read(f"{r}/sub/vmsub/rootfs.ext4") == "vm-disk-data"
+          assert read(f"{r}/top/api/store.json") == "api-db"
+          machine.fail(f"test -e {r}/top/images/x/vmlinux")
+          # Keys in the backup are sealed only; none is usable without this host.
+          machine.fail("find /tmp/r -name '*.key' | grep .")
+          machine.succeed(f"test -s {r}/top/secrets/boat-master-key.cred")
+          machine.succeed(f"test -s {r}/top/secrets/boat-desktop-key.cred")
+
+      with subtest("master key recovery as documented, and the sealed copy is host-bound"):
+          live = "systemd-creds decrypt --name=boat-master-key"
+          machine.succeed(
+              f"{live} {r}/top/secrets/boat-master-key.cred - >/tmp/from-backup",
+              f"{live} /var/lib/boat/secrets/boat-master-key.cred - >/tmp/live",
+              "cmp /tmp/from-backup /tmp/live",
+              # Recovery onto a new host: seal the offline copy with that host's key.
+              "systemd-creds encrypt --with-key=auto --name=boat-master-key /tmp/live /tmp/resealed.cred",
+              f"{live} /tmp/resealed.cred - | cmp - /tmp/live",
+          )
+          # Without this host's secret the credential does not open.
+          machine.succeed("mv /var/lib/systemd/credential.secret /var/lib/systemd/credential.secret.away")
+          machine.fail(f"{live} {r}/top/secrets/boat-master-key.cred - >/dev/null")
+          machine.succeed("mv /var/lib/systemd/credential.secret.away /var/lib/systemd/credential.secret")
+
+      emit({"test": "boat-ops", "pass": True})
+      machine.shutdown()
+    '';
+}

@@ -24,6 +24,24 @@ let
       ${if cfg.dnsProvider == null then "on_demand" else "dns ${cfg.dnsProvider}"}
     }
   '';
+  isLocal = lib.hasSuffix ".localhost" d;
+  # The API's own paths; everything else is the dashboard, when there is one.
+  apiPaths = [ "/v1/*" "/healthz" ];
+  apiProxy = "reverse_proxy 127.0.0.1:${toString boat.apiPort}";
+  dashboardSite =
+    if cfg.dashboardDir == null then
+      apiProxy
+    else
+      ''
+        root * ${cfg.dashboardDir}
+        header {
+          Content-Security-Policy "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+          X-Content-Type-Options nosniff
+          Referrer-Policy no-referrer
+        }
+        try_files {path} /index.html
+        file_server
+      '';
   listen = "127.0.0.1:8742";
   askListen = "127.0.0.1:8743";
 
@@ -63,6 +81,25 @@ in
         rate limits apply, see docs/boat.md).
       '';
     };
+    allowOnDemandTLS = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Permit per-host HTTP-01 certificates when {option}`dnsProvider` is null. Every new
+        port route or desktop then costs a certificate, so a tenant can burn the domain's
+        Let's Encrypt rate limit, and every name lands in Certificate Transparency logs.
+        Production should use DNS-01.
+      '';
+    };
+    dashboardDir = mkOption {
+      type = types.nullOr types.path;
+      default = if builtins.pathExists ../dashboard/index.html then ../dashboard else null;
+      defaultText = lib.literalExpression "../dashboard, when it has an index.html";
+      description = ''
+        Static web dashboard, served read-only from the Nix store at `https://api.<domain>/`
+        (same origin as the API, which it calls with the user's key). Null: no dashboard.
+      '';
+    };
     environmentFile = mkOption {
       type = types.nullOr types.path;
       default = null;
@@ -73,22 +110,45 @@ in
 
   config = lib.mkIf boat.enable (lib.mkMerge [
     (lib.mkIf cfg.enable {
+      assertions = [
+        {
+          assertion = cfg.dnsProvider != null || cfg.allowOnDemandTLS || isLocal;
+          message = ''
+            services.boat.gateway: set dnsProvider (DNS-01, one wildcard certificate; recommended) or, knowing
+            that a tenant can then burn your Let's Encrypt rate limit, allowOnDemandTLS = true. See docs/boat.md.'';
+        }
+      ];
+      warnings = lib.optional (cfg.dnsProvider == null && !isLocal) ''
+        services.boat.gateway has no dnsProvider, so every port route and desktop gets its own on-demand
+        HTTP-01 certificate: a tenant can exhaust ${d}'s Let's Encrypt rate limit (TLS for new routes then
+        fails for everyone) and all names are published in CT logs. Use DNS-01 in production; see docs/boat.md.'';
+
       services.caddy = {
         enable = true;
         package = cfg.caddyPackage;
         email = boat.acmeEmail;
         inherit (cfg) environmentFile;
-        globalConfig = lib.optionalString (cfg.dnsProvider == null) ''
+        # skip_install_trust: Caddy's local CA (only *.localhost) never touches
+        # this system's trust store.
+        globalConfig = ''
+          skip_install_trust
+        '' + lib.optionalString (cfg.dnsProvider == null) ''
           on_demand_tls {
             ask http://${askListen}/ask
           }
         '';
         virtualHosts = {
+          # route: these handlers run in this order, first match wins.
           "api.${d}".extraConfig = ''
-            handle /internal/* {
-              respond 404
+            route {
+              handle /internal/* {
+                respond 404
+              }
+              ${lib.concatMapStrings (p: "handle ${p} {\n  ${apiProxy}\n}\n") apiPaths}
+              handle {
+                ${dashboardSite}
+              }
             }
-            reverse_proxy 127.0.0.1:${toString boat.apiPort}
           '';
           ${desktopDomain}.extraConfig = ''
             reverse_proxy ${listen}
@@ -102,6 +162,13 @@ in
           '';
         };
       };
+      users.users.boat-gateway = {
+        isSystemUser = true;
+        group = "boat-gateway";
+        description = "boat HTTP router";
+      };
+      users.groups.boat-gateway = { };
+
       networking.firewall.allowedTCPPorts = [ 80 443 ];
       # HTTP/3.
       networking.firewall.allowedUDPPorts = [ 443 ];
@@ -122,10 +189,13 @@ in
             "-listen" listen
             "-ask-listen" askListen
             "-routes" "/run/boat/routes.json"
-            "-desktop-key" "${boat.dataDir}/secrets/desktop.key"
+            "-desktop-key" "%d/boat-desktop-key"
           ];
-          User = "boat";
-          Group = "boat";
+          # Faces the internet: its own uid, no access to boatd's socket or to
+          # boat-api's data. It reads routes.json and this one credential.
+          User = "boat-gateway";
+          Group = "boat-gateway";
+          LoadCredentialEncrypted = "boat-desktop-key:${boat.dataDir}/secrets/boat-desktop-key.cred";
           Restart = "always";
           RestartSec = 2;
           ProtectSystem = "strict";

@@ -158,7 +158,7 @@ func TestDesktopPerVMOrigin(t *testing.T) {
 		t.Fatalf("desktop session: %d %+v %q", w.Code, c, w.Header().Get("Location"))
 	}
 	// Started on another site: a Strict cookie needs a fresh same-origin navigation.
-	w = req(g, a, "/vnc.html?a=1&"+link("abc-1", time.Hour), header("Sec-Fetch-Site", "cross-site"))
+	w = req(g, a, "/vnc.html?a=1&"+link("abc-1", time.Hour), header("Sec-Fetch-Site", "cross-site"), header("Sec-Fetch-Mode", "navigate"), header("Sec-Fetch-Dest", "document"))
 	if w.Code != 200 || len(w.Result().Cookies()) != 1 || !strings.Contains(w.Body.String(), `url=/vnc.html?a=1"`) {
 		t.Fatalf("cross-site desktop session: %d %s", w.Code, w.Body)
 	}
@@ -175,6 +175,79 @@ func TestDesktopPerVMOrigin(t *testing.T) {
 	}
 	if w := req(g, "x.abc-1.desktop.boat.test", "/", cookie(desktopCookie, c[0].Value)); w.Code != 404 {
 		t.Fatalf("nested desktop host: %d", w.Code)
+	}
+}
+
+// A page on VM A must not use the browser's session for VM B, although both
+// origins are same-site. Covers the websocket upgrade the council found open.
+func TestCrossOriginRefused(t *testing.T) {
+	g, _, port := setup(t)
+	p := strconv.Itoa(port)
+	dA, dB := "abc-1.desktop.boat.test", "xyz-2.desktop.boat.test"
+	cB := cookie(desktopCookie, first(tok(func(e int64) string { return signDesktop(g.key, "xyz-2", e) }, time.Hour)))
+	https := header("X-Forwarded-Proto", "https")
+	ws := func(r *http.Request) {
+		r.Header.Set("Connection", "Upgrade")
+		r.Header.Set("Upgrade", "websocket")
+	}
+	cases := []struct {
+		name string
+		mods []func(*http.Request)
+		want int
+	}{
+		{"own origin", []func(*http.Request){cB, https, header("Origin", "https://"+dB)}, 200},
+		{"own origin with default port", []func(*http.Request){cB, https, header("Origin", "https://"+dB+":443")}, 200},
+		{"no origin, typed url", []func(*http.Request){cB, https, header("Sec-Fetch-Site", "none")}, 200},
+		{"websocket from VM A", []func(*http.Request){cB, https, ws, header("Origin", "https://"+dA)}, 403},
+		{"xhr from VM A", []func(*http.Request){cB, https, header("Origin", "https://"+dA)}, 403},
+		{"port route page of VM A", []func(*http.Request){cB, https, header("Origin", "https://8080-abc-1.vm.boatvms.test")}, 403},
+		{"downgraded scheme", []func(*http.Request){cB, https, header("Origin", "http://"+dB)}, 403},
+		{"null origin", []func(*http.Request){cB, https, header("Origin", "null")}, 403},
+		{"same-site subresource", []func(*http.Request){cB, https, header("Sec-Fetch-Site", "same-site"), header("Sec-Fetch-Mode", "no-cors")}, 403},
+		{"same-site iframe", []func(*http.Request){cB, https, header("Sec-Fetch-Site", "same-site"), header("Sec-Fetch-Mode", "navigate"), header("Sec-Fetch-Dest", "iframe")}, 403},
+		{"same-site navigation with the cookie", []func(*http.Request){cB, https, header("Sec-Fetch-Site", "same-site"), header("Sec-Fetch-Mode", "navigate"), header("Sec-Fetch-Dest", "document")}, 403},
+	}
+	for _, c := range cases {
+		if w := req(g, dB, "/", c.mods...); w.Code != c.want {
+			t.Errorf("desktop, %s: want %d, got %d", c.name, c.want, w.Code)
+		}
+	}
+	// A signed link may still arrive from anywhere, and ends on a same-origin page.
+	exp := time.Now().Add(time.Hour).Unix()
+	q := "/?exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.key, "xyz-2", exp)
+	for _, site := range []string{"cross-site", "same-site"} {
+		w := req(g, dB, q, https, header("Sec-Fetch-Site", site), header("Sec-Fetch-Mode", "navigate"), header("Sec-Fetch-Dest", "document"))
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "http-equiv") || len(w.Result().Cookies()) != 1 {
+			t.Errorf("link from %s: %d %s", site, w.Code, w.Body)
+		}
+	}
+	if w := req(g, dB, "/", cB, https); !strings.Contains(w.Header().Get("Content-Security-Policy"), "frame-ancestors 'self'") {
+		t.Errorf("desktop is embeddable: %v", w.Header())
+	}
+
+	// Private port route: another VM is refused, another port of the same VM is
+	// allowed, and the explicit token header needs no Origin rule.
+	priv := p + "-abc-1.vm.boatvms.test"
+	rt := first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", e) }, time.Hour))
+	cR := cookie(routeCookie, rt)
+	for name, c := range map[string]struct {
+		mods []func(*http.Request)
+		want int
+	}{
+		"own":         {[]func(*http.Request){cR, https, header("Origin", "https://"+priv)}, 200},
+		"same VM":     {[]func(*http.Request){cR, https, header("Origin", "https://3000-abc-1.vm.boatvms.test")}, 200},
+		"other VM":    {[]func(*http.Request){cR, https, ws, header("Origin", "https://3000-xyz-2.vm.boatvms.test")}, 403},
+		"no-cors":     {[]func(*http.Request){cR, https, header("Sec-Fetch-Site", "same-site"), header("Sec-Fetch-Mode", "no-cors")}, 403},
+		"navigation":  {[]func(*http.Request){cR, https, header("Sec-Fetch-Site", "same-site"), header("Sec-Fetch-Mode", "navigate"), header("Sec-Fetch-Dest", "document")}, 200},
+		"header only": {[]func(*http.Request){header(routeHeader, rt), https, header("Origin", "https://app.example")}, 200},
+	} {
+		if w := req(g, priv, "/", c.mods...); w.Code != c.want {
+			t.Errorf("route, %s: want %d, got %d", name, c.want, w.Code)
+		}
+	}
+	// Public routes are public: no Origin rule.
+	if w := req(g, p+"-xyz-2.vm.boatvms.test", "/", header("Origin", "https://evil.example")); w.Code != 200 {
+		t.Errorf("public route with foreign Origin: %d", w.Code)
 	}
 }
 

@@ -39,6 +39,36 @@ let
 
   credFile = "${cfg.dataDir}/secrets/boat-master-key.cred";
   masterCred = "boat-master-key:${credFile}";
+  desktopCredFile = "${cfg.dataDir}/secrets/boat-desktop-key.cred";
+  desktopCred = "boat-desktop-key:${desktopCredFile}";
+
+  # The Firecracker that boat-e2e tests (e2e.sh FC_VERSION + FC_SHA256), not
+  # whatever nixpkgs carries: snapshots are version-sensitive. Static binaries.
+  firecrackerPinned = pkgs.stdenvNoCC.mkDerivation rec {
+    pname = "firecracker";
+    version = "1.17.0";
+    src = pkgs.fetchurl {
+      url = "https://github.com/firecracker-microvm/firecracker/releases/download/v${version}/firecracker-v${version}-x86_64.tgz";
+      sha256 = "06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558";
+    };
+    sourceRoot = "release-v${version}-x86_64";
+    dontConfigure = true;
+    dontBuild = true;
+    dontFixup = true;
+    installPhase = ''
+      install -Dm755 firecracker-v${version}-x86_64 $out/bin/firecracker
+      install -Dm755 jailer-v${version}-x86_64 $out/bin/jailer
+    '';
+    meta = {
+      license = lib.licenses.asl20;
+      platforms = [ "x86_64-linux" ];
+      sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
+    };
+  };
+
+  # Last two labels: a heuristic (co.uk looks like a registrable domain), good
+  # enough to warn on.
+  regDomain = name: lib.concatStringsSep "." (lib.takeEnd 2 (lib.splitString "." name));
 
   # Exit status for "this host cannot run boatd" (EX_CONFIG): no restart loop.
   exConfig = 78;
@@ -120,7 +150,7 @@ let
     "-boatd" "/run/boat/boatd.sock"
     "-ssh-user" "dev" # the guest image's login user
     "-desktop-url" "https://desktop.${cfg.domain}"
-    "-desktop-key-file" "${cfg.dataDir}/secrets/desktop.key"
+    "-desktop-key-file" "%d/boat-desktop-key"
     "-ssh-jump-keys-file" "${cfg.dataDir}/ssh/jump_authorized_keys"
     "-vm-domain" cfg.vmDomain
   ]
@@ -196,6 +226,22 @@ in
           maxVMs = mkOption { type = types.ints.unsigned; default = 10; };
           maxVCPU = mkOption { type = types.ints.unsigned; default = 32; };
           maxMemMiB = mkOption { type = types.ints.unsigned; default = 65536; };
+          maxTotalVMs = mkOption {
+            type = types.ints.unsigned;
+            default = 50;
+            description = "VMs including stopped ones (their disks stay on the host).";
+          };
+          maxSnapshots = mkOption { type = types.ints.unsigned; default = 100; };
+          maxDiskGiB = mkOption {
+            type = types.ints.unsigned;
+            default = 1000;
+            description = "Committed storage: VM disks, memory files and snapshots.";
+          };
+          maxPorts = mkOption {
+            type = types.ints.unsigned;
+            default = 50;
+            description = "Port routes across the team's VMs. Each can cost an ACME certificate without DNS-01.";
+          };
           allowIntraTeam = mkOption {
             type = types.bool;
             default = false;
@@ -233,9 +279,9 @@ in
     };
     firecrackerPackage = mkOption {
       type = types.package;
-      default = pkgs.firecracker;
-      defaultText = lib.literalExpression "pkgs.firecracker";
-      description = "Provides bin/firecracker and bin/jailer.";
+      default = firecrackerPinned;
+      defaultText = lib.literalExpression "Firecracker v1.17.0, the release boat-e2e tests";
+      description = "Provides bin/firecracker and bin/jailer. Changing it leaves your VMs' snapshots on an untested version.";
     };
     boatdPackage = mkOption {
       type = types.package;
@@ -290,6 +336,16 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    warnings =
+      lib.optional (!(lib.hasSuffix ".localhost" cfg.domain) && regDomain cfg.vmDomain == regDomain cfg.domain) ''
+        services.boat.vmDomain (${cfg.vmDomain}) shares a registrable domain with ${cfg.domain}: tenant apps
+        are same-site with api.${cfg.domain} and can set cookies for ${regDomain cfg.domain}. Use a separate
+        domain (or one on the Public Suffix List) before you host untrusted tenants; see docs/boat.md.''
+      ++ lib.optional (!(lib.hasSuffix ".localhost" cfg.domain) && regDomain cfg.desktopDomain == regDomain cfg.domain) ''
+        services.boat.desktopDomain (${cfg.desktopDomain}) shares a registrable domain with ${cfg.domain}: the
+        pages a VM's desktop serves are same-site with api.${cfg.domain}. Use a separate domain before you
+        host untrusted tenants; see docs/boat.md.'';
+
     assertions = [
       {
         assertion = lib.all (n: !(lib.hasPrefix "/" n) && !(lib.elem ".." (lib.splitString "/" n))) (lib.attrNames cfg.images);
@@ -309,6 +365,9 @@ in
       "net.ipv6.conf.all.forwarding" = 1;
       # Forwarding turns off RA on the uplink; keep RA-configured uplinks (OVH) working.
       "net.ipv6.conf.default.accept_ra" = 2;
+      # ...but never from a VM: the bridge inherits `default`. udev reapplies
+      # this when the interface appears (boatd also writes it).
+      "net.ipv6.conf.boatbr0.accept_ra" = 0;
     };
     networking.nftables.enable = true;
 
@@ -322,13 +381,15 @@ in
     environment.etc."boat/boatd.json".text = builtins.toJSON boatdConfig;
 
     systemd.tmpfiles.rules = [
-      "d /run/boat 0750 root boat - -"
+      # 0751: boat-gateway (no boat group) reads routes.json by name; it cannot
+      # list the directory, and boatd's socket is 0660 root:boat.
+      "d /run/boat 0751 root boat - -"
       # `v`: a btrfs subvolume when on btrfs (outside root snapshots, reflink
       # clones for fork/snapshot), a plain directory elsewhere.
       "v ${cfg.dataDir} 0750 root boat - -"
       "d ${cfg.imagesDir} 0755 root root - -"
-      # boat-api and boat-gateway (both user boat) share the desktop key, 0600.
-      "d ${cfg.dataDir}/secrets 0700 boat boat - -"
+      # Sealed credentials: only systemd (PID 1) reads them, for the units below.
+      "d ${cfg.dataDir}/secrets 0700 root root - -"
       "d ${cfg.dataDir}/api 0700 boat boat - -"
       "d ${cfg.dataDir}/ssh 0750 boat boat - -"
     ];
@@ -339,11 +400,13 @@ in
       cfg.cliPackage
       (pkgs.writeShellScriptBin "boat-admin" ''
         [ "''${1-}" = init ] && shift
-        exec ${config.systemd.package}/bin/systemd-run --quiet --pipe --wait --collect \
+        ${config.systemd.package}/bin/systemd-run --quiet --pipe --wait --collect \
           -p User=boat -p Group=boat \
           -p LoadCredentialEncrypted=${masterCred} \
           -p RequiresMountsFor=${cfg.dataDir} \
-          ${lib.getExe' cfg.apiPackage "boat-api"} admin init -data ${cfg.dataDir}/api "$@"
+          ${lib.getExe' cfg.apiPackage "boat-api"} admin init -data ${cfg.dataDir}/api "$@" || exit
+        # The running API reads its users at start.
+        ${config.systemd.package}/bin/systemctl try-restart boat-api.service
       '')
     ];
 
@@ -359,31 +422,28 @@ in
         UMask = "0077";
       };
       script = ''
-        # boat-api's master key (seals secrets and webhook keys) lives only as a
-        # systemd credential, encrypted with the TPM2 when present and the host
-        # key (/var/lib/systemd/credential.secret). A plaintext key left by an
-        # older install is sealed, verified, then removed.
-        cred=${credFile} plain=${cfg.dataDir}/api/master.key
-        if [ ! -s "$cred" ]; then
+        # boat-api's master key (seals tenant secrets and webhook keys) and the
+        # desktop/route HMAC key live only as systemd credentials, encrypted
+        # with the TPM2 when present and the host key
+        # (/var/lib/systemd/credential.secret, not under dataDir), so a backup
+        # of dataDir holds no usable key. A plaintext key from an older install
+        # is sealed, verified, then removed.
+        seal() { # name plaintext-path credential-path
+          name=$1 plain=$2 cred=$3
+          [ -s "$cred" ] && return 0
           if [ -s "$plain" ]; then src=$plain; else src=$(mktemp); head -c 32 /dev/urandom >"$src"; fi
-          systemd-creds encrypt --with-key=auto --name=boat-master-key "$src" "$cred.tmp"
-          systemd-creds decrypt --name=boat-master-key "$cred.tmp" - | cmp -s - "$src" ||
-            {
-              echo "boat-secrets: sealed master key does not decrypt; nothing changed" >&2
-              rm -f "$cred.tmp"
-              [ "$src" = "$plain" ] || rm -f "$src" # a key generated just now, never used
-              exit 1
-            }
+          systemd-creds encrypt --with-key=auto --name="$name" "$src" "$cred.tmp"
+          if ! systemd-creds decrypt --name="$name" "$cred.tmp" - | cmp -s - "$src"; then
+            echo "boat-secrets: sealed $name does not decrypt; nothing changed" >&2
+            rm -f "$cred.tmp"
+            [ "$src" = "$plain" ] || rm -f "$src" # a key generated just now, never used
+            exit 1
+          fi
           mv "$cred.tmp" "$cred"
           if [ "$src" = "$plain" ]; then shred -u "$plain" 2>/dev/null || rm -f "$plain"; else rm -f "$src"; fi
-        fi
-        f=${cfg.dataDir}/secrets/desktop.key
-        if [ ! -s "$f" ]; then
-          ${pkgs.coreutils}/bin/head -c 32 /dev/urandom >"$f.tmp"
-          ${pkgs.coreutils}/bin/chmod 0600 "$f.tmp"
-          ${pkgs.coreutils}/bin/chown boat:boat "$f.tmp"
-          ${pkgs.coreutils}/bin/mv "$f.tmp" "$f"
-        fi
+        }
+        seal boat-master-key ${cfg.dataDir}/api/master.key ${credFile}
+        seal boat-desktop-key ${cfg.dataDir}/secrets/desktop.key ${desktopCredFile}
       '';
     };
 
@@ -414,7 +474,7 @@ in
       restartIfChanged = false;
       stopIfChanged = false;
       path = [
-        cfg.firecrackerPackage pkgs.iproute2 pkgs.nftables pkgs.coreutils pkgs.procps
+        cfg.firecrackerPackage pkgs.iproute2 pkgs.nftables pkgs.conntrack-tools pkgs.coreutils pkgs.procps
         pkgs.e2fsprogs pkgs.btrfs-progs pkgs.util-linux
       ];
       # VM disks live there: never start on (or write to) the bare mountpoint.
@@ -450,7 +510,7 @@ in
     systemd.services.boat-api = {
       description = "boat public API";
       wantedBy = [ "multi-user.target" ];
-      wants = [ "boatd.service" ];
+      wants = [ "boatd.service" "network-online.target" ];
       after = [ "boatd.service" "boat-secrets.service" "network-online.target" ];
       requires = [ "boat-secrets.service" ];
       unitConfig.RequiresMountsFor = cfg.dataDir;
@@ -459,7 +519,7 @@ in
         ExecStartPre = dataCheck;
         RestartPreventExitStatus = exConfig;
         # Read by boat-api from $CREDENTIALS_DIRECTORY/boat-master-key.
-        LoadCredentialEncrypted = masterCred;
+        LoadCredentialEncrypted = [ masterCred desktopCred ];
         OOMScoreAdjust = -900;
         User = "boat";
         Group = "boat";

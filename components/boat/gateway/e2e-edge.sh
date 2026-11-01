@@ -283,6 +283,15 @@ ck=$(awk '$6 == "__Host-boat_gw" {print $6 "=" $7}' "$djar" | head -1)
 [ "$(hc "https://$id_a.desktop.$D/" -b "$ck")" = 401 ] || fail "VM D's cookie opened VM A's desktop origin"
 [ "$(hc "https://$id_a.desktop.$D/?${link#*\?}")" = 403 ] || fail "VM D's link accepted on VM A's origin"
 [ "$(hc "https://$id_d.desktop.$D/")" = 401 ] || fail "desktop open without a cookie"
+log "cross-origin: a page on VM A must not use the browser's session for VM D (same-site, so SameSite does not help)"
+WS=(-H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==")
+[ "$(hc "https://$id_d.desktop.$D/" -b "$ck" -H "Origin: https://$id_a.desktop.$D")" = 403 ] || fail "request with VM A's Origin reached VM D's desktop"
+[ "$(hc "https://$id_d.desktop.$D/websockify" -b "$ck" -H "Origin: https://$id_a.desktop.$D" "${WS[@]}")" = 403 ] || fail "websocket with VM A's Origin reached VM D's desktop"
+[ "$(hc "https://$id_d.desktop.$D/" -b "$ck" -H "Sec-Fetch-Site: same-site" -H "Sec-Fetch-Mode: no-cors")" = 403 ] || fail "same-site subresource request reached VM D's desktop"
+# Control: the same request from its own origin gets past the gateway (HTTP/1.1, as websockets require).
+code=$(curl -sS --http1.1 --cacert "$CA" --connect-to "::127.0.0.1:443" -o /dev/null -w '%{http_code}' --max-time 5 \
+  -b "$ck" -H "Origin: https://$id_d.desktop.$D" "${WS[@]}" "https://$id_d.desktop.$D/websockify" || true)
+[ "$code" = 101 ] || fail "websocket from VM D's own origin: HTTP $code"
 
 if [ -x "$HERE/guest/desktop-check.sh" ]; then
   log "guest/desktop-check.sh: websocket + one frame"
@@ -310,6 +319,26 @@ ssh-keygen -q -R "$ip_a" >/dev/null 2>&1 || true
 ssh -F "$WORK/ssh_config" -p 2222 jump@localhost true 2>/dev/null && fail "jump user got a shell"
 sshj "dev@10.200.255.254" true 2>/dev/null && fail "jump host forwarded to an address with no grant"
 ssh -F "$WORK/ssh_config" -p 2222 "$(id -un)@localhost" true 2>/dev/null && fail "port 2222 admitted a non-jump user"
+
+log "upgrade: stop boatd (snapshots VMs), start a newer build (resumes them): processes and routes survive"
+boot_a=$(run edge-a 'cat /proc/sys/kernel/random/boot_id')
+pid=$(cat "$WORK/boatd.pid")
+sudo kill "$pid"
+for _ in $(seq 600); do sudo kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+sudo kill -0 "$pid" 2>/dev/null && fail "boatd did not stop within 120s"
+# A different binary from the same source stands in for the next version.
+(cd "$HERE/boatd" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$WORK/bin/boatd.next" .)
+cmp -s "$WORK/bin/boatd" "$WORK/bin/boatd.next" && fail "the next boatd build is the same binary"
+sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >>"$4" 2>&1' _ \
+  "$WORK/boatd.pid" "$WORK/bin/boatd.next" "$WORK/boatd.json" "$WORK/boatd.log" &
+for _ in $(seq 600); do curl -fs --unix-socket "$SOCK" http://boatd/v1/health >/dev/null && break; sleep 0.2; done
+[ "$(sudo readlink "/proc/$(cat "$WORK/boatd.pid")/exe")" = "$WORK/bin/boatd.next" ] || fail "the next boatd build is not the one running"
+for _ in $(seq 150); do [ "$(field edge-a state)" = running ] && break; sleep 0.4; done
+[ "$(field edge-a state)" = running ] || fail "edge-a is $(field edge-a state) after the upgrade"
+[ "$(run edge-a 'cat /proc/sys/kernel/random/boot_id')" = "$boot_a" ] || fail "edge-a cold-booted instead of resuming"
+rt_new_exp=$(($(date +%s) + 300))
+rt_new="$rt_new_exp.$(hmac_hex "route.8080-$id_a.$rt_new_exp")"
+[ "$(curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443" -H "X-Boat-Route-Token: $rt_new" "$priv")" = edge-ok ] || fail "guest server or route lost across the upgrade"
 
 if [ -x "$HERE/sdk/e2e-live.sh" ] || [ -x "$HERE/api/e2e-auth.sh" ]; then
   export BOAT_URL=$API BOAT_API_KEY=$KEY BOAT_API_DATA=$WORK/api BOAT_VM_DOMAIN=$VMD E2E_TMP=$WORK/tmp

@@ -92,7 +92,7 @@ jobs:
             /mnt/guest-out/rootfs-full.ext4.zst
             /mnt/guest-out/size-*.txt
             /mnt/guest-out/manifest-*.txt
-          key: boat-guest-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat-agent.py') }}
+          key: boat-guest-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py') }}
 
       - name: Build guest image (kernel + slim + full)
         if: steps.guest.outputs.cache-hit != 'true'

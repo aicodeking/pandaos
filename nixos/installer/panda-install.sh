@@ -421,6 +421,9 @@ write_local_nix() {
   if [[ $profile == server ]]; then
     boat="  services.boat.domain = \"$domain\";
   services.boat.acmeEmail = \"$acme_email\";
+  # No DNS API yet: per-host certificates, which a tenant can exhaust. Before
+  # untrusted tenants, set gateway.dnsProvider and remove this (docs/boat.md).
+  services.boat.gateway.allowOnDemandTLS = true;
 "
     [[ -z $ipv6_prefix ]] || boat+="  services.boat.ipv6Prefix = \"$ipv6_prefix\";
 "

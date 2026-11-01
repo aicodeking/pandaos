@@ -177,6 +177,13 @@ func (g *gateway) desktop(w http.ResponseWriter, r *http.Request, vmid string) {
 		_, err := checkToken(tok, g.now(), func(exp int64) string { return signDesktop(g.key, vmid, exp) })
 		return err
 	}
+	// The desktop page is not embeddable, and only its own origin may use it.
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'self'")
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+	if err := checkOrigin(r, nil); err != nil {
+		http.Error(w, "desktop: "+err.Error(), http.StatusForbidden)
+		return
+	}
 	if q := r.URL.Query(); q.Has("sig") {
 		tok := q.Get("exp") + "." + q.Get("sig")
 		exp, err := checkToken(tok, g.now(), func(exp int64) string { return signDesktop(g.key, vmid, exp) })
@@ -185,6 +192,12 @@ func (g *gateway) desktop(w http.ResponseWriter, r *http.Request, vmid string) {
 			return
 		}
 		setSession(w, r, desktopCookie, tok, exp, http.SameSiteStrictMode, withoutQuery(r, "exp", "sig"))
+		return
+	}
+	// Top-level navigations from a sibling origin are refused too: only a signed
+	// link (above) may enter from elsewhere, not the session cookie.
+	if site := r.Header.Get("Sec-Fetch-Site"); site == "same-site" || site == "cross-site" {
+		http.Error(w, "desktop: open it from a link (GET /v1/vms/<id>/desktop)", http.StatusForbidden)
 		return
 	}
 	if err := anyCookie(r, desktopCookie, check); err != nil {
@@ -217,9 +230,18 @@ func (g *gateway) portRoute(w http.ResponseWriter, r *http.Request, port int, vm
 			setSession(w, r, routeCookie, tok, exp, http.SameSiteLaxMode, withoutQuery(r, "boat_exp", "boat_sig"))
 			return
 		}
-		err := anyCookie(r, routeCookie, check)
+		var err error
 		if h := r.Header.Get(routeHeader); h != "" {
-			err = check(h)
+			err = check(h) // a program holding the token: no ambient credential involved
+		} else if err = checkOrigin(r, func(host string) bool {
+			// Another port of the same VM is the same tenant's app.
+			_, other, ok := g.parsePortHost(host)
+			return ok && other == vmid
+		}); err != nil {
+			http.Error(w, "private port: "+err.Error(), http.StatusForbidden)
+			return
+		} else {
+			err = anyCookie(r, routeCookie, check)
 		}
 		if err != nil {
 			http.Error(w, "private port: send "+routeHeader+" or open a link from GET /v1/vms/<id>/ports/<port>/url ("+err.Error()+")", http.StatusUnauthorized)
