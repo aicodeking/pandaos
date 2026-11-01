@@ -534,11 +534,21 @@ func TestWebhookSlotsReleasedWhileSleeping(t *testing.T) {
 	_, hg := e.do(e.owner, "POST", "/v1/webhooks", map[string]any{"url": good.URL})
 	snap := e.srv.store.Snapshot()
 	ev := Event{ID: "e1", Type: "x", TeamID: "t"}
-	go d.deliver(ctx, *snap.Webhooks[hb["id"].(string)], ev)
+	var wg sync.WaitGroup
+	deliver := func(h Webhook) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d.deliver(ctx, h, ev)
+		}()
+	}
+	deliver(*snap.Webhooks[hb["id"].(string)])
 	waitFor(t, "first attempt failed", func() bool { return len(e.srv.store.Snapshot().Deliveries[hb["id"].(string)]) == 1 })
 	// the bad delivery now sleeps an hour; the only slot must be free
-	go d.deliver(ctx, *snap.Webhooks[hg["id"].(string)], ev)
+	deliver(*snap.Webhooks[hg["id"].(string)])
 	waitFor(t, "second delivery with the slot", func() bool { return ok.Load() == 1 })
+	cancel() // wake the sleeper; both must finish before the temp dir goes
+	wg.Wait()
 }
 
 func TestWebhookPerTeamLimits(t *testing.T) {
@@ -580,7 +590,8 @@ func TestWebhookPerTeamLimits(t *testing.T) {
 		}
 		return dropped == 2
 	})
-	time.Sleep(50 * time.Millisecond)
+	waitFor(t, "two attempts in flight", func() bool { return peak.Load() >= 2 })
+	time.Sleep(50 * time.Millisecond) // room for a third to break the limit
 	if peak.Load() != 2 {
 		t.Errorf("in-flight per team: %d, want 2", peak.Load())
 	}
