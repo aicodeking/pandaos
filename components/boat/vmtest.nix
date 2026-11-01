@@ -31,6 +31,8 @@ pkgs.testers.runNixOSTest {
       self.nixosModules.server
     ];
     pandaos.firstboot.enable = false;
+    # base.nix pins hostName = "pandaos"; the test driver names nodes.
+    networking.hostName = pkgs.lib.mkForce "machine";
     # Local CA for *.localhost; don't try to edit the VM's trust store.
     services.caddy.globalConfig = "skip_install_trust";
     services.boat = {

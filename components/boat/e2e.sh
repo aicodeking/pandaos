@@ -48,12 +48,12 @@ cleanup() {
   sudo nft delete table bridge boat 2>/dev/null
   sudo iptables -D FORWARD -i boatbr0 -j ACCEPT 2>/dev/null
   sudo iptables -D FORWARD -o boatbr0 -j ACCEPT 2>/dev/null
+  sudo sh -c 'for f in "$1"/vms/*/firecracker.log; do [ -f "$f" ] && { echo "--- $f (tail)"; tail -n 30 "$f"; }; done' _ "$STATE"
   mountpoint -q "$STATE" && sudo umount -l "$STATE"
   sudo rmdir /sys/fs/cgroup/boat-e2e 2>/dev/null
   for f in boatd api gateway hooks; do
     [ -f "$WORK/$f.log" ] && { echo "--- $f.log (tail)"; tail -n 60 "$WORK/$f.log"; }
   done
-  sudo sh -c 'for f in "$1"/vms/*/firecracker.log; do [ -f "$f" ] && { echo "--- $f (tail)"; tail -n 30 "$f"; }; done' _ "$STATE"
 }
 trap cleanup EXIT
 
