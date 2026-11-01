@@ -44,9 +44,7 @@ func serve(cfgPath string) error {
 	if err := setupBridge(cfg, execRunner); err != nil {
 		return fmt.Errorf("bridge: %w", err)
 	}
-	if cg := ownCgroup(); cfg.Jailer != "" && cg != "" && !slices.Contains(cfg.JailerArgs, "--parent-cgroup") {
-		cfg.JailerArgs = append(cfg.JailerArgs, "--parent-cgroup", cg)
-	}
+	setupCgroups(&cfg)
 	m, err := newManager(cfg, execRunner, realProcs{cfg})
 	if err != nil {
 		return err
@@ -60,7 +58,7 @@ func serve(cfgPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go func() {
-		t := time.NewTicker(30 * time.Second)
+		t := time.NewTicker(time.Duration(cfg.ReapS) * time.Second)
 		defer t.Stop()
 		for {
 			select {
@@ -86,6 +84,44 @@ func serve(cfgPath string) error {
 	// snapshot every running VM first; they resume on the next start.
 	m.stopAll(context.Background(), "boatd shutdown")
 	return nil
+}
+
+// setupCgroups picks the jailer's parent cgroup (cgroupParent, a legacy
+// --parent-cgroup in jailerArgs, else boatd's own delegated cgroup) and
+// enables memory/pids/cpu for the per-VM children. cgroup v2 forbids
+// processes in a cgroup that delegates controllers, so when the parent is our
+// own cgroup boatd first moves itself into a "boatd" leaf.
+func setupCgroups(c *Config) {
+	if c.Jailer == "" {
+		return
+	}
+	if i := slices.Index(c.JailerArgs, "--parent-cgroup"); i >= 0 && i+1 < len(c.JailerArgs) {
+		if c.CgroupParent == "" {
+			c.CgroupParent = c.JailerArgs[i+1]
+		}
+		c.JailerArgs = slices.Delete(slices.Clone(c.JailerArgs), i, i+2)
+	}
+	own := ownCgroup()
+	if c.CgroupParent == "" {
+		c.CgroupParent = own
+	}
+	if c.CgroupParent == "" {
+		log.Printf("cgroups: no cgroup v2 parent; VMs run without memory/cpu/pids limits")
+		return
+	}
+	base := filepath.Join("/sys/fs/cgroup", c.CgroupParent)
+	if c.CgroupParent == own {
+		leaf := filepath.Join(base, "boatd")
+		if err := os.MkdirAll(leaf, 0o755); err == nil {
+			os.WriteFile(filepath.Join(leaf, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0)
+		}
+	}
+	os.MkdirAll(base, 0o755)
+	if err := os.WriteFile(filepath.Join(base, "cgroup.subtree_control"), []byte("+memory +pids +cpu"), 0); err != nil {
+		log.Printf("cgroups: cannot delegate controllers under %s: %v; VMs run without limits", base, err)
+		return
+	}
+	c.cgroupLimits = true
 }
 
 // ownCgroup is boatd's cgroup v2 path (Delegate=yes); jailed VMs go below it.

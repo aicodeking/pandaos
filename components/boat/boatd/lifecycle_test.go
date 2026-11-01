@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,8 +44,9 @@ func TestLifecycle(t *testing.T) {
 	if len(fc.idents) != 1 || fc.idents[0]["ipv4_cidr"] != "10.200.0.2/16" || fc.idents[0]["hostname"] != "a" || fc.env["K"] != "v" {
 		t.Fatalf("guest init: %v %v", fc.idents, fc.env)
 	}
-	if !fc.called("PUT /actions") || fc.tap != "bt2" || !h.ran("ip tuntap add dev bt2 mode tap") {
-		t.Fatal("not cold booted on its tap")
+	if !fc.called("PUT /actions") || fc.tap != "tap0" || !h.ran("ip link add bt2 type veth peer name veth0 netns boat2") ||
+		!h.ran("ip -n boat2 tuntap add dev tap0 mode tap") || !h.ran("ip link set bt2 master boatbr0 up") {
+		t.Fatal("not cold booted on tap0 in its netns")
 	}
 	putFile(t, m, v.ID, "/home/dev/x", "hello")
 
@@ -53,12 +56,20 @@ func TestLifecycle(t *testing.T) {
 		t.Fatalf("stop: %+v %v", v, err)
 	}
 	for _, f := range []string{vmstate, memFile} {
-		if !exists(filepath.Join(m.root(v.ID), f)) || exists(filepath.Join(m.root(v.ID), "new."+f)) {
+		if !exists(filepath.Join(m.root(v.ID), f)) {
 			t.Fatalf("snapshot file %s not in place", f)
 		}
 	}
-	if !fc.called("PATCH /vm") || !fc.called("PUT /snapshot/create") {
-		t.Fatal("stop did not snapshot")
+	for _, f := range []string{snapState, snapDiff, memNew} {
+		if exists(filepath.Join(m.root(v.ID), f)) {
+			t.Fatalf("temp file %s left", f)
+		}
+	}
+	if !fc.called("PATCH /vm") || !fc.called("snapshot Diff") || !fc.called("agent sync") {
+		t.Fatal("stop did not sync + diff-snapshot")
+	}
+	if st, _ := os.Stat(filepath.Join(m.root(v.ID), memFile)); st.Size() != 512<<20 {
+		t.Fatalf("merged mem is %d bytes, want the VM's RAM", st.Size())
 	}
 
 	// start: restore, delete the now-stale snapshot, fix the guest clock.
@@ -67,11 +78,11 @@ func TestLifecycle(t *testing.T) {
 		t.Fatalf("start: %+v %v", v, err)
 	}
 	fc = h.fcOf(t, m, v.ID)
-	if !fc.called("PUT /snapshot/load") || fc.called("PUT /actions") || !fc.clockSet {
+	if !fc.called("PUT /snapshot/load") || !fc.called("load tracking") || fc.called("PUT /actions") || !fc.clockSet {
 		t.Fatal("start did not restore from snapshot")
 	}
-	if exists(filepath.Join(m.root(v.ID), vmstate)) {
-		t.Fatal("stale snapshot kept after restore")
+	if exists(filepath.Join(m.root(v.ID), vmstate)) || !exists(filepath.Join(m.root(v.ID), memFile)) {
+		t.Fatal("after restore: vmstate must be consumed, mem kept as the backing/diff base")
 	}
 
 	// fork a running VM: parent resumed, child restored with new identity + disk copy.
@@ -83,8 +94,11 @@ func TestLifecycle(t *testing.T) {
 		t.Fatal("parent left paused")
 	}
 	cfc := h.fcOf(t, m, c.ID)
-	if !cfc.called("PUT /snapshot/load") || cfc.tap != "bt3" {
-		t.Fatalf("child not restored on its own tap: %v %s", cfc.calls, cfc.tap)
+	if !cfc.called("PUT /snapshot/load") || cfc.tap != "tap0" || !h.ran("ip netns add boat3") {
+		t.Fatalf("child not restored in its own netns: %v %s", cfc.calls, cfc.tap)
+	}
+	if i, j := indexOf(cfc.calls, "agent reseed"), indexOf(cfc.calls, "agent set_identity"); i < 0 || j < i {
+		t.Fatalf("reseed must precede set_identity: %v", cfc.calls)
 	}
 	if len(cfc.idents) != 1 || cfc.idents[0]["ipv4_cidr"] != "10.200.0.3/16" || cfc.idents[0]["mac"] != "06:00:0a:c8:00:03" {
 		t.Fatalf("child identity: %v", cfc.idents)
@@ -146,6 +160,15 @@ func TestLifecycle(t *testing.T) {
 	}
 }
 
+func indexOf(xs []string, x string) int {
+	for i, y := range xs {
+		if y == x {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestQuota(t *testing.T) {
 	m, _ := newTestManager(t, func(c *Config) {
 		c.Teams = map[string]TeamPolicy{"t": {MaxVMs: 1}}
@@ -187,7 +210,7 @@ func TestReconcile(t *testing.T) {
 	b, _ := m.Create(ctx, CreateReq{Name: "b"})
 	// b looks like boatd died mid-stop with a half-written snapshot.
 	m.update(b.ID, "", func(v *VM) { v.State = Stopping })
-	os.WriteFile(filepath.Join(m.root(b.ID), "new."+memFile), []byte("x"), 0o600)
+	os.WriteFile(filepath.Join(m.root(b.ID), memNew), []byte("x"), 0o600)
 	h.Kill(b.PID)
 
 	m2, err := newManager(m.cfg, h.run, h)
@@ -197,7 +220,7 @@ func TestReconcile(t *testing.T) {
 	if v, _ := m2.get(a.ID); v.State != Running || v.PID != a.PID {
 		t.Fatalf("running vm not adopted: %+v", v)
 	}
-	if v, _ := m2.get(b.ID); v.State != Stopped || v.HasSnapshot || exists(filepath.Join(m.root(b.ID), "new."+memFile)) {
+	if v, _ := m2.get(b.ID); v.State != Stopped || v.HasSnapshot || exists(filepath.Join(m.root(b.ID), memNew)) {
 		t.Fatalf("dead vm not reconciled: %+v", v)
 	}
 	// the adopted process exits on its own (guest poweroff) -> stopped, cold next time.
@@ -272,4 +295,116 @@ func TestStopAll(t *testing.T) {
 	m.resumeAll(ctx)
 	eventually(t, "resumed", func() bool { v, _ := m.get(b.ID); return v.State == Running && v.AgentReady })
 	eventually(t, "resumed", func() bool { v, _ := m.get(a.ID); return v.State == Running && !v.ResumeOnBoot })
+}
+
+func TestStorageQuotaAndAdmission(t *testing.T) {
+	m, _ := newTestManager(t, func(c *Config) {
+		c.Teams = map[string]TeamPolicy{"t": {MaxTotalVMs: 1, MaxSnapshots: 1}, "d": {MaxDiskGiB: 2}}
+		c.HostMemMiB, c.HostReserveMiB, c.MemOvercommit = 2048, 512, 1.0 // 1536 MiB for VMs
+	})
+	ctx := context.Background()
+	var ae *apiErr
+	a, err := m.Create(ctx, CreateReq{Team: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Stop(ctx, a.ID, "")
+	if _, err := m.Create(ctx, CreateReq{Team: "t"}); !errors.As(err, &ae) || ae.code != 429 {
+		t.Fatalf("maxTotalVMs counts stopped VMs: %v", err)
+	}
+	if _, err := m.CreateSnapshot(ctx, a.ID, "1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CreateSnapshot(ctx, a.ID, "2"); !errors.As(err, &ae) || ae.code != 429 {
+		t.Fatalf("maxSnapshots: %v", err)
+	}
+	// d: 2 GiB committed = one 1 GiB disk + 512 MiB mem; a second VM does not fit.
+	if _, err := m.Create(ctx, CreateReq{Team: "d"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Create(ctx, CreateReq{Team: "d"}); !errors.As(err, &ae) || ae.code != 429 {
+		t.Fatalf("maxDiskGiB: %v", err)
+	}
+	// host: 1536 MiB, one 512 MiB VM running; two more fit, the third does not.
+	m.Create(ctx, CreateReq{Team: "x"})
+	m.Create(ctx, CreateReq{Team: "x"})
+	if _, err := m.Create(ctx, CreateReq{Team: "x"}); !errors.As(err, &ae) || ae.code != 503 {
+		t.Fatalf("host admission: %v", err)
+	}
+	rep, err := m.Usage(time.Time{})
+	if err != nil || len(rep.Storage) == 0 || rep.Disk == nil {
+		t.Fatalf("usage storage: %+v %v", rep.Storage, err)
+	}
+	for _, s := range rep.Storage {
+		if s.Team == "t" && (s.Snapshots != 1 || s.VMs != 1 || s.CommittedBytes <= 0 || s.VMApparentBytes <= 0) {
+			t.Fatalf("storage: %+v", s)
+		}
+	}
+}
+
+func TestDiskFloor(t *testing.T) {
+	m, h := newTestManager(t, func(c *Config) { c.MinFreePct = 10 })
+	ctx := context.Background()
+	m.statfs = func(string) (uint64, uint64, error) { return 50 << 30, 100 << 30, nil }
+	v, err := m.Create(ctx, CreateReq{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.statfs = func(string) (uint64, uint64, error) { return 5 << 30, 100 << 30, nil } // 5% free
+	var ae *apiErr
+	if _, err := m.Create(ctx, CreateReq{}); !errors.As(err, &ae) || ae.code != 507 {
+		t.Fatalf("create below floor: %v", err)
+	}
+	if _, err := m.Fork(ctx, v.ID, "", ""); !errors.As(err, &ae) || ae.code != 507 {
+		t.Fatalf("fork below floor: %v", err)
+	}
+	if _, err := m.CreateSnapshot(ctx, v.ID, ""); !errors.As(err, &ae) || ae.code != 507 {
+		t.Fatalf("snapshot below floor: %v", err)
+	}
+	fc := h.fcOf(t, m, v.ID)
+	v, err = m.Stop(ctx, v.ID, "")
+	if err != nil || v.State != Stopped || v.HasSnapshot || !fc.called("agent shutdown") || fc.called("PUT /snapshot/create") {
+		t.Fatalf("stop below floor must shut down cleanly: %+v %v %v", v, err, fc.calls)
+	}
+	if exists(filepath.Join(m.root(v.ID), memFile)) {
+		t.Fatal("stale mem kept after a cold stop")
+	}
+}
+
+func TestBtrfsQgroups(t *testing.T) {
+	m, h := newTestManager(t, func(c *Config) { c.BtrfsQgroups = true })
+	v, err := m.Create(context.Background(), CreateReq{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.ran("btrfs quota enable") || !h.ran("btrfs subvolume create "+m.vmDir(v.ID)) ||
+		!h.ran(fmt.Sprintf("btrfs qgroup limit -e %d %s", int64(1)<<30+2*512<<20+1<<30, m.vmDir(v.ID))) {
+		t.Fatal(h.cmds)
+	}
+	m.Delete(context.Background(), v.ID)
+	if !h.ran("btrfs subvolume delete "+m.vmDir(v.ID)) || exists(m.vmDir(v.ID)) || !h.ran("conntrack -D -s "+v.IP) {
+		t.Fatal("subvolume/conntrack not cleaned up")
+	}
+}
+
+func TestCopyExtents(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "diff"), filepath.Join(dir, "base")
+	f, _ := os.Create(src)
+	f.Truncate(4 << 20)
+	f.WriteAt([]byte("AAAA"), 1<<20)
+	f.WriteAt([]byte("BBBB"), 3<<20)
+	f.Close()
+	os.WriteFile(dst, bytes.Repeat([]byte("x"), 4<<20), 0o600)
+	if err := copyExtents(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(dst)
+	if string(b[1<<20:1<<20+4]) != "AAAA" || string(b[3<<20:3<<20+4]) != "BBBB" || len(b) != 4<<20 {
+		t.Fatal("dirty pages not merged")
+	}
+	// Holes keep the base where the filesystem reports them (APFS/btrfs/ext4 do at 4K+).
+	if b[0] != 'x' && b[0] != 0 {
+		t.Fatalf("byte 0 = %q", b[0])
+	}
 }

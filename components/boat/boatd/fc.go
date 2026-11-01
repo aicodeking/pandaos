@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -69,32 +70,38 @@ func (c *fcClient) resume(ctx context.Context) error {
 	return c.call(ctx, "PATCH", "/vm", map[string]string{"state": "Resumed"})
 }
 
-// snapshot writes a full snapshot to root/<prefix>vmstate and root/<prefix>mem.
-func (c *fcClient) snapshot(ctx context.Context, prefix string) error {
+// snapshot writes a "Full" or "Diff" (pages dirtied since the last snapshot,
+// restore or boot; a sparse file) snapshot of a paused VM.
+func (c *fcClient) snapshot(ctx context.Context, typ, statePath, memPath string) error {
 	return c.call(ctx, "PUT", "/snapshot/create", map[string]string{
-		"snapshot_type": "Full", "snapshot_path": prefix + vmstate, "mem_file_path": prefix + memFile,
+		"snapshot_type": typ, "snapshot_path": statePath, "mem_file_path": memPath,
 	})
 }
 
-// restore loads root/{vmstate,mem}, swaps the tap (Firecracker >= 1.12) and resumes.
-func (c *fcClient) restore(ctx context.Context, tap string) error {
+// restore loads root/{vmstate,mem} (mem is mmapped MAP_PRIVATE, so it stays
+// the VM's backing file and the base for its next diff snapshot), points eth0
+// at tap0 of the VM's own netns and resumes. VMGenID (Firecracker >= 1.10,
+// x86_64) is bumped on every load, so a guest kernel with the vmgenid driver
+// reseeds its CRNG on its own as well.
+func (c *fcClient) restore(ctx context.Context, trackDirty bool) error {
 	return c.call(ctx, "PUT", "/snapshot/load", map[string]any{
 		"snapshot_path":     vmstate,
 		"mem_backend":       map[string]string{"backend_type": "File", "backend_path": memFile},
 		"resume_vm":         true,
-		"network_overrides": []map[string]string{{"iface_id": "eth0", "host_dev_name": tap}},
+		"track_dirty_pages": trackDirty,
+		"network_overrides": []map[string]string{{"iface_id": "eth0", "host_dev_name": guestTap}},
 	})
 }
 
-func (c *fcClient) boot(ctx context.Context, v VM, bootArgs string) error {
+func (c *fcClient) boot(ctx context.Context, v VM, bootArgs string, trackDirty bool) error {
 	steps := []struct {
 		path string
 		body any
 	}{
 		{"/boot-source", map[string]string{"kernel_image_path": kernFile, "boot_args": bootArgs}},
 		{"/drives/rootfs", map[string]any{"drive_id": "rootfs", "path_on_host": diskFile, "is_root_device": true, "is_read_only": false}},
-		{"/machine-config", map[string]any{"vcpu_count": v.VCPU, "mem_size_mib": v.MemMiB, "smt": false}},
-		{"/network-interfaces/eth0", map[string]string{"iface_id": "eth0", "guest_mac": v.MAC, "host_dev_name": v.Tap}},
+		{"/machine-config", map[string]any{"vcpu_count": v.VCPU, "mem_size_mib": v.MemMiB, "smt": false, "track_dirty_pages": trackDirty}},
+		{"/network-interfaces/eth0", map[string]string{"iface_id": "eth0", "guest_mac": v.MAC, "host_dev_name": guestTap}},
 		{"/vsock", map[string]any{"guest_cid": 3, "uds_path": vsockUDS}},
 		{"/actions", map[string]string{"action_type": "InstanceStart"}},
 	}
@@ -128,45 +135,90 @@ func (p realProcs) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 		return 0, nil, err
 	}
 	defer logf.Close()
+	exe := filepath.Base(p.cfg.Firecracker)
 	var cmd *exec.Cmd
 	if p.cfg.Jailer != "" {
 		// The jailer re-creates these each launch and fails if they exist
 		// (<exec>.pid too: "Failed to open file /firecracker.pid: File exists").
-		exe := filepath.Base(p.cfg.Firecracker)
 		for _, n := range []string{"dev", "run", exe, exe + ".pid"} {
 			os.RemoveAll(filepath.Join(root, n))
 		}
-		args := []string{"--id", v.ID, "--exec-file", p.cfg.Firecracker,
-			"--uid", strconv.Itoa(uid), "--gid", strconv.Itoa(gid),
-			"--chroot-base-dir", vmDir, "--cgroup-version", "2"}
-		args = append(append(args, p.cfg.JailerArgs...), "--", "--api-sock", "/"+apiSock)
-		cmd = exec.Command(p.cfg.Jailer, args...)
+		cmd = exec.Command(p.cfg.Jailer, jailerArgs(p.cfg, v, uid, gid, vmDir)...)
 	} else {
-		cmd = exec.Command(p.cfg.Firecracker, "--id", v.ID, "--api-sock", filepath.Join(root, apiSock))
-		cmd.Dir = root
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
+		// Dev/test mode: one shared uid, no chroot/cgroup; still in the VM's netns.
+		args := []string{"--net=" + netnsPath(v.Index)}
 		if uid != 0 {
-			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
+			args = append(args, "--setuid", strconv.Itoa(uid), "--setgid", strconv.Itoa(gid))
 		}
+		args = append(args, "--", p.cfg.Firecracker, "--id", v.ID, "--api-sock", filepath.Join(root, apiSock))
+		cmd = exec.Command("nsenter", args...)
+		cmd.Dir = root
 	}
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.Setsid = true // survive a boatd restart (unit has KillMode=process)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdout, cmd.Stderr = logf, logf
 	if err := cmd.Start(); err != nil {
 		return 0, nil, err
 	}
-	done := make(chan struct{})
-	go func() { cmd.Wait(); close(done) }()
-	return cmd.Process.Pid, done, nil
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	if p.cfg.Jailer == "" {
+		done := make(chan struct{})
+		go func() { <-exited; close(done) }()
+		return cmd.Process.Pid, done, nil
+	}
+	// --new-pid-ns: the jailer forks firecracker as pid 1 of a new pid
+	// namespace, writes its host pid to <chroot>/<exe>.pid and exits.
+	pid, err := waitPidFile(filepath.Join(root, exe+".pid"), exited)
+	if err != nil {
+		return 0, nil, err
+	}
+	return pid, p.Adopt(pid, v.ID), nil
+}
+
+// jailerArgs: per-VM uid/gid, chroot, netns, new pid ns and a cgroup with
+// memory/cpu/pids limits (when the controllers are delegated to us).
+func jailerArgs(c Config, v VM, uid, gid int, vmDir string) []string {
+	args := []string{"--id", v.ID, "--exec-file", c.Firecracker,
+		"--uid", strconv.Itoa(uid), "--gid", strconv.Itoa(gid),
+		"--chroot-base-dir", vmDir, "--netns", netnsPath(v.Index), "--new-pid-ns", "--cgroup-version", "2"}
+	if c.CgroupParent != "" {
+		args = append(args, "--parent-cgroup", c.CgroupParent)
+	}
+	if c.cgroupLimits {
+		args = append(args,
+			"--cgroup", fmt.Sprintf("memory.max=%d", int64(v.MemMiB+c.VMOverheadMiB)<<20),
+			"--cgroup", fmt.Sprintf("cpu.max=%d 100000", (v.VCPU+1)*100000), // vCPUs + 1 for the VMM threads
+			"--cgroup", "pids.max=256")
+	}
+	args = append(args, c.JailerArgs...)
+	return append(args, "--", "--api-sock", "/"+apiSock)
+}
+
+func waitPidFile(path string, exited <-chan error) (int, error) {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(path); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
+				return pid, nil
+			}
+		}
+		select {
+		case err := <-exited:
+			if err != nil {
+				return 0, fmt.Errorf("jailer: %w (see firecracker.log)", err)
+			}
+			exited = nil // exited cleanly; the pid file is (about to be) there
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	return 0, fmt.Errorf("jailer wrote no pid file %s", path)
 }
 
 func (p realProcs) Adopt(pid int, id string) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		for p.Alive(pid, id) {
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		}
 		close(done)
 	}()

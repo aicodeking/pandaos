@@ -26,6 +26,16 @@ func execRunner(stdin, name string, args ...string) error {
 
 const maxIndex = 65534 // slots 2..65534 of the /16; .0.1 is the gateway
 
+// Egress from VMs to these is dropped: RFC 1918, CGNAT, loopback, link-local
+// (cloud metadata 169.254.169.254), benchmarking, multicast/reserved, and the
+// IPv6 equivalents (ULA covers fd00:ec2::254). Published-port hairpins are
+// accepted earlier (ct status dnat).
+var (
+	privateV4 = []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+		"172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/3"}
+	privateV6 = []string{"::1", "fc00::/7", "fe80::/10", "ff00::/8", "64:ff9b:1::/48"}
+)
+
 func (c Config) gateway() netip.Addr {
 	return netip.MustParsePrefix(c.Subnet).Addr().Next()
 }
@@ -77,15 +87,57 @@ func setupBridge(c Config, run runner) error {
 	return nil
 }
 
-func addTap(c Config, run runner, tap string, uid int) error {
-	run("", "ip", "link", "del", tap) // stale from a crash; error = absent
-	if err := run("", "ip", "tuntap", "add", "dev", tap, "mode", "tap", "user", fmt.Sprint(uid), "group", fmt.Sprint(uid)); err != nil {
-		return err
+// guestTap is the tap firecracker opens. It lives in the VM's own netns, so
+// every VM (and every fork restored from a snapshot) uses the same name.
+const guestTap = "tap0"
+
+func netnsFor(i int) string { return fmt.Sprintf("boat%d", i) }
+
+func netnsPath(i int) string { return "/run/netns/" + netnsFor(i) }
+
+// addVMNet builds the VM's network: netns boat<n> holding tap0 (owned by the
+// VM's uid) bridged to veth0, whose peer bt<n> is the VM's port on boatbr0.
+// The jailer joins the netns, so firecracker sees no host interface at all.
+func addVMNet(c Config, run runner, v VM, uid int) error {
+	delVMNet(run, v)
+	ns, u := netnsFor(v.Index), fmt.Sprint(uid)
+	steps := [][]string{
+		{"ip", "netns", "add", ns},
+		{"ip", "link", "add", v.Tap, "type", "veth", "peer", "name", "veth0", "netns", ns},
+		{"ip", "netns", "exec", ns, "sysctl", "-qw", "net.ipv6.conf.all.disable_ipv6=1"},
+		{"ip", "-n", ns, "link", "add", "br0", "type", "bridge"},
+		{"ip", "-n", ns, "tuntap", "add", "dev", guestTap, "mode", "tap", "user", u, "group", u},
+		{"ip", "-n", ns, "link", "set", guestTap, "master", "br0", "up"},
+		{"ip", "-n", ns, "link", "set", "veth0", "master", "br0", "up"},
+		{"ip", "-n", ns, "link", "set", "br0", "up"},
+		{"ip", "link", "set", v.Tap, "master", c.Bridge, "up"},
 	}
-	return run("", "ip", "link", "set", tap, "master", c.Bridge, "up")
+	for _, st := range steps {
+		if err := run("", st[0], st[1:]...); err != nil {
+			delVMNet(run, v)
+			return err
+		}
+	}
+	return nil
 }
 
-func delTap(run runner, tap string) { run("", "ip", "link", "del", tap) }
+// delVMNet removes the netns (with tap0, br0, the veth pair). Errors = absent.
+func delVMNet(run runner, v VM) {
+	run("", "ip", "netns", "del", netnsFor(v.Index))
+	run("", "ip", "link", "del", v.Tap)
+}
+
+// flushConntrack drops tracked flows of an IP being released or reused, so a
+// new VM never inherits a previous owner's NAT/established state.
+func flushConntrack(run runner, ips ...string) {
+	for _, ip := range ips {
+		if ip == "" {
+			continue
+		}
+		run("", "conntrack", "-D", "-s", ip) // exit 1 = nothing to delete
+		run("", "conntrack", "-D", "-d", ip)
+	}
+}
 
 // ruleset renders the whole boat nftables config from the VM list. It is
 // loaded atomically with `nft -f -` on every change (create/delete/port).
@@ -110,14 +162,31 @@ func ruleset(c Config, vms []VM) string {
 	w("    iifname %q drop\n  }", br)
 
 	w("  chain forward {\n    type filter hook forward priority 0; policy accept;")
-	w("    oifname %q ct state established,related accept", br)
+	w("    ct state established,related accept")
 	w("    oifname %q ct status dnat accept", br)
-	if c.IPv6Prefix != "" {
-		w("    oifname %q ip6 daddr %s accept", br, c.IPv6Prefix)
+	for _, v := range vms { // IPv6 inbound: published ports only
+		for _, p := range v.Ports {
+			if v.IPv6 != "" && p.HostPort > 0 {
+				w("    oifname %q ip6 daddr %s tcp dport %d accept", br, v.IPv6, p.GuestPort)
+			}
+		}
 	}
 	w("    oifname %q drop", br)
-	w("    iifname %q ip daddr { 169.254.0.0/16, %s } drop", br, c.Subnet)
+	w("    iifname %q ip daddr { %s } drop", br, strings.Join(privateV4, ", "))
+	w("    iifname %q ip6 daddr { %s } drop", br, strings.Join(privateV6, ", "))
+	if !c.AllowSMTP {
+		w("    iifname %q tcp dport { 25, 465, 587 } drop", br)
+	}
+	if c.EgressMbit > 0 {
+		for _, v := range vms {
+			w("    iifname %q limit rate over %d kbytes/second drop", v.Tap, c.EgressMbit*125)
+		}
+	}
 	w("  }")
+	if c.Jailer != "" { // a VMM escaping into the host netns still can't reach host services
+		w("  chain output {\n    type filter hook output priority 0; policy accept;")
+		w("    meta skuid %d-%d drop\n  }", c.JailUIDBase, c.JailUIDBase+maxIndex)
+	}
 
 	w("  chain prerouting {\n    type nat hook prerouting priority dstnat; policy accept;")
 	for _, v := range vms {
@@ -131,7 +200,7 @@ func ruleset(c Config, vms []VM) string {
 		}
 	}
 	w("  }")
-	w("  chain output {\n    type nat hook output priority -100; policy accept;")
+	w("  chain output_nat {\n    type nat hook output priority -100; policy accept;")
 	for _, v := range vms {
 		for _, p := range v.Ports {
 			if p.HostPort > 0 {
@@ -194,6 +263,7 @@ type routeFile struct {
 type routeVM struct {
 	IP          string `json:"ip"`
 	Ports       []int  `json:"ports"`
+	Public      []int  `json:"public"` // reachable without a route token (published with a host port)
 	DesktopPort int    `json:"desktopPort"`
 	Team        string `json:"team"`
 	State       State  `json:"state"`
@@ -205,11 +275,16 @@ func writeRoutes(c Config, vms []VM) error {
 		if v.State != Running {
 			continue
 		}
-		ports := []int{}
+		ports, public := []int{}, []int{}
 		for _, p := range v.Ports {
 			ports = append(ports, p.GuestPort)
+			if p.HostPort > 0 {
+				public = append(public, p.GuestPort)
+			}
 		}
-		rf.VMs[v.ID] = routeVM{IP: v.IP, Ports: ports, DesktopPort: c.DesktopPort, Team: v.Team, State: v.State}
+		sort.Ints(ports)
+		sort.Ints(public)
+		rf.VMs[v.ID] = routeVM{IP: v.IP, Ports: ports, Public: public, DesktopPort: c.DesktopPort, Team: v.Team, State: v.State}
 	}
 	if err := os.MkdirAll(c.RunDir, 0o755); err != nil {
 		return err

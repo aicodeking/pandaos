@@ -448,6 +448,8 @@ func (m *Manager) usageHandler(r *http.Request) (any, error) {
 		rep.VMs = filter(rep.VMs, func(v vmUsage) bool { return v.Team == team })
 		rep.Snapshots = filter(rep.Snapshots, func(s snapUsage) bool { return s.Team == team })
 		rep.Teams = filter(rep.Teams, func(t teamUsage) bool { return t.Team == team })
+		rep.Storage = filter(rep.Storage, func(t teamStorage) bool { return t.Team == team })
+		rep.Disk = nil // host-wide: not for tenants
 	}
 	return rep, err
 }

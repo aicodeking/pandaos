@@ -8,7 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -40,6 +43,10 @@ type Manager struct {
 	dones  map[string]<-chan struct{}
 	active map[string]time.Time // last exec/file/desktop seen by boatd
 	netMu  sync.Mutex
+
+	statfs  func(path string) (free, total uint64, err error)
+	hostMem int // MiB available to VMs before overcommit (RAM - reserve)
+	hostCPU int
 }
 
 func newManager(cfg Config, run runner, p procs) (*Manager, error) {
@@ -52,8 +59,36 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 		usage: &ledger{path: filepath.Join(cfg.StateDir, "usage.jsonl")},
 		now:   func() time.Time { return time.Now().UTC() },
 		vms:   map[string]VM{}, snaps: map[string]Snapshot{}, locks: map[string]*sync.Mutex{},
-		dones: map[string]<-chan struct{}{}, active: map[string]time.Time{}}
+		dones: map[string]<-chan struct{}{}, active: map[string]time.Time{}, statfs: statfs}
+	m.hostMem, m.hostCPU = cfg.HostMemMiB, cfg.HostCPUs
+	if m.hostMem == 0 {
+		m.hostMem = hostMemMiB()
+	}
+	if m.hostCPU == 0 {
+		m.hostCPU = runtime.NumCPU()
+	}
+	m.hostMem -= cfg.HostReserveMiB
+	if cfg.BtrfsQgroups {
+		if err := run("", "btrfs", "quota", "enable", cfg.StateDir); err != nil {
+			return nil, err
+		}
+	}
 	return m, m.reconcile()
+}
+
+// hostMemMiB reads MemTotal; 0 (= no RAM admission check) where unavailable.
+func hostMemMiB() int {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(l); len(f) >= 2 && f[0] == "MemTotal:" {
+			kb, _ := strconv.Atoi(f[1])
+			return kb / 1024
+		}
+	}
+	return 0
 }
 
 func (m *Manager) vmDir(id string) string   { return filepath.Join(m.cfg.StateDir, "vms", id) }
@@ -156,7 +191,17 @@ func (m *Manager) quotaLocked(team string, s Size, exclude string) error {
 			n, cpu, mem = n+1, cpu+v.VCPU, mem+v.MemMiB
 		}
 	}
+	var hostMem, hostCPU int // whole host, all teams
+	for _, v := range m.vms {
+		if v.ID != exclude && v.State.active() {
+			hostMem, hostCPU = hostMem+v.MemMiB, hostCPU+v.VCPU
+		}
+	}
 	switch {
+	case m.hostMem > 0 && float64(hostMem+s.MemMiB) > float64(m.hostMem)*m.cfg.MemOvercommit:
+		return errf(http.StatusServiceUnavailable, "host capacity: %d MiB of VM RAM already active (limit %.0f)", hostMem, float64(m.hostMem)*m.cfg.MemOvercommit)
+	case m.hostCPU > 0 && float64(hostCPU+s.VCPU) > float64(m.hostCPU)*m.cfg.CPUOvercommit:
+		return errf(http.StatusServiceUnavailable, "host capacity: %d vCPUs already active (limit %.0f)", hostCPU, float64(m.hostCPU)*m.cfg.CPUOvercommit)
 	case p.MaxVMs > 0 && n > p.MaxVMs:
 		return errf(http.StatusTooManyRequests, "quota: team %s may run %d VMs", team, p.MaxVMs)
 	case p.MaxVCPU > 0 && cpu > p.MaxVCPU:
@@ -172,6 +217,9 @@ func (m *Manager) alloc(v VM, st State) (VM, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.quotaLocked(v.Team, Size{v.VCPU, v.MemMiB, v.DiskGiB}, ""); err != nil {
+		return VM{}, err
+	}
+	if err := m.storageQuotaLocked(v.Team, 1, 0, vmCommit(v)); err != nil {
 		return VM{}, err
 	}
 	used, pub := map[int]bool{}, map[string]bool{}
@@ -199,14 +247,40 @@ func (m *Manager) alloc(v VM, st State) (VM, error) {
 		}
 	}
 	v.State, v.Ports, v.CreatedAt = st, []Port{}, m.now()
-	if err := os.MkdirAll(m.root(v.ID), 0o700); err != nil {
+	if err := m.makeVMDir(v); err != nil {
 		return VM{}, err
 	}
+	flushConntrack(m.run, v.IP, v.IPv6, v.PublicIP) // a previous owner's flows
 	if err := m.commitLocked(VM{}, v, "created"); err != nil {
-		os.RemoveAll(m.vmDir(v.ID))
+		m.removeVMDir(v.ID)
 		return VM{}, err
 	}
 	return v, nil
+}
+
+// makeVMDir: with btrfsQgroups the VM dir is a subvolume whose exclusive
+// bytes (data not shared with the image or parent by reflink) are capped at
+// disk + 2x mem + 1 GiB, so one guest cannot fill the host disk.
+func (m *Manager) makeVMDir(v VM) error {
+	dir := m.vmDir(v.ID)
+	if m.cfg.BtrfsQgroups {
+		if err := m.run("", "btrfs", "subvolume", "create", dir); err != nil {
+			return err
+		}
+		limit := int64(v.DiskGiB)<<30 + 2*int64(v.MemMiB)<<20 + 1<<30
+		if err := m.run("", "btrfs", "qgroup", "limit", "-e", strconv.FormatInt(limit, 10), dir); err != nil {
+			m.removeVMDir(v.ID)
+			return err
+		}
+	}
+	return os.MkdirAll(m.root(v.ID), 0o700)
+}
+
+func (m *Manager) removeVMDir(id string) error {
+	if m.cfg.BtrfsQgroups && m.run("", "btrfs", "subvolume", "delete", m.vmDir(id)) == nil {
+		return nil
+	}
+	return os.RemoveAll(m.vmDir(id))
 }
 
 // syncNet reloads nftables and routes.json from the current VM set.
@@ -273,9 +347,8 @@ func (m *Manager) reconcile() error {
 			continue
 		}
 		root := m.root(v.ID)
-		for _, p := range []string{"new.", "fork.", "snap."} {
-			os.Remove(filepath.Join(root, p+vmstate))
-			os.Remove(filepath.Join(root, p+memFile))
+		for _, f := range []string{snapState, snapDiff, memNew} {
+			os.Remove(filepath.Join(root, f))
 		}
 		m.mu.Lock()
 		err := m.commitLocked(v, m.deadState(v), "boatd restart")
@@ -283,7 +356,7 @@ func (m *Manager) reconcile() error {
 		if err != nil {
 			return err
 		}
-		delTap(m.run, v.Tap)
+		delVMNet(m.run, v)
 	}
 	return nil
 }
@@ -312,7 +385,7 @@ func (m *Manager) watch(id string, pid int, done <-chan struct{}) {
 	if err != nil || v.PID != pid || v.State != Running {
 		return
 	}
-	delTap(m.run, v.Tap)
+	delVMNet(m.run, v)
 	if _, err := m.update(id, "exited", func(v *VM) {
 		v.State, v.PID, v.HasSnapshot, v.AgentReady = Stopped, 0, false, false
 	}); err != nil {

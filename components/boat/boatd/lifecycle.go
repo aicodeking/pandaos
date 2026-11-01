@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -86,6 +89,9 @@ func (m *Manager) Create(ctx context.Context, r CreateReq) (VM, error) {
 	} else if !exists(filepath.Join(src, diskFile)) || !exists(filepath.Join(src, kernFile)) {
 		return VM{}, errf(400, "image %q is not installed", r.Image)
 	}
+	if err := m.checkFloor(0); err != nil {
+		return VM{}, err
+	}
 	v, err := m.alloc(base, Creating)
 	if err != nil {
 		return VM{}, err
@@ -160,7 +166,7 @@ func (m *Manager) fail(id string, err error) (VM, error) {
 	log.Printf("%s: %v", id, err)
 	v, _ := m.get(id)
 	m.killWait(id, v.PID)
-	delTap(m.run, v.Tap)
+	delVMNet(m.run, v)
 	m.update(id, "failed", func(v *VM) { v.State, v.Error, v.PID = Error, err.Error(), 0 })
 	m.syncNet()
 	return VM{}, err
@@ -180,15 +186,19 @@ func (m *Manager) bootArgs(v VM) string {
 // boot launches firecracker and either cold-boots or restores root/{vmstate,mem}.
 func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 	uid, gid := m.ids(v)
-	if err := addTap(m.cfg, m.run, v.Tap, uid); err != nil {
+	if err := addVMNet(m.cfg, m.run, v, uid); err != nil {
 		return v, err
 	}
 	root := m.root(v.ID)
 	os.Remove(filepath.Join(root, apiSock))
 	os.Remove(filepath.Join(root, vsockUDS))
+	if !restore { // a cold boot has no memory base
+		os.Remove(filepath.Join(root, vmstate))
+		os.Remove(filepath.Join(root, memFile))
+	}
 	pid, done, err := m.procs.Start(v, root, uid, gid)
 	if err != nil {
-		delTap(m.run, v.Tap)
+		delVMNet(m.run, v)
 		return v, err
 	}
 	m.mu.Lock()
@@ -201,21 +211,20 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 	err = waitSock(filepath.Join(root, apiSock), done, 5*time.Second)
 	fc := newFC(filepath.Join(root, apiSock))
 	if err == nil && restore {
-		if err = fc.restore(ctx, v.Tap); err == nil {
-			// Memory is mapped privately; the files are stale once the guest runs.
+		if err = fc.restore(ctx, m.cfg.DiffSnapshots); err == nil {
+			// vmstate is consumed; mem stays: it backs the guest (MAP_PRIVATE) and is the next diff's base.
 			os.Remove(filepath.Join(root, vmstate))
-			os.Remove(filepath.Join(root, memFile))
 		}
 	} else if err == nil {
-		err = fc.boot(ctx, v, m.bootArgs(v))
+		err = fc.boot(ctx, v, m.bootArgs(v), m.cfg.DiffSnapshots)
 	}
 	if err != nil {
 		m.killWait(v.ID, pid)
-		delTap(m.run, v.Tap)
+		delVMNet(m.run, v)
 		return v, err
 	}
 	return m.update(v.ID, "", func(x *VM) {
-		x.State, x.HasSnapshot, x.Error = Running, false, ""
+		x.State, x.HasSnapshot, x.Error, x.DiffOK = Running, false, "", m.cfg.DiffSnapshots
 		if x.TTLS > 0 {
 			t := m.now().Add(time.Duration(x.TTLS) * time.Second)
 			x.ExpiresAt = &t
@@ -229,6 +238,9 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 func (m *Manager) initGuest(ctx context.Context, v VM, env map[string]string, identity, restored bool) (VM, error) {
 	sock := filepath.Join(m.root(v.ID), vsockUDS)
 	err := waitAgent(ctx, sock, time.Duration(m.cfg.BootTimeoutS)*time.Second)
+	if err == nil && identity {
+		m.reseed(ctx, v, sock)
+	}
 	if err == nil && identity {
 		id := map[string]any{"op": "set_identity", "hostname": v.Name, "ipv4_cidr": v.IP + "/16",
 			"gw": m.cfg.gateway().String(), "mac": v.MAC, "dns": m.cfg.DNS}
@@ -250,6 +262,17 @@ func (m *Manager) initGuest(ctx context.Context, v VM, env map[string]string, id
 		log.Printf("%s: %v", v.ID, err)
 	}
 	return m.update(v.ID, "", func(x *VM) { x.AgentReady, x.Error = err == nil, msg })
+}
+
+// reseed mixes 64 fresh host bytes into the guest CRNG before set_identity
+// regenerates machine-id and ssh host keys: forks of one snapshot share the
+// parent's RNG state until then.
+func (m *Manager) reseed(ctx context.Context, v VM, sock string) {
+	b := make([]byte, 64)
+	rand.Read(b)
+	if _, err := agentCall(ctx, sock, map[string]any{"op": "reseed", "entropy_b64": base64.StdEncoding.EncodeToString(b)}); err != nil {
+		log.Printf("%s: reseed: %v", v.ID, err)
+	}
 }
 
 // syncClock: a restored guest's wall clock is as old as its snapshot.
@@ -284,16 +307,15 @@ func (m *Manager) Stop(ctx context.Context, id, reason string) (VM, error) {
 		return v, err
 	}
 	root := m.root(id)
-	fc := newFC(filepath.Join(root, apiSock))
-	err = fc.pause(ctx)
+	err = m.checkFloor(uint64(v.MemMiB) << 20) // a diff is usually far smaller; plan for a full one
 	if err == nil {
-		err = fc.snapshot(ctx, "new.")
+		v, err = m.takeSnapshot(ctx, v)
 	}
 	snap := err == nil
 	if !snap {
 		// No snapshot: let the guest flush its disk and reboot (= exit) instead.
-		log.Printf("%s: snapshot failed, shutting down cold: %v", id, err)
-		fc.resume(ctx)
+		log.Printf("%s: no snapshot, shutting down cold: %v", id, err)
+		newFC(filepath.Join(root, apiSock)).resume(ctx)
 		agentCall(ctx, filepath.Join(root, vsockUDS), map[string]string{"op": "shutdown"})
 		m.mu.Lock()
 		done := m.dones[id]
@@ -305,10 +327,12 @@ func (m *Manager) Stop(ctx context.Context, id, reason string) (VM, error) {
 	}
 	m.killWait(id, v.PID)
 	if snap {
-		snap = os.Rename(filepath.Join(root, "new."+vmstate), filepath.Join(root, vmstate)) == nil &&
-			os.Rename(filepath.Join(root, "new."+memFile), filepath.Join(root, memFile)) == nil
+		snap = os.Rename(filepath.Join(root, snapState), filepath.Join(root, vmstate)) == nil
 	}
-	delTap(m.run, v.Tap)
+	if !snap {
+		os.Remove(filepath.Join(root, memFile))
+	}
+	delVMNet(m.run, v)
 	v, err = m.update(id, reason, func(x *VM) {
 		x.State, x.PID, x.HasSnapshot, x.AgentReady, x.ExpiresAt = Stopped, 0, snap, false, nil
 	})
@@ -381,14 +405,18 @@ func (m *Manager) Fork(ctx context.Context, id, name, team string) (VM, error) {
 	}
 	base := VM{Name: name, Team: p.Team, Image: p.Image, Size: p.Size, VCPU: p.VCPU, MemMiB: p.MemMiB,
 		DiskGiB: p.DiskGiB, Labels: p.Labels, TTLS: p.TTLS, IdleStopS: p.IdleStopS, ParentID: p.ID}
-	c, err := m.alloc(base, Forking)
+	err = m.checkFloor(uint64(p.MemMiB) << 20)
+	var c VM
+	if err == nil {
+		c, err = m.alloc(base, Forking)
+	}
 	if err != nil {
 		unlockP()
 		return VM{}, err
 	}
 	unlockC := m.lock(c.ID)
 	defer unlockC()
-	withMem, err := m.freeze(ctx, p, m.root(c.ID), "fork.")
+	withMem, err := m.freeze(ctx, p, m.root(c.ID))
 	unlockP()
 	if err == nil {
 		err = m.finishDisk(c)
@@ -400,47 +428,6 @@ func (m *Manager) Fork(ctx context.Context, id, name, team string) (VM, error) {
 	return m.bootNew(ctx, c, withMem, nil)
 }
 
-// freeze copies v's disk+kernel (+vmstate/mem) into dst. A running VM is
-// paused, snapshotted to root/<tmp>*, its disk reflinked, then resumed.
-func (m *Manager) freeze(ctx context.Context, v VM, dst, tmp string) (bool, error) {
-	if err := os.MkdirAll(dst, 0o700); err != nil {
-		return false, err
-	}
-	root := m.root(v.ID)
-	if v.State != Running {
-		files := []string{diskFile, kernFile}
-		if v.HasSnapshot {
-			files = append(files, vmstate, memFile)
-		}
-		for _, f := range files {
-			if err := m.cp(filepath.Join(root, f), filepath.Join(dst, f)); err != nil {
-				return false, err
-			}
-		}
-		return v.HasSnapshot, nil
-	}
-	fc := newFC(filepath.Join(root, apiSock))
-	if err := fc.pause(ctx); err != nil {
-		return false, err
-	}
-	err := fc.snapshot(ctx, tmp)
-	for _, f := range []string{diskFile, kernFile} {
-		if err == nil {
-			err = m.cp(filepath.Join(root, f), filepath.Join(dst, f))
-		}
-	}
-	if rerr := fc.resume(context.WithoutCancel(ctx)); rerr != nil {
-		log.Printf("%s: resume after snapshot: %v", v.ID, rerr)
-	}
-	for _, f := range []string{vmstate, memFile} {
-		if err == nil {
-			err = os.Rename(filepath.Join(root, tmp+f), filepath.Join(dst, f))
-		}
-		os.Remove(filepath.Join(root, tmp+f))
-	}
-	return err == nil, err
-}
-
 func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 	unlock := m.lock(id)
 	defer unlock()
@@ -449,12 +436,16 @@ func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 		return v, err
 	}
 	m.killWait(id, v.PID)
-	delTap(m.run, v.Tap)
+	delVMNet(m.run, v)
+	flushConntrack(m.run, v.IP, v.IPv6, v.PublicIP)
+	if m.cfg.CgroupParent != "" {
+		os.Remove(filepath.Join("/sys/fs/cgroup", m.cfg.CgroupParent, id)) // the jailer's (empty) cgroup
+	}
 	m.update(id, "deleted", func(x *VM) { x.State, x.PID = Stopped, 0 }) // closes the billing interval
 	for _, s := range m.Snapshots(id) {
 		m.DeleteSnapshot(id, s.ID)
 	}
-	if err := os.RemoveAll(m.vmDir(id)); err != nil {
+	if err := m.removeVMDir(id); err != nil {
 		return v, err
 	}
 	m.mu.Lock()
@@ -466,65 +457,6 @@ func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 	m.syncNet()
 	v.State = "deleted"
 	return v, nil
-}
-
-func (m *Manager) Snapshots(vmID string) []Snapshot {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := []Snapshot{}
-	for _, s := range m.snaps {
-		if s.VMID == vmID {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapshot, error) {
-	if len(name) > 128 {
-		return Snapshot{}, errf(400, "name too long")
-	}
-	unlock := m.lock(vmID)
-	defer unlock()
-	v, err := m.get(vmID)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	if v.State != Running && v.State != Stopped {
-		return Snapshot{}, errf(http.StatusConflict, "vm is %s", v.State)
-	}
-	s := Snapshot{ID: newID("snap-"), Name: name, VMID: v.ID, Team: v.Team, Image: v.Image, Size: v.Size,
-		VCPU: v.VCPU, MemMiB: v.MemMiB, DiskGiB: v.DiskGiB, CreatedAt: m.now()}
-	dir := m.snapDir(s.ID)
-	if s.HasMem, err = m.freeze(ctx, v, dir, "snap."); err == nil {
-		err = writeJSONAtomic(filepath.Join(dir, "snap.json"), s, 0o600)
-	}
-	if err != nil {
-		os.RemoveAll(dir)
-		return Snapshot{}, err
-	}
-	m.mu.Lock()
-	m.snaps[s.ID] = s
-	m.mu.Unlock()
-	m.ev.publish(Event{Type: "snapshot.created", VMID: v.ID, SnapID: s.ID, Team: v.Team})
-	return s, nil
-}
-
-func (m *Manager) DeleteSnapshot(vmID, sid string) error {
-	m.mu.Lock()
-	s, ok := m.snaps[sid]
-	if ok && s.VMID == vmID {
-		delete(m.snaps, sid)
-	}
-	m.mu.Unlock()
-	if !ok || s.VMID != vmID {
-		return errf(404, "snapshot not found")
-	}
-	if err := m.usage.append(usageRec{"snapshot", s.ID, s.Team, s.Size, s.CreatedAt, m.now()}); err != nil {
-		log.Printf("usage: %v", err)
-	}
-	m.ev.publish(Event{Type: "snapshot.deleted", VMID: vmID, SnapID: sid, Team: s.Team})
-	return os.RemoveAll(m.snapDir(sid))
 }
 
 // AddPort exposes guest_port: always as a gateway hostname route, and with
@@ -614,5 +546,12 @@ func (m *Manager) Usage(since time.Time) (usageReport, error) {
 		recs = append(recs, usageRec{"snapshot", s.ID, s.Team, s.Size, s.CreatedAt, now})
 	}
 	m.mu.Unlock()
-	return summarize(recs, since, now), nil
+	rep := summarize(recs, since, now)
+	st, disk := m.storage()
+	rep.Disk, rep.Storage = &disk, []teamStorage{}
+	for _, t := range st {
+		rep.Storage = append(rep.Storage, *t)
+	}
+	sort.Slice(rep.Storage, func(i, j int) bool { return rep.Storage[i].Team < rep.Storage[j].Team })
+	return rep, nil
 }

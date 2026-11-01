@@ -154,11 +154,13 @@ type teamUsage struct {
 }
 
 type usageReport struct {
-	Since     time.Time   `json:"since"`
-	Until     time.Time   `json:"until"`
-	VMs       []vmUsage   `json:"vms"`
-	Snapshots []snapUsage `json:"snapshots"`
-	Teams     []teamUsage `json:"teams"`
+	Since     time.Time     `json:"since"`
+	Until     time.Time     `json:"until"`
+	VMs       []vmUsage     `json:"vms"`
+	Snapshots []snapUsage   `json:"snapshots"`
+	Teams     []teamUsage   `json:"teams"`
+	Storage   []teamStorage `json:"storage"` // bytes now, per team
+	Disk      *diskSpace    `json:"disk,omitempty"`
 }
 
 // summarize clips intervals (closed + still-open) to [since, until].

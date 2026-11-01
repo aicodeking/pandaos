@@ -47,6 +47,7 @@ cleanup() {
   sudo ip link del boatbr0 2>/dev/null
   sudo nft delete table inet boat 2>/dev/null
   sudo nft delete table bridge boat 2>/dev/null
+  for n in $(ip netns list 2>/dev/null | awk '/^boat[0-9]/{print $1}'); do sudo ip netns del "$n"; done
   sudo iptables -D FORWARD -i boatbr0 -j ACCEPT 2>/dev/null
   sudo iptables -D FORWARD -o boatbr0 -j ACCEPT 2>/dev/null
   sudo sh -c 'for f in "$1"/vms/*/firecracker.log; do [ -f "$f" ] && { echo "--- $f (tail)"; tail -n 30 "$f"; }; done' _ "$STATE"
@@ -63,7 +64,7 @@ mkdir -p "$WORK/bin" "$WORK/dl" "$WORK/run" "$WORK/api" "$WORK/tmp"
 
 log "tools"
 missing=()
-for c in jq:jq nft:nftables mkfs.btrfs:btrfs-progs curl:curl ssh:openssh-client ssh-keyscan:openssh-client; do
+for c in jq:jq nft:nftables mkfs.btrfs:btrfs-progs curl:curl ssh:openssh-client ssh-keyscan:openssh-client conntrack:conntrack; do
   command -v "${c%%:*}" >/dev/null || missing+=("${c#*:}")
 done
 [ ${#missing[@]} = 0 ] || { sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" >/dev/null; }
@@ -110,11 +111,11 @@ log "boatd (root)"
 jailer='""' jargs='[]'
 if [ "$JAILER" = 1 ]; then
   sudo mkdir -p /sys/fs/cgroup/boat-e2e
-  jailer="\"$WORK/dl/jailer\"" jargs='["--parent-cgroup","boat-e2e"]'
+  jailer="\"$WORK/dl/jailer\""
 fi
 cat >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
- "firecracker":"$WORK/dl/firecracker","jailer":$jailer,"jailerArgs":$jargs,"reflink":"always",
+ "firecracker":"$WORK/dl/firecracker","jailer":$jailer,"jailerArgs":$jargs,"cgroupParent":"boat-e2e","reflink":"always","btrfsQgroups":true,
  "bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
  "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},
  "defaultTeam":{"maxVMs":$MAX_VMS}}
@@ -296,16 +297,21 @@ id_d=$(field e2e-d id)
 d=$(boat desktop e2e-d --json)
 desktop_s=$(secs "$t" "$(now)")
 u=$(jq -r .url <<<"$d")
-[[ $u == "http://desktop.$DOMAIN:8742/$id_d?exp="* ]] || fail "desktop url: $d"
-gw=(--connect-to "desktop.$DOMAIN:8742:127.0.0.1:8742" --max-time 20)
-# Follow the link like a browser: /<id>?sig -> /<id>/?sig (Set-Cookie) -> /<id>/
+[[ $u == "http://"*"$id_d"*"exp="* ]] || fail "desktop url: $d"
+gw=(--connect-to "::127.0.0.1:8742" --max-time 20) # any host -> the gateway
+# Follow the link like a browser: the signed link redirects to the VM's own
+# desktop origin (<id>.desktop.D), which sets the session cookie.
 hdr=$(curl -sS -L -D - -o /dev/null "${gw[@]}" "$u" || true)
-cookie=$( (grep -i '^set-cookie: boat_gw=' <<<"$hdr" || true) | sed 's/^[^:]*: //; s/;.*//' | tr -d '\r')
+cookie=$( (grep -iE '^set-cookie: (__Host-)?boat_gw=' <<<"$hdr" || true) | tail -1 | sed 's/^[^:]*: //; s/;.*//' | tr -d '\r')
 [ -n "$cookie" ] || fail "desktop link gave no cookie: $hdr"
 # The cookie is Secure (Caddy serves https in production); send it by hand over http.
-code=$(curl -sS -o "$WORK/tmp/desktop.html" -w '%{http_code}' -b "$cookie" "${gw[@]}" "http://desktop.$DOMAIN:8742/$id_d/")
-[ "$code" = 200 ] && grep -qi '<html' "$WORK/tmp/desktop.html" || fail "desktop page: HTTP $code $(head -c 300 "$WORK/tmp/desktop.html")"
-[ "$(curl -s -o /dev/null -w '%{http_code}' "${gw[@]}" "http://desktop.$DOMAIN:8742/$id_d/")" != 200 ] || fail "desktop open without the cookie"
+desk=""
+for cand in "http://$id_d.desktop.$DOMAIN:8742/" "http://desktop.$DOMAIN:8742/$id_d/"; do
+  code=$(curl -sS -o "$WORK/tmp/desktop.html" -w '%{http_code}' -b "$cookie" "${gw[@]}" "$cand")
+  if [ "$code" = 200 ] && grep -qi '<html' "$WORK/tmp/desktop.html"; then desk=$cand; break; fi
+done
+[ -n "$desk" ] || fail "desktop page: HTTP $code $(head -c 300 "$WORK/tmp/desktop.html")"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "${gw[@]}" "$desk")" != 200 ] || fail "desktop open without the cookie"
 echo "desktop ${desktop_s}s (create + desktop start)"
 
 log "quota: $MAX_VMS VMs active, the next create is refused"

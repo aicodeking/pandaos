@@ -21,7 +21,6 @@ func TestRuleset(t *testing.T) {
 		"table inet boat\ndelete table inet boat", // atomic replace
 		`iifname "boatbr0" ip daddr 10.200.0.1 meta l4proto { udp, tcp } th dport 53 accept`,
 		`iifname "boatbr0" drop`,
-		`oifname "boatbr0" ip6 daddr 2001:db8:1::/64 accept`,
 		"fib daddr type local tcp dport 20000 dnat ip to 10.200.0.2:8080",
 		"ip daddr 203.0.113.7 dnat ip to 10.200.0.2",
 		`ip saddr 10.200.0.2 oifname != "boatbr0" snat ip to 203.0.113.7`,
@@ -29,6 +28,11 @@ func TestRuleset(t *testing.T) {
 		`set team0 { type ifname; elements = { "bt2", "bt3" }; }`,
 		"iifname @team0 oifname @team0 accept",
 		`iifname "bt*" oifname "bt*" drop`,
+		`iifname "boatbr0" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12,`,
+		`iifname "boatbr0" ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8, 64:ff9b:1::/48 } drop`,
+		`iifname "boatbr0" tcp dport { 25, 465, 587 } drop`,
+		`oifname "boatbr0" ip6 daddr 2001:db8:1::2 tcp dport 8080 accept`,
+		"ct state established,related accept",
 		`iifname "bt300" ether type ip ip saddr != 10.200.1.44 drop`,
 		`iifname "bt300" ether saddr != 06:00:0a:c8:01:2c drop`,
 		`iifname "bt2" ether type ip6 ip6 saddr != { 2001:db8:1::2, fe80::/10, :: } drop`,
@@ -36,6 +40,15 @@ func TestRuleset(t *testing.T) {
 		if !strings.Contains(rs, want) {
 			t.Errorf("ruleset missing %q\n%s", want, rs)
 		}
+	}
+	if strings.Contains(rs, "dport 3000 accept") || strings.Contains(rs, "ip6 daddr 2001:db8:1::/64 accept") || strings.Contains(rs, "skuid") {
+		t.Errorf("unpublished v6 port open, whole prefix open, or jail-uid rule without a jailer\n%s", rs)
+	}
+	c.Jailer, c.AllowSMTP, c.EgressMbit = "/bin/jailer", true, 100
+	rs = ruleset(c, vms)
+	if !strings.Contains(rs, "meta skuid 900000-965534 drop") || strings.Contains(rs, "dport { 25") ||
+		!strings.Contains(rs, `iifname "bt2" limit rate over 12500 kbytes/second drop`) {
+		t.Errorf("jailer/smtp/egress options\n%s", rs)
 	}
 	if strings.Contains(rs, "dport 0") || strings.Contains(rs, "bt300\", ") {
 		t.Errorf("port without host_port forwarded, or red team in blue set\n%s", rs)

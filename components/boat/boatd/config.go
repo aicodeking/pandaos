@@ -18,11 +18,16 @@ type Size struct {
 	DiskGiB int `json:"disk_gib"`
 }
 
-// TeamPolicy is a per-team quota. Zero = unlimited.
+// TeamPolicy is a per-team quota. Zero = unlimited. maxVMs/maxVCPU/maxMemMiB
+// count active VMs; maxTotalVMs counts stopped ones too; maxDiskGiB is the
+// committed storage (each VM's disk + mem file, each snapshot's disk + mem).
 type TeamPolicy struct {
 	MaxVMs         int  `json:"maxVMs"`
 	MaxVCPU        int  `json:"maxVCPU"`
 	MaxMemMiB      int  `json:"maxMemMiB"`
+	MaxTotalVMs    int  `json:"maxTotalVMs"`
+	MaxSnapshots   int  `json:"maxSnapshots"`
+	MaxDiskGiB     int  `json:"maxDiskGiB"`
 	AllowIntraTeam bool `json:"allowIntraTeam"`
 }
 
@@ -49,12 +54,32 @@ type Config struct {
 	PortMax     int      `json:"portMax"`
 	DesktopPort int      `json:"desktopPort"` // guest port the gateway proxies the desktop to
 
-	Sizes        map[string]Size       `json:"sizes"`
-	DefaultSize  string                `json:"defaultSize"`
-	DefaultImage string                `json:"defaultImage"`
-	BootArgs     string                `json:"bootArgs"`
-	BootTimeoutS int                   `json:"bootTimeoutS"` // wait for the guest agent
-	IdleStopS    int                   `json:"idleStopS"`    // 0 = never auto-stop on idle
+	Sizes        map[string]Size `json:"sizes"`
+	DefaultSize  string          `json:"defaultSize"`
+	DefaultImage string          `json:"defaultImage"`
+	BootArgs     string          `json:"bootArgs"`
+	BootTimeoutS int             `json:"bootTimeoutS"`  // wait for the guest agent
+	IdleStopS    int             `json:"idleStopS"`     // 0 = never auto-stop on idle
+	ReapS        int             `json:"reapIntervalS"` // TTL/idle check period
+
+	// Host protection.
+	MinFreePct     int     `json:"minFreePct"`     // refuse create/fork/snapshot below this free % of stateDir
+	MinFreeGiB     int     `json:"minFreeGiB"`     // ... or below this many GiB (the larger floor wins)
+	MemOvercommit  float64 `json:"memOvercommit"`  // active VM RAM <= (host RAM - reserve) * this
+	CPUOvercommit  float64 `json:"cpuOvercommit"`  // active vCPUs <= host CPUs * this
+	HostReserveMiB int     `json:"hostReserveMiB"` // RAM kept for the host itself
+	HostMemMiB     int     `json:"hostMemMiB"`     // 0 = /proc/meminfo
+	HostCPUs       int     `json:"hostCPUs"`       // 0 = runtime.NumCPU
+	VMOverheadMiB  int     `json:"vmOverheadMiB"`  // cgroup memory.max = VM RAM + this
+	CgroupParent   string  `json:"cgroupParent"`   // jailer --parent-cgroup; "" = boatd's own (Delegate=yes)
+	BtrfsQgroups   bool    `json:"btrfsQgroups"`   // each VM dir is a subvolume with an exclusive-bytes limit
+	DiffSnapshots  bool    `json:"diffSnapshots"`  // dirty-page snapshots merged onto a reflinked base
+
+	// Egress policy.
+	AllowSMTP  bool `json:"allowSMTP"`  // else tcp 25/465/587 out is dropped
+	EgressMbit int  `json:"egressMbit"` // per-VM egress cap; 0 = none
+
+	cgroupLimits bool                  // set at startup when the cgroup controllers could be delegated
 	Teams        map[string]TeamPolicy `json:"teams"`
 	DefaultTeam  TeamPolicy            `json:"defaultTeam"`
 }
@@ -69,22 +94,30 @@ var (
 
 func defaultConfig() Config {
 	return Config{
-		StateDir:     "/var/lib/boat",
-		RunDir:       "/run/boat",
-		Socket:       "/run/boat/boatd.sock",
-		Firecracker:  "firecracker",
-		JailUIDBase:  900000,
-		Reflink:      "always",
-		Bridge:       "boatbr0",
-		Subnet:       "10.200.0.0/16",
-		DNS:          []string{"1.1.1.1", "9.9.9.9"},
-		PortMin:      20000,
-		PortMax:      40000,
-		DesktopPort:  6080,
-		DefaultSize:  "default",
-		DefaultImage: "ubuntu-24.04",
-		BootArgs:     "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
-		BootTimeoutS: 60,
+		StateDir:       "/var/lib/boat",
+		RunDir:         "/run/boat",
+		Socket:         "/run/boat/boatd.sock",
+		Firecracker:    "firecracker",
+		JailUIDBase:    900000,
+		Reflink:        "always",
+		Bridge:         "boatbr0",
+		Subnet:         "10.200.0.0/16",
+		DNS:            []string{"1.1.1.1", "9.9.9.9"},
+		PortMin:        20000,
+		PortMax:        40000,
+		DesktopPort:    6080,
+		DefaultSize:    "default",
+		DefaultImage:   "ubuntu-24.04",
+		BootArgs:       "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
+		BootTimeoutS:   60,
+		ReapS:          30,
+		MinFreePct:     10,
+		MinFreeGiB:     5,
+		MemOvercommit:  1.0,
+		CPUOvercommit:  4.0,
+		HostReserveMiB: 1024,
+		VMOverheadMiB:  256,
+		DiffSnapshots:  true,
 		Sizes: map[string]Size{
 			"small":   {2, 4096, 51},
 			"default": {4, 8192, 51},
@@ -142,6 +175,9 @@ func (c Config) validate() error {
 		if s.VCPU < 1 || s.MemMiB < 128 || s.DiskGiB < 1 {
 			return fmt.Errorf("size %s invalid", n)
 		}
+	}
+	if c.MemOvercommit <= 0 || c.CPUOvercommit <= 0 || c.MinFreePct < 0 || c.MinFreePct > 90 || c.MinFreeGiB < 0 || c.ReapS < 1 {
+		return fmt.Errorf("memOvercommit/cpuOvercommit must be > 0, minFreePct 0-90, minFreeGiB >= 0, reapIntervalS >= 1")
 	}
 	if !filepath.IsAbs(c.StateDir) || !filepath.IsAbs(c.RunDir) {
 		return fmt.Errorf("stateDir and runDir must be absolute")

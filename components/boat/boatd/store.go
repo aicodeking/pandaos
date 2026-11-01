@@ -53,6 +53,7 @@ type VM struct {
 	PID          int               `json:"pid,omitempty"`
 	HasSnapshot  bool              `json:"has_snapshot"` // stop snapshot (mem+vmstate) present
 	AgentReady   bool              `json:"agent_ready"`
+	DiffOK       bool              `json:"diff_ok,omitempty"`        // root/mem (or zeros) is a valid base for a diff snapshot
 	ResumeOnBoot bool              `json:"resume_on_boot,omitempty"` // stopped by a boatd shutdown
 	Ports        []Port            `json:"ports"`
 	TTLS         int               `json:"ttl_s,omitempty"`

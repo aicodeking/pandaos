@@ -41,6 +41,12 @@ func (h *fakeHost) run(stdin, name string, args ...string) error {
 		h.nft = stdin
 	}
 	h.mu.Unlock()
+	if name == "btrfs" && len(args) == 3 && args[0] == "subvolume" {
+		if args[1] == "create" {
+			return os.Mkdir(args[2], 0o711)
+		}
+		return os.RemoveAll(args[2])
+	}
 	if name != "cp" {
 		return nil
 	}
@@ -69,6 +75,7 @@ func (h *fakeHost) ran(prefix string) bool {
 type fakeFC struct {
 	h        *fakeHost
 	id, root string
+	pid      int
 	mu       sync.Mutex
 	calls    []string
 	paused   bool
@@ -92,6 +99,7 @@ func (h *fakeHost) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 	h.mu.Lock()
 	h.next++
 	pid := h.next
+	f.pid = pid
 	h.vms[pid] = f
 	h.mu.Unlock()
 	return pid, f.done, nil
@@ -165,6 +173,12 @@ func (f *fakeFC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&body)
 	f.record(r.Method + " " + r.URL.Path)
 	str := func(k string) string { s, _ := body[k].(string); return s }
+	if r.URL.Path == "/snapshot/create" {
+		f.record("snapshot " + str("snapshot_type"))
+	}
+	if r.URL.Path == "/snapshot/load" && body["track_dirty_pages"] == true {
+		f.record("load tracking")
+	}
 	switch r.Method + " " + r.URL.Path {
 	case "PUT /boot-source":
 		if !exists(filepath.Join(f.root, str("kernel_image_path"))) {
@@ -318,6 +332,17 @@ func (f *fakeFC) agentConn(c net.Conn) {
 			send(map[string]bool{"ok": true})
 		case "desktop":
 			send(map[string]any{"ok": true, "port": 6080})
+		case "sync":
+			send(map[string]bool{"ok": true})
+		case "reseed":
+			if len(q["entropy_b64"].(string)) != 88 {
+				send(map[string]string{"error": "want 64 bytes"})
+				continue
+			}
+			send(map[string]bool{"ok": true})
+		case "shutdown":
+			send(map[string]bool{"ok": true})
+			go f.h.Kill(f.pid)
 		default:
 			send(map[string]string{"error": "unknown op"})
 		}
@@ -334,6 +359,7 @@ func newTestManager(t *testing.T, mod func(*Config)) (*Manager, *fakeHost) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	cfg := defaultConfig()
 	cfg.StateDir, cfg.RunDir, cfg.Reflink, cfg.BootTimeoutS = dir, filepath.Join(dir, "run"), "auto", 5
+	cfg.MinFreeGiB, cfg.MinFreePct, cfg.HostMemMiB, cfg.HostCPUs = 0, 0, 1<<20, 64
 	cfg.Sizes = map[string]Size{"default": {2, 512, 1}, "large": {4, 1024, 1}}
 	if mod != nil {
 		mod(&cfg)

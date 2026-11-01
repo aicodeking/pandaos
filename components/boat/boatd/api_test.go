@@ -112,7 +112,7 @@ func TestAPI(t *testing.T) {
 	}
 	var rf routeFile
 	readJSON(filepath.Join(m.cfg.RunDir, "routes.json"), &rf)
-	if r := rf.VMs[v.ID]; r.IP != v.IP || len(r.Ports) != 2 || r.DesktopPort != 6080 {
+	if r := rf.VMs[v.ID]; r.IP != v.IP || len(r.Ports) != 2 || r.DesktopPort != 6080 || len(r.Public) != 1 || r.Public[0] != 8080 || r.Ports[0] != 3000 {
 		t.Fatalf("routes.json: %+v", rf)
 	}
 	if c := call(t, srv, "DELETE", "/v1/vms/"+v.ID+"/ports?port=8080", nil, nil); c != 200 {
