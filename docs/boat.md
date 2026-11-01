@@ -132,6 +132,23 @@ Internet --443--> Caddy --api.D---------------------> boat-api 127.0.0.1:8740   
 | Billing | no | metering only; no payments, invoices or plans |
 | Regions | N/A | one server is one region; run several servers for more |
 
+### What the `boat-e2e` workflow proves
+
+`components/boat/e2e.sh` (first green: run 41286609943) runs real Firecracker (jailer on) on a GitHub
+KVM runner with boatd, boat-api and boat-gateway as plain processes, and drives everything through
+the `boat` CLI: `new` (slim image) and `new --image full`, `exec`, `ssh` via the returned endpoint,
+`scp` both ways, VM egress, secrets in the exec env, `ports add --public` (host port and gateway
+route), stop -> start as a memory restore (same `boot_id`, the guest's HTTP server survives), `fork`
+(file kept; new hostname, IP, machine-id and ssh host key; both running), snapshot + `new --snapshot`,
+`prompt` (a stub `claude` proves argv and env), `desktop` (signed link -> cookie -> KasmVNC page via
+boat-gateway), the team quota (429), TTL auto-stop, HMAC-valid webhooks (checked with the Python SDK),
+usage metering and `rm`. Its `METRIC` line records create, ssh-ready, fork, stop, resume and
+from-snapshot times and the image sizes.
+
+Not covered there: Caddy/TLS and the ssh jump host (only in `checks.boat-module`, with stubs), idle
+auto-stop, IPv6 and public IPv4, cross-team network isolation, boatd restart/reconcile, and the SDKs
+against a live server.
+
 ## Honest gaps
 
 - **One host.** No live migration, no cross-host scheduling and no HA. If the box dies, its VMs go down with it. Back up `/var/lib/boat` with `btrfs send` of snapshots.
