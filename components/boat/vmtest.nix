@@ -57,8 +57,8 @@ pkgs.testers.runNixOSTest {
     with subtest("boatd: clear refusal without /dev/kvm, running with it"):
         if machine.execute("test -c /dev/kvm")[0] != 0:
             machine.wait_until_fails("systemctl is-active boatd.service")
-            log = machine.succeed("journalctl -u boatd.service --no-pager")
-            assert "/dev/kvm is missing" in log, log
+            journal = machine.succeed("journalctl -u boatd.service --no-pager")
+            assert "/dev/kvm is missing" in journal, journal
             time.sleep(8)
             n = machine.succeed("systemctl show -p NRestarts --value boatd.service").strip()
             assert n == "0", f"boatd restart loop: NRestarts={n}"
