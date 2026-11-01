@@ -50,13 +50,15 @@ PROBE = """
       }
     };
   }
+  // A factory, not a subclass: the client must get a genuine WebSocket (it failed to
+  // connect with a subclass), and the probe must not change what it measures.
   const WS = window.WebSocket;
-  window.WebSocket = class extends WS {
-    constructor(...args) {
-      super(...args);
-      this.addEventListener('message', e => { b.bytes += e.data.byteLength || e.data.size || e.data.length || 0; });
-    }
-  };
+  window.WebSocket = Object.assign(function (...args) {
+    const ws = new WS(...args);
+    ws.addEventListener('message', e => { b.bytes += e.data.byteLength || e.data.size || e.data.length || 0; });
+    return ws;
+  }, {CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3});
+  window.WebSocket.prototype = WS.prototype;
   addEventListener('error', e => b.errors.push(String(e.message)));
   const sample = document.createElement('canvas');
   sample.width = %d; sample.height = %d;
