@@ -423,7 +423,9 @@ func TestKeysAndTeams(t *testing.T) {
 
 func must(_ int, b []byte) []byte { return b }
 
-func TestOpenAPICoversRoutes(t *testing.T) {
+// TestOpenAPIMatchesRoutes diffs the registered route table against
+// openapi.json in both directions, so either side drifting fails CI.
+func TestOpenAPIMatchesRoutes(t *testing.T) {
 	var spec struct {
 		OpenAPI string                    `json:"openapi"`
 		Paths   map[string]map[string]any `json:"paths"`
@@ -434,19 +436,33 @@ func TestOpenAPICoversRoutes(t *testing.T) {
 	if spec.OpenAPI != "3.1.0" {
 		t.Errorf("openapi version %q", spec.OpenAPI)
 	}
-	src, _ := os.ReadFile("main.go")
-	for _, line := range strings.Split(string(src), "\n") {
-		i := strings.Index(line, `s.route("`)
-		if i < 0 {
-			continue
-		}
-		pat := strings.SplitN(line[i+9:], `"`, 2)[0]
-		method, path, _ := strings.Cut(pat, " ")
-		if spec.Paths[path][strings.ToLower(method)] == nil {
-			t.Errorf("openapi.json missing %s %s", method, path)
+	e := setup(t)
+	registered := map[string]bool{}
+	for _, pat := range e.srv.routeTable {
+		registered[pat] = true
+	}
+	documented := map[string]bool{}
+	for path, ops := range spec.Paths {
+		for m := range ops {
+			if m == "parameters" {
+				continue
+			}
+			documented[strings.ToUpper(m)+" "+path] = true
 		}
 	}
-	e := setup(t)
+	for pat := range registered {
+		if !documented[pat] {
+			t.Errorf("route %q is registered but missing from openapi.json", pat)
+		}
+	}
+	for pat := range documented {
+		if !registered[pat] {
+			t.Errorf("openapi.json documents %q but no such route is registered", pat)
+		}
+	}
+	if len(registered) < 40 {
+		t.Errorf("route table looks incomplete: %d routes", len(registered))
+	}
 	if st, _ := e.raw("", "GET", "/v1/openapi.json", nil); st != 200 {
 		t.Errorf("spec endpoint: %d", st)
 	}

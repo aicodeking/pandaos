@@ -169,3 +169,9 @@ func SignGuestDesktop(key []byte, vmID string) string {
 	m.Write([]byte("guest-desktop." + vmID))
 	return hex.EncodeToString(m.Sum(nil))
 }
+
+func signHex(key []byte, payload string) string {
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte(payload))
+	return hex.EncodeToString(m.Sum(nil))
+}

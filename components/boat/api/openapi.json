@@ -609,7 +609,7 @@
     }
    },
    "post": {
-    "summary": "Expose a port",
+    "summary": "Expose a port. auth=private (default): the gateway route needs a token from …/ports/{port}/url. auth=public (or public:true): open route plus a raw TCP host port",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -631,17 +631,25 @@
       "application/json": {
        "schema": {
         "type": "object",
+        "required": [
+         "port"
+        ],
         "properties": {
          "port": {
           "type": "integer"
          },
+         "auth": {
+          "enum": [
+           "private",
+           "public"
+          ],
+          "default": "private"
+         },
          "public": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "shorthand for auth=public"
          }
-        },
-        "required": [
-         "port"
-        ]
+        }
        }
       }
      }
@@ -956,7 +964,7 @@
     }
    },
    "post": {
-    "summary": "Create a team (caller becomes owner)",
+    "summary": "Create a team (operator only). With owner, a new user owns it and their first key is returned; else the operator owns it",
     "x-boat-scope": "admin",
     "requestBody": {
      "required": true,
@@ -964,14 +972,18 @@
       "application/json": {
        "schema": {
         "type": "object",
+        "required": [
+         "name"
+        ],
         "properties": {
          "name": {
           "type": "string"
+         },
+         "owner": {
+          "type": "string",
+          "description": "name of a new user who becomes owner"
          }
-        },
-        "required": [
-         "name"
-        ]
+        }
        }
       }
      }
@@ -982,7 +994,27 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/Team"
+         "allOf": [
+          {
+           "$ref": "#/components/schemas/Team"
+          },
+          {
+           "type": "object",
+           "properties": {
+            "owner": {
+             "type": "object",
+             "properties": {
+              "user": {
+               "type": "object"
+              },
+              "key": {
+               "$ref": "#/components/schemas/Key"
+              }
+             }
+            }
+           }
+          }
+         ]
         }
        }
       }
@@ -1014,6 +1046,36 @@
        "application/json": {
         "schema": {
          "$ref": "#/components/schemas/Team"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "summary": "Delete a team (operator only; the team must have no VMs). Removes its keys, secrets and webhooks",
+    "x-boat-scope": "admin",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Ok"
         }
        }
       }
@@ -1161,7 +1223,7 @@
     }
    },
    "post": {
-    "summary": "Mint a key; scopes \u2286 caller scopes \u2229 role. token shown once",
+    "summary": "Mint a key; scopes ⊆ caller scopes ∩ role. token shown once",
     "requestBody": {
      "required": true,
      "content": {
@@ -1274,7 +1336,7 @@
   },
   "/v1/secrets/{name}": {
    "put": {
-    "summary": "Set a secret (AES-256-GCM at rest)",
+    "summary": "Set or rotate a secret (AES-256-GCM at rest). Rotation only affects VMs started or created afterwards; running VMs, their disks and snapshots keep the old value",
     "x-boat-scope": "admin",
     "parameters": [
      {
@@ -1532,6 +1594,61 @@
      }
     }
    }
+  },
+  "/v1/vms/{id}/ports/{port}/url": {
+   "get": {
+    "summary": "Gateway URL of a port route. Private routes carry ?boat_exp=&boat_sig= (and `token` for the X-Boat-Token header); the gateway trades it for a host-only cookie",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "port",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     },
+     {
+      "name": "ttl_s",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "minimum": 60,
+       "maximum": 604800
+      },
+      "description": "token lifetime (default -port-url-ttl, 1h)"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/PortURL"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
   }
  },
  "components": {
@@ -1659,6 +1776,13 @@
       "additionalProperties": {
        "type": "string"
       }
+     },
+     "secrets": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "team secret names injected into this VM (absent = all team secrets, [] = none). Forks inherit the selection."
      }
     }
    },
@@ -1781,6 +1905,9 @@
      },
      "key_id": {
       "type": "string"
+     },
+     "operator": {
+      "type": "boolean"
      }
     }
    },
@@ -1902,6 +2029,31 @@
      "at": {
       "type": "string",
       "format": "date-time"
+     }
+    }
+   },
+   "PortURL": {
+    "type": "object",
+    "properties": {
+     "url": {
+      "type": "string"
+     },
+     "auth": {
+      "enum": [
+       "private",
+       "public"
+      ]
+     },
+     "guest_port": {
+      "type": "integer"
+     },
+     "expires_at": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "token": {
+      "type": "string",
+      "description": "<exp>.<sig>, for the X-Boat-Token header"
      }
     }
    }

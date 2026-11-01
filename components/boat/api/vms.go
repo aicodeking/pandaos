@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -68,11 +67,12 @@ func (s *server) ownVM(w http.ResponseWriter, r *http.Request, p *principal) (VM
 	return vm, true
 }
 
-// teamEnv decrypts all team secrets; they are injected as env vars.
-func (s *server) teamEnv(teamID string) (map[string]string, error) {
+// teamEnv decrypts the team secrets injected as env vars: all of them, or
+// only the names in only when it is non-nil (per-VM selection).
+func (s *server) teamEnv(teamID string, only []string) (map[string]string, error) {
 	env := map[string]string{}
 	for _, sec := range s.store.Snapshot().Secrets {
-		if sec.TeamID != teamID {
+		if sec.TeamID != teamID || (only != nil && !slices.Contains(only, sec.Name)) {
 			continue
 		}
 		v, err := s.keys.Open(sec.Sealed, secretKey(sec.TeamID, sec.Name))
@@ -84,8 +84,20 @@ func (s *server) teamEnv(teamID string) (map[string]string, error) {
 	return env, nil
 }
 
-func (s *server) envOrFail(w http.ResponseWriter, r *http.Request, p *principal) (map[string]string, bool) {
-	env, err := s.teamEnv(p.Team.ID)
+// vmSecrets is the VM's secret selection (nil = all team secrets).
+func (s *server) vmSecrets(vmID string) []string {
+	sel, ok := s.store.Snapshot().VMSecrets[vmID]
+	if !ok {
+		return nil
+	}
+	if sel == nil {
+		return []string{}
+	}
+	return sel
+}
+
+func (s *server) envOrFail(w http.ResponseWriter, r *http.Request, p *principal, only []string) (map[string]string, bool) {
+	env, err := s.teamEnv(p.Team.ID, only)
 	if err != nil {
 		log.Printf("%s: %v", info(r).id, err)
 		writeErr(w, r, 500, "secrets_unavailable", "cannot decrypt team secrets")
@@ -128,6 +140,8 @@ type createReq struct {
 	Snapshot string            `json:"snapshot"`
 	Labels   map[string]string `json:"labels"`
 	Env      map[string]string `json:"env"`
+	// Secrets selects which team secrets the VM gets (absent = all, [] = none).
+	Secrets *[]string `json:"secrets"`
 }
 
 func (s *server) validateCreate(c *createReq) string {
@@ -169,6 +183,17 @@ func (s *server) validateCreate(c *createReq) string {
 	return ""
 }
 
+// checkSecretNames reports the first selected name the team does not have.
+func (s *server) checkSecretNames(team string, names []string) string {
+	st := s.store.Snapshot()
+	for _, n := range names {
+		if st.Secrets[secretKey(team, n)] == nil {
+			return "unknown secret " + n
+		}
+	}
+	return ""
+}
+
 func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	var c createReq
 	if !decode(w, r, &c) {
@@ -178,7 +203,15 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 		writeErr(w, r, 400, "invalid_request", msg)
 		return
 	}
-	env, ok := s.envOrFail(w, r, p)
+	var only []string
+	if c.Secrets != nil {
+		only = append([]string{}, *c.Secrets...)
+		if msg := s.checkSecretNames(p.Team.ID, only); msg != "" {
+			writeErr(w, r, 400, "invalid_request", msg)
+			return
+		}
+	}
+	env, ok := s.envOrFail(w, r, p, only)
 	if !ok {
 		return
 	}
@@ -192,14 +225,34 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 		writeUpstream(w, r, err)
 		return
 	}
+	if only != nil {
+		if err := s.setVMSecrets(str(vm, "id"), only); err != nil {
+			// Fail loudly: without the record a later start would inject all secrets.
+			log.Printf("%s: record secret selection for %s: %v; deleting the VM", info(r).id, str(vm, "id"), err)
+			s.boatd.call(r.Context(), "POST", vmPath(str(vm, "id"), "delete"), nil, nil)
+			writeErr(w, r, 500, "store_error", "could not record the secret selection")
+			return
+		}
+	}
 	writeJSON(w, 201, publicVM(vm))
+}
+
+func (s *server) setVMSecrets(vmID string, names []string) error {
+	return s.store.Update(func(st *State) error {
+		if names == nil {
+			delete(st.VMSecrets, vmID)
+		} else {
+			st.VMSecrets[vmID] = append([]string{}, names...)
+		}
+		return nil
+	})
 }
 
 func (s *server) startVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	if _, ok := s.ownVM(w, r, p); !ok {
 		return
 	}
-	env, ok := s.envOrFail(w, r, p)
+	env, ok := s.envOrFail(w, r, p, s.vmSecrets(r.PathValue("id")))
 	if !ok {
 		return
 	}
@@ -214,8 +267,11 @@ func (s *server) stopVM(w http.ResponseWriter, r *http.Request, p *principal) {
 
 func (s *server) deleteVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	if _, ok := s.ownVM(w, r, p); ok {
-		s.vmAction(w, r, "delete", nil)
-		s.syncJumpKeys(r.Context())
+		if s.vmAction(w, r, "delete", nil) {
+			s.forgetVM(r.PathValue("id"))
+			s.syncJumpKeys(r.Context())
+			s.syncPublicPorts(r.Context())
+		}
 	}
 }
 
@@ -230,26 +286,54 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 		writeErr(w, r, 400, "invalid_request", "invalid name")
 		return
 	}
-	if _, ok := s.ownVM(w, r, p); ok {
-		s.vmAction(w, r, "fork", map[string]any{"name": body.Name, "team": p.Team.ID})
+	if _, ok := s.ownVM(w, r, p); !ok {
+		return
 	}
-}
-
-func (s *server) vmAction(w http.ResponseWriter, r *http.Request, action string, body any) {
-	var vm VM
-	if err := s.boatd.call(r.Context(), "POST", vmPath(r.PathValue("id"), action), body, &vm); err != nil {
+	var child VM
+	parent := r.PathValue("id")
+	if err := s.boatd.call(r.Context(), "POST", vmPath(parent, "fork"), map[string]any{"name": body.Name, "team": p.Team.ID}, &child); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
+	// The child inherits the parent's disk, hence its secrets, so it keeps
+	// the parent's selection for later starts too.
+	if sel, ok := s.store.Snapshot().VMSecrets[parent]; ok {
+		if err := s.setVMSecrets(str(child, "id"), append([]string{}, sel...)); err != nil {
+			log.Printf("%s: copy secret selection to fork %s: %v", info(r).id, str(child, "id"), err)
+		}
+	}
+	writeJSON(w, 201, publicVM(child))
+}
+
+// forgetVM drops boat-api state tied to a deleted VM.
+func (s *server) forgetVM(id string) {
+	err := s.store.Update(func(st *State) error {
+		delete(st.VMSecrets, id)
+		for k := range st.PublicPorts {
+			if strings.HasPrefix(k, id+":") {
+				delete(st.PublicPorts, k)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("forget vm %s: %v", id, err)
+	}
+}
+
+// vmAction proxies a lifecycle POST and reports whether it succeeded.
+func (s *server) vmAction(w http.ResponseWriter, r *http.Request, action string, body any) bool {
+	var vm VM
+	if err := s.boatd.call(r.Context(), "POST", vmPath(r.PathValue("id"), action), body, &vm); err != nil {
+		writeUpstream(w, r, err)
+		return false
+	}
 	if vm == nil {
 		writeJSON(w, 200, map[string]any{"ok": true})
-		return
+		return true
 	}
-	status := 200
-	if action == "fork" {
-		status = 201
-	}
-	writeJSON(w, status, publicVM(vm))
+	writeJSON(w, 200, publicVM(vm))
+	return true
 }
 
 // ---- exec & prompt ----
@@ -337,7 +421,7 @@ func (s *server) promptVM(w http.ResponseWriter, r *http.Request, p *principal) 
 	if _, ok := s.ownVM(w, r, p); !ok {
 		return
 	}
-	env, ok := s.envOrFail(w, r, p)
+	env, ok := s.envOrFail(w, r, p, s.vmSecrets(r.PathValue("id")))
 	if !ok {
 		return
 	}
@@ -448,57 +532,7 @@ func (s *server) putVMFile(r *http.Request, id, path string, data []byte) error 
 	return nil
 }
 
-// ---- ports & snapshots ----
-
-func (s *server) listPorts(w http.ResponseWriter, r *http.Request, p *principal) {
-	if vm, ok := s.ownVM(w, r, p); ok {
-		ports := vm["ports"]
-		if ports == nil {
-			ports = []any{}
-		}
-		writeJSON(w, 200, map[string]any{"ports": ports})
-	}
-}
-
-func (s *server) addPort(w http.ResponseWriter, r *http.Request, p *principal) {
-	var body struct {
-		Port   int  `json:"port"`
-		Public bool `json:"public"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	if body.Port < 1 || body.Port > 65535 {
-		writeErr(w, r, 400, "invalid_request", "port must be 1-65535")
-		return
-	}
-	if _, ok := s.ownVM(w, r, p); !ok {
-		return
-	}
-	var out any
-	if err := s.boatd.call(r.Context(), "POST", vmPath(r.PathValue("id"), "ports"), body, &out); err != nil {
-		writeUpstream(w, r, err)
-		return
-	}
-	writeJSON(w, 201, out)
-}
-
-func (s *server) removePort(w http.ResponseWriter, r *http.Request, p *principal) {
-	port, err := strconv.Atoi(r.PathValue("port"))
-	if err != nil || port < 1 || port > 65535 {
-		writeErr(w, r, 400, "invalid_request", "port must be 1-65535")
-		return
-	}
-	if _, ok := s.ownVM(w, r, p); !ok {
-		return
-	}
-	path := vmPath(r.PathValue("id"), "ports") + "?port=" + strconv.Itoa(port)
-	if err := s.boatd.call(r.Context(), "DELETE", path, map[string]int{"port": port}, nil); err != nil {
-		writeUpstream(w, r, err)
-		return
-	}
-	writeJSON(w, 200, map[string]any{"ok": true})
-}
+// ---- snapshots ----
 
 // proxySnapshots forwards GET/POST /snapshots and DELETE /snapshots/{sid}.
 func (s *server) proxySnapshots(w http.ResponseWriter, r *http.Request, p *principal) {

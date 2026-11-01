@@ -13,14 +13,15 @@ import (
 
 // fakeBoatd implements the boatd internal contract in memory.
 type fakeBoatd struct {
-	mu     sync.Mutex
-	vms    map[string]VM
-	files  map[string][]byte // vmid + ":" + path
-	execs  []map[string]any
-	starts []map[string]any
-	desk   []map[string]any
-	events chan string
-	n      int
+	mu       sync.Mutex
+	vms      map[string]VM
+	files    map[string][]byte // vmid + ":" + path
+	execs    []map[string]any
+	starts   []map[string]any
+	desk     []map[string]any
+	portReqs []map[string]any
+	events   chan string
+	n        int
 }
 
 func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
@@ -115,6 +116,9 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			if in["public"] == true {
 				p["host_port"] = 20000
 			}
+			f.portReqs = append(f.portReqs, in)
+			ports, _ := vm["ports"].([]any)
+			vm["ports"] = append(ports, p)
 			writeJSON(w, 201, p)
 			return
 		case "snapshots":
@@ -145,6 +149,23 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		f.files[r.PathValue("id")+":"+r.URL.Query().Get("path")] = b
 		f.mu.Unlock()
 		writeJSON(w, 200, map[string]any{"ok": true, "path": r.URL.Query().Get("path"), "bytes": len(b)})
+	})
+	mux.HandleFunc("DELETE /v1/vms/{id}/ports", func(w http.ResponseWriter, r *http.Request) {
+		vm := get(w, r)
+		if vm == nil {
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		ports, _ := vm["ports"].([]any)
+		var kept []any
+		for _, p := range ports {
+			if fmt.Sprint(p.(map[string]any)["guest_port"]) != r.URL.Query().Get("port") {
+				kept = append(kept, p)
+			}
+		}
+		vm["ports"] = kept
+		writeJSON(w, 200, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("GET /v1/vms/{id}/snapshots", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"snapshots": []any{}})

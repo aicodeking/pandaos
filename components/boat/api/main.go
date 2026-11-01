@@ -23,7 +23,8 @@ var openapiSpec []byte
 
 const usageText = `usage:
   boat-api [serve] [flags]          run the API server
-  boat-api admin init [flags]       create the first owner + team, print its key
+  boat-api admin init [flags]       create the operator (first owner) + team, print its key
+  boat-api admin gen-master-key     print a new 32-byte master key (hex) for systemd-creds encrypt
 run "boat-api serve -h" for flags`
 
 type common struct {
@@ -35,14 +36,30 @@ func (c *common) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.masterKey, "master-key-file", "", "32-byte master key (default $CREDENTIALS_DIRECTORY/boat-master-key, else <data>/master.key, created 0600)")
 }
 
-func (c *common) open() (*Store, *Keyring, error) {
-	path, create := c.masterKey, false
-	if path == "" {
-		if d := os.Getenv("CREDENTIALS_DIRECTORY"); d != "" {
-			path = filepath.Join(d, "boat-master-key")
-		} else {
-			path, create = filepath.Join(c.dataDir, "master.key"), true
+// masterKeyPath picks the master key source. Preferred: the systemd
+// credential "boat-master-key" (LoadCredentialEncrypted=, TPM2-sealed when
+// the host has one), which systemd decrypts into $CREDENTIALS_DIRECTORY.
+// Fallback: <data>/master.key (created 0600), with a warning, because a
+// plain file on the data disk is readable from backups and disk images.
+func (c *common) masterKeyPath() (path string, create bool, warn string) {
+	if c.masterKey != "" {
+		return c.masterKey, false, ""
+	}
+	if d := os.Getenv("CREDENTIALS_DIRECTORY"); d != "" {
+		p := filepath.Join(d, "boat-master-key")
+		if _, err := os.Stat(p); err == nil {
+			return p, false, ""
 		}
+	}
+	return filepath.Join(c.dataDir, "master.key"), true,
+		"WARNING: master key is a plain file on the data disk; use the systemd credential boat-master-key " +
+			"(LoadCredentialEncrypted=, see README) so secrets at rest are not readable from disk images or backups"
+}
+
+func (c *common) open() (*Store, *Keyring, error) {
+	path, create, warn := c.masterKeyPath()
+	if warn != "" {
+		log.Print(warn + " (" + path + ")")
 	}
 	master, err := LoadMasterKey(path, create)
 	if err != nil {
@@ -59,6 +76,9 @@ func (c *common) open() (*Store, *Keyring, error) {
 func main() {
 	args := os.Args[1:]
 	switch {
+	case len(args) >= 2 && args[0] == "admin" && args[1] == "gen-master-key":
+		fmt.Println(randHex(32))
+		os.Exit(0)
 	case len(args) >= 2 && args[0] == "admin" && args[1] == "init":
 		os.Exit(adminInit(args[2:]))
 	case len(args) == 0 || strings.HasPrefix(args[0], "-"):
@@ -110,6 +130,16 @@ func serve(args []string) int {
 	images := fs.String("images", "ubuntu-24.04", "comma-separated image ids; first is the default")
 	allowPrivate := fs.Bool("allow-private-webhooks", false, "allow http:// and private-network webhook targets (dev only)")
 	jumpKeys := fs.String("ssh-jump-keys-file", "", "authorized_keys file for the jump host user, rewritten on ssh grants (e.g. /var/lib/boat/ssh/jump_authorized_keys)")
+	auditMax := fs.Int64("audit-max-bytes", 100<<20, "rotate the audit log at this size (0 = never)")
+	auditKeep := fs.Int("audit-keep", 20, "rotated audit files to keep (0 = unlimited)")
+	auditAge := fs.Duration("audit-max-age", 90*24*time.Hour, "delete rotated audit files older than this (0 = never)")
+	teamRate := fs.Float64("team-rate", 30, "requests/second per team, all keys together (0 = unlimited)")
+	teamBurst := fs.Float64("team-burst", 120, "rate limit burst per team")
+	maxKeys := fs.Int("max-keys-per-team", 100, "API keys per team (0 = unlimited)")
+	maxHooks := fs.Int("max-webhooks-per-team", 20, "webhooks per team (0 = unlimited)")
+	portsBase := fs.String("ports-base-url", "", "gateway base URL for port routes, e.g. https://vm.example.com (routes are <port>-<vmid>.<host>)")
+	portTTL := fs.Duration("port-url-ttl", time.Hour, "default lifetime of private port URLs")
+	publicPorts := fs.String("public-ports-file", "", "JSON file listing open port routes for the gateway (others need a token)")
 	maxFile := fs.Int64("max-file-bytes", 256<<20, "max upload size for PUT files")
 	fs.Parse(args)
 
@@ -119,7 +149,9 @@ func serve(args []string) int {
 		return 1
 	}
 	cfg := Config{SSHUser: *sshUser, SSHJump: *sshJump, DesktopURL: *desktopURL, DesktopTTL: *desktopTTL,
-		AllowPrivateHook: *allowPrivate, MaxFileBytes: *maxFile, JumpKeysFile: *jumpKeys}
+		AllowPrivateHook: *allowPrivate, MaxFileBytes: *maxFile, JumpKeysFile: *jumpKeys,
+		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, PortsBaseURL: *portsBase, PortURLTTL: *portTTL,
+		PublicPortsFile: *publicPorts}
 	for _, im := range strings.Split(*images, ",") {
 		if im = strings.TrimSpace(im); im != "" {
 			cfg.Images = append(cfg.Images, im)
@@ -137,7 +169,7 @@ func serve(args []string) int {
 		if p == "" {
 			p = filepath.Join(c.dataDir, "audit.jsonl")
 		}
-		f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		f, err := openRotating(p, *auditMax, *auditKeep, *auditAge)
 		if err != nil {
 			log.Printf("boat-api: audit log: %v", err)
 			return 1
@@ -146,11 +178,13 @@ func serve(args []string) int {
 		auditW = f
 	}
 	s := newServer(store, kr, newBoatd(*boatd), cfg, newLimiter(*rate, *burst), &auditLog{w: auditW})
+	s.teamLim = newLimiter(*teamRate, *teamBurst)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go s.hooks.watch(ctx)
 	go s.syncJumpKeys(ctx)
+	go s.syncPublicPorts(ctx)
 	srv := &http.Server{Addr: *listen, Handler: s, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	go func() {
 		<-ctx.Done()
@@ -180,8 +214,8 @@ func newServer(store *Store, kr *Keyring, bd *boatdClient, cfg Config, lim *limi
 }
 
 func (s *server) routes() {
-	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]bool{"ok": true}) })
-	s.mux.HandleFunc("GET /v1/openapi.json", func(w http.ResponseWriter, r *http.Request) {
+	s.handle("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]bool{"ok": true}) })
+	s.handle("GET /v1/openapi.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(openapiSpec)
 	})
@@ -205,6 +239,7 @@ func (s *server) routes() {
 	s.route("GET /v1/vms/{id}/ports", "vms:read", s.listPorts)
 	s.route("POST /v1/vms/{id}/ports", "vms:write", s.addPort)
 	s.route("DELETE /v1/vms/{id}/ports/{port}", "vms:write", s.removePort)
+	s.route("GET /v1/vms/{id}/ports/{port}/url", "exec", s.portURL)
 	s.route("GET /v1/vms/{id}/snapshots", "vms:read", s.proxySnapshots)
 	s.route("POST /v1/vms/{id}/snapshots", "vms:write", s.proxySnapshots)
 	s.route("DELETE /v1/vms/{id}/snapshots/{sid}", "vms:write", s.proxySnapshots)
@@ -214,6 +249,7 @@ func (s *server) routes() {
 	s.route("GET /v1/teams", "", s.listTeams)
 	s.route("POST /v1/teams", "admin", s.createTeam)
 	s.route("GET /v1/teams/{id}", "", s.getTeam)
+	s.route("DELETE /v1/teams/{id}", "admin", s.deleteTeam)
 	s.route("POST /v1/teams/{id}/members", "admin", s.addMember)
 	s.route("DELETE /v1/teams/{id}/members/{user}", "admin", s.removeMember)
 

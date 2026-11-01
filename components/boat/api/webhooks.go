@@ -76,7 +76,14 @@ func (s *server) createHook(w http.ResponseWriter, r *http.Request, p *principal
 		return
 	}
 	h.SealedSecret = sealed
-	if err := s.store.Update(func(st *State) error { st.Webhooks[h.ID] = h; return nil }); err != nil {
+	err = s.store.Update(func(st *State) error {
+		if !underLimit(teamHookCount(st, p.Team.ID), s.cfg.MaxHooksPerTeam) {
+			return errLimit
+		}
+		st.Webhooks[h.ID] = h
+		return nil
+	})
+	if err != nil {
 		s.storeErr(w, r, err)
 		return
 	}
@@ -355,6 +362,10 @@ func (d *dispatcher) handleRaw(ctx context.Context, sseType, data string) {
 	}
 	if strings.HasPrefix(typ, "vm.") {
 		go d.s.syncJumpKeys(ctx) // ips change on start/fork/delete
+	}
+	if typ == "vm.deleted" && vmID != "" { // also TTL/operator deletes outside boat-api
+		d.s.forgetVM(vmID)
+		go d.s.syncPublicPorts(ctx)
 	}
 	if typ == "" || team == "" {
 		return

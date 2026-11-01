@@ -15,9 +15,38 @@ var (
 	reName       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.@-]{0,63}$`)
 	reSecretName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 	errConflict  = errors.New("conflict")
+	errLimit     = errors.New("team limit reached")
 )
 
+// teamKeyCount / teamHookCount count objects for per-team limits.
+func teamKeyCount(st *State, team string) int {
+	n := 0
+	for _, k := range st.Keys {
+		if k.TeamID == team {
+			n++
+		}
+	}
+	return n
+}
+
+func teamHookCount(st *State, team string) int {
+	n := 0
+	for _, h := range st.Webhooks {
+		if h.TeamID == team {
+			n++
+		}
+	}
+	return n
+}
+
+func underLimit(n, max int) bool { return max <= 0 || n < max }
+
 const maxSecretBytes = 64 << 10
+
+// rotateNote: secrets are copied into VMs (env file, process env, disk),
+// so a new value reaches only VMs created or started afterwards.
+const rotateNote = "new value applies to VMs created or started from now on; running VMs keep the old value " +
+	"until restarted, and existing disks, forks and snapshots still contain it. Revoke the old value at its issuer."
 
 type keyView struct {
 	ID      string    `json:"id"`
@@ -55,7 +84,7 @@ func bootstrap(store *Store, kr *Keyring, userName, teamName string) (keyView, e
 			return errors.New("already initialised: users exist")
 		}
 		now := time.Now().UTC()
-		u := &User{ID: "usr_" + randHex(6), Name: userName, Created: now}
+		u := &User{ID: "usr_" + randHex(6), Name: userName, Created: now, Operator: true}
 		t := &Team{ID: "team_" + randHex(6), Name: teamName, Members: []Member{{UserID: u.ID, Role: "owner"}}, Created: now}
 		st.Users[u.ID], st.Teams[t.ID] = u, t
 		k, tok := mintKey(kr, st, u.ID, t.ID, "bootstrap", nil)
@@ -67,7 +96,7 @@ func bootstrap(store *Store, kr *Keyring, userName, teamName string) (keyView, e
 
 func (s *server) me(w http.ResponseWriter, r *http.Request, p *principal) {
 	writeJSON(w, 200, map[string]any{"user": p.User, "team": map[string]string{"id": p.Team.ID, "name": p.Team.Name},
-		"role": p.Role, "scopes": p.Scopes, "key_id": p.Key.ID})
+		"role": p.Role, "scopes": p.Scopes, "key_id": p.Key.ID, "operator": p.Operator})
 }
 
 func (s *server) images(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -128,23 +157,131 @@ func (s *server) getTeam(w http.ResponseWriter, r *http.Request, p *principal) {
 	writeJSON(w, 200, teamView{ID: t.ID, Name: t.Name, Role: t.role(p.User.ID), Members: t.Members, Created: t.Created})
 }
 
+// createTeam is operator-only: tenants are onboarded by the operator. With
+// "owner", a new user owns the team and their first key is returned; without
+// it the operator becomes the owner.
 func (s *server) createTeam(w http.ResponseWriter, r *http.Request, p *principal) {
 	var body struct {
-		Name string `json:"name"`
+		Name  string `json:"name"`
+		Owner string `json:"owner"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	if !reName.MatchString(body.Name) {
-		writeErr(w, r, 400, "invalid_request", "invalid team name")
+	if !p.Operator {
+		writeErr(w, r, 403, "forbidden", "only the instance operator can create teams")
 		return
 	}
-	t := &Team{ID: "team_" + randHex(6), Name: body.Name, Members: []Member{{UserID: p.User.ID, Role: "owner"}}, Created: time.Now().UTC()}
-	if err := s.store.Update(func(st *State) error { st.Teams[t.ID] = t; return nil }); err != nil {
+	if !reName.MatchString(body.Name) || (body.Owner != "" && !reName.MatchString(body.Owner)) {
+		writeErr(w, r, 400, "invalid_request", "invalid team or owner name")
+		return
+	}
+	now := time.Now().UTC()
+	t := &Team{ID: "team_" + randHex(6), Name: body.Name, Created: now}
+	out := map[string]any{}
+	err := s.store.Update(func(st *State) error {
+		ownerID := p.User.ID
+		if body.Owner != "" {
+			u := &User{ID: "usr_" + randHex(6), Name: body.Owner, Created: now}
+			st.Users[u.ID] = u
+			ownerID = u.ID
+			k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", nil)
+			out["owner"] = map[string]any{"user": u, "key": viewKey(k, tok)}
+		}
+		t.Members = []Member{{UserID: ownerID, Role: "owner"}}
+		st.Teams[t.ID] = t
+		return nil
+	})
+	if err != nil {
 		s.storeErr(w, r, err)
 		return
 	}
-	writeJSON(w, 201, teamView{ID: t.ID, Name: t.Name, Role: "owner", Members: t.Members, Created: t.Created})
+	role := "owner"
+	if body.Owner != "" {
+		role = ""
+	}
+	out["id"], out["name"], out["role"], out["members"], out["created"] = t.ID, t.Name, role, t.Members, t.Created
+	writeJSON(w, 201, out)
+}
+
+// deleteTeam is operator-only and refuses while the team still has VMs.
+func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request, p *principal) {
+	id := r.PathValue("id")
+	if !p.Operator {
+		writeErr(w, r, 403, "forbidden", "only the instance operator can delete teams")
+		return
+	}
+	if s.store.Snapshot().Teams[id] == nil {
+		writeErr(w, r, 404, "not_found", "team not found")
+		return
+	}
+	if id == p.Team.ID {
+		writeErr(w, r, 409, "conflict", "cannot delete the team of the key in use")
+		return
+	}
+	var list struct {
+		VMs []VM `json:"vms"`
+	}
+	if err := s.boatd.call(r.Context(), "GET", "/v1/vms?team="+url.QueryEscape(id), nil, &list); err != nil {
+		writeUpstream(w, r, err)
+		return
+	}
+	for _, vm := range list.VMs {
+		if str(vm, "team") == id {
+			writeErr(w, r, 409, "conflict", "team still has VMs; delete them first")
+			return
+		}
+	}
+	err := s.store.Update(func(st *State) error {
+		delete(st.Teams, id)
+		for k, v := range st.Keys {
+			if v.TeamID == id {
+				delete(st.Keys, k)
+			}
+		}
+		for k, v := range st.Secrets {
+			if v.TeamID == id {
+				delete(st.Secrets, k)
+			}
+		}
+		for k, v := range st.Webhooks {
+			if v.TeamID == id {
+				delete(st.Webhooks, k)
+				delete(st.Deliveries, k)
+			}
+		}
+		for k, g := range st.SSHGrants {
+			if g.TeamID == id {
+				delete(st.SSHGrants, k)
+			}
+		}
+		pruneOrphanUsers(st)
+		return nil
+	})
+	if err != nil {
+		s.storeErr(w, r, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "id": id})
+}
+
+// pruneOrphanUsers removes non-operator users that belong to no team.
+func pruneOrphanUsers(st *State) {
+	for id, u := range st.Users {
+		if u.Operator {
+			continue
+		}
+		member := false
+		for _, t := range st.Teams {
+			if t.role(id) != "" {
+				member = true
+				break
+			}
+		}
+		if !member {
+			delete(st.Users, id)
+		}
+	}
 }
 
 // teamAdmin checks the caller is owner/admin of the team in the path.
@@ -196,6 +333,9 @@ func (s *server) addMember(w http.ResponseWriter, r *http.Request, p *principal)
 		if team == nil {
 			return errConflict
 		}
+		if !underLimit(teamKeyCount(st, t.ID), s.cfg.MaxKeysPerTeam) {
+			return errLimit
+		}
 		st.Users[u.ID] = u
 		team.Members = append(slices.Clone(team.Members), Member{UserID: u.ID, Role: body.Role})
 		k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", nil)
@@ -245,6 +385,7 @@ func (s *server) removeMember(w http.ResponseWriter, r *http.Request, p *princip
 				delete(st.Keys, id)
 			}
 		}
+		pruneOrphanUsers(st)
 		return nil
 	})
 	if err != nil {
@@ -255,6 +396,10 @@ func (s *server) removeMember(w http.ResponseWriter, r *http.Request, p *princip
 }
 
 func (s *server) storeErr(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, errLimit) {
+		writeErr(w, r, 403, "limit_reached", "team limit reached (keys or webhooks); delete unused ones or ask the operator")
+		return
+	}
 	if errors.Is(err, errConflict) {
 		writeErr(w, r, 409, "conflict", "concurrent modification, retry")
 		return
@@ -318,6 +463,9 @@ func (s *server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 	}
 	var kv keyView
 	err := s.store.Update(func(st *State) error {
+		if !underLimit(teamKeyCount(st, t.ID), s.cfg.MaxKeysPerTeam) {
+			return errLimit
+		}
 		k, tok := mintKey(s.keys, st, p.User.ID, t.ID, body.Name, slices.Clone(scopes))
 		kv = viewKey(k, tok)
 		return nil
@@ -378,6 +526,7 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request, p *principal)
 		return
 	}
 	now := time.Now().UTC()
+	existed := s.store.Snapshot().Secrets[secretKey(p.Team.ID, name)] != nil
 	err = s.store.Update(func(st *State) error {
 		st.Secrets[secretKey(p.Team.ID, name)] = &Secret{TeamID: p.Team.ID, Name: name, Sealed: sealed, Updated: now}
 		return nil
@@ -386,7 +535,12 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request, p *principal)
 		s.storeErr(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"name": name, "updated": now})
+	out := map[string]any{"name": name, "updated": now}
+	if existed {
+		out["rotated"] = true
+		out["note"] = rotateNote
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request, p *principal) {

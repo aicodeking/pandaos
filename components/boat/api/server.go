@@ -26,18 +26,27 @@ type Config struct {
 	AllowPrivateHook bool // permit webhook targets on loopback/private nets (dev/tests)
 	MaxFileBytes     int64
 	JumpKeysFile     string // authorized_keys for the ssh jump user; empty disables
+	MaxKeysPerTeam   int    // 0 = unlimited
+	MaxHooksPerTeam  int    // 0 = unlimited
+	PortsBaseURL     string // e.g. https://vm.example.com; routes are <port>-<vmid>.<host>
+	PortURLTTL       time.Duration
+	PublicPortsFile  string // JSON list of open (unauthenticated) gateway port routes
 }
 
 type server struct {
 	store   *Store
 	keys    *Keyring
 	boatd   *boatdClient
-	limiter *limiter
+	limiter *limiter // per key
+	teamLim *limiter // per team (all keys of a team share it)
 	audit   *auditLog
 	hooks   *dispatcher
 	cfg     Config
 	mux     *http.ServeMux
 	jumpMu  sync.Mutex
+	portsMu sync.Mutex
+	// routeTable lists every registered "METHOD /path" (OpenAPI drift test).
+	routeTable []string
 }
 
 // ---- scopes and roles ----
@@ -62,6 +71,9 @@ type principal struct {
 	Team   *Team
 	Role   string
 	Scopes []string // key scopes ∩ role scopes
+	// Operator is the instance operator (set by admin init); only operators
+	// create or delete teams. Still limited by the key's admin scope.
+	Operator bool
 }
 
 func (p *principal) has(scope string) bool { return slices.Contains(p.Scopes, scope) }
@@ -107,7 +119,7 @@ func (s *server) authenticate(header string) *principal {
 	if role == "" {
 		return nil
 	}
-	return &principal{Key: k, User: u, Team: t, Role: role, Scopes: effectiveScopes(k.Scopes, role)}
+	return &principal{Key: k, User: u, Team: t, Role: role, Scopes: effectiveScopes(k.Scopes, role), Operator: u.Operator}
 }
 
 // ---- rate limiting: token bucket per key ----
@@ -131,7 +143,7 @@ func newLimiter(rate, burst float64) *limiter {
 
 // allow takes one token; when empty it reports how long until one is available.
 func (l *limiter) allow(key string) (bool, time.Duration) {
-	if l.rate <= 0 {
+	if l == nil || l.rate <= 0 {
 		return true, 0
 	}
 	l.mu.Lock()
@@ -189,8 +201,9 @@ func (a *auditLog) write(e auditEntry) {
 type ctxKey struct{}
 
 type reqInfo struct {
-	id string
-	p  *principal
+	id    string
+	p     *principal
+	audit bool // audit even though it is a GET (sensitive read)
 }
 
 func info(r *http.Request) *reqInfo { return r.Context().Value(ctxKey{}).(*reqInfo) }
@@ -231,7 +244,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-Id", rid)
 	sw := &statusWriter{ResponseWriter: w}
 	s.mux.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), ctxKey{}, ri)))
-	if r.Method == http.MethodGet && sw.status != http.StatusUnauthorized && sw.status != http.StatusForbidden {
+	if r.Method == http.MethodGet && !ri.audit && sw.status != http.StatusUnauthorized &&
+		sw.status != http.StatusForbidden && sw.status != http.StatusTooManyRequests {
 		return
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -246,8 +260,28 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type handlerFunc func(w http.ResponseWriter, r *http.Request, p *principal)
 
 // route registers an authenticated, rate-limited handler requiring scope ("" = any key).
+// auditedReads are GETs that disclose data or grant access, so they are
+// audited like writes.
+var auditedReads = map[string]bool{
+	"GET /v1/vms/{id}/files":            true,
+	"GET /v1/vms/{id}/desktop":          true,
+	"GET /v1/vms/{id}/ports/{port}/url": true,
+	"GET /v1/secrets":                   true,
+	"GET /v1/keys":                      true,
+	"GET /v1/webhooks/{id}/deliveries":  true,
+}
+
+// handle registers an unauthenticated route.
+func (s *server) handle(pattern string, h http.HandlerFunc) {
+	s.routeTable = append(s.routeTable, pattern)
+	s.mux.HandleFunc(pattern, h)
+}
+
 func (s *server) route(pattern, scope string, h handlerFunc) {
+	s.routeTable = append(s.routeTable, pattern)
+	audit := auditedReads[pattern]
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		info(r).audit = audit
 		p := s.authenticate(r.Header.Get("Authorization"))
 		if p == nil {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="boat"`)
@@ -257,7 +291,12 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 		info(r).p = p
 		if ok, wait := s.limiter.allow(p.Key.ID); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
-			writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded")
+			writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded for this key")
+			return
+		}
+		if ok, wait := s.teamLim.allow(p.Team.ID); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+			writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded for this team")
 			return
 		}
 		if scope != "" && !p.has(scope) {

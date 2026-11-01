@@ -16,9 +16,10 @@ import (
 // to SQLite (deliveries first, they are the hottest writer).
 
 type User struct {
-	ID      string    `json:"id"`
-	Name    string    `json:"name"`
-	Created time.Time `json:"created"`
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	Operator bool      `json:"operator,omitempty"` // instance operator (admin init)
+	Created  time.Time `json:"created"`
 }
 
 type Member struct {
@@ -91,6 +92,10 @@ type State struct {
 	Webhooks   map[string]*Webhook   `json:"webhooks"`
 	Deliveries map[string][]Delivery `json:"deliveries"` // by webhook id, newest last
 	SSHGrants  map[string]*SSHGrant  `json:"ssh_grants"` // key: team_id + "|" + "type base64"
+	// VMSecrets: secret names selected at create (absent = all team secrets).
+	VMSecrets map[string][]string `json:"vm_secrets"`
+	// PublicPorts: "<vmid>:<port>" routes opened without auth (default private).
+	PublicPorts map[string]bool `json:"public_ports"`
 }
 
 // SSHGrant records which team VMs a public key was registered for, so the
@@ -124,6 +129,12 @@ func (st *State) init() {
 	}
 	if st.SSHGrants == nil {
 		st.SSHGrants = map[string]*SSHGrant{}
+	}
+	if st.VMSecrets == nil {
+		st.VMSecrets = map[string][]string{}
+	}
+	if st.PublicPorts == nil {
+		st.PublicPorts = map[string]bool{}
 	}
 }
 
