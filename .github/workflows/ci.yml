@@ -75,7 +75,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        component: [agentd, mem, checkpoint, agent-env, sysmcp, computer-use]
+        component: [agentd, mem, checkpoint, agent-env, sysmcp, computer-use, boat/boatd, boat/api, boat/cli, boat/gateway]
     defaults:
       run:
         working-directory: components/${{ matrix.component }}
@@ -87,6 +87,18 @@ jobs:
           cache: false
       - run: go vet ./...
       - run: go test -race ./...
+
+  boat-sdk:
+    permissions:
+      contents: read
+    name: boat SDKs + guest agent unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: python3 -m unittest discover -s components/boat/sdk/python/tests -v
+      - run: cd components/boat/guest/agent && python3 -m unittest -v test_boat_agent
+      - run: cd components/boat/sdk/typescript && node --test test/*.test.js
+      - run: shellcheck -S warning components/boat/e2e.sh components/boat/boatd/e2e.sh components/boat/guest/build.sh components/boat/guest/test-in-vm.sh
 
   bench-script:
     permissions:

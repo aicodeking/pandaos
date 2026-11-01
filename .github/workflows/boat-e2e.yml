@@ -1,0 +1,103 @@
+name: boat-e2e
+
+# Real Firecracker end-to-end test of boat on a KVM-capable ubuntu runner:
+# guest image (cached) -> boatd + boat-api + boat-gateway built from source
+# and run as plain processes -> every feature driven through the `boat` CLI.
+# See components/boat/e2e.sh.
+
+on:
+  push:
+    paths:
+      - components/boat/**
+      - .github/workflows/boat-e2e.yml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: boat-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    permissions:
+      contents: read
+    name: boat e2e (Firecracker on KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      OUT: /mnt/guest-out
+      E2E_WORK: /mnt/boat-e2e
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Free disk space, docker on /mnt
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo systemctl stop docker docker.socket
+          echo '{"data-root": "/mnt/docker"}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
+          sudo mkdir -p "$OUT" "$E2E_WORK" && sudo chown "$(id -u):$(id -g)" "$OUT" "$E2E_WORK"
+          df -h / /mnt
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Restore guest image
+        id: guest
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            /mnt/guest-out/vmlinux
+            /mnt/guest-out/rootfs-slim.ext4.zst
+            /mnt/guest-out/rootfs-full.ext4.zst
+            /mnt/guest-out/size-*.txt
+            /mnt/guest-out/manifest-*.txt
+          key: boat-guest-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat-agent.py') }}
+
+      - name: Build guest image (kernel + slim + full)
+        if: steps.guest.outputs.cache-hit != 'true'
+        run: |
+          components/boat/guest/build.sh all
+          ls -l "$OUT"
+
+      - name: Save guest image
+        if: steps.guest.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            /mnt/guest-out/vmlinux
+            /mnt/guest-out/rootfs-slim.ext4.zst
+            /mnt/guest-out/rootfs-full.ext4.zst
+            /mnt/guest-out/size-*.txt
+            /mnt/guest-out/manifest-*.txt
+          key: ${{ steps.guest.outputs.cache-primary-key }}
+
+      - name: Unpack guest image
+        run: |
+          for v in slim full; do
+            [ -f "$OUT/rootfs-$v.ext4" ] || zstd -q -d -f "$OUT/rootfs-$v.ext4.zst"
+          done
+          ls -l "$OUT"
+          cat "$OUT"/size-*.txt "$OUT"/manifest-*.txt
+          # The images are dense now; the build's docker layers are not needed.
+          docker system prune -af >/dev/null || true
+          df -h / /mnt
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: components/boat/boatd/go.mod
+          cache: false
+
+      - name: e2e
+        run: components/boat/e2e.sh "$OUT" 2>&1 | tee e2e.log; test "${PIPESTATUS[0]}" = 0
+
+      - name: Metrics
+        if: always()
+        run: |
+          grep -h '^METRIC ' e2e.log | tee -a "$GITHUB_STEP_SUMMARY" || echo "no METRIC line"
