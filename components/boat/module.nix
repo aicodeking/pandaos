@@ -352,7 +352,7 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "systemd-tmpfiles-setup.service" ];
       unitConfig.RequiresMountsFor = cfg.dataDir;
-      path = [ pkgs.coreutils config.systemd.package ];
+      path = [ pkgs.coreutils pkgs.diffutils config.systemd.package ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
@@ -368,7 +368,12 @@ in
           if [ -s "$plain" ]; then src=$plain; else src=$(mktemp); head -c 32 /dev/urandom >"$src"; fi
           systemd-creds encrypt --with-key=auto --name=boat-master-key "$src" "$cred.tmp"
           systemd-creds decrypt --name=boat-master-key "$cred.tmp" - | cmp -s - "$src" ||
-            { echo "boat-secrets: sealed master key does not decrypt; keeping $src" >&2; rm -f "$cred.tmp"; exit 1; }
+            {
+              echo "boat-secrets: sealed master key does not decrypt; nothing changed" >&2
+              rm -f "$cred.tmp"
+              [ "$src" = "$plain" ] || rm -f "$src" # a key generated just now, never used
+              exit 1
+            }
           mv "$cred.tmp" "$cred"
           if [ "$src" = "$plain" ]; then shred -u "$plain" 2>/dev/null || rm -f "$plain"; else rm -f "$src"; fi
         fi

@@ -184,7 +184,7 @@ func (g *gateway) desktop(w http.ResponseWriter, r *http.Request, vmid string) {
 			http.Error(w, "desktop link invalid: "+err.Error(), http.StatusForbidden)
 			return
 		}
-		setSession(w, desktopCookie, tok, exp, http.SameSiteStrictMode, withoutQuery(r, "exp", "sig"))
+		setSession(w, r, desktopCookie, tok, exp, http.SameSiteStrictMode, withoutQuery(r, "exp", "sig"))
 		return
 	}
 	if err := anyCookie(r, desktopCookie, check); err != nil {
@@ -214,7 +214,7 @@ func (g *gateway) portRoute(w http.ResponseWriter, r *http.Request, port int, vm
 				http.Error(w, "route link invalid: "+err.Error(), http.StatusForbidden)
 				return
 			}
-			setSession(w, routeCookie, tok, exp, http.SameSiteLaxMode, withoutQuery(r, "boat_exp", "boat_sig"))
+			setSession(w, r, routeCookie, tok, exp, http.SameSiteLaxMode, withoutQuery(r, "boat_exp", "boat_sig"))
 			return
 		}
 		err := anyCookie(r, routeCookie, check)

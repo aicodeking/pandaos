@@ -51,7 +51,7 @@ let
 
   checkScript = pkgs.writeShellScript "boat-reboot-check" ''
     set -u
-    export PATH=${lib.makeBinPath [ pkgs.coreutils config.systemd.package ]}
+    export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.diffutils config.systemd.package ]}
     reasons=()
     for f in kernel initrd kernel-modules; do
       [ "$(readlink -f /run/booted-system/$f)" = "$(readlink -f /run/current-system/$f)" ] || reasons+=("$f")

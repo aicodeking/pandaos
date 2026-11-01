@@ -272,7 +272,7 @@ link=$(boat desktop edge-d --json | jq -r .url)
 [[ $link == "https://desktop.$D/$id_d?exp="* ]] || fail "desktop link: $link"
 djar=$WORK/tmp/desktop.jar
 final=$(curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443" -L -c "$djar" -b "$djar" -o /dev/null -w '%{url_effective}' "$link")
-[[ $final == "https://$id_d.desktop.$D/?exp="* ]] || fail "desktop link did not move to the VM origin: $final"
+[ "$final" = "https://$id_d.desktop.$D/" ] || fail "desktop link did not end on the VM origin without its signature: $final"
 grep -q "$id_d.desktop.$D.*__Host-boat_gw" "$djar" || fail "no desktop cookie for $id_d.desktop.$D"
 awk -v h="desktop.$D" '{ d = $1; sub(/^#HttpOnly_/, "", d) } d == h { f = 1 } END { exit !f }' "$djar" &&
   fail "a cookie was set on the shared desktop.$D origin"

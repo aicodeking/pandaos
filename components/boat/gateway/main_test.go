@@ -96,9 +96,9 @@ func TestPortRoutesPrivateByDefault(t *testing.T) {
 	sig := strings.SplitN(good, ".", 2)[1]
 	w = req(g, priv, "/a?q=1&boat_exp="+strconv.FormatInt(exp, 10)+"&boat_sig="+sig)
 	c := w.Result().Cookies()
-	if w.Code != 200 || len(c) != 1 || c[0].Name != routeCookie || c[0].Domain != "" || c[0].Path != "/" ||
-		!c[0].Secure || !c[0].HttpOnly || !strings.Contains(w.Body.String(), `url=/a?q=1"`) {
-		t.Fatalf("route link: %d %v %s", w.Code, c, w.Body)
+	if w.Code != 302 || len(c) != 1 || c[0].Name != routeCookie || c[0].Domain != "" || c[0].Path != "/" ||
+		!c[0].Secure || !c[0].HttpOnly || w.Header().Get("Location") != "/a?q=1" {
+		t.Fatalf("route link: %d %v %q", w.Code, c, w.Header().Get("Location"))
 	}
 	if w := req(g, priv, "/a", cookie(routeCookie, "junk"), cookie(routeCookie, c[0].Value)); w.Code != 200 ||
 		strings.Contains(w.Body.String(), routeCookie) {
@@ -152,10 +152,15 @@ func TestDesktopPerVMOrigin(t *testing.T) {
 	}
 	w = req(g, a, "/vnc.html?a=1&"+link("abc-1", time.Hour))
 	c := w.Result().Cookies()
-	if w.Code != 200 || len(c) != 1 || c[0].Name != desktopCookie || c[0].Domain != "" || c[0].Path != "/" ||
+	if w.Code != 302 || len(c) != 1 || c[0].Name != desktopCookie || c[0].Domain != "" || c[0].Path != "/" ||
 		!c[0].Secure || !c[0].HttpOnly || c[0].SameSite != http.SameSiteStrictMode ||
-		!strings.Contains(w.Body.String(), `url=/vnc.html?a=1"`) {
-		t.Fatalf("desktop session: %d %+v %s", w.Code, c, w.Body)
+		w.Header().Get("Location") != "/vnc.html?a=1" {
+		t.Fatalf("desktop session: %d %+v %q", w.Code, c, w.Header().Get("Location"))
+	}
+	// Started on another site: a Strict cookie needs a fresh same-origin navigation.
+	w = req(g, a, "/vnc.html?a=1&"+link("abc-1", time.Hour), header("Sec-Fetch-Site", "cross-site"))
+	if w.Code != 200 || len(w.Result().Cookies()) != 1 || !strings.Contains(w.Body.String(), `url=/vnc.html?a=1"`) {
+		t.Fatalf("cross-site desktop session: %d %s", w.Code, w.Body)
 	}
 	w = req(g, a, "/vnc.html", cookie(desktopCookie, c[0].Value), cookie("app", "1"), cookie(guestCookie, "client-chosen"))
 	body := w.Body.String()

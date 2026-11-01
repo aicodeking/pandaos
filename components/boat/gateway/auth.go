@@ -77,18 +77,22 @@ func anyCookie(r *http.Request, name string, check func(string) error) error {
 	return err
 }
 
-// setSession sets a host-only cookie and sends the browser to target via a
-// same-origin page instead of a 302. A SameSite=Strict cookie set during a
-// navigation that started on another site is withheld on its redirects;
-// a fresh navigation started by this page carries it.
-func setSession(w http.ResponseWriter, name, value string, exp time.Time, same http.SameSite, target string) {
+// setSession sets a host-only cookie and moves on to target. Normally a 302.
+// But a SameSite=Strict cookie set during a navigation that started on another
+// site is withheld on its redirects, so in that one case (the browser says
+// Sec-Fetch-Site: cross-site) a same-origin page starts a fresh navigation.
+func setSession(w http.ResponseWriter, r *http.Request, name, value string, exp time.Time, same http.SameSite, target string) {
 	http.SetCookie(w, &http.Cookie{
 		Name: name, Value: value, Path: "/", Expires: exp,
 		HttpOnly: true, Secure: true, SameSite: same,
 	})
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	if r.Header.Get("Sec-Fetch-Site") != "cross-site" {
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	t := html.EscapeString(target)
 	fmt.Fprintf(w, `<!doctype html><meta http-equiv="refresh" content="0;url=%s"><a href="%s">Continue</a>`+"\n", t, t)
 }
