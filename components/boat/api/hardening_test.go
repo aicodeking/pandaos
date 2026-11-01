@@ -139,6 +139,9 @@ func TestAuditSensitiveReads(t *testing.T) {
 			t.Errorf("not audited: %s\n%s", want, got)
 		}
 	}
+	if !strings.Contains(e.audit.String(), `"query":"path=/etc/hostname"`) {
+		t.Errorf("file read must record which file: %s", e.audit.String())
+	}
 	if strings.Contains(got, "GET /v1/vms\n") || strings.HasSuffix(got, "GET /v1/vms") {
 		t.Errorf("plain list should not be audited:\n%s", got)
 	}
@@ -314,4 +317,44 @@ func TestPrivatePortRoutes(t *testing.T) {
 	if _, u := e.do(e.owner, "GET", "/v1/vms/"+id+"/ports/8080/url", nil); !strings.HasPrefix(u["url"].(string), "http://8080-"+id+".vm.local:8742/?") {
 		t.Errorf("dev url: %v", u)
 	}
+}
+
+func TestMigrateOperator(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	raw := map[string]any{"users": map[string]any{
+		"a": map[string]any{"id": "a", "name": "first", "created": old},
+		"b": map[string]any{"id": "b", "name": "later", "created": old.Add(time.Hour)},
+	}}
+	b, _ := json.Marshal(raw)
+	os.WriteFile(filepath.Join(dir, "state.json"), b, 0o600)
+	st, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := st.Snapshot()
+	if !snap.Users["a"].Operator || snap.Users["b"].Operator {
+		t.Errorf("oldest user must become the only operator: %+v %+v", snap.Users["a"], snap.Users["b"])
+	}
+}
+
+func TestAuditRotateRenameFailureKeepsLogging(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "audit.jsonl")
+	r, err := openRotating(p, 10, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.now = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+	r.Write([]byte("0123456789"))
+	// a directory at the rotation target makes the rename fail
+	os.Mkdir(p+".20260101T000000.000000000Z", 0o700)
+	os.WriteFile(filepath.Join(p+".20260101T000000.000000000Z", "x"), nil, 0o600)
+	if _, err := r.Write([]byte("more\n")); err == nil {
+		t.Fatal("expected a rotate error")
+	}
+	if _, err := r.Write([]byte("")); err != nil {
+		t.Errorf("file left unusable after a failed rotation: %v", err)
+	}
+	r.Close()
 }

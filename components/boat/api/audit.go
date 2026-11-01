@@ -63,6 +63,10 @@ func (r *rotatingFile) rotate() error {
 	}
 	dst := r.path + "." + r.now().UTC().Format("20060102T150405.000000000Z")
 	if err := os.Rename(r.path, dst); err != nil {
+		// Keep logging to the current file rather than losing every later line.
+		if oerr := r.open(); oerr != nil {
+			return fmt.Errorf("%w; reopen: %v", err, oerr)
+		}
 		return err
 	}
 	if err := r.open(); err != nil {

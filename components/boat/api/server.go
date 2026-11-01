@@ -176,6 +176,7 @@ type auditEntry struct {
 	TeamID    string    `json:"team_id,omitempty"`
 	Method    string    `json:"method"`
 	Path      string    `json:"path"`
+	Query     string    `json:"query,omitempty"` // e.g. the file path of a file read
 	Status    int       `json:"status"`
 	RemoteIP  string    `json:"remote_ip"`
 	Forwarded string    `json:"forwarded_for,omitempty"`
@@ -247,7 +248,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	e := auditEntry{Time: start.UTC(), RequestID: rid, Method: r.Method, Path: r.URL.Path, Status: sw.status,
+	e := auditEntry{Time: start.UTC(), RequestID: rid, Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, Status: sw.status,
 		RemoteIP: ip, Forwarded: r.Header.Get("X-Forwarded-For"), Millis: time.Since(start).Milliseconds()}
 	if ri.p != nil {
 		e.KeyID, e.UserID, e.TeamID = ri.p.Key.ID, ri.p.User.ID, ri.p.Team.ID

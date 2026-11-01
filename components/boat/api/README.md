@@ -20,7 +20,8 @@ Run `admin init` before `serve`. The server loads its state at startup.
 
 ## Tenant model
 
-- **Operator:** the user created by `admin init` is the instance operator. Only the
+- **Operator:** the user created by `admin init` is the instance operator. State
+  written before this role existed promotes its oldest user at load. Only the
   operator creates and deletes teams, and only with a key that has the `admin` scope:
   - `POST /v1/teams {name, owner?}`: with `owner`, a new user owns the team and their
     first key is returned once. Without it, the operator owns the team.
@@ -122,8 +123,8 @@ Errors use the shape `{"error":{"code","message","request_id"}}`. Every response
     delete the VMs that had it. The PUT response reports `rotated:true` and a note.
 - **Rate limit:** per key and per team, see Tenant model.
 - **Audit:** JSON lines go to `<data>/audit.jsonl` (`-audit-log`, `-` = stderr). Each
-  line has `ts, request_id, key_id, user_id, team_id, method, path, status, remote_ip,
-  forwarded_for, ms`. Logged requests:
+  line has `ts, request_id, key_id, user_id, team_id, method, path, query, status,
+  remote_ip, forwarded_for, ms`; `query` records, for example, which file was read. Logged requests:
   - every non-GET request;
   - every 401/403/429;
   - the GETs that disclose data or grant access: file reads, desktop links, port URLs,
@@ -215,6 +216,10 @@ grows past roughly 10 MB or writes pass roughly 50/s. There are more limits:
 - Webhook retries waiting in memory are lost when the server restarts.
 - Rate-limit buckets live in each process, so running several replicas needs a shared limiter.
 - `admin init` must run while the server is stopped (or restart the server afterwards).
+- Removing a member revokes their API keys, but not ssh public keys they already
+  registered. Those stay in the VMs' `authorized_keys` and in the jump-host grants,
+  because grants are per team and key, not per user. To cut off a departing member,
+  delete or re-key the VMs they could reach.
 
 ## Assumptions about boatd
 

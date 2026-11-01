@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -158,7 +159,27 @@ func OpenStore(dir string) (*Store, error) {
 		}
 	}
 	s.cur.init()
+	migrateOperator(s.cur)
 	return s, nil
+}
+
+// migrateOperator handles state written before the operator role: the oldest
+// user is the one admin init created, so it becomes the operator. In memory
+// only; it is recomputed on each load until an Update persists it.
+func migrateOperator(st *State) {
+	var oldest *User
+	for _, u := range st.Users {
+		if u.Operator {
+			return
+		}
+		if oldest == nil || u.Created.Before(oldest.Created) {
+			oldest = u
+		}
+	}
+	if oldest != nil {
+		log.Printf("boat-api: no operator in state; promoting the oldest user %s (%s)", oldest.ID, oldest.Name)
+		oldest.Operator = true
+	}
 }
 
 // Snapshot returns the current state. Callers must treat it as read-only.
