@@ -35,6 +35,9 @@ KEYF=$WORK/desktop.key
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 fail() { echo "edge FAIL: $*" >&2; exit 1; }
 warn() { echo "::warning::edge: $*"; }
+# Scripts other components own: record a failure, run the rest, fail at the end.
+FAILED=()
+soft() { local name=$1; shift; "$@" || { echo "edge: $name FAILED (continuing, the run will fail)" >&2; FAILED+=("$name"); }; }
 
 PIDS=()
 cleanup() {
@@ -119,7 +122,7 @@ sudo mkdir -p /sys/fs/cgroup/boat-edge
 cat >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":"$WORK/dl/jailer","cgroupParent":"boat-edge",
- "reflink":"always","bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
+ "reflink":"always","aiProxyPort":8744,"bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
  "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},"defaultTeam":{"maxVMs":8}}
 JSON
 sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
@@ -312,7 +315,7 @@ if [ -x "$HERE/guest/desktop-check.sh" ]; then
   link=$(boat desktop edge-d --json | jq -r .url)
   CURL_OPTS="--cacert $CA --connect-to ::127.0.0.1:443" SSL_CA=$CA \
     ANIMATE_CMD="boat exec edge-d -- boat-desktop-animate 10" \
-    "$HERE/guest/desktop-check.sh" "$link" || fail "desktop-check.sh"
+    soft desktop-check.sh "$HERE/guest/desktop-check.sh" "$link"
 else
   warn "components/boat/guest/desktop-check.sh not present yet"
 fi
@@ -361,7 +364,7 @@ fi
 for s in sdk/e2e-live.sh api/e2e-auth.sh sdk/e2e-agent-from-env.sh; do
   if [ -x "$HERE/$s" ]; then
     log "$s"
-    "$HERE/$s" || fail "$s"
+    soft "$s" "$HERE/$s"
   else
     warn "components/boat/$s not present yet"
   fi
@@ -373,7 +376,7 @@ if [ -f "$HERE/dashboard/web/index.html" ]; then
   grep -qi "frame-ancestors 'none'" <<<"$page" && grep -qi '<html' <<<"$page" || fail "dashboard page: $page"
   [ "$(hc "https://api.$D/v1/me" -H "Authorization: Bearer $KEY")" = 200 ] || fail "API behind the dashboard"
   grep -q "api.$D" /etc/hosts || echo "127.0.0.1 api.$D" | sudo tee -a /etc/hosts >/dev/null
-  BOAT_URL=https://api.$D BOAT_KEY=$KEY BOAT_INSECURE=1 BOAT_E2E_REQUIRE_BROWSER=1 "$HERE/dashboard/e2e.sh" || fail "dashboard/e2e.sh"
+  BOAT_URL=https://api.$D BOAT_KEY=$KEY BOAT_INSECURE=1 BOAT_E2E_REQUIRE_BROWSER=1 soft dashboard/e2e.sh "$HERE/dashboard/e2e.sh"
 else
   warn "components/boat/dashboard/web not present yet"
 fi
@@ -383,5 +386,6 @@ boat rm edge-a --json >/dev/null
 sshj "dev@$ip_a" true 2>/dev/null && fail "jump grant survived boat rm"
 [ "$(hc "$priv" -H "X-Boat-Route-Token: $rt")" = 404 ] || fail "route survived boat rm"
 boat rm edge-d --json >/dev/null
+[ ${#FAILED[@]} = 0 ] || fail "these failed: ${FAILED[*]}"
 echo "METRIC $(jq -nc '{test: "boat-edge-e2e", pass: true}')"
 echo "edge: PASS"

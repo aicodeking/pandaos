@@ -157,6 +157,7 @@ let
     "-vm-domain" cfg.vmDomain
     # Only the AI proxy, on the bridge, for VMs (boatd opens aiProxyPort to them).
     "-ai-proxy-listen" "10.200.0.1:${toString aiProxyPort}"
+    "-public-url" "https://api.${cfg.domain}"
   ]
   ++ lib.optionals cfg.sshGateway.enable [ "-ssh-jump" "jump@ssh.${cfg.domain}:${toString cfg.sshGateway.port}" ]
   ++ lib.optionals (imageIds != [ ]) [ "-images" (lib.concatStringsSep "," imageIds) ];

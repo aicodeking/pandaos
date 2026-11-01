@@ -179,14 +179,16 @@ Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list
 |---|---|---|---|
 | Sandboxes | create, list, get, delete | yes | `boat new/list/rm` |
 | | update (PATCH), recover, share/unshare | no | |
-| | stop, resume | yes | `boat stop/start`, memory restored (same `boot_id`); the command is `start`, not `resume` |
+| | stop, resume | yes | `boat stop`, `boat start` or `resume`; memory restored (same `boot_id`) |
 | | fork | yes | new hostname, IP, machine-id, host keys, entropy |
-| | per-sandbox usage | unit | `GET /v1/vms/{id}/usage` |
+| | per-sandbox usage | unit | `boat vm-usage` |
 | | `current` shortcut, `boat onboard`, sign up from an agent | no | keys come from the operator |
 | Commands | exec with output | yes | |
-| | detached commands, attach, stop, logs, history, `ps` | partial | API routes exist (`/commands`, `/command-history`, `/processes`); no CLI verbs yet |
+| | detached commands, follow, signal, logs, history (also on a stopped VM) | yes | `boat cmd`; driven through the SDKs in `sdk/e2e-live.sh` |
+| | `ps` | unit | |
 | Files | read, write | yes | `boat scp` |
-| | delete, list, info, search, folder, move, permissions | unit | API only |
+| | list, search, move, delete, folder, info | yes | `boat files`, through `sdk/e2e-live.sh` |
+| | permissions | unit | |
 | | find in files, replace, upload/download URLs, artifacts | no | |
 | Connect | ssh | yes | through the jump host; IP target; no `boat ssh-config` for editors |
 | | VS Code, Cursor | partial | works with a hand-written `ProxyJump`; not automated |
@@ -200,28 +202,34 @@ Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list
 | Long-running | TTL and idle auto-stop | yes | |
 | | extend the deadline, prompts pushing it out | no | |
 | | systemd services across stop/resume | yes | memory restore keeps all processes; boat.dev restarts services instead |
-| Environments | image, setup script, env vars, secret selection, versions | unit | `/v1/environments`; no CLI verbs |
+| Environments | image, setup script, env vars, secret selection, prebuilt snapshot | yes | `boat env`; setup and build run in `sdk/e2e-live.sh` |
+| | versions | unit | a counter; no upgrade of running VMs |
 | | repo cloning, secret files, private registries, safe-for-third-parties, per-org access | no | |
 | Snapshots | create, list, delete, new from snapshot | yes | memory + disk |
-| | share code, download, import | unit | |
+| | share code, import | yes | through `sdk/e2e-live.sh` |
+| | download | unit | |
 | | browse file tree, retention rules | no | |
 | Machines | sizes | yes | operator-defined |
-| | resize | unit | `POST /v1/vms/{id}/resize` |
+| | resize | unit | `boat resize` |
 | | nested virtualization, fail-fast | no | |
 | | Docker in the sandbox | yes | `full` image |
 | Agents | `boat prompt` | yes | with a stub agent; real agent only if CI has a key (`e2e-agent-from-env.sh` otherwise reports SKIPPED) |
 | | harnesses | partial | Claude Code, Codex, OpenCode preinstalled; boat.dev lists seven |
-| | async prompts, steer, interrupt, conversations | unit | |
-| | AI credentials, keep-keys-out proxy, usage, block | unit | one credential per provider and team, no profiles or backup accounts |
+| | async prompts, steer, conversations | yes | with a stub agent, through `sdk/e2e-live.sh` |
+| | interrupt | unit | |
+| | AI credentials, keep-keys-out proxy, usage | yes | proxy token in the VM, real key not, through `sdk/e2e-live.sh`; one credential per provider and team, no profiles or backup accounts |
+| | block a VM's AI access | unit | |
 | | computer use, MCP server, skills, llms.txt | no | not integrated in boat (PandaOS has `panda-cu` separately) |
 | API and SDKs | REST + OpenAPI, Python, TypeScript | yes | own schema, see above |
-| | CLI with `--json` | yes | far fewer verbs than boat.dev's CLI |
+| | CLI with `--json` | partial | the common verbs; no `current`, `extend`, `ssh-config` or `api-key` presets |
 | | pagination, `Idempotency-Key` | no | |
 | Keys | create, list, revoke, scopes | yes | |
-| | rotate, per-key usage | unit | |
+| | rotate | yes | through `sdk/e2e-live.sh` |
+| | per-key usage | unit | |
 | Webhooks | signed, delivery log, test | yes | |
-| | rotate, update | unit | |
-| Monitoring | OpenTelemetry | unit | |
+| | rotate | yes | through `sdk/e2e-live.sh` |
+| | update | unit | |
+| Monitoring | OpenTelemetry | unit | `boat telemetry`; exporting to a real collector is untested |
 | Teams | teams, members, quotas | yes | no invites, seats or shared wallets |
 | Dashboard | web UI | partial | new; its browser smoke test runs in the edge e2e; has not been reviewed |
 | Security | isolation, tokenized URLs | yes | see Security model |
