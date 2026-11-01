@@ -197,6 +197,16 @@ func TestMasterKeySource(t *testing.T) {
 	if _, kr, err := c.open(); err != nil || kr == nil {
 		t.Errorf("open with credential: %v", err)
 	}
+	// systemd's ACL grant shows up as group-readable; plain files stay strict
+	os.Chmod(filepath.Join(creds, "boat-master-key"), 0o440)
+	if _, err := LoadMasterKey(filepath.Join(creds, "boat-master-key"), false); err != nil {
+		t.Errorf("credential with an ACL mask refused: %v", err)
+	}
+	plain := filepath.Join(t.TempDir(), "k")
+	os.WriteFile(plain, []byte(randHex(32)), 0o440)
+	if _, err := LoadMasterKey(plain, false); err == nil {
+		t.Error("group-readable plain key file accepted")
+	}
 }
 
 func envOf(m map[string]any) map[string]any {

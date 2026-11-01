@@ -74,7 +74,7 @@ func LoadMasterKey(path string, create bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if st, err := os.Stat(path); err == nil && st.Mode().Perm()&0o077 != 0 {
+	if st, err := os.Stat(path); err == nil && st.Mode().Perm()&0o077 != 0 && !isCredential(path) {
 		return nil, fmt.Errorf("%s must not be group/world readable (chmod 600)", path)
 	}
 	if len(b) == 32 {
@@ -174,4 +174,13 @@ func signHex(key []byte, payload string) string {
 	m := hmac.New(sha256.New, key)
 	m.Write([]byte(payload))
 	return hex.EncodeToString(m.Sum(nil))
+}
+
+// isCredential reports whether path is a systemd credential. systemd manages
+// that directory per service; when it grants the service user access through
+// an ACL the file's group bits show the ACL mask (0440), so the mode check
+// for plain key files does not apply.
+func isCredential(path string) bool {
+	d := os.Getenv("CREDENTIALS_DIRECTORY")
+	return d != "" && filepath.Dir(path) == filepath.Clean(d)
 }
