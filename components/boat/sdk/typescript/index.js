@@ -86,8 +86,8 @@ export class Boat {
   async listVMs() { return (await this.call("GET", "/v1/vms")).vms; }
   getVM(id) { return this.call("GET", `/v1/vms/${q(id)}`); }
   createVM(opts = {}) {
-    const { name, size, image, ttlS, labels, env: e } = opts;
-    return this.call("POST", "/v1/vms", clean({ name, size, image, ttl_s: ttlS, labels, env: e }));
+    const { name, size, image, ttlS, labels, env: e, secrets, idleStopS, snapshot } = opts;
+    return this.call("POST", "/v1/vms", clean({ name, size, image, ttl_s: ttlS, labels, env: e, secrets, idle_stop_s: idleStopS, snapshot }));
   }
   start(id) { return this.call("POST", `/v1/vms/${q(id)}/start`); }
   stop(id) { return this.call("POST", `/v1/vms/${q(id)}/stop`); }
@@ -121,7 +121,12 @@ export class Boat {
   }
 
   async ports(id) { return (await this.call("GET", `/v1/vms/${q(id)}/ports`)).ports; }
-  addPort(id, port, { public: pub = false } = {}) { return this.call("POST", `/v1/vms/${q(id)}/ports`, { port, public: pub }); }
+  addPort(id, port, { public: pub = false, auth } = {}) {
+    return this.call("POST", `/v1/vms/${q(id)}/ports`, { port, auth: auth || (pub ? "public" : "private") });
+  }
+  portUrl(id, port, { ttlS } = {}) {
+    return this.call("GET", `/v1/vms/${q(id)}/ports/${Number(port)}/url${ttlS ? "?ttl_s=" + Number(ttlS) : ""}`);
+  }
   async removePort(id, port) { await this.call("DELETE", `/v1/vms/${q(id)}/ports/${Number(port)}`); }
   snapshots(id) { return this.call("GET", `/v1/vms/${q(id)}/snapshots`); }
   createSnapshot(id, { name } = {}) { return this.call("POST", `/v1/vms/${q(id)}/snapshots`, clean({ name })); }
@@ -130,7 +135,8 @@ export class Boat {
   desktop(id) { return this.call("GET", `/v1/vms/${q(id)}/desktop`); }
 
   async teams() { return (await this.call("GET", "/v1/teams")).teams; }
-  createTeam(name) { return this.call("POST", "/v1/teams", { name }); }
+  createTeam(name, { owner } = {}) { return this.call("POST", "/v1/teams", clean({ name, owner })); }
+  async deleteTeam(id) { await this.call("DELETE", `/v1/teams/${q(id)}`); }
   addMember(teamId, name, { role = "member" } = {}) { return this.call("POST", `/v1/teams/${q(teamId)}/members`, { name, role }); }
   async keys() { return (await this.call("GET", "/v1/keys")).keys; }
   createKey({ name = "key", scopes, teamId } = {}) { return this.call("POST", "/v1/keys", clean({ name, scopes, team_id: teamId })); }

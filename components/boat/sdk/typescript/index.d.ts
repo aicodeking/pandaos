@@ -22,6 +22,22 @@ export interface CreateVMOptions {
   ttlS?: number;
   labels?: Record<string, string>;
   env?: Record<string, string>;
+  /** Team secret names to inject (omit = all, [] = none). Forks inherit it. */
+  secrets?: string[];
+  /** Auto-stop after this many idle seconds; -1 = never. */
+  idleStopS?: number;
+  /** Create from a snapshot id of the same team. */
+  snapshot?: string;
+}
+
+export interface Port { guest_port: number; host_port?: number; hostname?: string; auth: "private" | "public"; [extra: string]: unknown; }
+export interface PortURL {
+  url: string;
+  auth: "private" | "public";
+  guest_port: number;
+  /** Private routes: send as header X-Boat-Route-Token, or open url in a browser. */
+  token?: string;
+  expires_at?: string;
 }
 
 export interface ExecEvent {
@@ -87,8 +103,9 @@ export declare class Boat {
   prompt(id: string, prompt: string, opts?: PromptOptions): AsyncGenerator<ExecEvent>;
   readFile(id: string, path: string): Promise<Uint8Array>;
   writeFile(id: string, path: string, data: Uint8Array | string): Promise<void>;
-  ports(id: string): Promise<unknown[]>;
-  addPort(id: string, port: number, opts?: { public?: boolean }): Promise<unknown>;
+  ports(id: string): Promise<Port[]>;
+  addPort(id: string, port: number, opts?: { public?: boolean; auth?: "private" | "public" }): Promise<Port>;
+  portUrl(id: string, port: number, opts?: { ttlS?: number }): Promise<PortURL>;
   removePort(id: string, port: number): Promise<void>;
   snapshots(id: string): Promise<unknown>;
   createSnapshot(id: string, opts?: { name?: string }): Promise<unknown>;
@@ -97,7 +114,10 @@ export declare class Boat {
   desktop(id: string): Promise<DesktopURL>;
 
   teams(): Promise<Team[]>;
-  createTeam(name: string): Promise<Team>;
+  /** Operator only. With owner, a new user owns the team and `owner.key.token` is returned once. */
+  createTeam(name: string, opts?: { owner?: string }): Promise<Team & { owner?: { user: { id: string; name: string }; key: Key } }>;
+  /** Operator only; the team must have no VMs. */
+  deleteTeam(id: string): Promise<void>;
   addMember(teamId: string, name: string, opts?: { role?: "owner" | "admin" | "member" }): Promise<{ user: { id: string; name: string }; role: string; key: Key }>;
   keys(): Promise<Key[]>;
   createKey(opts?: { name?: string; scopes?: Scope[]; teamId?: string }): Promise<Key>;

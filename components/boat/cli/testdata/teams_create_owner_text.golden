@@ -1,0 +1,8 @@
+$ boat teams create tenant --owner bob
+exit 0
+--- stdout
+created team tenant (team_2)
+owner key: boat_owner (shown once)
+--- stderr
+--- requests
+POST /v1/teams {"name":"tenant","owner":"bob"}

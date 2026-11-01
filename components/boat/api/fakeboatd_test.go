@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -100,7 +101,15 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			f.execs = append(f.execs, in)
 			w.Header().Set("Content-Type", "application/x-ndjson")
 			enc := json.NewEncoder(w)
-			enc.Encode(map[string]string{"stream": "stdout", "data_b64": base64.StdEncoding.EncodeToString([]byte("hello\n"))})
+			out := "hello\n"
+			if cmd, _ := in["cmd"].([]any); len(cmd) > 1 && cmd[0] == "echo" { // behave like echo for the live scripts
+				parts := make([]string, len(cmd)-1)
+				for i, c := range cmd[1:] {
+					parts[i] = fmt.Sprint(c)
+				}
+				out = strings.Join(parts, " ") + "\n"
+			}
+			enc.Encode(map[string]string{"stream": "stdout", "data_b64": base64.StdEncoding.EncodeToString([]byte(out))})
 			enc.Encode(map[string]int{"exit": 0})
 			return
 		case "desktop":

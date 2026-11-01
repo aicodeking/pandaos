@@ -1,0 +1,7 @@
+$ boat ports add vm1 8080 --public --auth private
+exit 2
+--- stdout
+--- stderr
+<usage>
+--- requests
+GET /v1/vms/vm1 

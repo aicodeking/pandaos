@@ -1,0 +1,9 @@
+$ boat ports ls vm1
+exit 0
+--- stdout
+GUEST_PORT  AUTH    HOST_PORT  HOSTNAME
+3000        public  20001      3000-vm1
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/ports 

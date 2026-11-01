@@ -155,8 +155,12 @@ class Boat:
 
     def create_vm(self, name: Optional[str] = None, size: Optional[str] = None, image: Optional[str] = None,
                   ttl_s: Optional[int] = None, labels: Optional[Dict[str, str]] = None,
-                  env: Optional[Dict[str, str]] = None) -> VM:
-        body = self._clean({"name": name, "size": size, "image": image, "ttl_s": ttl_s, "labels": labels, "env": env})
+                  env: Optional[Dict[str, str]] = None, secrets: Optional[List[str]] = None,
+                  idle_stop_s: Optional[int] = None, snapshot: Optional[str] = None) -> VM:
+        """secrets: team secret names to inject (None = all, [] = none); forks inherit it."""
+        body = self._clean({"name": name, "size": size, "image": image, "ttl_s": ttl_s, "labels": labels, "env": env,
+                            "secrets": None if secrets is None else list(secrets), "idle_stop_s": idle_stop_s,
+                            "snapshot": snapshot})
         return VM.from_json(self._call("POST", "/v1/vms", body))
 
     def start(self, vm_id: str) -> VM:
@@ -198,8 +202,16 @@ class Boat:
     def ports(self, vm_id: str) -> List[Dict[str, Any]]:
         return self._call("GET", f"/v1/vms/{_q(vm_id)}/ports")["ports"]
 
-    def add_port(self, vm_id: str, port: int, public: bool = False) -> Dict[str, Any]:
-        return self._call("POST", f"/v1/vms/{_q(vm_id)}/ports", {"port": port, "public": public})
+    def add_port(self, vm_id: str, port: int, public: bool = False, auth: Optional[str] = None) -> Dict[str, Any]:
+        """auth="private" (default): the gateway route needs a token from port_url().
+        public=True / auth="public": open route plus a raw TCP host port."""
+        mode = auth or ("public" if public else "private")
+        return self._call("POST", f"/v1/vms/{_q(vm_id)}/ports", {"port": port, "auth": mode})
+
+    def port_url(self, vm_id: str, port: int, ttl_s: Optional[int] = None) -> Dict[str, Any]:
+        """{url, auth, token?, expires_at?}; send token as header X-Boat-Route-Token, or open url in a browser."""
+        q = f"?ttl_s={int(ttl_s)}" if ttl_s else ""
+        return self._call("GET", f"/v1/vms/{_q(vm_id)}/ports/{int(port)}/url{q}")
 
     def remove_port(self, vm_id: str, port: int) -> None:
         self._call("DELETE", f"/v1/vms/{_q(vm_id)}/ports/{int(port)}")
@@ -226,8 +238,13 @@ class Boat:
     def teams(self) -> List[Dict[str, Any]]:
         return self._call("GET", "/v1/teams")["teams"]
 
-    def create_team(self, name: str) -> Dict[str, Any]:
-        return self._call("POST", "/v1/teams", {"name": name})
+    def create_team(self, name: str, owner: Optional[str] = None) -> Dict[str, Any]:
+        """Operator only. With owner, a new user owns the team; result["owner"]["key"]["token"]."""
+        return self._call("POST", "/v1/teams", self._clean({"name": name, "owner": owner}))
+
+    def delete_team(self, team_id: str) -> None:
+        """Operator only; the team must have no VMs."""
+        self._call("DELETE", f"/v1/teams/{_q(team_id)}")
 
     def add_member(self, team_id: str, name: str, role: str = "member") -> Dict[str, Any]:
         return self._call("POST", f"/v1/teams/{_q(team_id)}/members", {"name": name, "role": role})

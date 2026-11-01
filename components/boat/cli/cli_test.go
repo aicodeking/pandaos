@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -48,12 +50,15 @@ func fakeAPI(t *testing.T, log *bytes.Buffer) *httptest.Server {
 	mux.HandleFunc("POST /v1/vms/vm1/prompt", stream)
 	mux.HandleFunc("POST /v1/vms/vm1/ssh", j(200, obj{"host": "10.0.0.5", "port": 22, "user": "ubuntu", "jump": "boat@gw.example:2222"}))
 	mux.HandleFunc("GET /v1/vms/vm1/desktop", j(200, obj{"url": "https://boat.example/desktop/vm1?exp=1&sig=ab", "expires_at": "2026-01-01T00:00:00Z"}))
-	mux.HandleFunc("GET /v1/vms/vm1/ports", j(200, obj{"ports": []obj{{"guest_port": 3000, "host_port": 20001, "hostname": "3000-vm1"}}}))
-	mux.HandleFunc("POST /v1/vms/vm1/ports", j(201, obj{"guest_port": 8080, "hostname": "8080-vm1"}))
+	mux.HandleFunc("GET /v1/vms/vm1/ports", j(200, obj{"ports": []obj{{"guest_port": 3000, "host_port": 20001, "hostname": "3000-vm1", "auth": "public"}}}))
+	mux.HandleFunc("POST /v1/vms/vm1/ports", j(201, obj{"guest_port": 8080, "hostname": "8080-vm1", "auth": "private"}))
+	mux.HandleFunc("GET /v1/vms/vm1/ports/8080/url", j(200, obj{"url": "https://8080-vm1.vm.example/?boat_exp=1&boat_sig=ab", "token": "1.ab", "auth": "private", "guest_port": 8080, "expires_at": "2026-01-01T00:00:00Z"}))
+	mux.HandleFunc("POST /v1/teams", j(201, obj{"id": "team_2", "name": "tenant", "role": "", "owner": obj{"user": obj{"id": "usr_2", "name": "bob"}, "key": obj{"id": "k9", "token": "boat_owner"}}}))
 	mux.HandleFunc("GET /v1/vms/vm1/files", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "remote-data") })
 	mux.HandleFunc("PUT /v1/vms/vm1/files", j(200, obj{"ok": true, "path": "/tmp/x", "bytes": 5}))
 	mux.HandleFunc("GET /v1/secrets", j(200, obj{"secrets": []obj{{"name": "ANTHROPIC_API_KEY", "updated": "2026-01-01T00:00:00Z"}}}))
-	mux.HandleFunc("PUT /v1/secrets/{name}", j(200, obj{"name": "OPENAI_API_KEY", "updated": "2026-01-01T00:00:00Z"}))
+	mux.HandleFunc("PUT /v1/secrets/OPENAI_API_KEY", j(200, obj{"name": "OPENAI_API_KEY", "updated": "2026-01-01T00:00:00Z"}))
+	mux.HandleFunc("PUT /v1/secrets/ANTHROPIC_API_KEY", j(200, obj{"name": "ANTHROPIC_API_KEY", "updated": "2026-01-01T00:00:00Z", "rotated": true, "note": "running VMs keep the old value"}))
 	mux.HandleFunc("POST /v1/keys", j(201, obj{"id": "k2", "name": "ci", "scopes": []string{"vms:read"}, "token": "boat_x_y"}))
 	mux.HandleFunc("GET /v1/teams", j(200, obj{"teams": []obj{{"id": "team_1", "name": "acme", "role": "owner"}}}))
 	mux.HandleFunc("GET /v1/webhooks", j(200, obj{"webhooks": []obj{{"id": "wh_1", "url": "https://h.example", "events": []string{"vm.*"}}}}))
@@ -92,6 +97,16 @@ func TestGolden(t *testing.T) {
 		{"desktop_json", []string{"desktop", "vm1", "--json"}},
 		{"ports_ls_json", []string{"ports", "ls", "vm1", "--json"}},
 		{"ports_add_json", []string{"ports", "add", "vm1", "8080", "--json"}},
+		{"ports_add_public_json", []string{"ports", "add", "vm1", "8080", "--public", "--json"}},
+		{"ports_add_conflict", []string{"ports", "add", "vm1", "8080", "--public", "--auth", "private"}},
+		{"ports_url_json", []string{"ports", "url", "vm1", "8080", "--ttl", "2h", "--json"}},
+		{"ports_url_text", []string{"ports", "url", "vm1", "8080"}},
+		{"ports_ls_text", []string{"ports", "ls", "vm1"}},
+		{"new_secrets_json", []string{"new", "--name", "new", "--secrets", "A,B", "--json"}},
+		{"new_no_secrets_json", []string{"new", "--name", "new", "--no-secrets", "--json"}},
+		{"secrets_rotate_text", []string{"secrets", "rotate", "ANTHROPIC_API_KEY", "sk-2"}},
+		{"secrets_rotate_missing", []string{"secrets", "rotate", "NOPE", "x"}},
+		{"teams_create_owner_text", []string{"teams", "create", "tenant", "--owner", "bob"}},
 		{"scp_up_json", []string{"scp", "--json", local, "vm1:/tmp/x"}},
 		{"secrets_ls_json", []string{"secrets", "ls", "--json"}},
 		{"secrets_set_json", []string{"secrets", "set", "OPENAI_API_KEY", "sk-1", "--json"}},
@@ -192,5 +207,55 @@ func TestSSHExecArgv(t *testing.T) {
 	want := "ssh -p 22 -o StrictHostKeyChecking=accept-new -o ProxyCommand=ssh -W %h:%p -p 2222 boat@gw.example ubuntu@10.0.0.5 uptime"
 	if strings.Join(argv, " ") != want {
 		t.Errorf("argv %q", strings.Join(argv, " "))
+	}
+}
+
+func TestUpgrade(t *testing.T) {
+	bin := []byte("#!/bin/sh\necho new boat\n")
+	sum := sha256.Sum256(bin)
+	good := hex.EncodeToString(sum[:]) + "  " + assetName() + "\n"
+	sums := good
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/boat_SHA256SUMS":
+			io.WriteString(w, sums)
+		case "/" + assetName():
+			w.Write(bin)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	self := filepath.Join(dir, "boat")
+	os.WriteFile(self, []byte("old"), 0o755)
+	run := func() (int, string) {
+		var out, errw bytes.Buffer
+		a := &app{out: &out, errw: &errw, getenv: func(k string) string {
+			return map[string]string{"BOAT_RELEASE_BASE": srv.URL}[k]
+		}, exe: func() (string, error) { return self, nil }}
+		code := a.run([]string{"upgrade", "--json"})
+		return code, out.String() + errw.String()
+	}
+	if code, out := run(); code != 0 || !strings.Contains(out, `"ok":true`) {
+		t.Fatalf("upgrade: %d %s", code, out)
+	}
+	if b, _ := os.ReadFile(self); !bytes.Equal(b, bin) {
+		t.Fatalf("binary not replaced: %q", b)
+	}
+	if st, _ := os.Stat(self); st.Mode().Perm() != 0o755 {
+		t.Errorf("mode %v", st.Mode())
+	}
+	os.WriteFile(self, []byte("old"), 0o755)
+	sums = strings.Repeat("0", 64) + "  " + assetName() + "\n"
+	if code, out := run(); code == 0 || !strings.Contains(out, "checksum mismatch") {
+		t.Errorf("bad checksum accepted: %d %s", code, out)
+	}
+	if b, _ := os.ReadFile(self); string(b) != "old" {
+		t.Error("binary replaced despite checksum mismatch")
+	}
+	sums = ""
+	if code, _ := run(); code == 0 {
+		t.Error("missing checksum accepted")
 	}
 }

@@ -18,23 +18,26 @@ import (
 	"time"
 )
 
-const version = "0.1.0"
+// version is set at release build time with -ldflags "-X main.version=vX.Y.Z".
+var version = "0.1.0"
 
 const usage = `boat - persistent Ubuntu VMs for AI agents
 
   boat login --url URL --key KEY       save credentials (~/.config/boat/config.json)
   boat whoami | images | usage
   boat new [--name N] [--size S] [--image I] [--ttl 2h] [--idle-stop 30m|never] [--snapshot SID] [--label k=v]
+                [--secrets A,B | --no-secrets]
   boat list
   boat ssh <vm> [-- ssh-args]          boat scp <src> <dst>   (vm:/path on one side)
   boat exec <vm> -- cmd [args]         boat prompt <vm> "text" [--agent claude|codex|opencode] [--model M]
   boat fork <vm> [--name N]            boat stop|start|rm <vm>
   boat desktop <vm> [--no-open]
-  boat ports ls|add|rm <vm> [port] [--public]
+  boat ports ls|add|rm|url <vm> [port] [--auth private|public] [--public] [--ttl 1h]
   boat snapshots <vm> [ls | create [--name N] | rm <id>]
-  boat secrets ls | set NAME [VALUE|-] | rm NAME
+  boat secrets ls | set NAME [VALUE|-] | rotate NAME [VALUE|-] | rm NAME
   boat keys [ls | create [--name N] [--scopes a,b] [--team T] | rm ID]
-  boat teams [ls | create NAME | show ID | add-member TEAM NAME [--role R] | rm-member TEAM USER]
+  boat teams [ls | create NAME [--owner U] | show ID | rm ID | add-member TEAM NAME [--role R] | rm-member TEAM USER]
+  boat upgrade [--version vX.Y.Z]       replace this binary with a release build (checksum-verified)
   boat webhooks [ls | create URL [--events a,b] | rm ID | deliveries ID | test ID]
 
 Global: --json (JSON lines on stdout, errors as JSON on stderr). Env: BOAT_URL, BOAT_API_KEY, BOAT_CONFIG.`
@@ -48,6 +51,7 @@ type app struct {
 	c         *client
 	execProg  func(argv []string) error // replaces the process (ssh)
 	open      func(url string) error
+	exe       func() (string, error) // os.Executable; replaced in tests
 }
 
 func main() {
@@ -123,6 +127,9 @@ func (a *app) run(args []string) int {
 func (a *app) dispatch(cmd string, args []string) error {
 	if cmd == "login" {
 		return a.login(args)
+	}
+	if cmd == "upgrade" {
+		return a.upgrade(args)
 	}
 	if cmd == "version" {
 		return a.emit(obj{"version": version}, func() { fmt.Fprintln(a.out, "boat", version) })

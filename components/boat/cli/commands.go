@@ -32,7 +32,7 @@ func init() {
 
 var (
 	vmCols   = []string{"id", "name", "size", "state", "image"}
-	portCols = []string{"guest_port", "host_port", "hostname"}
+	portCols = []string{"guest_port", "auth", "host_port", "hostname"}
 )
 
 func (a *app) emitVM(vm obj) error {
@@ -100,6 +100,8 @@ func cmdNew(a *app, args []string) error {
 	snap := fs.String("snapshot", "", "create from a snapshot id")
 	lab := labels{}
 	fs.Var(lab, "label", "")
+	secrets := fs.String("secrets", "", "comma-separated team secrets for this VM (default: all)")
+	noSecrets := fs.Bool("no-secrets", false, "inject no team secrets")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -124,6 +126,14 @@ func cmdNew(a *app, args []string) error {
 	}
 	if len(lab) > 0 {
 		body["labels"] = lab
+	}
+	switch {
+	case *noSecrets && *secrets != "":
+		return fmt.Errorf("--secrets and --no-secrets conflict: %w", errUsage)
+	case *noSecrets:
+		body["secrets"] = []string{}
+	case *secrets != "":
+		body["secrets"] = splitList(*secrets)
 	}
 	var vm obj
 	if err := a.c.call("POST", "/v1/vms", body, &vm); err != nil {
@@ -447,9 +457,11 @@ func cmdDesktop(a *app, args []string) error {
 // ---- ports / snapshots ----
 
 func cmdPorts(a *app, args []string) error {
-	op, args := sub(args, "ls", "ls", "add", "rm")
+	op, args := sub(args, "ls", "ls", "add", "rm", "url")
 	fs := flag.NewFlagSet("ports", flag.ContinueOnError)
-	public := fs.Bool("public", false, "")
+	public := fs.Bool("public", false, "open route + raw TCP port (same as --auth public)")
+	auth := fs.String("auth", "", "private (default: gateway route needs a token from `boat ports url`) or public")
+	ttl := fs.Duration("ttl", 0, "lifetime of a private port URL (default: server's, 1h)")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -478,11 +490,36 @@ func cmdPorts(a *app, args []string) error {
 		if err != nil {
 			return fmt.Errorf("port must be a number: %w", errUsage)
 		}
+		mode := *auth
+		if *public {
+			if mode == "private" {
+				return fmt.Errorf("--public conflicts with --auth private: %w", errUsage)
+			}
+			mode = "public"
+		}
+		if mode == "" {
+			mode = "private"
+		}
 		var out obj
-		if err := a.c.call("POST", vmPath(id, "ports"), obj{"port": port, "public": *public}, &out); err != nil {
+		if err := a.c.call("POST", vmPath(id, "ports"), obj{"port": port, "auth": mode}, &out); err != nil {
 			return err
 		}
 		return a.emitList([]obj{out}, portCols...)
+	case "url":
+		path := vmPath(id, "ports", url.PathEscape(pos[1]), "url")
+		if *ttl > 0 {
+			path += "?ttl_s=" + strconv.Itoa(int(ttl.Seconds()))
+		}
+		var out obj
+		if err := a.c.call("GET", path, nil, &out); err != nil {
+			return err
+		}
+		return a.emit(out, func() {
+			fmt.Fprintln(a.out, s(out, "url"))
+			if t := s(out, "token"); t != "" {
+				fmt.Fprintf(a.errw, "private route, valid until %s; for scripts: curl -H 'X-Boat-Route-Token: %s' …\n", s(out, "expires_at"), t)
+			}
+		})
 	default:
 		if err := a.c.call("DELETE", vmPath(id, "ports", url.PathEscape(pos[1])), nil, nil); err != nil {
 			return err
@@ -534,7 +571,7 @@ func cmdSnapshots(a *app, args []string) error {
 // ---- secrets / keys / teams / webhooks ----
 
 func cmdSecrets(a *app, args []string) error {
-	op, pos := sub(args, "ls", "ls", "set", "rm")
+	op, pos := sub(args, "ls", "ls", "set", "rotate", "rm")
 	switch op {
 	case "ls":
 		l, err := listCall(a, "/v1/secrets", "secrets")
@@ -542,9 +579,12 @@ func cmdSecrets(a *app, args []string) error {
 			return err
 		}
 		return a.emitList(l, "name", "updated")
-	case "set":
+	case "set", "rotate":
 		if len(pos) < 1 || len(pos) > 2 {
-			return fmt.Errorf("usage: boat secrets set NAME [VALUE|-]: %w", errUsage)
+			return fmt.Errorf("usage: boat secrets %s NAME [VALUE|-]: %w", op, errUsage)
+		}
+		if op == "rotate" && !a.secretExists(pos[0]) {
+			return fmt.Errorf("secret %s does not exist; use boat secrets set", pos[0])
 		}
 		var value string
 		if len(pos) == 2 && pos[1] != "-" {
@@ -560,7 +600,13 @@ func cmdSecrets(a *app, args []string) error {
 		if err := a.c.call("PUT", "/v1/secrets/"+url.PathEscape(pos[0]), obj{"value": value}, &out); err != nil {
 			return err
 		}
-		return a.emit(out, func() { fmt.Fprintln(a.out, "set", pos[0]) })
+		return a.emit(out, func() {
+			fmt.Fprintln(a.out, "set", pos[0])
+			if out["rotated"] == true {
+				fmt.Fprintln(a.errw, "note:", s(out, "note"))
+				fmt.Fprintln(a.errw, "hint: restart VMs that need the new value (boat stop VM && boat start VM); VMs created with --secrets without it are unaffected")
+			}
+		})
 	default:
 		if err := need(pos, 1, "NAME"); err != nil {
 			return err
@@ -609,9 +655,10 @@ func cmdKeys(a *app, args []string) error {
 }
 
 func cmdTeams(a *app, args []string) error {
-	op, args := sub(args, "ls", "ls", "create", "show", "add-member", "rm-member")
+	op, args := sub(args, "ls", "ls", "create", "show", "rm", "add-member", "rm-member")
 	fs := flag.NewFlagSet("teams", flag.ContinueOnError)
 	role := fs.String("role", "member", "")
+	owner := fs.String("owner", "", "create: new user who owns the team (operator only)")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -628,10 +675,28 @@ func cmdTeams(a *app, args []string) error {
 		if err := need(pos, 1, "NAME"); err != nil {
 			return err
 		}
-		if err := a.c.call("POST", "/v1/teams", obj{"name": pos[0]}, &out); err != nil {
+		body := obj{"name": pos[0]}
+		if *owner != "" {
+			body["owner"] = *owner
+		}
+		if err := a.c.call("POST", "/v1/teams", body, &out); err != nil {
 			return err
 		}
-		return a.emitList([]obj{out}, "id", "name", "role")
+		return a.emit(out, func() {
+			fmt.Fprintf(a.out, "created team %s (%s)\n", s(out, "name"), s(out, "id"))
+			if o, ok := out["owner"].(map[string]any); ok {
+				k, _ := o["key"].(map[string]any)
+				fmt.Fprintf(a.out, "owner key: %v (shown once)\n", k["token"])
+			}
+		})
+	case "rm":
+		if err := need(pos, 1, "TEAM_ID"); err != nil {
+			return err
+		}
+		if err := a.c.call("DELETE", "/v1/teams/"+url.PathEscape(pos[0]), nil, nil); err != nil {
+			return err
+		}
+		return a.emit(obj{"ok": true, "id": pos[0]}, func() { fmt.Fprintln(a.out, "deleted team", pos[0]) })
 	case "show":
 		if err := need(pos, 1, "TEAM_ID"); err != nil {
 			return err
@@ -715,4 +780,17 @@ func cmdWebhooks(a *app, args []string) error {
 		}
 		return a.emit(obj{"ok": true, "id": pos[0]}, func() { fmt.Fprintln(a.out, "deleted", pos[0]) })
 	}
+}
+
+func (a *app) secretExists(name string) bool {
+	l, err := listCall(a, "/v1/secrets", "secrets")
+	if err != nil {
+		return true // let the PUT report the real error
+	}
+	for _, x := range l {
+		if s(x, "name") == name {
+			return true
+		}
+	}
+	return false
 }

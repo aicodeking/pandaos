@@ -1,0 +1,8 @@
+$ boat ports url vm1 8080 --ttl 2h --json
+exit 0
+--- stdout
+{"auth":"private","expires_at":"2026-01-01T00:00:00Z","guest_port":8080,"token":"1.ab","url":"https://8080-vm1.vm.example/?boat_exp=1\u0026boat_sig=ab"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/ports/8080/url?ttl_s=7200 

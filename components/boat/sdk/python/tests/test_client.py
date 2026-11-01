@@ -61,6 +61,11 @@ class Mock(BaseHTTPRequestHandler):
             return self._send(200, {"host": "10.0.0.5", "port": 22, "user": "ubuntu"})
         if (m, p) == ("PUT", "/v1/secrets/ANTHROPIC_API_KEY"):
             return self._send(200, {"name": "ANTHROPIC_API_KEY"})
+        if (m, p) == ("POST", "/v1/vms/vm1/ports"):
+            return self._send(201, dict(json.loads(body), guest_port=8080))
+        if (m, p) == ("GET", "/v1/vms/vm1/ports/8080/url?ttl_s=600"):
+            return self._send(200, {"url": "https://8080-vm1.vm.example/?boat_exp=1&boat_sig=ab", "token": "1.ab",
+                                    "auth": "private", "guest_port": 8080})
         if (m, p) == ("DELETE", "/v1/vms/vm1"):
             return self._send(200, {"ok": True})
         return self._send(404, {"error": {"code": "not_found", "message": "vm not found", "request_id": "req_2"}})
@@ -120,6 +125,17 @@ class ClientTest(unittest.TestCase):
         self.b.set_secret("ANTHROPIC_API_KEY", "sk")
         self.assertEqual(json.loads(Mock.log[-1][2]), {"value": "sk"})
         self.b.delete("vm1")
+
+    def test_ports_and_secret_selection(self):
+        self.b.add_port("vm1", 8080)
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"port": 8080, "auth": "private"})
+        self.b.add_port("vm1", 8080, public=True)
+        self.assertEqual(json.loads(Mock.log[-1][2])["auth"], "public")
+        self.assertEqual(self.b.port_url("vm1", 8080, ttl_s=600)["token"], "1.ab")
+        self.b.create_vm(name="x", secrets=[])
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"name": "x", "secrets": []})
+        self.b.create_vm(name="y", secrets=["A"])
+        self.assertEqual(json.loads(Mock.log[-1][2])["secrets"], ["A"])
 
     def test_verify_webhook(self):
         body = b'{"type":"vm.stopped"}'

@@ -41,6 +41,8 @@ before(async () => {
       return res.end(files.get(req.url) ?? Buffer.alloc(0));
     }
     if (k === "PUT /v1/secrets/OPENAI_API_KEY") return json(200, { name: "OPENAI_API_KEY" });
+    if (k === "POST /v1/vms/vm1/ports") return json(201, { ...JSON.parse(body), guest_port: 8080 });
+    if (k === "GET /v1/vms/vm1/ports/8080/url?ttl_s=600") return json(200, { url: "https://8080-vm1.vm.example/?boat_exp=1&boat_sig=ab", token: "1.ab", auth: "private", guest_port: 8080 });
     if (k === "DELETE /v1/vms/vm1") return json(200, { ok: true });
     json(404, { error: { code: "not_found", message: "vm not found", request_id: "req_2" } });
   });
@@ -93,6 +95,17 @@ test("secrets and delete", async () => {
   await boat.setSecret("OPENAI_API_KEY", "sk");
   assert.deepEqual(JSON.parse(log.at(-1).body), { value: "sk" });
   await boat.delete("vm1");
+});
+
+test("ports auth + url and per-VM secrets", async () => {
+  const boat = new Boat({ url, key: TOKEN });
+  await boat.addPort("vm1", 8080);
+  assert.deepEqual(JSON.parse(log.at(-1).body), { port: 8080, auth: "private" });
+  await boat.addPort("vm1", 8080, { public: true });
+  assert.equal(JSON.parse(log.at(-1).body).auth, "public");
+  assert.equal((await boat.portUrl("vm1", 8080, { ttlS: 600 })).token, "1.ab");
+  await boat.createVM({ name: "x", secrets: [] });
+  assert.deepEqual(JSON.parse(log.at(-1).body), { name: "x", secrets: [] });
 });
 
 test("verifyWebhook", () => {
