@@ -18,6 +18,10 @@ approve agent tasks on it.
   accessibility tree over MCP, on your session or a private headless one, and the desktop is tuned
   for predictable screenshots. `bench/cubench` compares it with other desktops.
 - **Self-updating.** It updates itself every day and rolls back if an update breaks it.
+- **Self-hosted agent VMs (server profile).** `boat` turns a dedicated server into a boat.dev-style
+  host: persistent Firecracker microVMs with an API, a `boat` CLI, Python/TypeScript SDKs, ssh, port
+  URLs, a browser desktop, stop/resume, forks, snapshots, secrets, webhooks, quotas and metering.
+  Off unless `services.boat.enable`; see [docs/boat.md](docs/boat.md).
 
 ## Measured numbers
 
@@ -158,6 +162,7 @@ There is no default password: you set one (and optionally an ssh key) during the
 - [Checkpoints](docs/checkpoints.md)
 - [Desktop](docs/desktop.md)
 - [Computer use and cubench](docs/computer-use.md)
+- [boat: self-hosted agent VMs](docs/boat.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Benchmarks](docs/benchmarks.md)
 - [Development](docs/development.md)

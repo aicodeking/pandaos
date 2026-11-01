@@ -8,6 +8,15 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Added
 
+- **boat (server profile):** self-hosted persistent Firecracker microVMs for agents, a boat.dev
+  alternative. `boatd` (VM manager: jailer, tap/bridge NAT, nftables tenant isolation, stop = memory
+  snapshot, forks, snapshots, TTL/idle stop, quotas, metering), `boat-api` (keys, scopes, teams,
+  sealed secrets, signed webhooks), `boat-gateway` (port URLs, signed desktop links, ssh jump),
+  the `boat` CLI, Python/TypeScript SDKs and an Ubuntu 24.04 guest (slim, and full with a KasmVNC
+  desktop). `services.boat` (in `nixosModules.default`, off by default), `nixosModules.server`,
+  `nixosConfigurations.server`, `packages.{boatd,boat-api,boat,boat-gateway}`, checks `boat-module`
+  and `boat-packages`, and the `boat-e2e` workflow, which drives every feature through the real CLI
+  on a KVM runner. See [docs/boat.md](docs/boat.md).
 - **Computer use:** `panda-cu` (`services.panda-cu`, in `nixosModules.default`, off by default; on in
   attach mode in the desktop profile, `mode = "headless"` for a private 1280x800 labwc session of the
   `agent` user). An MCP server with 17 `cu_*` tools (screenshots with Set-of-Marks, pointer,
