@@ -94,8 +94,6 @@ type State struct {
 	SSHGrants  map[string]*SSHGrant  `json:"ssh_grants"` // key: team_id + "|" + "type base64"
 	// VMSecrets: secret names selected at create (absent = all team secrets).
 	VMSecrets map[string][]string `json:"vm_secrets"`
-	// PublicPorts: "<vmid>:<port>" routes opened without auth (default private).
-	PublicPorts map[string]bool `json:"public_ports"`
 }
 
 // SSHGrant records which team VMs a public key was registered for, so the
@@ -133,9 +131,7 @@ func (st *State) init() {
 	if st.VMSecrets == nil {
 		st.VMSecrets = map[string][]string{}
 	}
-	if st.PublicPorts == nil {
-		st.PublicPorts = map[string]bool{}
-	}
+
 }
 
 // Store hands out immutable snapshots: Update builds a fresh copy, persists

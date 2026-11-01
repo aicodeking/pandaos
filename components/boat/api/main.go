@@ -137,9 +137,8 @@ func serve(args []string) int {
 	teamBurst := fs.Float64("team-burst", 120, "rate limit burst per team")
 	maxKeys := fs.Int("max-keys-per-team", 100, "API keys per team (0 = unlimited)")
 	maxHooks := fs.Int("max-webhooks-per-team", 20, "webhooks per team (0 = unlimited)")
-	portsBase := fs.String("ports-base-url", "", "gateway base URL for port routes, e.g. https://vm.example.com (routes are <port>-<vmid>.<host>)")
+	vmDomain := fs.String("vm-domain", "", "domain of gateway port routes <port>-<vmid>.<vm-domain> (https; a scheme://host[:port] value is used as is)")
 	portTTL := fs.Duration("port-url-ttl", time.Hour, "default lifetime of private port URLs")
-	publicPorts := fs.String("public-ports-file", "", "JSON file listing open port routes for the gateway (others need a token)")
 	maxFile := fs.Int64("max-file-bytes", 256<<20, "max upload size for PUT files")
 	fs.Parse(args)
 
@@ -150,8 +149,7 @@ func serve(args []string) int {
 	}
 	cfg := Config{SSHUser: *sshUser, SSHJump: *sshJump, DesktopURL: *desktopURL, DesktopTTL: *desktopTTL,
 		AllowPrivateHook: *allowPrivate, MaxFileBytes: *maxFile, JumpKeysFile: *jumpKeys,
-		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, PortsBaseURL: *portsBase, PortURLTTL: *portTTL,
-		PublicPortsFile: *publicPorts}
+		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, VMDomain: *vmDomain, PortURLTTL: *portTTL}
 	for _, im := range strings.Split(*images, ",") {
 		if im = strings.TrimSpace(im); im != "" {
 			cfg.Images = append(cfg.Images, im)
@@ -184,7 +182,6 @@ func serve(args []string) int {
 	defer stop()
 	go s.hooks.watch(ctx)
 	go s.syncJumpKeys(ctx)
-	go s.syncPublicPorts(ctx)
 	srv := &http.Server{Addr: *listen, Handler: s, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	go func() {
 		<-ctx.Done()

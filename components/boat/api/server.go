@@ -28,9 +28,8 @@ type Config struct {
 	JumpKeysFile     string // authorized_keys for the ssh jump user; empty disables
 	MaxKeysPerTeam   int    // 0 = unlimited
 	MaxHooksPerTeam  int    // 0 = unlimited
-	PortsBaseURL     string // e.g. https://vm.example.com; routes are <port>-<vmid>.<host>
+	VMDomain         string // port routes are <port>-<vmid>.<VMDomain> (scheme optional, default https)
 	PortURLTTL       time.Duration
-	PublicPortsFile  string // JSON list of open (unauthenticated) gateway port routes
 }
 
 type server struct {
@@ -44,7 +43,6 @@ type server struct {
 	cfg     Config
 	mux     *http.ServeMux
 	jumpMu  sync.Mutex
-	portsMu sync.Mutex
 	// routeTable lists every registered "METHOD /path" (OpenAPI drift test).
 	routeTable []string
 }

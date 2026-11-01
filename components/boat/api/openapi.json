@@ -1597,7 +1597,7 @@
   },
   "/v1/vms/{id}/ports/{port}/url": {
    "get": {
-    "summary": "Gateway URL of a port route. Private routes carry ?boat_exp=&boat_sig= (and `token` for the X-Boat-Token header); the gateway trades it for a host-only cookie",
+    "summary": "Gateway URL of a port route. Private routes carry ?boat_exp=&boat_sig= (and `token` for the X-Boat-Route-Token header); the gateway trades it for a host-only cookie",
     "x-boat-scope": "exec",
     "tags": [
      "VMs"
@@ -2053,7 +2053,7 @@
      },
      "token": {
       "type": "string",
-      "description": "<exp>.<sig>, for the X-Boat-Token header"
+      "description": "<exp>.<sig>, for the X-Boat-Route-Token header"
      }
     }
    }

@@ -270,7 +270,6 @@ func (s *server) deleteVM(w http.ResponseWriter, r *http.Request, p *principal) 
 		if s.vmAction(w, r, "delete", nil) {
 			s.forgetVM(r.PathValue("id"))
 			s.syncJumpKeys(r.Context())
-			s.syncPublicPorts(r.Context())
 		}
 	}
 }
@@ -309,11 +308,6 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 func (s *server) forgetVM(id string) {
 	err := s.store.Update(func(st *State) error {
 		delete(st.VMSecrets, id)
-		for k := range st.PublicPorts {
-			if strings.HasPrefix(k, id+":") {
-				delete(st.PublicPorts, k)
-			}
-		}
 		return nil
 	})
 	if err != nil {

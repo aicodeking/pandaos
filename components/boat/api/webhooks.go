@@ -365,7 +365,6 @@ func (d *dispatcher) handleRaw(ctx context.Context, sseType, data string) {
 	}
 	if typ == "vm.deleted" && vmID != "" { // also TTL/operator deletes outside boat-api
 		d.s.forgetVM(vmID)
-		go d.s.syncPublicPorts(ctx)
 	}
 	if typ == "" || team == "" {
 		return

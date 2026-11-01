@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -251,13 +250,11 @@ func TestPerVMSecretSelection(t *testing.T) {
 
 func TestPrivatePortRoutes(t *testing.T) {
 	e := setup(t)
-	pubFile := filepath.Join(t.TempDir(), "public-ports.json")
-	e.srv.cfg.PublicPortsFile = pubFile
 	id := e.createVM()
 	if st, _ := e.do(e.owner, "GET", "/v1/vms/"+id+"/ports/8080/url", nil); st != 501 {
 		t.Errorf("unconfigured: %d", st)
 	}
-	e.srv.cfg.PortsBaseURL = "https://vm.boat.example"
+	e.srv.cfg.VMDomain = "vm.boat.example"
 	e.srv.cfg.PortURLTTL = time.Hour
 
 	st, p := e.do(e.owner, "POST", "/v1/vms/"+id+"/ports", map[string]any{"port": 8080})
@@ -266,13 +263,14 @@ func TestPrivatePortRoutes(t *testing.T) {
 	}
 	_, u := e.do(e.owner, "GET", "/v1/vms/"+id+"/ports/8080/url", nil)
 	pu, err := url.Parse(u["url"].(string))
-	if err != nil || pu.Host != "8080-"+id+".vm.boat.example" {
+	if err != nil || pu.Scheme != "https" || pu.Host != "8080-"+id+".vm.boat.example" {
 		t.Fatalf("url: %v", u)
 	}
 	exp := pu.Query().Get("boat_exp")
 	var expN int64
 	fmt.Sscan(exp, &expN)
-	if pu.Query().Get("boat_sig") != SignPort([]byte("desktop-key"), id, 8080, expN) || u["token"] != exp+"."+pu.Query().Get("boat_sig") {
+	// gateway contract: hex(HMAC-SHA256(desktopKey, "route.<port>-<vmid>.<exp>"))
+	if want := signHex([]byte("desktop-key"), "route.8080-"+id+"."+exp); pu.Query().Get("boat_sig") != want || u["token"] != exp+"."+want {
 		t.Errorf("signature does not verify: %v", u)
 	}
 	if d := time.Until(time.Unix(expN, 0)); d < 59*time.Minute || d > time.Hour+time.Minute {
@@ -284,19 +282,13 @@ func TestPrivatePortRoutes(t *testing.T) {
 	if st, _ := e.do(e.owner, "GET", "/v1/vms/"+id+"/ports/9999/url", nil); st != 404 {
 		t.Errorf("unexposed port: %d", st)
 	}
-	if b, _ := os.ReadFile(pubFile); strings.Contains(string(b), "8080") {
-		t.Errorf("private route listed as public: %s", b)
-	}
 
 	st, p = e.do(e.owner, "POST", "/v1/vms/"+id+"/ports", map[string]any{"port": 3000, "auth": "public"})
 	if st != 201 || p["auth"] != "public" || e.boatd.portReqs[1]["public"] != true {
 		t.Fatalf("public: %d %v", st, p)
 	}
-	if b, _ := os.ReadFile(pubFile); string(b) != `{"public":["3000-`+id+`"],"version":1}`+"\n" {
-		t.Errorf("public ports file: %s", b)
-	}
 	_, u = e.do(e.owner, "GET", "/v1/vms/"+id+"/ports/3000/url", nil)
-	if u["url"] != "https://3000-"+id+".vm.boat.example/" {
+	if u["url"] != "https://3000-"+id+".vm.boat.example/" || u["token"] != nil {
 		t.Errorf("public url must be plain: %v", u)
 	}
 	_, l := e.do(e.owner, "GET", "/v1/vms/"+id+"/ports", nil)
@@ -311,26 +303,15 @@ func TestPrivatePortRoutes(t *testing.T) {
 	if st, _ := e.do(e.owner, "POST", "/v1/vms/"+id+"/ports", map[string]any{"port": 1, "auth": "open"}); st != 400 {
 		t.Errorf("bad auth: %d", st)
 	}
-	e.do(e.owner, "DELETE", "/v1/vms/"+id+"/ports/3000", nil)
-	if b, _ := os.ReadFile(pubFile); strings.Contains(string(b), "3000") {
-		t.Errorf("removed port still public: %s", b)
+	if st, _ := e.do(e.owner, "DELETE", "/v1/vms/"+id+"/ports/3000", nil); st != 200 {
+		t.Errorf("remove: %d", st)
 	}
-	// other teams cannot mint URLs for the VM
 	_, other := e.newTeam("other")
 	if st, _ := e.do(other, "GET", "/v1/vms/"+id+"/ports/8080/url", nil); st != 404 {
 		t.Errorf("cross-team port url: %d", st)
 	}
-	// deleting the VM (here via a boatd event) drops its public routes
-	e.do(e.owner, "POST", "/v1/vms/"+id+"/ports", map[string]any{"port": 4000, "public": true})
-	e.boatd.mu.Lock()
-	delete(e.boatd.vms, id)
-	e.boatd.mu.Unlock()
-	e.srv.hooks.handleRaw(context.Background(), "vm.deleted", `{"type":"vm.deleted","vm_id":"`+id+`","team":"x"}`)
-	waitFor(t, "public ports pruned", func() bool {
-		b, _ := os.ReadFile(pubFile)
-		return !strings.Contains(string(b), id)
-	})
-	if len(e.srv.store.Snapshot().PublicPorts) != 0 {
-		t.Error("public port state kept after vm.deleted")
+	e.srv.cfg.VMDomain = "http://vm.local:8742" // dev form keeps scheme and port
+	if _, u := e.do(e.owner, "GET", "/v1/vms/"+id+"/ports/8080/url", nil); !strings.HasPrefix(u["url"].(string), "http://8080-"+id+".vm.local:8742/?") {
+		t.Errorf("dev url: %v", u)
 	}
 }
