@@ -151,19 +151,20 @@ port, so the host proxies it like any other URL.
 headless Chrome through the real link and web client at 1920x1080, on a 4-core GitHub
 runner that also hosts the VM, with software rendering (llvmpipe), software encoding
 and software decoding. "Shown" counts paints where the canvas pixels changed, which is
-what a viewer sees. "Decoded" counts WebCodecs frames, and is 0 in image mode. Two CI
-runs (41326922291, 41328850520); glxgears was the source and was not the limit.
+what a viewer sees. "Decoded" counts WebCodecs frames, and is 0 in image mode. Ranges
+over three CI runs (41326922291, 41328850520, 41332202705); glxgears was the source
+and was not the limit.
 
 | 1080p desktop, 2 vCPU VM, direct to the guest | shown fps | decoded fps | Mbps |
 |---|---|---|---|
-| Fullscreen motion, stock KasmVNC client settings | 19.0-19.2 | - | 6.5-6.6 |
-| Fullscreen motion, preset 3, JPEG/WebP | 21.0-24.6 | - | 7.3-8.5 |
-| **Fullscreen motion, preset 3, H.264 (default)** | **27.4-29.6** | 34.4-35.8 | 19.9-20.6 |
+| Fullscreen motion, stock KasmVNC client settings | 19.0-20.2 | - | 6.5-7.0 |
+| Fullscreen motion, preset 3, JPEG/WebP | 20.8-24.6 | - | 7.2-8.5 |
+| **Fullscreen motion, preset 3, H.264 (default)** | **26.6-29.6** | 34.4-35.8 | 19.9-20.6 |
 | 400x400 window moving, preset 3, JPEG/WebP | 55.6-59.2 | - | 3.7-3.8 |
-| **400x400 window moving, preset 3, H.264 (default)** | **40.3-45.8** | 58.2-58.3 | 9.0 |
+| **400x400 window moving, preset 3, H.264 (default)** | **40.3-45.8** | 57.2-58.3 | 8.9-9.0 |
 
 Through the TLS edge (Caddy + gateway, default-size VM), default H.264, fullscreen:
-**34.0-34.7 shown, 47.2-47.7 decoded, 25.4-25.8 Mbps.**
+**34.0-34.7 shown, 47.2-49.4 decoded, 25.4-26.5 Mbps.**
 
 Earlier versions of this file claimed 44-62 fps. That was wrong: it counted raw 8bpp
 RFB updates at the server, not what a browser shows, and the range was too generous
@@ -190,9 +191,9 @@ Why these settings:
   gateway support that the host does not have. It was not built or measured. KasmVNC's
   `enable_webrtc` UDP path needs a UDP route to the guest, which is also absent.
 
-The gate: `desktop-check.sh` fails below 20 shown fps or under 1920 wide
-(`MIN_BROWSER_FPS`). That is just above stock settings' 19 fps on this hardware, so it
-catches a slide back to them. It is not a quality target.
+The gates: `desktop-check.sh` fails below 20 shown fps, below 25 decoded fps or under
+1920 wide (`MIN_BROWSER_FPS`, `MIN_DECODED_FPS`). Those catch a real regression: stock
+settings decode nothing, and losing H.264 does the same. They are not quality targets.
 
 Auth: no RFB or HTTP auth on Xvnc (`-SecurityTypes None -disableBasicAuth`). Its ports
 (5901, 6081) listen on loopback only, and anything that can reach those already runs

@@ -14,7 +14,7 @@ cookies, the real KasmVNC web client) and over SECONDS counts:
 
 Env: CHROME (path), CURL_OPTS (--resolve/--connect-to become Chrome's resolver rules),
 WARMUP_S (10: let the stream settle), MIN_FPS (when set, fail below this or if the
-stream is not full width; default 0).
+stream is not full width; default 0), MIN_DECODED_FPS (fail below this; default 0).
 Certificate errors are ignored: this measures frames, it does not test TLS.
 """
 import base64
@@ -280,6 +280,10 @@ def main():
     print("desktop-browser-fps: measured at %s" % urlsplit(where).netloc)
     fps = report(a, b)
     floor = float(os.environ.get("MIN_FPS", "0"))
+    decoded_floor = float(os.environ.get("MIN_DECODED_FPS", "0"))
+    decoded = (b["decoded"] - a["decoded"]) / ((b["now"] - a["now"]) / 1000.0)
+    if decoded < decoded_floor:
+        die("%.1f decoded fps is below the floor of %.1f; H.264 is off?" % (decoded, decoded_floor))
     if fps < floor:
         die("%.1f fps is below the floor of %.1f" % (fps, floor))
     if floor and max(b["w"] if b["decoded"] > a["decoded"] else 0, b["cw"]) < VIEW_W:

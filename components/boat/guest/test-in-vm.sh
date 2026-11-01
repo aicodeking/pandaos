@@ -281,7 +281,7 @@ if [[ $VARIANT == full ]]; then
     browser_row q3_60fps_image "$image_js" "" full
     browser_row q3_60fps_image_small "$image_js" "" small
     browser_row default_h264_small "$default_js" "$default_args" small
-    MIN_FPS=20 browser_row default_h264 "$default_js" "$default_args" full  # last: leaves the defaults
+    MIN_FPS=20 MIN_DECODED_FPS=25 browser_row default_h264 "$default_js" "$default_args" full  # last: leaves the defaults
   else
     printf '\033[33mWARN\033[0m no Chrome on this host, so no browser rows\n'
     reply=$(boat '{"op":"desktop","action":"start"}') || fail "desktop start: $reply"

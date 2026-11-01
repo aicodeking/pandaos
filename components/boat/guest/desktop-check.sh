@@ -16,16 +16,18 @@
 #      METRIC desktop_raw_8bpp_fps=F    server side only, not what a user sees
 # 4. If Chrome is here, desktop-browser-fps.py opens LINK in the real web client
 #    and prints desktop_browser_fps, which is what a user sees. It fails below
-#    MIN_BROWSER_FPS (default below). DESKTOP_BROWSER=0 skips this step.
+#    MIN_BROWSER_FPS or MIN_DECODED_FPS (defaults below). DESKTOP_BROWSER=0 skips this.
 # $ANIMATE_CMD, if set, runs in a loop in the background (e.g.
 # "boat exec VM -- boat-desktop-animate 10") so there is something to stream.
 set -euo pipefail
 LINK=${1:?usage: desktop-check.sh LINK [SECONDS]}
 SECS=${2:-5}
 HERE=$(cd "$(dirname "$0")" && pwd)
-# Above the 19 fps of KasmVNC's stock client settings on the same CI hardware, so
-# sliding back to them fails. Not a target: see README.md for what is measured.
+# Regression gates, not targets (README.md has what is measured). The default
+# configuration shows 26+ and decodes 34+ on CI; stock client settings show about 20
+# and decode nothing, so they fail the second gate.
 MIN_BROWSER_FPS=${MIN_BROWSER_FPS:-20}
+MIN_DECODED_FPS=${MIN_DECODED_FPS:-25}
 W=$(mktemp -d)
 trap 'rm -rf "$W"; [[ -n ${anim:-} ]] && kill "$anim" 2>/dev/null; true' EXIT
 
@@ -250,7 +252,8 @@ print("METRIC desktop_raw_8bpp_fps=%.1f" % (frames / max(elapsed, 1e-3)))
 PY
 if [[ ${DESKTOP_BROWSER:-1} != 0 ]]; then
   if command -v "${CHROME:-google-chrome}" >/dev/null || command -v chromium >/dev/null; then
-    MIN_FPS=$MIN_BROWSER_FPS python3 -I "$HERE/desktop-browser-fps.py" "$LINK" "$SECS"
+    MIN_FPS=$MIN_BROWSER_FPS MIN_DECODED_FPS=$MIN_DECODED_FPS \
+      python3 -I "$HERE/desktop-browser-fps.py" "$LINK" "$SECS"
   else
     echo "desktop-check: no Chrome here, so no desktop_browser_fps" >&2
   fi
