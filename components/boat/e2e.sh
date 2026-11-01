@@ -47,7 +47,9 @@ cleanup() {
   sudo ip link del boatbr0 2>/dev/null
   sudo nft delete table inet boat 2>/dev/null
   sudo nft delete table bridge boat 2>/dev/null
-  for n in $(ip netns list 2>/dev/null | awk '/^boat[0-9]/{print $1}'); do sudo ip netns del "$n"; done
+  for n in $(ip netns list 2>/dev/null | awk '/^boat[0-9]|^e2e-ext/{print $1}'); do sudo ip netns del "$n"; done
+  sudo ip link del e2eh 2>/dev/null
+  sudo pkill -f 'http.server 8000'
   sudo iptables -D FORWARD -i boatbr0 -j ACCEPT 2>/dev/null
   sudo iptables -D FORWARD -o boatbr0 -j ACCEPT 2>/dev/null
   sudo sh -c 'for f in "$1"/vms/*/firecracker.log; do [ -f "$f" ] && { echo "--- $f (tail)"; tail -n 30 "$f"; }; done' _ "$STATE"
@@ -116,7 +118,7 @@ fi
 cat >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":$jailer,"jailerArgs":$jargs,"cgroupParent":"boat-e2e","reflink":"always","btrfsQgroups":true,
- "bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
+ "bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e","ipv6Prefix":"fd42:b0a7::/64","reapIntervalS":5,
  "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},
  "defaultTeam":{"maxVMs":$MAX_VMS}}
 JSON
@@ -358,6 +360,11 @@ boat rm e2e-a --json >/dev/null
 [ "$(boat list --json | jq -s length)" = 0 ] || fail "VMs left"
 [ -z "$(sudo ls "$STATE/vms")" ] || fail "VM dirs left"
 
+# boatd host-level phases: perf, fork memory/entropy, jail, isolation, ipv6,
+# idle stop, restart reconcile, disk floor, docker.
+# shellcheck source=boatd/e2e-host.sh
+. "$HERE/boatd/e2e-host.sh"
+
 mib() { echo $(( $(stat -c %s "$1") / 1048576 )); }
 zst() { if [ -f "$1" ]; then mib "$1"; else echo null; fi; }
 echo "METRIC $(jq -nc \
@@ -366,7 +373,9 @@ echo "METRIC $(jq -nc \
   --argjson k "$(mib "$GUEST/vmlinux")" --argjson sl "$(mib "$GUEST/rootfs-slim.ext4")" \
   --argjson fu "$(mib "$GUEST/rootfs-full.ext4")" --argjson slz "$(zst "$GUEST/rootfs-slim.ext4.zst")" \
   --argjson fuz "$(zst "$GUEST/rootfs-full.ext4.zst")" --argjson vs "$vm_seconds" \
+  --argjson hs1 "$stop2_s" --argjson hs2 "$stop3_s" --argjson hr "$resume2_s" --argjson hf "$fork2_s" \
   '{test: "boat-e2e", createReadyS: $c, sshReadyS: $s, forkS: $f, stopS: $st, resumeS: $r,
     newFromSnapshotS: $sn, desktopS: $d, kernelMB: $k, slimImageMB: $sl, fullImageMB: $fu,
-    slimZstMB: $slz, fullZstMB: $fuz, usageVmSeconds: $vs}')"
+    slimZstMB: $slz, fullZstMB: $fuz, usageVmSeconds: $vs,
+    hostStopFirstS: $hs1, hostStopDiffS: $hs2, hostResumeS: $hr, hostForkS: $hf}')"
 echo "e2e: PASS"
