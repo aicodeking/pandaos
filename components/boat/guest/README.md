@@ -208,7 +208,9 @@ Additions to the PROTOCOL.md contract (all optional):
   (`--no-block`), so a client may need to retry its first connection for a moment.
 - Host keys are ed25519 and ecdsa only. RSA keygen took a random 59-555 ms per key on
   an M-series Mac (the other two: ~25 ms), which showed up as `identity=349-1208ms`
-  on forks in CI. No RSA host key means a client that only accepts RSA can't connect.
+  on forks in CI. With RSA gone and sshd no longer awaited, one CI run measured
+  `identity` at 0-326 ms (mostly under 100 ms) and a fork at 0.90 s. No RSA host key
+  means a client that only accepts RSA can't connect.
 - `set_env` writes `/etc/boat/env` (`export K='v'` lines), 0600, owned by `dev` so
   that dev's login shells (`/etc/profile.d/boat-env.sh`) and bash (`/etc/bash.bashrc`)
   can source it.
@@ -231,9 +233,11 @@ Additions to the PROTOCOL.md contract (all optional):
   `METRIC desktop_first_frame_ms` and `METRIC desktop_fps`. `$ANIMATE_CMD` runs
   first in the background, e.g. `boat exec VM -- boat-desktop-animate 10`
   (glxgears on llvmpipe, with an xdotool-moved window as fallback). Measured in CI
-  directly against the guest's token proxy, 2 vCPU, 1920x1080, glxgears at 400x400:
-  46.4 fps, first frame 158 ms. Those are raw 8bpp updates, not the browser's encoded
-  stream, so they show how fast the server produces frames, not what a user sees.
+  on 2 vCPU, 1920x1080, glxgears at 400x400, over 8 runs: 44-62 fps, counting both
+  direct runs against the guest's token proxy and runs through the TLS edge; first
+  frame 136-211 ms.
+  Those are raw 8bpp updates, not the browser's encoded stream, so they show how fast
+  the server produces frames, not what a user sees.
 - `./test-in-vm.sh [vmlinux] [rootfs.ext4]`: needs `/dev/kvm` and sudo (tap + NAT).
   Downloads Firecracker v1.17.0 (sha-pinned) unless `FIRECRACKER` is set, boots the
   image with an 8 GB disk, and checks health, exec (user, exit code, timeout),
