@@ -130,8 +130,10 @@ func (p realProcs) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 	defer logf.Close()
 	var cmd *exec.Cmd
 	if p.cfg.Jailer != "" {
-		// The jailer re-creates these each launch and fails if they exist.
-		for _, n := range []string{"dev", "run", filepath.Base(p.cfg.Firecracker)} {
+		// The jailer re-creates these each launch and fails if they exist
+		// (<exec>.pid too: "Failed to open file /firecracker.pid: File exists").
+		exe := filepath.Base(p.cfg.Firecracker)
+		for _, n := range []string{"dev", "run", exe, exe + ".pid"} {
 			os.RemoveAll(filepath.Join(root, n))
 		}
 		args := []string{"--id", v.ID, "--exec-file", p.cfg.Firecracker,
