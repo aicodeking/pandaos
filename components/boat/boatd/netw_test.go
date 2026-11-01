@@ -64,7 +64,7 @@ func TestRuleset(t *testing.T) {
 	}
 	// The policer must sit in the bridge table: on the L3 hooks iifname is boatbr0.
 	_, bridge, _ := strings.Cut(rs, "table bridge boat {")
-	if !strings.Contains(bridge, `iifname "bt2" limit rate over 12500 kbytes/second burst 1250 kbytes drop`) {
+	if !strings.Contains(bridge, `iifname "bt2" limit rate over 12207 kbytes/second drop`) {
 		t.Errorf("egress cap not in the bridge table\n%s", bridge)
 	}
 	if strings.Contains(ruleset(c, nil), `iifname != {`) || !strings.Contains(ruleset(c, nil), "    iifname \"bt*\" drop\n") {

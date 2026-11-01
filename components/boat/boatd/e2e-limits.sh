@@ -203,9 +203,11 @@ bd GET "/v1/vms/$d1" | jq -r '.ports[].guest_port' | while read -r gp; do bd DEL
 
 log "limits e2e: egress cap, measured"
 transfer() { curl -fsS --max-time 60 -o /dev/null -w '%{speed_download}' "http://$ip_d1:8082/big"; }
-capped=$(transfer)
+transfer >/dev/null # drains nft's one-second token bucket
+capped=$(transfer) # back to back: the steady rate
 restart_boatd "$(cfg_with 'del(.egressMbit)' nocap)"
-uncapped=$(transfer)
+untransfer >/dev/null # drains nft's one-second token bucket
+capped=$(transfer) # back to back: the steady rate
 restart_boatd "$WORK/boatd.json"
 capped_mbit=$(mbps "$capped") uncapped_mbit=$(mbps "$uncapped")
 echo "egress: cap ${EGRESS_MBIT} Mbit/s, measured ${capped_mbit} Mbit/s; without the cap ${uncapped_mbit} Mbit/s"

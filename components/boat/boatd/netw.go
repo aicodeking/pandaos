@@ -288,8 +288,9 @@ func ruleset(c Config, vms []VM) string {
 	}
 	for _, v := range vms {
 		if c.EgressMbit > 0 { // L2: the L3 hooks only see boatbr0, not the VM's port
-			// Burst 100 ms: nft's default of a whole second lets 12% through on a 1 GiB transfer.
-			w("    iifname %q limit rate over %d kbytes/second burst %d kbytes drop", v.Tap, c.EgressMbit*125, max(c.EgressMbit*125/10, 64))
+			// nft kbytes are KiB. Its bucket holds at least one second of tokens, so
+			// the first second of a burst can reach twice the cap; the steady rate is the cap.
+			w("    iifname %q limit rate over %d kbytes/second drop", v.Tap, c.EgressMbit*1000000/8/1024)
 		}
 		w("    iifname %q ether saddr != %s drop", v.Tap, v.MAC)
 		w("    iifname %q ether type arp arp saddr ip != %s drop", v.Tap, v.IP)
