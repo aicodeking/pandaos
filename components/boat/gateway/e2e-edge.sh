@@ -303,10 +303,10 @@ sshj() { ssh -F "$WORK/ssh_config" -J jump@localhost:2222 "$@"; }
 out=""
 for _ in $(seq 30); do out=$(sshj "dev@$ip_a" hostname 2>&1) && break; sleep 1; done
 [ "$out" = edge-a ] || fail "ssh -J: $out"
-# The CLI's own ProxyCommand path, with a throwaway HOME (known_hosts, keys).
-mkdir -p "$WORK/home/.ssh" && cp ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub "$WORK/home/.ssh/"
-cp "$WORK/ssh_config" "$WORK/home/.ssh/config"
-[ "$(HOME=$WORK/home boat ssh edge-a -- hostname </dev/null)" = edge-a ] || fail "boat ssh via the jump host"
+# The CLI's own ProxyCommand path. e2e.sh ran on this runner first, and VM IPs
+# are reused: drop its known_hosts entry for this address.
+ssh-keygen -q -R "$ip_a" >/dev/null 2>&1 || true
+[ "$(boat ssh edge-a -- hostname </dev/null)" = edge-a ] || fail "boat ssh via the jump host"
 ssh -F "$WORK/ssh_config" -p 2222 jump@localhost true 2>/dev/null && fail "jump user got a shell"
 sshj "dev@10.200.255.254" true 2>/dev/null && fail "jump host forwarded to an address with no grant"
 ssh -F "$WORK/ssh_config" -p 2222 "$(id -un)@localhost" true 2>/dev/null && fail "port 2222 admitted a non-jump user"
