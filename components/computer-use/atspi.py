@@ -7,6 +7,7 @@ the request's "seq":
   {"cmd": "tree", "app": A, "max_depth": 30, "limit": 2000, "interactive": false, "active": false}
   {"cmd": "find", "app": A, "role": R, "text": T, "limit": 50}
   {"cmd": "get", "id": "e12"}                 the element now, plus its window
+  {"cmd": "find", "active": true, "focused": true, "limit": 1}
   {"cmd": "act", "id": "e12", "action": "click|press|focus|set_text", "text": T, "role": R, "name": N}
 
 Element ids ("e12") name one accessible object for the life of this
@@ -244,12 +245,12 @@ def tree(a):
     return {"elements": out.elements, "windows": out.windows, "truncated": out.full()}
 
 
-def collection_matches(top, roles):
+def collection_matches(top, roles, states=(S.SHOWING,)):
     col = top.get_collection_iface()
     if col is None:
         return None
     all_, any_ = Atspi.CollectionMatchType.ALL, Atspi.CollectionMatchType.ANY
-    rule = Atspi.MatchRule.new(Atspi.StateSet.new([S.SHOWING]), all_, {}, all_,
+    rule = Atspi.MatchRule.new(Atspi.StateSet.new(list(states)), all_, {}, all_,
                                roles, any_ if roles else all_, [], all_, False)
     try:
         return col.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 0, True)
@@ -263,16 +264,19 @@ def find(a):
     if role and role not in ROLE_BY_NAME:
         raise ValueError(f"unknown role {a.get('role')!r}")
     out = Out(a.get("limit", 50))
+    focused = a.get("focused")  # with active: the element with the keyboard focus
 
     def keep(e):
         return (not role or e["role"] == role) and (
-            not text or text in e["name"].lower() or text in e.get("text", "").lower())
+            not text or text in e["name"].lower() or text in e.get("text", "").lower()) and (
+            not focused or "focused" in e.get("states", ()))
 
     via = set()
+    states = (S.SHOWING, S.FOCUSED) if focused else (S.SHOWING,)
     for _, top, we in toplevels(a, out):
-        if keep(we):
+        if keep(we) and not focused:
             out.elements.append(dict(we, win=we["id"]))
-        found = collection_matches(top, [ROLE_BY_NAME[role]] if role else [])
+        found = collection_matches(top, [ROLE_BY_NAME[role]] if role else [], states)
         if found is None:  # no Collection (e.g. GTK 4): walk
             via.add("walk")
             for ch in children(top):

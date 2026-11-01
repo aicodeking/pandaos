@@ -160,7 +160,7 @@ def _():
     call("cu_act", {"element_id": area["id"], "action": "set_text", "text": "Hello, "})
     call("cu_act", {"element_id": area["id"], "action": "focus"})
     call("cu_key", {"combo": "ctrl+End"})
-    call("cu_type", {"text": "panda-cu!"})
+    metrics["editor_type_landed"] = data(call("cu_type", {"text": "panda-cu!"})[0]).get("landed")
     call("cu_wait", {"app": "mousepad", "text": WANT, "timeout": 10})
     call("cu_key", {"combo": "ctrl+s"})
     call("cu_wait", {"window": "Save", "timeout": 20})
@@ -410,7 +410,10 @@ def _():
         if not by_id:  # reported, then the same through AT-SPI actions
             metrics["browser_click_refused"] = text(r)[:200]
             call("cu_act", {"element_id": entry["id"], "action": "focus"})
-        call("cu_type", {"text": "panda"})
+        # The click must have reached the input, on a cold browser too.
+        typed = data(call("cu_type", {"text": "panda"})[0])
+        metrics["browser_type_landed"] = typed.get("landed")
+        assert typed.get("landed") is True, typed
         send = one(app="CU Form", role="push button", text="Send")
         if by_id:
             call("cu_click", {"element_id": send["id"]})

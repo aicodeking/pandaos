@@ -25,6 +25,8 @@ type element struct {
 	// Popup: inside a popup surface (a GTK 3 menu), whose screen position
 	// is unknown on Wayland; such boxes are never used for pixel clicks.
 	Popup bool `json:"popup,omitempty"`
+	// boxSince: when this box was first reported (see clickPoint).
+	boxSince time.Time
 }
 
 // a11yReply is the helper's answer to tree and find.
@@ -35,7 +37,19 @@ type a11yReply struct {
 	Via       []string           `json:"via,omitempty"`
 }
 
-const maxKnown = 50_000
+const (
+	maxKnown = 50_000
+	// A box must hold still this long before a click by element_id trusts it.
+	// A cold Chromium first reports a page's input about (26,20) px from where
+	// it is drawn, for up to about 1.2 s (CI runs 41296253198, 41305927008).
+	// ponytail: a fixed window, not a proof; cu_type's landed report catches a
+	// slower correction.
+	boxSettle = 1500 * time.Millisecond
+	// A box still changing after this long is refused.
+	boxSettleLimit = 6 * time.Second
+	// How long cu_type waits to see its text in the focused field.
+	typeLandLimit = 5 * time.Second
+)
 
 // a11y sends one request to the helper (tests swap in a fake).
 func (s *Server) a11y(timeout time.Duration, req map[string]any, v any) error {
@@ -58,11 +72,21 @@ func (s *Server) remember(els []element, wins map[string]element) {
 		s.known = map[string]element{}
 	}
 	for _, e := range els {
-		s.known[e.ID] = e
+		s.keep(e)
 	}
-	for id, w := range wins {
-		s.known[id] = w
+	for _, w := range wins {
+		s.keep(w)
 	}
+}
+
+// keep stores e under s.mu, and when its box differs from the last one
+// restarts the time the box has held still.
+func (s *Server) keep(e element) {
+	e.boxSince = time.Now()
+	if old, ok := s.known[e.ID]; ok && slices.Equal(old.BBox, e.BBox) {
+		e.boxSince = old.boxSince
+	}
+	s.known[e.ID] = e
 }
 
 func (s *Server) scaleBoxes(els []element) {
@@ -216,12 +240,37 @@ type errNoPixels struct{ why string }
 
 func (e errNoPixels) Error() string { return e.why }
 
-// clickPoint re-reads element id from the app (role, name, box, window)
+// clickPoint returns the centre of element id's box, once the box has held
+// still for boxSettle: an element that just appeared can report a box it is
+// not drawn at, and a click there misses. An element seen earlier with the
+// same box does not wait.
+func (s *Server) clickPoint(id string, sw, sh int) (int, int, error) {
+	deadline := time.Now().Add(boxSettleLimit)
+	for {
+		x, y, err := s.readPoint(id, sw, sh)
+		if err != nil {
+			return 0, 0, err
+		}
+		e, _ := s.cached(id)
+		if time.Since(e.boxSince) >= s.boxSettle {
+			return x, y, nil
+		}
+		if time.Now().After(deadline) {
+			return 0, 0, fmt.Errorf("element %s (%s %q) is still moving (now at %v); look again, or use cu_act", id, e.Role, e.Name, e.BBox)
+		}
+		if err := s.guard(); err != nil {
+			return 0, 0, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// readPoint re-reads element id from the app (role, name, box, window)
 // and returns the centre of its box. It fails when a click there could
 // miss: the element changed or is gone, is hidden, or its window is behind
 // the active one. When the box is not a screen position (a popup menu, or a
 // window that is not maximized) the error is an errNoPixels.
-func (s *Server) clickPoint(id string, sw, sh int) (int, int, error) {
+func (s *Server) readPoint(id string, sw, sh int) (int, int, error) {
 	was, ok := s.cached(id)
 	if !ok {
 		return 0, 0, fmt.Errorf("unknown element_id %q: take a cu_tree, cu_find or cu_screenshot{marks} snapshot first", id)
@@ -258,6 +307,55 @@ func (s *Server) clickPoint(id string, sw, sh int) (int, int, error) {
 		return 0, 0, fmt.Errorf("element %s is off screen at (%d,%d); scroll it into view", id, cx, cy)
 	}
 	return cx, cy, nil
+}
+
+// focusedField asks the active window which element has the keyboard focus.
+// False when that is unknown (no accessibility tree, no focused element).
+func (s *Server) focusedField() (element, bool) {
+	var res a11yReply
+	req := map[string]any{"cmd": "find", "active": true, "focused": true, "role": "", "text": "", "limit": 1}
+	if err := s.a11y(10*time.Second, req, &res); err != nil || len(res.Elements) == 0 {
+		return element{}, false
+	}
+	return res.Elements[0], true
+}
+
+// typeText types text with wtype and says whether it was seen to land:
+// keystrokes that go nowhere are not an error of wtype's. "landed" is absent
+// when that cannot be known: no focus reported, the field is gone (Enter
+// submitted it), a newline in the text (it may send the field's contents
+// away), or a field that already holds exactly this text.
+func (s *Server) typeText(text string) (any, error) {
+	before, known := s.focusedField()
+	if _, err := s.run(60*time.Second, text, "wtype", "-d", "2", "-"); err != nil {
+		return nil, err
+	}
+	res := map[string]any{"typed": len([]rune(text))}
+	if !known || strings.TrimSpace(text) == "" || strings.Contains(text, "\n") || before.Text == text {
+		return res, nil
+	}
+	if !slices.Contains(before.States, "editable") {
+		res["landed"] = false
+		res["warning"] = fmt.Sprintf("the focus is on %s %q, which is not editable, so the text may have gone nowhere; look, and focus the field", before.Role, before.Name)
+		return res, nil
+	}
+	for deadline := time.Now().Add(s.typeLand); ; time.Sleep(100 * time.Millisecond) {
+		var now struct {
+			Element element `json:"element"`
+		}
+		if err := s.a11y(10*time.Second, map[string]any{"cmd": "get", "id": before.ID}, &now); err != nil {
+			return res, nil
+		}
+		if now.Element.Text != before.Text || now.Element.Chars != before.Chars {
+			res["landed"] = true
+			return res, nil
+		}
+		if time.Now().After(deadline) {
+			res["landed"] = false
+			res["warning"] = fmt.Sprintf("%s %q had the focus but its contents did not change, so the text went elsewhere; look, click the field and type again", before.Role, before.Name)
+			return res, nil
+		}
+	}
 }
 
 func (s *Server) wait(a toolArgs) (any, error) {

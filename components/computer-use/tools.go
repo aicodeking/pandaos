@@ -68,6 +68,8 @@ type Server struct {
 	screenSize  func() (int, int, string)
 	mu          sync.Mutex
 	known       map[string]element // every element seen, by id (merged across calls)
+	boxSettle   time.Duration      // tests shorten these two
+	typeLand    time.Duration
 }
 
 // pointerDev is what the pointer and key tools need from a display connection.
@@ -85,7 +87,7 @@ func (d *desktop) size() (int, int, string) { return d.out.Width, d.out.Height, 
 func (d *desktop) sync() error              { return d.roundtrip(nil) }
 
 func newServer(cfg Config) *Server {
-	s := &Server{cfg: cfg, exec: realExec, known: map[string]element{}, helper: &atspiHelper{env: cfg.environ()}}
+	s := &Server{cfg: cfg, exec: realExec, known: map[string]element{}, helper: &atspiHelper{env: cfg.environ()}, boxSettle: boxSettle, typeLand: typeLandLimit}
 	s.display = func() (pointerDev, error) {
 		if err := s.waitReady(); err != nil {
 			return nil, err
@@ -140,8 +142,8 @@ func (s *Server) runTool(name string, a toolArgs) ([]content, error) {
 		if err := checkText(*a.Text, maxTypeChars, "text"); err != nil {
 			return nil, err
 		}
-		_, err := s.run(60*time.Second, *a.Text, "wtype", "-d", "2", "-")
-		return s.after(a, map[string]any{"typed": len([]rune(*a.Text))}, err)
+		v, err := s.typeText(*a.Text)
+		return s.after(a, v, err)
 	case "cu_key":
 		args, err := keyArgs(a.Combo)
 		if err != nil {

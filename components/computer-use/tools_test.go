@@ -125,6 +125,9 @@ func (f *fakeApp) call(req map[string]any, v any) error {
 			if req["cmd"] == "find" && !matches(e, req["text"].(string), req["role"].(string)) {
 				continue
 			}
+			if req["focused"] == true && !slices.Contains(e.States, "focused") {
+				continue
+			}
 			els = append(els, e)
 		}
 		res = a11yReply{Elements: els, Windows: f.wins}
@@ -149,6 +152,7 @@ func (f *fakeApp) call(req map[string]any, v any) error {
 
 func testServer(fp *fakePointer, calls *[][]string) (*Server, *fakeApp) {
 	s := newServer(Config{Mode: "attach", Env: map[string]string{}})
+	s.boxSettle, s.typeLand = 0, 300*time.Millisecond
 	app := newFakeApp()
 	s.display = func() (pointerDev, error) { return fp, nil }
 	s.a11yCall = app.call
@@ -261,6 +265,85 @@ func TestClickByIDRefusals(t *testing.T) {
 	}
 	if len(fp.log) != 0 {
 		t.Fatalf("a refused click moved the pointer: %v", fp.log)
+	}
+}
+
+// TestClickWaitsForBoxToSettle replays CI run 41305927008: a cold Chromium
+// reports an input at (87,187), twice, then at its real (61,167). The click
+// must go to the real place, and a box seen long ago must not wait.
+func TestClickWaitsForBoxToSettle(t *testing.T) {
+	fp, calls := &fakePointer{}, &[][]string{}
+	s, app := testServer(fp, calls)
+	s.boxSettle = 200 * time.Millisecond
+	e := app.els["e1"]
+	e.BBox = []int{87, 187, 263, 24}
+	app.els["e1"] = e
+	if _, err := call(t, s, "cu_find", `{"text":"b1"}`); err != nil {
+		t.Fatal(err)
+	}
+	gets := 0
+	s.a11yCall = func(req map[string]any, v any) error {
+		if req["cmd"] == "get" {
+			if gets++; gets > 2 {
+				e := app.els["e1"]
+				e.BBox = []int{61, 167, 263, 24}
+				app.els["e1"] = e
+			}
+		}
+		return app.call(req, v)
+	}
+	out, err := call(t, s, "cu_click", `{"element_id":"e1"}`)
+	if err != nil || !strings.Contains(out, `"x":192,"y":179`) {
+		t.Fatalf("click: %q %v (pointer %v)", out, err, fp.log)
+	}
+	if got := strings.Join(fp.log, "|"); got != "move 192,179|down|up" {
+		t.Fatalf("pointer log %s", got)
+	}
+	time.Sleep(s.boxSettle)
+	t0 := time.Now()
+	if _, err := call(t, s, "cu_click", `{"element_id":"e1"}`); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(t0); d >= s.boxSettle {
+		t.Fatalf("a settled box waited %v", d)
+	}
+}
+
+// TestTypeReportsLanding: text that reaches the focused field is landed:true;
+// text that does not is landed:false, as is a focus on something not editable.
+func TestTypeReportsLanding(t *testing.T) {
+	fp, calls := &fakePointer{}, &[][]string{}
+	s, app := testServer(fp, calls)
+	type_ := func(want string) {
+		t.Helper()
+		if out, err := call(t, s, "cu_type", `{"text":"panda"}`); err != nil || !strings.Contains(out, want) {
+			t.Fatalf("want %s in %q (%v)", want, out, err)
+		}
+	}
+	e := app.els["e1"]
+	e.Role, e.States = "entry", []string{"focused", "editable"}
+	app.els["e1"] = e
+	type_(`"landed":false`) // nothing changes the field: the typing went elsewhere
+
+	wtype := s.exec
+	s.exec = func(ctx context.Context, env []string, stdin string, argv []string) ([]byte, error) {
+		e := app.els["e1"]
+		e.Text, e.Chars = stdin, len(stdin)
+		app.els["e1"] = e
+		return wtype(ctx, env, stdin, argv)
+	}
+	type_(`"landed":true`)
+
+	e = app.els["e1"]
+	e.Role, e.States, e.Text, e.Chars = "document web", []string{"focused"}, "", 0
+	app.els["e1"] = e
+	type_(`not editable`)
+
+	e = app.els["e1"]
+	e.States = nil
+	app.els["e1"] = e
+	if out, err := call(t, s, "cu_type", `{"text":"panda"}`); err != nil || strings.Contains(out, "landed") {
+		t.Fatalf("no focus known, no claim: %q %v", out, err)
 	}
 }
 

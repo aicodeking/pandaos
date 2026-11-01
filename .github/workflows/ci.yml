@@ -98,7 +98,7 @@ jobs:
       - run: python3 -m unittest discover -s components/boat/sdk/python/tests -v
       - run: cd components/boat/guest/agent && python3 -m unittest -v test_boat_agent
       - run: cd components/boat/sdk/typescript && node --test test/*.test.js
-      - run: shellcheck -S warning components/boat/e2e.sh components/boat/boatd/e2e.sh components/boat/guest/build.sh components/boat/guest/test-in-vm.sh
+      - run: shellcheck -S warning components/boat/e2e.sh components/boat/boatd/e2e.sh components/boat/guest/build.sh components/boat/guest/test-in-vm.sh components/boat/gateway/e2e-edge.sh components/boat/api/e2e-auth.sh components/boat/sdk/e2e-live.sh components/boat/cli/install.sh
 
   bench-script:
     permissions:
