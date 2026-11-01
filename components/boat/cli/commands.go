@@ -51,12 +51,19 @@ func cmdWhoami(a *app, args []string) error {
 	})
 }
 
+// listCall reads the named list from a response that may have other fields.
 func listCall(a *app, path, key string) ([]obj, error) {
-	var out map[string][]obj
+	var out map[string]json.RawMessage
 	if err := a.c.call("GET", path, nil, &out); err != nil {
 		return nil, err
 	}
-	return out[key], nil
+	var list []obj
+	if raw, ok := out[key]; ok {
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return nil, fmt.Errorf("%s: %s: %w", path, key, err)
+		}
+	}
+	return list, nil
 }
 
 func cmdImages(a *app, args []string) error {
@@ -102,6 +109,11 @@ func cmdNew(a *app, args []string) error {
 	fs.Var(lab, "label", "")
 	secrets := fs.String("secrets", "", "comma-separated team secrets for this VM (default: all)")
 	noSecrets := fs.Bool("no-secrets", false, "inject no team secrets")
+	envName := fs.String("env", "", "environment name")
+	fs.StringVar(envName, "environment", "", "same as --env")
+	noEnv := fs.Bool("no-env", false, "ignore the team's default environment")
+	from := fs.String("from", "", "a share code bsh_...")
+	waitSetup := fs.Bool("wait-setup", false, "follow the environment's setup script; fail if it fails")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -135,11 +147,29 @@ func cmdNew(a *app, args []string) error {
 	case *secrets != "":
 		body["secrets"] = splitList(*secrets)
 	}
+	if *envName != "" {
+		body["environment"] = *envName
+	}
+	if *noEnv {
+		body["no_env"] = true
+	}
+	if *from != "" {
+		body["from"] = *from
+	}
 	var vm obj
 	if err := a.c.call("POST", "/v1/vms", body, &vm); err != nil {
 		return err
 	}
-	return a.emitVM(vm)
+	if err := a.emitVM(vm); err != nil {
+		return err
+	}
+	if se := s(vm, "setup_error"); se != "" {
+		fmt.Fprintln(a.errw, "boat: setup:", se)
+	}
+	if c := s(vm, "setup_cmd_id"); c != "" && *waitSetup {
+		return a.followLogs(vmPath(s(vm, "id"), "commands", c, "logs"))
+	}
+	return nil
 }
 
 func cmdList(a *app, args []string) error {
@@ -206,6 +236,7 @@ func cmdExec(a *app, args []string) error {
 	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
 	timeout := fs.Int("timeout", 0, "seconds")
 	cwd := fs.String("cwd", "", "")
+	detach := fs.Bool("detach", false, "run in the background; prints the command id")
 	pos, cmd, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -220,6 +251,13 @@ func cmdExec(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *detach {
+		var out obj
+		if err := a.c.call("POST", vmPath(s(vm, "id"), "commands"), obj{"cmd": cmd, "cwd": *cwd}, &out); err != nil {
+			return err
+		}
+		return a.show(out, "id", "state", "cmd")
+	}
 	return a.stream(vmPath(s(vm, "id"), "exec"), obj{"cmd": cmd, "timeout_s": *timeout, "cwd": *cwd})
 }
 
@@ -229,6 +267,8 @@ func cmdPrompt(a *app, args []string) error {
 	model := fs.String("model", "", "")
 	cwd := fs.String("cwd", "", "")
 	timeout := fs.Int("timeout", 0, "seconds")
+	var turn promptFlags
+	turn.register(fs)
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -247,6 +287,9 @@ func cmdPrompt(a *app, args []string) error {
 	vm, err := a.c.resolveVM(pos[0])
 	if err != nil {
 		return err
+	}
+	if turn.used() {
+		return a.startTurn(s(vm, "id"), obj{"prompt": text, "agent": *agent, "model": *model, "cwd": *cwd}, &turn)
 	}
 	return a.stream(vmPath(s(vm, "id"), "prompt"), obj{"prompt": text, "agent": *agent, "model": *model, "cwd": *cwd, "timeout_s": *timeout})
 }
@@ -310,7 +353,7 @@ func (a *app) stream(path string, body obj) error {
 func (a *app) publicKey(path string) (string, error) {
 	cands := []string{path}
 	if path == "" {
-		home := a.getenv("HOME")
+		home := homeDir(a.getenv)
 		cands = nil
 		for _, n := range []string{"id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"} {
 			cands = append(cands, filepath.Join(home, ".ssh", n))
@@ -534,13 +577,23 @@ func cmdPorts(a *app, args []string) error {
 
 func cmdSnapshots(a *app, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("expected <vm>: %w", errUsage)
+		return cmdSnapshotsTeam(a, "team", nil)
+	}
+	switch args[0] {
+	case "team", "shared", "import", "take", "delete":
+		return cmdSnapshotsTeam(a, args[0], args[1:])
 	}
 	vm, err := a.c.resolveVM(args[0])
 	if err != nil {
 		return err
 	}
 	id := s(vm, "id")
+	if len(args) > 1 {
+		switch args[1] {
+		case "download", "share", "shares", "unshare":
+			return vmSnapshotOp(a, id, args[1], args[2:])
+		}
+	}
 	op, args := sub(args[1:], "ls", "ls", "create", "rm")
 	fs := flag.NewFlagSet("snapshots", flag.ContinueOnError)
 	name := fs.String("name", "", "")
@@ -622,9 +675,29 @@ func cmdSecrets(a *app, args []string) error {
 	}
 }
 
+// omitNil drops empty lists, which the API's schema does not allow as null.
+func omitNil(o obj) obj {
+	out := obj{}
+	for k, v := range o {
+		if l, ok := v.([]string); ok && l == nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func overlapBody(d time.Duration) obj {
+	if d < 0 {
+		return obj{}
+	}
+	return obj{"overlap_s": int64(d.Seconds())}
+}
+
 func cmdKeys(a *app, args []string) error {
-	op, args := sub(args, "ls", "ls", "create", "rm")
+	op, args := sub(args, "ls", "ls", "create", "rm", "rotate", "usage")
 	fs := flag.NewFlagSet("keys", flag.ContinueOnError)
+	overlap := fs.Duration("overlap", -1, "how long the old secret keeps working (default 24h; 0 = revoke now)")
 	name := fs.String("name", "", "")
 	scopes := fs.String("scopes", "", "")
 	team := fs.String("team", "", "")
@@ -639,9 +712,32 @@ func cmdKeys(a *app, args []string) error {
 			return err
 		}
 		return a.emitList(l, "id", "name", "user_id", "scopes", "created")
+	case "rotate":
+		if err := need(pos, 1, "KEY_ID"); err != nil {
+			return err
+		}
+		var out obj
+		if err := a.c.call("POST", "/v1/keys/"+url.PathEscape(pos[0])+"/rotate", overlapBody(*overlap), &out); err != nil {
+			return err
+		}
+		return a.emit(out, func() {
+			fmt.Fprintf(a.out, "%s\n(new secret for key %s; shown once)\n", s(out, "token"), s(out, "id"))
+			if u := s(out, "prev_until"); u != "" {
+				fmt.Fprintf(a.errw, "the old secret works until %s\n", u)
+			}
+		})
+	case "usage":
+		if err := need(pos, 1, "KEY_ID"); err != nil {
+			return err
+		}
+		var out obj
+		if err := a.c.call("GET", "/v1/keys/"+url.PathEscape(pos[0])+"/usage", nil, &out); err != nil {
+			return err
+		}
+		return a.show(out, "id", "requests", "last_used")
 	case "create":
 		var out obj
-		if err := a.c.call("POST", "/v1/keys", obj{"name": *name, "scopes": splitList(*scopes), "team_id": *team}, &out); err != nil {
+		if err := a.c.call("POST", "/v1/keys", omitNil(obj{"name": *name, "scopes": splitList(*scopes), "team_id": *team}), &out); err != nil {
 			return err
 		}
 		return a.emit(out, func() {
@@ -740,8 +836,10 @@ func cmdTeams(a *app, args []string) error {
 }
 
 func cmdWebhooks(a *app, args []string) error {
-	op, args := sub(args, "ls", "ls", "create", "rm", "deliveries", "test")
+	op, args := sub(args, "ls", "ls", "create", "rm", "deliveries", "test", "rotate", "show", "update")
 	fs := flag.NewFlagSet("webhooks", flag.ContinueOnError)
+	overlap := fs.Duration("overlap", -1, "how long both secrets sign (default 24h; 0 = at once)")
+	newURL := fs.String("url", "", "")
 	events := fs.String("events", "", "")
 	pos, _, err := parse(fs, args)
 	if err != nil {
@@ -760,8 +858,35 @@ func cmdWebhooks(a *app, args []string) error {
 			return err
 		}
 		return a.emitList(l, "id", "url", "events")
+	case "show":
+		if err := a.c.call("GET", "/v1/webhooks/"+url.PathEscape(pos[0]), nil, &out); err != nil {
+			return err
+		}
+		return a.show(out, "id", "url", "events", "prev_until")
+	case "update":
+		body := obj{}
+		if *newURL != "" {
+			body["url"] = *newURL
+		}
+		if *events != "" {
+			body["events"] = splitList(*events)
+		}
+		if err := a.c.call("PATCH", "/v1/webhooks/"+url.PathEscape(pos[0]), body, &out); err != nil {
+			return err
+		}
+		return a.show(out, "id", "url", "events")
+	case "rotate":
+		if err := a.c.call("POST", "/v1/webhooks/"+url.PathEscape(pos[0])+"/rotate", overlapBody(*overlap), &out); err != nil {
+			return err
+		}
+		return a.emit(out, func() {
+			fmt.Fprintf(a.out, "signing secret: %s (shown once)\n", s(out, "secret"))
+			if u := s(out, "prev_until"); u != "" {
+				fmt.Fprintf(a.errw, "deliveries carry both signatures until %s\n", u)
+			}
+		})
 	case "create":
-		if err := a.c.call("POST", "/v1/webhooks", obj{"url": pos[0], "events": splitList(*events)}, &out); err != nil {
+		if err := a.c.call("POST", "/v1/webhooks", omitNil(obj{"url": pos[0], "events": splitList(*events)}), &out); err != nil {
 			return err
 		}
 		return a.emit(out, func() {

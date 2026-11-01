@@ -1,0 +1,7 @@
+$ boat env set base --setup make --json
+exit 0
+--- stdout
+{"id":"env_1","image":"ubuntu-24.04","is_default":false,"name":"base","size":"large","version":1}
+--- stderr
+--- requests
+PUT /v1/environments/base {"setup_script":"make"}

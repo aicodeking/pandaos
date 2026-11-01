@@ -1,0 +1,7 @@
+$ boat telemetry --json
+exit 0
+--- stdout
+{"configured":false}
+--- stderr
+--- requests
+GET /v1/telemetry 

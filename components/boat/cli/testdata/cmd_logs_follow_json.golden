@@ -1,0 +1,9 @@
+$ boat cmd logs vm1 c_1 -f --json
+exit 5
+--- stdout
+{"data_b64":"b3V0Cg==","next_offset":4,"stream":"stdout"}
+{"exit":5}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/commands/c_1/logs?follow=1&offset=0 

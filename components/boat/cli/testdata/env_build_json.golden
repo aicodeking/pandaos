@@ -1,0 +1,7 @@
+$ boat env build base --json
+exit 0
+--- stdout
+{"id":"env_1","image":"ubuntu-24.04","is_default":false,"name":"base","size":"large","version":1}
+--- stderr
+--- requests
+POST /v1/environments/base/build 

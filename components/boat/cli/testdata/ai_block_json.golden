@@ -1,0 +1,8 @@
+$ boat ai block vm1 --json
+exit 0
+--- stdout
+{"enabled":false,"id":"vm1"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+PUT /v1/vms/vm1/ai-access {"enabled":false}

@@ -26,6 +26,15 @@ await boat.stop(vm.id);
 - **Ports:** `ports`, `addPort` (`{auth: "private"}` default, or `{public: true}`), `portUrl` (signed URL + `token` for the `X-Boat-Route-Token` header), `removePort`
 - **Snapshots:** `snapshots`, `createSnapshot`, `deleteSnapshot`
 - **Access:** `ssh`, `desktop`
+- **Detached commands:** `startCommand`, `listCommands`, `commandStatus`, `commandHistory`, `commandLogs`, `followCommand`, `signalCommand`, `stopCommand`, `processes`
+- **File ops:** `listFiles`, `deleteFile`, `moveFile`, `searchFiles`, `fileInfo`, `makeFolder`, `setFileMode`
+- **Async prompts:** `startPrompt`, `listPrompts`, `promptStatus`, `followPrompt`, `steerPrompt`, `interruptPrompt`, `conversations`
+- **Environments:** `environments`, `createEnvironment`, `getEnvironment`, `updateEnvironment`, `deleteEnvironment`, `buildEnvironment`; `createVM({environment})`
+- **Resize:** `resize`
+- **Snapshots, beyond one VM:** `teamSnapshots`, `deleteTeamSnapshot`, `downloadSnapshot`, `importSnapshot`, `shareSnapshot`, `snapshotShares`, `revokeSnapshotShare`, `sharedSnapshots`, `takeSnapshotShare`
+- **AI proxy:** `aiCredentials`, `setAICredential`, `deleteAICredential`, `aiProxy`, `setAIProxy`, `aiUsage`, `setAIAccess`
+- **Telemetry:** `telemetry`, `setTelemetry`, `deleteTelemetry`
+- **Rotation:** `rotateKey`, `keyUsage`, `rotateWebhook`, `getWebhook`, `updateWebhook`
 - **Teams:** `teams`, `createTeam(name, {owner})` and `deleteTeam` (operator only), `addMember`
 - **Keys:** `keys`, `createKey`, `deleteKey`
 - **Secrets:** `secrets`, `setSecret`, `deleteSecret`

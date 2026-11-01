@@ -1,0 +1,8 @@
+$ boat files chmod vm1 600 /a --json
+exit 0
+--- stdout
+{"mode":"600","ok":true,"path":"/a"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+POST /v1/vms/vm1/files/permissions {"mode":"600","path":"/a"}

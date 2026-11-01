@@ -36,7 +36,13 @@ func releaseBase(getenv func(string) string, ver string) string {
 	return "https://github.com/" + repo + "/releases/download/" + ver
 }
 
-func assetName() string { return "boat_" + runtime.GOOS + "_" + runtime.GOARCH }
+func assetName() string {
+	name := "boat_" + runtime.GOOS + "_" + runtime.GOARCH
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return name
+}
 
 func fetch(hc *http.Client, u string, max int64) ([]byte, error) {
 	resp, err := hc.Get(u)
@@ -118,7 +124,7 @@ func (a *app) upgrade(args []string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp.Name(), self); err != nil {
+	if err := replaceSelf(tmp.Name(), self); err != nil {
 		return err
 	}
 	return a.emit(obj{"ok": true, "path": self, "from": version, "to": *ver, "sha256": want}, func() {

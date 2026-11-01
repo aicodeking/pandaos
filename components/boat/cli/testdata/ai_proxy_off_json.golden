@@ -1,0 +1,7 @@
+$ boat ai proxy off --json
+exit 0
+--- stdout
+{"available":true,"enabled":false}
+--- stderr
+--- requests
+PUT /v1/ai/proxy {"enabled":false}

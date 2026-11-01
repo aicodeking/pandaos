@@ -1,0 +1,7 @@
+$ boat webhooks update wh_1 --url https://n.example --json
+exit 0
+--- stdout
+{"events":["vm.*"],"id":"wh_1","url":"https://n.example"}
+--- stderr
+--- requests
+PATCH /v1/webhooks/wh_1 {"url":"https://n.example"}

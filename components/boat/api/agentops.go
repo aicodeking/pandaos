@@ -51,25 +51,33 @@ func agentReply(m map[string]any) map[string]any {
 	return out
 }
 
-// commandView maps a guest command object to the public shape.
+// commandView maps the guest's status object to the public shape.
 func commandView(g map[string]any) map[string]any {
-	state := "exited"
+	state := str(g, "state")
 	switch {
 	case g["running"] == true:
 		state = "running"
-	case g["signal"] != nil:
+	case state != "lost" && g["signal"] != nil:
 		state = "signaled"
+	case state == "":
+		state = "exited"
 	}
 	id := str(g, "cmd_id")
-	if id == "" {
-		id = str(g, "id")
-	}
 	cmd := g["argv"]
 	if cmd == nil {
 		cmd = []any{}
 	}
 	return map[string]any{"id": id, "cmd": cmd, "state": state, "exit": g["exit"], "signal": g["signal"],
-		"started_at": g["started_at"], "finished_at": g["finished_at"]}
+		"pid": g["pid"], "started_at": epochTime(g["started"]), "finished_at": epochTime(g["ended"])}
+}
+
+// epochTime turns the guest's epoch seconds into RFC 3339, or null.
+func epochTime(v any) any {
+	f, ok := v.(float64)
+	if !ok {
+		return nil
+	}
+	return time.Unix(int64(f), 0).UTC().Format(time.RFC3339)
 }
 
 func validEnv(env map[string]string) string {
@@ -165,7 +173,7 @@ func (s *server) listCommands(w http.ResponseWriter, r *http.Request, p *princip
 		return
 	}
 	list := []map[string]any{}
-	raw, _ := out["commands"].([]any)
+	raw, _ := out["cmds"].([]any)
 	for _, x := range raw {
 		if g, ok := x.(map[string]any); ok {
 			list = append(list, commandView(g))
@@ -220,7 +228,7 @@ func (s *server) commandHistory(w http.ResponseWriter, r *http.Request, p *princ
 }
 
 func (s *server) refreshHistory(vmID string, list map[string]any) {
-	raw, _ := list["commands"].([]any)
+	raw, _ := list["cmds"].([]any)
 	live := map[string]map[string]any{}
 	for _, x := range raw {
 		if g, ok := x.(map[string]any); ok {
@@ -299,7 +307,16 @@ func (s *server) readLogs(r *http.Request, vmID, cid string, offset int64, limit
 	if err != nil {
 		return nil, err
 	}
-	return agentReply(out), nil
+	out = agentReply(out)
+	out["exit"] = nil
+	if out["running"] != true { // cmd_logs has no exit status; cmd_status does
+		st, err := s.agentOp(r, vmID, "cmd_status", map[string]any{"cmd_id": cid})
+		if err != nil {
+			return nil, err
+		}
+		out["exit"], out["signal"] = st["exit"], st["signal"]
+	}
+	return out, nil
 }
 
 // followLogs polls cmd_logs until the command ends or the client leaves. A
@@ -435,7 +452,7 @@ func (s *server) listFiles(w http.ResponseWriter, r *http.Request, p *principal)
 	if entries == nil {
 		entries = []any{}
 	}
-	writeJSON(w, 200, map[string]any{"path": path, "entries": entries})
+	writeJSON(w, 200, map[string]any{"path": path, "entries": entries, "truncated": out["truncated"] == true})
 }
 
 func (s *server) deleteFile(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -460,8 +477,9 @@ func (s *server) deleteFile(w http.ResponseWriter, r *http.Request, p *principal
 
 func (s *server) moveFile(w http.ResponseWriter, r *http.Request, p *principal) {
 	var body struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		From      string `json:"from"`
+		To        string `json:"to"`
+		Overwrite bool   `json:"overwrite"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -473,7 +491,7 @@ func (s *server) moveFile(w http.ResponseWriter, r *http.Request, p *principal) 
 	if _, ok := s.ownVM(w, r, p); !ok {
 		return
 	}
-	if _, err := s.agentOp(r, r.PathValue("id"), "file_move", map[string]any{"from": body.From, "to": body.To}); err != nil {
+	if _, err := s.agentOp(r, r.PathValue("id"), "file_move", map[string]any{"from": body.From, "to": body.To, "overwrite": body.Overwrite}); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
@@ -496,7 +514,7 @@ func (s *server) searchFiles(w http.ResponseWriter, r *http.Request, p *principa
 		return
 	}
 	out, aerr := s.agentOp(r, r.PathValue("id"), "file_search",
-		map[string]any{"path": path, "query": query, "limit": limit, "content": q.Get("content") == "1"})
+		map[string]any{"path": path, "query": query, "limit": limit, "content": q.Get("content") == "1", "regex": q.Get("regex") == "1"})
 	if aerr != nil {
 		writeUpstream(w, r, aerr)
 		return
@@ -505,7 +523,7 @@ func (s *server) searchFiles(w http.ResponseWriter, r *http.Request, p *principa
 	if matches == nil {
 		matches = []any{}
 	}
-	writeJSON(w, 200, map[string]any{"matches": matches})
+	writeJSON(w, 200, map[string]any{"matches": matches, "truncated": out["truncated"] == true})
 }
 
 // execCapture runs argv through boatd's exec and collects its output.
@@ -672,20 +690,24 @@ func parsePS(out string) []map[string]any {
 	return list
 }
 
-// resizeVM changes a stopped VM's size.
+// resizeVM changes size or grows the disk. A vCPU/RAM change needs a stopped VM,
+// and discard_memory if it was stopped with a memory snapshot (which cannot
+// change shape; the next start is then a cold boot).
 func (s *server) resizeVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	var body struct {
-		Size string `json:"size"`
+		Size          string `json:"size"`
+		DiskGiB       int    `json:"disk_gib"`
+		DiscardMemory bool   `json:"discard_memory"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	if !reVMName.MatchString(body.Size) {
-		writeErr(w, r, 400, "invalid_request", "size is required")
+	if (body.Size != "" && !reVMName.MatchString(body.Size)) || body.DiskGiB < 0 || (body.Size == "" && body.DiskGiB == 0) {
+		writeErr(w, r, 400, "invalid_request", "give a size and/or disk_gib")
 		return
 	}
 	if _, ok := s.ownVM(w, r, p); ok {
-		s.vmAction(w, r, "resize", map[string]any{"size": body.Size})
+		s.vmAction(w, r, "resize", map[string]any{"size": body.Size, "disk_gib": body.DiskGiB, "discard_memory": body.DiscardMemory})
 	}
 }
 

@@ -1,0 +1,8 @@
+$ boat files ls vm1 /home --json
+exit 0
+--- stdout
+{"mode":"644","name":"a","size":1,"type":"file"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/files/list?path=%2Fhome 

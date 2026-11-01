@@ -460,7 +460,7 @@
   },
   "/v1/vms/{id}/resize": {
    "post": {
-    "summary": "Change a stopped VM's size (409 while running)",
+    "summary": "Change size (VM stopped; discard_memory if it has a stop snapshot, then the next start is a cold boot) and/or grow the disk",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -485,11 +485,14 @@
         "properties": {
          "size": {
           "type": "string"
+         },
+         "disk_gib": {
+          "type": "integer"
+         },
+         "discard_memory": {
+          "type": "boolean"
          }
-        },
-        "required": [
-         "size"
-        ]
+        }
        }
       }
      }
@@ -1326,6 +1329,9 @@
            "items": {
             "$ref": "#/components/schemas/FileEntry"
            }
+          },
+          "truncated": {
+           "type": "boolean"
           }
          },
          "required": [
@@ -1372,6 +1378,9 @@
          },
          "to": {
           "type": "string"
+         },
+         "overwrite": {
+          "type": "boolean"
          }
         },
         "required": [
@@ -1415,7 +1424,7 @@
   },
   "/v1/vms/{id}/files/search": {
    "get": {
-    "summary": "Search names, or contents with content=1",
+    "summary": "Search file names, or contents with content=1 (ripgrep)",
     "x-boat-scope": "exec",
     "tags": [
      "Files"
@@ -1465,6 +1474,15 @@
        "type": "integer"
       },
       "description": ""
+     },
+     {
+      "name": "regex",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "1: q is a regex"
      }
     ],
     "responses": {
@@ -1494,6 +1512,9 @@
              "path"
             ]
            }
+          },
+          "truncated": {
+           "type": "boolean"
           }
          },
          "required": [
@@ -2660,7 +2681,7 @@
   },
   "/v1/snapshots/import": {
    "post": {
-    "summary": "Import a snapshot archive (raw body) into the caller's team",
+    "summary": "Import a snapshot archive (raw body, as downloaded) into the caller's team. Memory is kept only for an archive from this host; otherwise it is disk-only and cold boots",
     "x-boat-scope": "vms:write",
     "tags": [
      "Snapshots"
@@ -2674,6 +2695,23 @@
        "type": "string"
       },
       "description": ""
+     },
+     {
+      "name": "image",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "local image for a disk-only import"
+     },
+     {
+      "name": "size",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
      }
     ],
     "requestBody": {
@@ -4596,6 +4634,83 @@
      }
     }
    }
+  },
+  "/v1/snapshots": {
+   "get": {
+    "summary": "The team's snapshots, imported ones included",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "Snapshots"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "snapshots": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Snapshot"
+           }
+          }
+         },
+         "required": [
+          "snapshots"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/snapshots/{sid}": {
+   "delete": {
+    "summary": "Delete one of the team's snapshots",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "Snapshots"
+    ],
+    "parameters": [
+     {
+      "name": "sid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "ok"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
   }
  },
  "components": {
@@ -4882,7 +4997,8 @@
       "enum": [
        "running",
        "exited",
-       "signaled"
+       "signaled",
+       "lost"
       ]
      },
      "exit": {
@@ -4906,6 +5022,12 @@
      "finished_at": {
       "type": [
        "string",
+       "null"
+      ]
+     },
+     "pid": {
+      "type": [
+       "integer",
        "null"
       ]
      }
@@ -5012,6 +5134,16 @@
        "string",
        "null"
       ]
+     },
+     "offset": {
+      "type": "number",
+      "description": "may be later than asked if old output rotated away"
+     },
+     "size": {
+      "type": "integer"
+     },
+     "truncated": {
+      "type": "boolean"
      }
     },
     "required": [
@@ -5059,7 +5191,8 @@
       "enum": [
        "file",
        "dir",
-       "link"
+       "symlink",
+       "other"
       ]
      },
      "size": {

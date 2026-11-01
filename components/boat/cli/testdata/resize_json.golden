@@ -1,0 +1,8 @@
+$ boat resize vm1 large --discard-memory --json
+exit 0
+--- stdout
+{"id":"vm1","image":"ubuntu-24.04","name":"dev","size":"default","state":"running","team":"team_1"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+POST /v1/vms/vm1/resize {"discard_memory":true,"disk_gib":0,"size":"large"}

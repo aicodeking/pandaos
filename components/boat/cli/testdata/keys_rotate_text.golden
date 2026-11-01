@@ -1,0 +1,9 @@
+$ boat keys rotate k2
+exit 0
+--- stdout
+boat_k2_new
+(new secret for key k2; shown once)
+--- stderr
+the old secret works until 2026-01-02T00:00:00Z
+--- requests
+POST /v1/keys/k2/rotate {}

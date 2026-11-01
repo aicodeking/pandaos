@@ -1,0 +1,7 @@
+$ boat env new base --size large --setup npm ci --var A=b --secrets S1,S2 --json
+exit 0
+--- stdout
+{"id":"env_1","image":"ubuntu-24.04","is_default":false,"name":"base","size":"large","version":1}
+--- stderr
+--- requests
+POST /v1/environments {"env":{"A":"b"},"name":"base","secrets":["S1","S2"],"setup_script":"npm ci","size":"large"}

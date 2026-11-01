@@ -1,0 +1,7 @@
+$ boat env --json
+exit 0
+--- stdout
+{"id":"env_1","image":"ubuntu-24.04","is_default":false,"name":"base","size":"large","version":1}
+--- stderr
+--- requests
+GET /v1/environments 

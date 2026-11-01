@@ -66,8 +66,8 @@ func (s *server) relayDownload(w http.ResponseWriter, r *http.Request, vmID, sid
 		writeUpstream(w, r, &boatdError{Status: resp.StatusCode, Body: body})
 		return
 	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.boatsnap"`, sid))
+	w.Header().Set("Content-Type", orDefault(resp.Header.Get("Content-Type"), "application/octet-stream"))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.tar.zst"`, sid))
 	if n := resp.Header.Get("Content-Length"); n != "" {
 		w.Header().Set("Content-Length", n)
 	}
@@ -87,9 +87,14 @@ func snapName(n string) bool { return n == "" || reVMName.MatchString(n) }
 
 // importInto streams a snapshot archive to boatd under team.
 func (s *server) importInto(r *http.Request, team, name string, body io.Reader) (map[string]any, error) {
-	q := url.Values{"team": {team}}
+	q := url.Values{"team": {team}} // boatd trusts this; it is always the caller's
 	if name != "" {
 		q.Set("name", name)
+	}
+	for _, k := range []string{"image", "size"} { // a disk-only import needs these
+		if v := r.URL.Query().Get(k); reVMNameOrDotted.MatchString(v) {
+			q.Set(k, v)
+		}
 	}
 	resp, err := s.boatd.do(r.Context(), "POST", "/v1/snapshots/import?"+q.Encode(), body, "application/octet-stream")
 	if err != nil {
@@ -105,6 +110,53 @@ func (s *server) importInto(r *http.Request, team, name string, body io.Reader) 
 		return nil, err
 	}
 	return out, nil
+}
+
+var reVMNameOrDotted = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// listTeamSnapshots includes imported snapshots, which belong to no VM.
+func (s *server) listTeamSnapshots(w http.ResponseWriter, r *http.Request, p *principal) {
+	var out struct {
+		Snapshots []map[string]any `json:"snapshots"`
+	}
+	if err := s.boatd.call(r.Context(), "GET", "/v1/snapshots?team="+url.QueryEscape(p.Team.ID), nil, &out); err != nil {
+		writeUpstream(w, r, err)
+		return
+	}
+	list := []map[string]any{}
+	for _, sn := range out.Snapshots {
+		if str(sn, "team") == p.Team.ID {
+			list = append(list, sn)
+		}
+	}
+	writeJSON(w, 200, map[string]any{"snapshots": list})
+}
+
+// deleteTeamSnapshot checks the team itself: boatd's route takes any id.
+func (s *server) deleteTeamSnapshot(w http.ResponseWriter, r *http.Request, p *principal) {
+	sid := r.PathValue("sid")
+	var out struct {
+		Snapshots []map[string]any `json:"snapshots"`
+	}
+	if !reID.MatchString(sid) {
+		writeErr(w, r, 404, "not_found", "snapshot not found")
+		return
+	}
+	if err := s.boatd.call(r.Context(), "GET", "/v1/snapshots?team="+url.QueryEscape(p.Team.ID), nil, &out); err != nil {
+		writeUpstream(w, r, err)
+		return
+	}
+	for _, sn := range out.Snapshots {
+		if str(sn, "id") == sid && str(sn, "team") == p.Team.ID {
+			if err := s.boatd.call(r.Context(), "DELETE", "/v1/snapshots/"+url.PathEscape(sid), nil, nil); err != nil {
+				writeUpstream(w, r, err)
+				return
+			}
+			writeJSON(w, 200, map[string]any{"ok": true})
+			return
+		}
+	}
+	writeErr(w, r, 404, "not_found", "snapshot not found")
 }
 
 // importSnapshot is POST /v1/snapshots/import with the archive as the raw body.

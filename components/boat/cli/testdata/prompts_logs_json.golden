@@ -1,0 +1,8 @@
+$ boat prompts logs vm1 prm_1 --json
+exit 0
+--- stdout
+{"data_b64":"b3V0Cg==","exit":0,"next_offset":4,"running":false}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/prompts/prm_1/logs?offset=0 

@@ -1,0 +1,8 @@
+$ boat files info vm1 /a --json
+exit 0
+--- stdout
+{"mode":"644","mtime":1,"path":"/a","size":1,"type":"file"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/files/info?path=%2Fa 

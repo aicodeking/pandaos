@@ -1,0 +1,8 @@
+$ boat cmd ls vm1 --json
+exit 0
+--- stdout
+{"cmd":["sleep","9"],"exit":null,"id":"c_1","started_at":"2026-01-01T00:00:00Z","state":"running"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/commands 

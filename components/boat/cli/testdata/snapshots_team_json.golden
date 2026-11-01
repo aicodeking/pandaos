@@ -1,0 +1,7 @@
+$ boat snapshots --json
+exit 0
+--- stdout
+{"id":"snap1","name":"s","vm_id":"vm1"}
+--- stderr
+--- requests
+GET /v1/snapshots 

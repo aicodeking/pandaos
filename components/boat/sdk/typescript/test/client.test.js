@@ -43,6 +43,22 @@ before(async () => {
     if (k === "PUT /v1/secrets/OPENAI_API_KEY") return json(200, { name: "OPENAI_API_KEY" });
     if (k === "POST /v1/vms/vm1/ports") return json(201, { ...JSON.parse(body), guest_port: 8080 });
     if (k === "GET /v1/vms/vm1/ports/8080/url?ttl_s=600") return json(200, { url: "https://8080-vm1.vm.example/?boat_exp=1&boat_sig=ab", token: "1.ab", auth: "private", guest_port: 8080 });
+    if (k === "POST /v1/vms/vm1/commands") return json(201, { id: "c_1", cmd: JSON.parse(body).cmd, state: "running" });
+    if (req.url.startsWith("/v1/vms/vm1/commands/c_1/logs?follow=1")) {
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      return res.end(`{"stream":"stdout","data_b64":"${b64("out")}","next_offset":3}\n{"exit":4}\n`);
+    }
+    if (k === "POST /v1/vms/vm1/prompts") return json(202, { id: "prm_1", conversation_id: "conv_1", state: "running" });
+    if (k === "POST /v1/vms/vm1/prompts/prm_1/steer") return json(202, { id: "prm_2", conversation_id: "conv_1", state: "running" });
+    if (k === "POST /v1/environments") return json(201, { ...JSON.parse(body), id: "env_1", version: 1 });
+    if (k === "POST /v1/keys/k1/rotate") return json(200, { id: "k1", token: "boat_new" });
+    if (k === "POST /v1/webhooks/w1/rotate") return json(200, { id: "w1", secret: "whsec_new" });
+    if (k === "PUT /v1/ai/credentials/anthropic") return json(200, { provider: "anthropic", last4: "1234", updated: "x" });
+    if (k === "POST /v1/vms/vm1/resize") return json(200, { ...VM, size: JSON.parse(body).size });
+    if (k === "POST /v1/vms/vm1/snapshots/s1/shares") return json(201, { id: "shr1", snapshot_id: "s1", uses: 0, code: "bsh_x" });
+    if (k === "GET /v1/vms/vm1/snapshots/s1/download") { res.writeHead(200); return res.end("ARCHIVE"); }
+    if (req.url.startsWith("/v1/vms/vm1/files/search?")) return json(200, { matches: [{ path: "/a" }], truncated: false });
+    if (k === "PUT /v1/telemetry") return json(200, { configured: true, endpoint: JSON.parse(body).endpoint });
     if (k === "DELETE /v1/vms/vm1") return json(200, { ok: true });
     json(404, { error: { code: "not_found", message: "vm not found", request_id: "req_2" } });
   });
@@ -106,6 +122,47 @@ test("ports auth + url and per-VM secrets", async () => {
   assert.equal((await boat.portUrl("vm1", 8080, { ttlS: 600 })).token, "1.ab");
   await boat.createVM({ name: "x", secrets: [] });
   assert.deepEqual(JSON.parse(log.at(-1).body), { name: "x", secrets: [] });
+});
+
+test("detached commands and follow", async () => {
+  const boat = new Boat({ url, key: TOKEN });
+  const c = await boat.startCommand("vm1", ["sleep", "9"], { cwd: "/tmp" });
+  assert.equal(c.id, "c_1");
+  assert.deepEqual(JSON.parse(log.at(-1).body), { cmd: ["sleep", "9"], cwd: "/tmp" });
+  const evs = [];
+  for await (const ev of boat.followCommand("vm1", "c_1")) evs.push(ev);
+  assert.equal(new TextDecoder().decode(evs[0].data), "out");
+  assert.equal(evs[0].nextOffset, 3);
+  assert.equal(evs.at(-1).exitCode, 4);
+});
+
+test("async prompt, steer, rotation, env, AI, resize, share", async () => {
+  const boat = new Boat({ url, key: TOKEN });
+  const run = await boat.startPrompt("vm1", "go", { agent: "claude", new: true });
+  assert.deepEqual(JSON.parse(log.at(-1).body), { prompt: "go", agent: "claude", new: true });
+  assert.equal((await boat.steerPrompt("vm1", run.id, "stop")).id, "prm_2");
+  assert.equal((await boat.rotateKey("k1", { overlapS: 0 })).token, "boat_new");
+  assert.deepEqual(JSON.parse(log.at(-1).body), { overlap_s: 0 });
+  assert.equal((await boat.rotateWebhook("w1")).secret, "whsec_new");
+  const e = await boat.createEnvironment("base", { setupScript: "npm ci", secrets: [] });
+  assert.deepEqual(JSON.parse(log.at(-1).body), { name: "base", setup_script: "npm ci", secrets: [] });
+  assert.equal(e.version, 1);
+  assert.equal((await boat.setAICredential("anthropic", "sk-1234")).last4, "1234");
+  assert.equal((await boat.resize("vm1", { size: "large", discardMemory: true })).size, "large");
+  assert.deepEqual(JSON.parse(log.at(-1).body), { size: "large", discard_memory: true });
+  assert.equal((await boat.shareSnapshot("vm1", "s1", { ttlS: 60 })).code, "bsh_x");
+  assert.equal(new TextDecoder().decode(await boat.downloadSnapshot("vm1", "s1")), "ARCHIVE");
+  assert.equal((await boat.searchFiles("vm1", "/", "a", { content: true }))[0].path, "/a");
+  assert.match(log.at(-1).path, /content=1/);
+  assert.equal((await boat.setTelemetry("https://o.example")).configured, true);
+});
+
+test("verifyWebhook during a rotation accepts either secret", () => {
+  const sign = (sec) => createHmac("sha256", sec).update("1000.{}").digest("hex");
+  const h = `t=1000,v1=${sign("new")},v1=${sign("old")}`;
+  assert.equal(verifyWebhook("new", h, "{}", { now: 1000 }), true);
+  assert.equal(verifyWebhook("old", h, "{}", { now: 1000 }), true);
+  assert.equal(verifyWebhook("other", h, "{}", { now: 1000 }), false);
 });
 
 test("verifyWebhook", () => {

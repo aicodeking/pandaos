@@ -1,0 +1,7 @@
+$ boat snapshots shared --json
+exit 0
+--- stdout
+{"code":"bsh_x_y","created":"2026-01-01T00:00:00Z","id":"shr1","snapshot_id":"snap1","uses":0}
+--- stderr
+--- requests
+GET /v1/shared-snapshots 

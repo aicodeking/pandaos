@@ -1,0 +1,7 @@
+$ boat ai usage vm1 --json
+exit 0
+--- stdout
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/ai-usage 

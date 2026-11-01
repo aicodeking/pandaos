@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 )
@@ -26,19 +25,29 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat login --url URL --key KEY       save credentials (~/.config/boat/config.json)
   boat whoami | images | usage
   boat new [--name N] [--size S] [--image I] [--ttl 2h] [--idle-stop 30m|never] [--snapshot SID] [--label k=v]
-                [--secrets A,B | --no-secrets]
-  boat list
+                [--secrets A,B | --no-secrets] [--env NAME | --no-env] [--from CODE] [--wait-setup]
+  boat list | info <vm> | ps <vm> | vm-usage <vm>
   boat ssh <vm> [-- ssh-args]          boat scp <src> <dst>   (vm:/path on one side)
-  boat exec <vm> -- cmd [args]         boat prompt <vm> "text" [--agent claude|codex|opencode] [--model M]
-  boat fork <vm> [--name N]            boat stop|start|rm <vm>
+  boat exec <vm> [--detach] -- cmd [args]
+  boat cmd start|ls|status|logs [-f]|signal [--signal S]|stop|history <vm> [id] [-- cmd]
+  boat files ls|rm [-r]|mv [--overwrite]|search [--content] [--regex]|info|mkdir|chmod <vm> ...
+  boat prompt <vm> "text" [--agent claude|codex|opencode] [--model M] [--async] [--new] [--resume CONV]
+  boat prompts ls|status|logs [-f] <vm> [id]    boat conversations <vm>
+  boat steer <vm> "text" [--prompt-id ID]       boat interrupt <vm> [--prompt-id ID]
+  boat env ls | new NAME | show E | set E | default E | build E | rm E   [--image I] [--size S] [--setup TEXT|--setup-file F] [--var K=V] [--secrets A,B]
+  boat fork <vm> [--name N]            boat stop|start|rm|delete <vm>   boat resume <vm> [--type S]
+  boat resize <vm> [SIZE] [--disk GIB] [--discard-memory]
   boat desktop <vm> [--no-open]
   boat ports ls|add|rm|url <vm> [port] [--auth private|public] [--public] [--ttl 1h]
-  boat snapshots <vm> [ls | create [--name N] | rm <id>]
+  boat snapshots <vm> [ls | create [--name N] | rm <id> | download <id> [-o F] | share <id> [--team T] [--ttl 24h] | shares <id> | unshare <id> <share>]
+  boat snapshots team | shared | import FILE [--name N] [--image I] [--size S] | take --share ID | take --code CODE | delete <id>
+  boat ai credentials [ls | set PROVIDER [KEY|-] | rm PROVIDER] | proxy [on|off] | usage [vm] | block <vm> | unblock <vm>
+  boat telemetry [show | set ENDPOINT [-H k=v] | unset]
   boat secrets ls | set NAME [VALUE|-] | rotate NAME [VALUE|-] | rm NAME
-  boat keys [ls | create [--name N] [--scopes a,b] [--team T] | rm ID]
+  boat keys [ls | create [--name N] [--scopes a,b] [--team T] | rm ID | rotate ID [--overlap 24h] | usage ID]
   boat teams [ls | create NAME [--owner U] | show ID | rm ID | add-member TEAM NAME [--role R] | rm-member TEAM USER]
   boat upgrade [--version vX.Y.Z]       replace this binary with a release build (checksum-verified)
-  boat webhooks [ls | create URL [--events a,b] | rm ID | deliveries ID | test ID]
+  boat webhooks [ls | create URL [--events a,b] | show ID | update ID [--url U] [--events a,b] | rm ID | deliveries ID | test ID | rotate ID [--overlap 24h]]
 
 Global: --json (JSON lines on stdout, errors as JSON on stderr). Env: BOAT_URL, BOAT_API_KEY, BOAT_CONFIG.`
 
@@ -59,20 +68,11 @@ func main() {
 	os.Exit(a.run(os.Args[1:]))
 }
 
-func execReplace(argv []string) error {
-	path, err := exec.LookPath(argv[0])
-	if err != nil {
-		return err
-	}
-	return syscall.Exec(path, argv, os.Environ())
-}
+func isDarwin() bool { return runtime.GOOS == "darwin" }
 
 func openURL(u string) error {
-	opener := "xdg-open"
-	if runtime.GOOS == "darwin" {
-		opener = "open"
-	}
-	return exec.Command(opener, u).Start()
+	name, args := openerArgs(u)
+	return exec.Command(name, args...).Start()
 }
 
 // exitError carries a remote exit status (exec/prompt) or a usage error (2).
@@ -150,23 +150,22 @@ func (a *app) dispatch(cmd string, args []string) error {
 	return h(a, args)
 }
 
-// parse handles flags interspersed with positional args, stopping at "--".
+// parse handles flags interspersed with positional args. Everything after the
+// first "--" is returned as is (flag.Parse would swallow the "--").
 func parse(fs *flag.FlagSet, args []string) ([]string, []string, error) {
 	fs.SetOutput(io.Discard)
+	var after []string
+	if i := slices.Index(args, "--"); i >= 0 {
+		args, after = args[:i], args[i+1:]
+	}
 	var pos []string
 	for {
-		if len(args) > 0 && args[0] == "--" { // flag.Parse would swallow it
-			return pos, args[1:], nil
-		}
 		if err := fs.Parse(args); err != nil {
 			return nil, nil, fmt.Errorf("%v: %w", err, errUsage)
 		}
 		args = fs.Args()
 		if len(args) == 0 {
-			return pos, nil, nil
-		}
-		if args[0] == "--" {
-			return pos, args[1:], nil
+			return pos, after, nil
 		}
 		pos, args = append(pos, args[0]), args[1:]
 	}

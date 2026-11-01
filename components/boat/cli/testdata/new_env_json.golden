@@ -1,0 +1,7 @@
+$ boat new --env base --json
+exit 0
+--- stdout
+{"id":"vm3","image":"ubuntu-24.04","name":"new","size":"small","state":"creating"}
+--- stderr
+--- requests
+POST /v1/vms {"environment":"base","image":"","name":"","size":"","ttl_s":0}

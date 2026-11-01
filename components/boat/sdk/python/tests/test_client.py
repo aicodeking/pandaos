@@ -66,6 +66,35 @@ class Mock(BaseHTTPRequestHandler):
         if (m, p) == ("GET", "/v1/vms/vm1/ports/8080/url?ttl_s=600"):
             return self._send(200, {"url": "https://8080-vm1.vm.example/?boat_exp=1&boat_sig=ab", "token": "1.ab",
                                     "auth": "private", "guest_port": 8080})
+        if (m, p) == ("POST", "/v1/vms/vm1/commands"):
+            return self._send(201, {"id": "c_1", "cmd": json.loads(body)["cmd"], "state": "running"})
+        if p.startswith("/v1/vms/vm1/commands/c_1/logs?follow=1"):
+            lines = [{"stream": "stdout", "data_b64": base64.b64encode(b"out").decode(), "next_offset": 3}, {"exit": 4}]
+            return self._send(200, raw=b"".join(json.dumps(x).encode() + b"\n" for x in lines), ctype="application/x-ndjson")
+        if (m, p) == ("GET", "/v1/vms/vm1/commands/c_1"):
+            return self._send(200, {"id": "c_1", "cmd": ["x"], "state": "exited", "exit": 4})
+        if (m, p) == ("POST", "/v1/vms/vm1/prompts"):
+            return self._send(202, {"id": "prm_1", "conversation_id": "conv_1", "agent": "claude", "cmd_id": "c_2", "state": "running"})
+        if (m, p) == ("POST", "/v1/vms/vm1/prompts/prm_1/steer"):
+            return self._send(202, {"id": "prm_2", "conversation_id": "conv_1", "state": "running"})
+        if p.startswith("/v1/vms/vm1/files/search?"):
+            return self._send(200, {"matches": [{"path": "/a"}], "truncated": False})
+        if (m, p) == ("POST", "/v1/environments"):
+            return self._send(201, dict(json.loads(body), id="env_1", version=1))
+        if (m, p) == ("POST", "/v1/keys/k1/rotate"):
+            return self._send(200, {"id": "k1", "token": "boat_new", "prev_until": "x"})
+        if (m, p) == ("POST", "/v1/webhooks/w1/rotate"):
+            return self._send(200, {"id": "w1", "secret": "whsec_new"})
+        if (m, p) == ("PUT", "/v1/ai/credentials/anthropic"):
+            return self._send(200, {"provider": "anthropic", "last4": "1234", "updated": "x"})
+        if (m, p) == ("POST", "/v1/vms/vm1/resize"):
+            return self._send(200, dict(VM, size=json.loads(body)["size"]))
+        if (m, p) == ("POST", "/v1/vms/vm1/snapshots/s1/shares"):
+            return self._send(201, {"id": "shr1", "snapshot_id": "s1", "uses": 0, "code": "bsh_x"})
+        if (m, p) == ("GET", "/v1/vms/vm1/snapshots/s1/download"):
+            return self._send(200, raw=b"ARCHIVE", ctype="application/zstd")
+        if (m, p) == ("PUT", "/v1/telemetry"):
+            return self._send(200, {"configured": True, "endpoint": json.loads(body)["endpoint"]})
         if (m, p) == ("DELETE", "/v1/vms/vm1"):
             return self._send(200, {"ok": True})
         return self._send(404, {"error": {"code": "not_found", "message": "vm not found", "request_id": "req_2"}})
@@ -136,6 +165,47 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(json.loads(Mock.log[-1][2]), {"name": "x", "secrets": []})
         self.b.create_vm(name="y", secrets=["A"])
         self.assertEqual(json.loads(Mock.log[-1][2])["secrets"], ["A"])
+
+    def test_detached_commands(self):
+        c = self.b.start_command("vm1", ["sleep", "9"], cwd="/tmp")
+        self.assertEqual((c.id, c.state), ("c_1", "running"))
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"cmd": ["sleep", "9"], "cwd": "/tmp"})
+        ev = list(self.b.follow_command("vm1", "c_1"))
+        self.assertEqual((ev[0].data, ev[-1].exit_code), (b"out", 4))
+        self.assertEqual(self.b.command_status("vm1", "c_1").exit, 4)
+
+    def test_async_prompt_and_steer(self):
+        run = self.b.start_prompt("vm1", "go", agent="claude", new=True)
+        self.assertEqual((run.id, run.conversation_id), ("prm_1", "conv_1"))
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"prompt": "go", "agent": "claude", "new": True})
+        self.assertEqual(self.b.steer_prompt("vm1", "prm_1", "stop").id, "prm_2")
+
+    def test_rotation_env_ai_resize_share(self):
+        self.assertEqual(self.b.rotate_key("k1", overlap_s=0)["token"], "boat_new")
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"overlap_s": 0})
+        self.assertEqual(self.b.rotate_webhook("w1")["secret"], "whsec_new")
+        e = self.b.create_environment("base", setup_script="npm ci", secrets=[])
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"name": "base", "setup_script": "npm ci", "secrets": []})
+        self.assertEqual(e["version"], 1)
+        self.assertEqual(self.b.set_ai_credential("anthropic", "sk-1234")["last4"], "1234")
+        self.assertEqual(self.b.resize("vm1", size="large", discard_memory=True).size, "large")
+        self.assertEqual(self.b.share_snapshot("vm1", "s1", ttl_s=60)["code"], "bsh_x")
+        import io
+        buf = io.BytesIO()
+        self.assertEqual(self.b.download_snapshot("vm1", "s1", buf), 7)
+        self.assertEqual(buf.getvalue(), b"ARCHIVE")
+        self.assertEqual(self.b.search_files("vm1", "/", "a", content=True)[0]["path"], "/a")
+        self.assertIn("content=1", Mock.log[-1][1])
+        self.assertTrue(self.b.set_telemetry("https://o.example")["configured"])
+
+    def test_verify_webhook_during_rotation(self):
+        body = b"{}"
+        new = hmac.new(b"new", b"1000." + body, hashlib.sha256).hexdigest()
+        old = hmac.new(b"old", b"1000." + body, hashlib.sha256).hexdigest()
+        hdr = "t=1000,v1=%s,v1=%s" % (new, old)
+        self.assertTrue(verify_webhook("new", hdr, body, now=1000))
+        self.assertTrue(verify_webhook("old", hdr, body, now=1000))
+        self.assertFalse(verify_webhook("other", hdr, body, now=1000))
 
     def test_verify_webhook(self):
         body = b'{"type":"vm.stopped"}'

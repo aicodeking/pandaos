@@ -1,0 +1,7 @@
+$ boat snapshots import $HOME/up.txt --name imp --json
+exit 0
+--- stdout
+{"id":"snap2","name":"imp","team":"team_1"}
+--- stderr
+--- requests
+POST /v1/snapshots/import?name=imp hello

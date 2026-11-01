@@ -1,0 +1,7 @@
+$ boat telemetry unset --json
+exit 0
+--- stdout
+{"ok":true}
+--- stderr
+--- requests
+DELETE /v1/telemetry 

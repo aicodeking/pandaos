@@ -317,6 +317,8 @@ func (s *server) routes() {
 	s.route("POST /v1/vms/{id}/snapshots/{sid}/shares", "admin", s.createShare)
 	s.route("GET /v1/vms/{id}/snapshots/{sid}/shares", "admin", s.listShares)
 	s.route("DELETE /v1/vms/{id}/snapshots/{sid}/shares/{share}", "admin", s.revokeShare)
+	s.route("GET /v1/snapshots", "vms:read", s.listTeamSnapshots)
+	s.route("DELETE /v1/snapshots/{sid}", "vms:write", s.deleteTeamSnapshot)
 	s.route("POST /v1/snapshots/import", "vms:write", s.importSnapshot)
 	s.route("POST /v1/snapshots/import-share", "vms:write", s.importShare)
 	s.route("GET /v1/shared-snapshots", "vms:read", s.sharedWithMe)

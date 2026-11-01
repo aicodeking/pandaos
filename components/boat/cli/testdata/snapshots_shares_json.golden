@@ -1,0 +1,8 @@
+$ boat snapshots vm1 shares snap1 --json
+exit 0
+--- stdout
+{"id":"shr1","uses":1}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/snapshots/snap1/shares 

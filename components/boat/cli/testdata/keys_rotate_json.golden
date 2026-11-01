@@ -1,0 +1,7 @@
+$ boat keys rotate k2 --overlap 1h --json
+exit 0
+--- stdout
+{"id":"k2","name":"ci","prev_until":"2026-01-02T00:00:00Z","scopes":["vms:read"],"token":"boat_k2_new"}
+--- stderr
+--- requests
+POST /v1/keys/k2/rotate {"overlap_s":3600}

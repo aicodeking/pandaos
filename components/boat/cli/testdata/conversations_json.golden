@@ -1,0 +1,8 @@
+$ boat conversations vm1 --json
+exit 0
+--- stdout
+{"agent":"claude","id":"conv_1","last_prompt":"hi","prompt_count":2,"running":false}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/conversations 

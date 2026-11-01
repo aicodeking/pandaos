@@ -1,0 +1,8 @@
+$ boat cmd signal vm1 c_1 --signal INT --json
+exit 0
+--- stdout
+{"id":"c_1","ok":true,"signal":"INT"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+POST /v1/vms/vm1/commands/c_1/signal {"signal":"INT"}

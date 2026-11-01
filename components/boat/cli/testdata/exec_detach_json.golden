@@ -1,0 +1,8 @@
+$ boat exec vm1 --detach --json -- sleep 9
+exit 0
+--- stdout
+{"cmd":["sleep","9"],"id":"c_1","state":"running"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+POST /v1/vms/vm1/commands {"cmd":["sleep","9"],"cwd":""}

@@ -25,7 +25,15 @@ func configPath(getenv func(string) string) string {
 	if x := getenv("XDG_CONFIG_HOME"); x != "" {
 		return filepath.Join(x, "boat", "config.json")
 	}
-	return filepath.Join(getenv("HOME"), ".config", "boat", "config.json")
+	return filepath.Join(homeDir(getenv), ".config", "boat", "config.json")
+}
+
+// homeDir also covers Windows, which has USERPROFILE instead of HOME.
+func homeDir(getenv func(string) string) string {
+	if h := getenv("HOME"); h != "" {
+		return h
+	}
+	return getenv("USERPROFILE")
 }
 
 // loadConfig reads the config file; BOAT_URL / BOAT_API_KEY override it.

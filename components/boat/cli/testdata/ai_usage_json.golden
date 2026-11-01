@@ -1,0 +1,7 @@
+$ boat ai usage --json
+exit 0
+--- stdout
+{"input_tokens":2,"model":"m","output_tokens":3,"provider":"anthropic","requests":1,"vm_id":"vm1"}
+--- stderr
+--- requests
+GET /v1/ai/usage 

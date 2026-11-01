@@ -1,0 +1,8 @@
+$ boat files mv vm1 /a /b --overwrite --json
+exit 0
+--- stdout
+{"from":"/a","ok":true,"to":"/b"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+POST /v1/vms/vm1/files/move {"from":"/a","overwrite":true,"to":"/b"}

@@ -1,0 +1,8 @@
+$ boat vm-usage vm1 --json
+exit 0
+--- stdout
+{"id":"vm1","vm_seconds":42}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/usage 

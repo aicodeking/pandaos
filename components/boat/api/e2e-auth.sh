@@ -117,6 +117,25 @@ if jq -e --arg id "$vm" '.vms[] | select(.id == $id)' "$tmp/list" >/dev/null; th
 else
   echo "ok - other team's list does not show the VM"
 fi
+expect 404 "other team: start a command" "$B" POST "/v1/vms/$vm/commands" '{"cmd":["id"]}'
+expect 404 "other team: list commands" "$B" GET "/v1/vms/$vm/commands"
+expect 404 "other team: command history" "$B" GET "/v1/vms/$vm/command-history"
+expect 404 "other team: list files" "$B" GET "/v1/vms/$vm/files/list?path=/"
+expect 404 "other team: delete a file" "$B" DELETE "/v1/vms/$vm/files?path=/home/dev/x"
+expect 404 "other team: start a prompt" "$B" POST "/v1/vms/$vm/prompts" '{"prompt":"hi"}'
+expect 404 "other team: conversations" "$B" GET "/v1/vms/$vm/conversations"
+expect 404 "other team: resize" "$B" POST "/v1/vms/$vm/resize" '{"disk_gib":99}'
+expect 404 "other team: AI usage" "$B" GET "/v1/vms/$vm/ai-usage"
+expect 404 "other team: AI block" "$B" PUT "/v1/vms/$vm/ai-access" '{"enabled":false}'
+expect 404 "other team: rotate another team's key" "$B" POST "/v1/keys/$ro_id/rotate"
+expect 403 "read-only key cannot start a command" "$RO" POST "/v1/vms/$vm/commands" '{"cmd":["id"]}'
+expect 403 "read-only key cannot start a prompt" "$RO" POST "/v1/vms/$vm/prompts" '{"prompt":"hi"}'
+expect 403 "read-only key cannot read files" "$RO" GET "/v1/vms/$vm/files/list?path=/"
+expect 403 "read-only key cannot set AI credentials" "$RO" PUT /v1/ai/credentials/anthropic '{"value":"sk-12345678"}'
+expect 403 "read-only key cannot create environments" "$RO" POST /v1/environments '{"name":"nope"}'
+expect 403 "read-only key cannot set telemetry" "$RO" PUT /v1/telemetry '{"endpoint":"https://example.com"}'
+expect 403 "member cannot set AI credentials" "$M" PUT /v1/ai/credentials/anthropic '{"value":"sk-12345678"}'
+expect 403 "member cannot turn the AI proxy off" "$M" PUT /v1/ai/proxy '{"enabled":false}'
 expect 200 "read-only key of the owning team can read it" "$RO" GET "/v1/vms/$vm"
 expect 403 "read-only key cannot stop it" "$RO" POST "/v1/vms/$vm/stop"
 expect 200 "operator deletes it" "$OP" DELETE "/v1/vms/$vm"

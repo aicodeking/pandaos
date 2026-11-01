@@ -1,0 +1,7 @@
+$ boat keys usage k2 --json
+exit 0
+--- stdout
+{"id":"k2","last_used":"2026-01-01T00:00:00Z","requests":3}
+--- stderr
+--- requests
+GET /v1/keys/k2/usage 

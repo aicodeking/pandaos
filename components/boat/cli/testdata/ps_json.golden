@@ -1,0 +1,8 @@
+$ boat ps vm1 --json
+exit 0
+--- stdout
+{"command":"init","elapsed_s":9,"pid":1,"user":"root"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/processes 

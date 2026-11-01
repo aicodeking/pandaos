@@ -220,6 +220,7 @@ type reqInfo struct {
 	p       *principal
 	audit   bool   // audit even though it is a GET (sensitive read)
 	pattern string // the matched route, for traces and the OpenAPI drift test
+	vmOK    bool   // ownVM passed, so a later boatd 404 is about something else
 }
 
 // baseCtx outlives requests (env builds).
@@ -389,6 +390,8 @@ func writeUpstream(w http.ResponseWriter, r *http.Request, err error) {
 	var be *boatdError
 	if errors.As(err, &be) {
 		switch {
+		case be.Status == http.StatusNotFound && info(r).vmOK:
+			writeErr(w, r, 404, "not_found", "not found")
 		case be.Status == http.StatusNotFound:
 			writeErr(w, r, 404, "not_found", "vm not found")
 		case be.Status == http.StatusTooManyRequests:

@@ -1,0 +1,7 @@
+$ boat telemetry set https://o.example -H X=y --json
+exit 0
+--- stdout
+{"configured":true,"endpoint":"https://o.example","header_names":["X"]}
+--- stderr
+--- requests
+PUT /v1/telemetry {"endpoint":"https://o.example","headers":{"X":"y"}}

@@ -24,6 +24,15 @@ boat.stop(vm.id)
 - **Ports:** `ports`, `add_port` (`auth="private"` default, or `public=True`), `port_url` (signed URL + `token` for the `X-Boat-Route-Token` header), `remove_port`
 - **Snapshots:** `snapshots`, `create_snapshot`, `delete_snapshot`
 - **Access:** `ssh`, `desktop`
+- **Detached commands:** `start_command`, `list_commands`, `command_status`, `command_history`, `command_logs`, `follow_command`, `signal_command`, `stop_command`, `processes`
+- **File ops:** `list_files`, `delete_file`, `move_file`, `search_files`, `file_info`, `make_folder`, `set_file_mode`
+- **Async prompts:** `start_prompt`, `list_prompts`, `prompt_status`, `follow_prompt`, `steer_prompt`, `interrupt_prompt`, `conversations`
+- **Environments:** `environments`, `create_environment`, `get_environment`, `update_environment`, `delete_environment`, `build_environment`; `create_vm(environment=)`
+- **Resize:** `resize`
+- **Snapshots, beyond one VM:** `team_snapshots`, `delete_team_snapshot`, `download_snapshot`, `import_snapshot`, `share_snapshot`, `snapshot_shares`, `revoke_snapshot_share`, `shared_snapshots`, `take_snapshot_share`
+- **AI proxy:** `ai_credentials`, `set_ai_credential`, `delete_ai_credential`, `ai_proxy`, `set_ai_proxy`, `ai_usage`, `set_ai_access`
+- **Telemetry:** `telemetry`, `set_telemetry`, `delete_telemetry`
+- **Rotation:** `rotate_key`, `key_usage`, `rotate_webhook`, `get_webhook`, `update_webhook`
 - **Teams:** `teams`, `create_team(name, owner=)` and `delete_team` (operator only), `add_member`
 - **Keys:** `keys`, `create_key`, `delete_key`
 - **Secrets:** `secrets`, `set_secret`, `delete_secret`
@@ -31,7 +40,7 @@ boat.stop(vm.id)
 
 Errors are raised as `BoatError(status, code, message, request_id)`.
 `verify_webhook(secret, request.headers["X-Boat-Signature"], raw_body)` checks a webhook
-signature.
+signature, and accepts either secret during a rotation.
 
 Example: `examples/quickstart.py`. Tests: `python3 -m unittest discover -s tests`.
 

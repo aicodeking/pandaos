@@ -1,0 +1,7 @@
+$ boat snapshots delete snap1 --json
+exit 0
+--- stdout
+{"id":"snap1","ok":true}
+--- stderr
+--- requests
+DELETE /v1/snapshots/snap1 

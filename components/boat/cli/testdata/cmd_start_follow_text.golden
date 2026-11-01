@@ -1,0 +1,9 @@
+$ boat cmd start vm1 -f -- sleep 9
+exit 5
+--- stdout
+out
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+POST /v1/vms/vm1/commands {"cmd":["sleep","9"],"cwd":""}
+GET /v1/vms/vm1/commands/c_1/logs?follow=1&offset=0 

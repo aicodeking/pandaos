@@ -412,7 +412,10 @@ func TestResize(t *testing.T) {
 		t.Errorf("running VM: %d", st)
 	}
 	e.do(e.owner, "POST", "/v1/vms/"+id+"/stop", nil)
-	if st, vm := e.do(e.owner, "POST", "/v1/vms/"+id+"/resize", map[string]any{"size": "large"}); st != 200 || vm["size"] != "large" {
+	if st, _ := e.do(e.owner, "POST", "/v1/vms/"+id+"/resize", map[string]any{"size": "large"}); st != 409 {
+		t.Errorf("stop snapshot without discard_memory: %d", st)
+	}
+	if st, vm := e.do(e.owner, "POST", "/v1/vms/"+id+"/resize", map[string]any{"size": "large", "discard_memory": true, "disk_gib": 60}); st != 200 || vm["size"] != "large" {
 		t.Errorf("resize: %d %v", st, vm)
 	}
 	_, other := e.newTeam("other")
@@ -646,6 +649,15 @@ func TestSnapshotDownloadImportShare(t *testing.T) {
 	}
 	if _, l := e.do(third, "GET", "/v1/shared-snapshots", nil); len(list(l, "shares")) != 0 {
 		t.Errorf("third team sees the share: %v", l)
+	}
+	if _, l := e.do(other, "GET", "/v1/snapshots", nil); len(list(l, "snapshots")) != 1 {
+		t.Errorf("team snapshots: %v", l)
+	}
+	if st, _ := e.do(third, "DELETE", "/v1/snapshots/"+imp["id"].(string), nil); st != 404 {
+		t.Errorf("cross-team snapshot delete: %d", st)
+	}
+	if st, _ := e.do(other, "DELETE", "/v1/snapshots/"+imp["id"].(string), nil); st != 200 {
+		t.Errorf("delete imported snapshot: %d", st)
 	}
 	st, cp := e.do(other, "POST", "/v1/snapshots/import-share", map[string]any{"share_id": gid, "name": "copy"})
 	if st != 201 || cp["team"] != tid || cp["name"] != "copy" {

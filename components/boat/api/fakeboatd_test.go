@@ -99,6 +99,7 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			vm["state"] = "running"
 		case "stop":
 			vm["state"] = "stopped"
+			vm["has_snapshot"] = true
 		case "delete":
 			delete(f.vms, vm["id"].(string))
 			for k, sn := range f.snaps { // like boatd: a VM's snapshots go with it
@@ -127,6 +128,8 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 						parts[i] = fmt.Sprint(c)
 					}
 					out = strings.Join(parts, " ") + "\n"
+				case cmd[0] == "cat" && fmt.Sprint(cmd[1]) == "/home/dev/env-ok":
+					out = "built\n"
 				case cmd[0] == "stat":
 					out = "regular file|5|644|100\n"
 				case cmd[0] == "ps":
@@ -139,8 +142,16 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			enc.Encode(map[string]int{"exit": exit})
 			return
 		case "resize":
+			if in["size"] == "" { // disk growth works in any state
+				writeJSON(w, 200, vm)
+				return
+			}
 			if vm["state"] != "stopped" {
 				writeJSON(w, 409, map[string]string{"error": "vm must be stopped to resize"})
+				return
+			}
+			if in["discard_memory"] != true && vm["has_snapshot"] == true {
+				writeJSON(w, 409, map[string]string{"error": "stop snapshot cannot change shape; set discard_memory"})
 				return
 			}
 			vm["size"] = in["size"]
@@ -234,6 +245,23 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		}
 		writeJSON(w, 404, map[string]string{"error": "no such snapshot"})
 	})
+	mux.HandleFunc("GET /v1/snapshots", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		out := []any{}
+		for _, sn := range f.snaps {
+			if t := r.URL.Query().Get("team"); t == "" || sn["team"] == t {
+				out = append(out, sn)
+			}
+		}
+		writeJSON(w, 200, map[string]any{"snapshots": out})
+	})
+	mux.HandleFunc("DELETE /v1/snapshots/{sid}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		delete(f.snaps, r.PathValue("sid"))
+		writeJSON(w, 200, map[string]bool{"ok": true})
+	})
 	mux.HandleFunc("POST /v1/snapshots/import", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		if !strings.HasPrefix(string(b), "ARCHIVE:") {
@@ -303,8 +331,21 @@ type fakeCmd struct {
 }
 
 func (c *fakeCmd) view() map[string]any {
-	return map[string]any{"cmd_id": c.id, "argv": c.argv, "running": c.running, "exit": c.exit, "signal": c.signal,
-		"started_at": c.started, "finished_at": nil}
+	state := "exited"
+	if c.running {
+		state = "running"
+	}
+	v := map[string]any{"cmd_id": c.id, "argv": c.argv, "state": state, "running": c.running, "pid": 42, "started": 1793000000}
+	if !c.running { // absent until they apply, like the real agent
+		if c.exit != nil {
+			v["exit"] = c.exit
+		}
+		if c.signal != nil {
+			v["signal"] = c.signal
+		}
+		v["ended"] = 1793000060
+	}
+	return v
 }
 
 // agentOp plays the guest agent; the caller holds f.mu.
@@ -341,7 +382,7 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 				out = append(out, x.view())
 			}
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "commands": out})
+		writeJSON(w, 200, map[string]any{"ok": true, "cmds": out})
 	case "cmd_status":
 		if c == nil || c.vm != vm["id"] {
 			writeJSON(w, 404, map[string]string{"error": "no such command"})
@@ -360,14 +401,14 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 		if int(off) < len(c.log) {
 			data = c.log[int(off):]
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "data_b64": base64.StdEncoding.EncodeToString([]byte(data)),
-			"next_offset": len(c.log), "running": c.running, "exit": c.exit})
+		writeJSON(w, 200, map[string]any{"ok": true, "data_b64": base64.StdEncoding.EncodeToString([]byte(data)), "offset": off,
+			"next_offset": len(c.log), "size": len(c.log), "truncated": false, "running": c.running})
 	case "cmd_signal":
 		if c == nil || c.vm != vm["id"] {
 			writeJSON(w, 404, map[string]string{"error": "no such command"})
 			return
 		}
-		c.running, c.signal = false, in["signal"]
+		c.running, c.signal = false, "SIG"+fmt.Sprint(in["signal"])
 		writeJSON(w, 200, map[string]any{"ok": true})
 	case "file_list":
 		out := []any{}
@@ -377,7 +418,7 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 				out = append(out, map[string]any{"name": strings.TrimPrefix(p, prefix), "type": "file", "size": len(b), "mode": "644", "mtime": 1})
 			}
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "entries": out})
+		writeJSON(w, 200, map[string]any{"ok": true, "entries": out, "truncated": false})
 	case "file_delete":
 		delete(f.files, fmt.Sprint(vm["id"])+":"+fmt.Sprint(in["path"]))
 		writeJSON(w, 200, map[string]any{"ok": true})
@@ -398,7 +439,7 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 				out = append(out, map[string]any{"path": p})
 			}
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "matches": out})
+		writeJSON(w, 200, map[string]any{"ok": true, "matches": out, "truncated": false})
 	default:
 		writeJSON(w, 400, map[string]string{"error": "unknown op"})
 	}

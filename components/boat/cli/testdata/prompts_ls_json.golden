@@ -1,0 +1,8 @@
+$ boat prompts ls vm1 --json
+exit 0
+--- stdout
+{"agent":"claude","cmd_id":"c_2","conversation_id":"conv_1","id":"prm_1","prompt":"hi","state":"running","vm_id":"vm1"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/prompts 

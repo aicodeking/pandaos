@@ -1,0 +1,7 @@
+$ boat snapshots take --code bsh_x_y --json
+exit 0
+--- stdout
+{"id":"snap3","name":"","team":"team_1"}
+--- stderr
+--- requests
+POST /v1/snapshots/import-share {"code":"bsh_x_y"}

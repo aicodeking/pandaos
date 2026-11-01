@@ -64,6 +64,7 @@ func (s *server) ownVM(w http.ResponseWriter, r *http.Request, p *principal) (VM
 		writeErr(w, r, 404, "not_found", "vm not found")
 		return nil, false
 	}
+	info(r).vmOK = true
 	return vm, true
 }
 
