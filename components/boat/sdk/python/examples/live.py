@@ -198,6 +198,17 @@ try:
             check(tok.startswith(b"boatvm_"), "VM env holds a proxy token")
             on_disk = boat.run(ai_vm.id, ["sudo", "cat", "/etc/boat/env"]).stdout
             check(fake_key.encode() not in on_disk, "the real key is not on the VM")
+            if REAL:
+                # The VM reaches the proxy (boatd's nft rule + the listener). A bad token
+                # gets the proxy's own 401; no real provider key is needed for this.
+                curl = 'curl -sS -m 20 "$ANTHROPIC_BASE_URL/v1/models" -H "anthropic-version: 2023-06-01" -H "x-api-key: %s"'
+                bad = boat.run(ai_vm.id, ["bash", "-lc", curl % "not-a-token"]).stdout
+                check(b"boat_proxy_error" in bad, "VM reaches the proxy; a bad token is refused (%r)" % bad[:120])
+                # The good token gets past the proxy to the real provider, which rejects
+                # the fake key: the swap happened and the request went out and back.
+                good = boat.run(ai_vm.id, ["bash", "-lc", curl % "$ANTHROPIC_API_KEY"]).stdout
+                check(b"boat_proxy_error" not in good and b"error" in good, "the proxy forwards to the provider (%r)" % good[:120])
+                check(boat.ai_usage(ai_vm.id)["totals"]["requests"] >= 1, "the proxy metered the request")
             boat.delete(ai_vm.id)
             made.remove(ai_vm.id)
         finally:
