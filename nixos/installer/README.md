@@ -44,7 +44,7 @@ panda-install --disk /dev/vda --profile headless --hostname X --user panda \
 | `--timezone TZ` | no | `UTC` | Must exist under `/etc/zoneinfo` |
 | `--relay URL` | no | none | PandaConnect relay for panda-agentd: `https://host[:port][/path]` |
 | `--allow-insecure-relay` | | | Accept an `http://` relay URL (sets `allowInsecure` in `local.nix`) |
-| `--domain D` | with `--profile server` | | boat base domain (`api.D`, `desktop.D`, `*.desktop.D`, `ssh.D`, `*.vm.D`) → `services.boat.domain` |
+| `--domain D` | with `--profile server` (`iso-server` ISO) | | boat base domain (`api.D`, `desktop.D`, `*.desktop.D`, `ssh.D`, `*.vm.D`) → `services.boat.domain` |
 | `--acme-email E` | with `--profile server` | | Let's Encrypt account e-mail → `services.boat.acmeEmail` |
 | `--ipv6-prefix P` | no | none | Routed IPv6 prefix for VMs → `services.boat.ipv6Prefix` |
 | `--data-disk DEV` | no | none | Second whole disk for `/var/lib/boat`, **erased**, btrfs `PANDADATA`; pinned by UUID in `disk.nix` (required mount) and marked in `/etc/pandaos/data-disk` |

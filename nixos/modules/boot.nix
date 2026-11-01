@@ -29,7 +29,13 @@ let
     lib.optional config.services.panda-agentd.enable "panda-agentd.service"
     ++ lib.optional config.services.panda-mem.enable "panda-mem.service"
     ++ lib.optional config.services.greetd.enable "greetd.service"
-    ++ lib.optional config.networking.networkmanager.enable "NetworkManager.service";
+    ++ lib.optional config.networking.networkmanager.enable "NetworkManager.service"
+    # Not boatd: it refuses to start on a box without KVM, on purpose.
+    ++ lib.optional config.services.boat.enable "boat-api.service"
+    ++ lib.optionals (config.services.boat.enable && config.services.boat.gateway.enable) [
+      "boat-gateway.service"
+      "caddy.service"
+    ];
 
   # Checked only once signed in (marker exists), so an unsigned box never
   # fails health or rolls back.

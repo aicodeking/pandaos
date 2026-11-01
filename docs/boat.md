@@ -38,7 +38,7 @@ Before you hand out API keys:
      [--ipv6-prefix 2a01:4f8:xxx:yyy:b0a7::/80] --ssh-key "ssh-ed25519 ..."
    ```
    `--data-disk` erases the second disk and formats it as btrfs (`PANDADATA`) for `/var/lib/boat`. It is pinned by UUID as a required mount in `/etc/pandaos/disk.nix` and recorded in `/etc/pandaos/data-disk`. If that disk is ever missing, boatd and boat-api refuse to start rather than write VM data to the system disk. Without `--data-disk`, `/var/lib/boat` is a btrfs subvolume on the system disk. VM disks are reflink copies either way, so fork and snapshot are near-free. To mirror later: `btrfs device add` + `btrfs balance start -dconvert=raid1 -mconvert=raid1`.
-   *The ISOs need the server system on board for `--profile server`; see "Integration notes".*
+   Use the `iso-server` ISO: the other ISOs do not carry the server system.
 3. Reboot, log in, and apply your settings now (the daily update would also do it):
    ```sh
    sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
@@ -47,8 +47,13 @@ Before you hand out API keys:
    ```nix
    services.boat = {
      vmDomain = "boatvms.example.net";
-     images."ubuntu-24.04/vmlinux" = { url = "https://.../vmlinux"; sha256 = "..."; };
-     images."ubuntu-24.04/rootfs.ext4.zst" = { url = "https://.../rootfs-full.ext4.zst"; sha256 = "..."; };
+     # Hashes: boat_guest_SHA256SUMS on the release page. "slim" also exists.
+     images."ubuntu-24.04/vmlinux" = {
+       url = "https://github.com/AICodeKing/pandaos/releases/download/vX.Y.Z/boat-guest-vmlinux"; sha256 = "...";
+     };
+     images."ubuntu-24.04/rootfs.ext4.zst" = {
+       url = "https://github.com/AICodeKing/pandaos/releases/download/vX.Y.Z/boat-guest-rootfs-full.ext4.zst"; sha256 = "...";
+     };
      gateway.caddyPackage = pkgs.caddy.withPlugins {
        plugins = [ "github.com/caddy-dns/cloudflare@v0.2.1" ]; hash = "sha256-...";
      };
@@ -198,7 +203,9 @@ Both parts run on a GitHub KVM runner with real Firecracker (jailer on) and the 
 
 `checks.boat-module` (NixOS VM, stubs for boatd and boat-api) proves the module itself: units, the sealed master key loaded into boat-api, the data-disk guard, the reboot metric, Caddy + gateway over TLS (private/public routes, per-VM desktop origins) and the jump host.
 
-Not covered: idle auto-stop, IPv6 and public IPv4, cross-team network isolation between live VMs, boatd restart/reconcile under load, backup/restore, maintenance reboots and the installer's `--data-disk` path.
+`boatd/e2e-host.sh` (sourced by `e2e.sh`) adds host phases: fork memory and entropy, the jail, network isolation, IPv6 (a ULA prefix), idle auto-stop, boatd restart re-adopting VMs, the free-space floor, docker in the full image and btrfs qgroups.
+
+Not covered by any automated test: public IPv4, a real ACME/DNS-01 issuance, `boat-admin`, backup/restore, maintenance reboots, a real TPM, and installing with `panda-install --profile server --data-disk`. `iso-server` is built but not booted.
 
 ## Honest gaps
 
@@ -208,10 +215,10 @@ Not covered: idle auto-stop, IPv6 and public IPv4, cross-team network isolation 
 - **Egress controls are basic:** SMTP is blocked by default and egress can be capped per VM (`egressMbit`), but there are no IOPS limits, no per-team egress budget and no destination filtering.
 - **HTTP-01 fallback:** CT-log exposure, rate limits, first-request delay.
 - **The master key** is bound to this host's TPM/host key. Keep the offline copy, or a hardware change loses sealed secrets.
-- **Guest images** must be published (URL + sha256) for `boat-images`. Until then, build them with `components/boat/guest/build.sh` and copy them to `/var/lib/boat/images/<id>/`.
+- **Guest images** are not pinned by default: `services.boat.images` is empty until you set the URLs and hashes of a release (`boat-guest-*`, `boat_guest_SHA256SUMS`). No tagged release has published them yet; until one does, build them with `components/boat/guest/build.sh` and copy them to `/var/lib/boat/images/<id>/`.
 - **Metrics:** host metrics and `boat_reboot_pending` only; per-VM numbers come from `/v1/usage`.
 
 ## Integration notes
 
-- **Flake.** `services.boat` is in `nixosModules.default`, with `nixosModules.server`, `nixosConfigurations.server` and the `boat*` packages. **Open:** the ISOs must carry the server system for `panda-install --profile server`. Add `"server"` to the `iso-desktop` targets (or a new `iso-server = mkIso system "headless" [ "headless" "server" ]`) and to `packages.panda-install`'s `systems` in `flake.nix`. Until then, install `headless` and change `profile = "server"` in `/etc/pandaos/flake.nix`.
-- **Health.** Consider adding `boat-api`, `boat-gateway` and `caddy` to `panda-health`'s units (`nixos/modules/boot.nix`). Leave out `boatd`, which fails on purpose without KVM.
+- **Flake.** `services.boat` is in `nixosModules.default`, with `nixosModules.server`, `nixosConfigurations.server`, the `boat*` packages and `packages.iso-server` (headless live system that installs `headless` or `server`, built by `boat-e2e` and on release).
+- **Health.** `panda-health` watches `boat-api`, and `boat-gateway` + `caddy` when the gateway is on, so a bad update rolls back. It leaves out `boatd`, which fails on purpose without KVM.

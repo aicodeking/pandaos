@@ -1,6 +1,6 @@
 name: release
 
-# On a v* tag: check, build both ISOs, publish a GitHub release, then move the
+# On a v* tag: check, build the ISOs, the boat CLI and guest images, publish a GitHub release, then move the
 # `release` branch to the tag. Installed boxes auto-update from
 # github:AICodeKing/pandaos/release, so that branch only moves after all of this passes.
 on:
@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          for p in headless desktop; do
+          for p in headless desktop server; do
             .github/scripts/nix-retry.sh "build-$p.log" nix build ".#iso-$p" -L --no-update-lock-file -o "result-$p"
             iso=$(find -L "result-$p" -name '*.iso' | head -n 1)
             test -n "$iso"
@@ -93,8 +93,74 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  boat-assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      id-token: write # build provenance
+      attestations: write
+    env:
+      OUT: /mnt/guest-out
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: components/boat/cli/go.mod
+          cache: false
+
+      # boat_<os>_<arch> + boat_SHA256SUMS: what cli/install.sh and `boat upgrade` fetch.
+      - name: Build the boat CLI
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for os in linux darwin; do
+            for arch in amd64 arm64; do
+              (cd components/boat/cli && CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
+                -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o "$GITHUB_WORKSPACE/dist/boat_${os}_${arch}" .)
+            done
+          done
+          (cd dist && sha256sum boat_* > boat_SHA256SUMS)
+
+      - name: Free disk space, docker on /mnt
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo systemctl stop docker docker.socket
+          echo '{"data-root": "/mnt/docker"}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
+          sudo mkdir -p "$OUT" && sudo chown "$(id -u):$(id -g)" "$OUT"
+
+      # For services.boat.images (docs/boat.md). GitHub refuses release assets over 2 GiB.
+      - name: Build the guest images
+        run: |
+          set -euo pipefail
+          components/boat/guest/build.sh all
+          cp "$OUT/vmlinux" dist/boat-guest-vmlinux
+          cp "$OUT/rootfs-slim.ext4.zst" dist/boat-guest-rootfs-slim.ext4.zst
+          cp "$OUT/rootfs-full.ext4.zst" dist/boat-guest-rootfs-full.ext4.zst
+          for f in dist/boat-guest-*; do
+            test "$(stat -c %s "$f")" -lt 2147483648 || { echo "::error::$f is over GitHub's 2 GiB asset limit"; exit 1; }
+          done
+          (cd dist && sha256sum boat-guest-* > boat_guest_SHA256SUMS)
+          tee -a "$GITHUB_STEP_SUMMARY" < dist/boat_SHA256SUMS
+          tee -a "$GITHUB_STEP_SUMMARY" < dist/boat_guest_SHA256SUMS
+
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            dist/boat_*_*
+            dist/boat-guest-*
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: boat-assets
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, boat-assets]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and move the release branch
@@ -113,11 +179,18 @@ jobs:
           name: dist
           path: dist
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: boat-assets
+          path: dist
+
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             dist/*.iso
             dist/SHA256SUMS
+            dist/boat_*
+            dist/boat-guest-*
           generate_release_notes: true
           fail_on_unmatched_files: true
 

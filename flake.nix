@@ -157,6 +157,11 @@
             "headless"
             "desktop"
           ];
+          # A headless live system that can install the boat server profile.
+          iso-server = mkIso system "headless" [
+            "headless"
+            "server"
+          ];
           vm-headless = (mkPandaSystem { profile = "headless"; inherit system; }).config.system.build.vm;
           panda-cu = pkgs.callPackage ./components/computer-use/package.nix { };
           boatd = pkgs.callPackage ./components/boat/boatd/package.nix { };
@@ -165,7 +170,7 @@
           boat-gateway = pkgs.callPackage ./components/boat/gateway/package.nix { };
           panda-install = pkgs.callPackage ./nixos/installer/package.nix {
             inherit flakeUrl revision flakeLock;
-            systems = lib.genAttrs [ "headless" "desktop" ] (installable system);
+            systems = lib.genAttrs [ "headless" "desktop" "server" ] (installable system);
           };
         }
       );
