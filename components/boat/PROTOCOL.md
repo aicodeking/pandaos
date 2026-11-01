@@ -152,7 +152,7 @@ Framing:
 | `exec` | `{"op":"exec","argv":[…],"env"?:{},"cwd"?:"/","stdin_b64"?:"…","timeout_s"?:600,"tty"?:false,"user"?:"dev"}` | `{"stream":"stdout\|stderr","data_b64":"…"}`… then `{"exit":N,"timed_out"?:true,"signal"?:"…"}` |
 | `put_file` | `{"op":"put_file","path":"/abs","mode":"644","data_b64":"…","offset":N,"last":bool,"owner"?:"user[:group]"}`, one line per chunk | `{"ok":true,"size":N,"complete":bool}` for each chunk |
 | `get_file` | `{"op":"get_file","path":"/abs"}` | `{"offset":N,"data_b64":"…"}`… then `{"eof":true,"size":N,"mode":"644"}` |
-| `set_identity` | `{"op":"set_identity","hostname":"web","ipv4_cidr":"10.200.0.5/16","gw":"10.200.0.1","mac":"06:00:0a:c8:00:05","dns":["1.1.1.1"],"ipv6_cidr"?:"2001:db8::5/64","ipv6_gw"?:"2001:db8::1"}` | `{"ok":true}` |
+| `set_identity` | `{"op":"set_identity","hostname":"web","ipv4_cidr":"10.200.0.5/16","gw":"10.200.0.1","mac":"06:00:0a:c8:00:05","dns":["1.1.1.1"],"ipv6_cidr"?:"2001:db8::5/64","ipv6_gw"?:"2001:db8::1"}` | `{"ok":true,"ms":{"network":N,"secrets":N}}` |
 | `set_env` | `{"op":"set_env","vars":{"K":"V"}}` | `{"ok":true,"count":N}` |
 | `desktop` | `{"op":"desktop","action":"start\|stop\|status","token"?:"…"}` | `{"ok":true,"port":6080,…}` |
 | `shutdown` | `{"op":"shutdown"}` | `{"ok":true}`, then the guest syncs and reboots (= firecracker exits) |
@@ -173,7 +173,7 @@ Semantics:
 - **sync**: flushes every guest filesystem. boatd calls it before each pause/snapshot (stop, fork, named snapshot). For agents without this op, it falls back to `exec ["sync"]` as root.
 - **set_identity**
   - The agent sets the MAC (link down, set address, up), flushes and adds IPv4 (and IPv6), sets the default route(s), `/etc/resolv.conf`, hostname and `/etc/hosts`.
-  - It **always** regenerates `/etc/machine-id` and the ssh host keys, then restarts sshd (which also starts one that had failed).
+  - It **always** regenerates `/etc/machine-id` and the ed25519 and ecdsa ssh host keys (no RSA host key), and they are on disk before the reply. sshd restarts with `--no-block`, so it may refuse connections for a moment after the reply. `ms` holds the guest-side step timings.
   - It saves the identity to `/etc/boat/identity.json` and re-applies it at every boot, which overrides the kernel `ip=`.
   - boatd sends it once for each new VM (create, fork, from-snapshot), never on start.
 - **set_env** writes `/etc/boat/env` (mode 0600, owner the exec user) as `export K='V'` lines. It is meant for team secrets.
