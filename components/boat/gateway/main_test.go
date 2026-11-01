@@ -12,101 +12,174 @@ import (
 	"time"
 )
 
-// One upstream on 127.0.0.1 stands in for a VM; routes.json points at it.
-func setup(t *testing.T) (*gateway, *httptest.Server, string, int) {
+// One upstream on 127.0.0.1 stands in for both VMs; routes.json points at it.
+// VM abc-1: private route on the upstream port; VM xyz-2: the same port public.
+func setup(t *testing.T) (*gateway, string, int) {
 	t.Helper()
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("path=" + r.URL.Path + " cookie=" + r.Header.Get("Cookie") + " host=" + r.Host))
+		w.Write([]byte("path=" + r.URL.RequestURI() + " cookie=" + r.Header.Get("Cookie") +
+			" host=" + r.Host + " hdr=" + r.Header.Get(routeHeader)))
 	}))
 	t.Cleanup(up.Close)
-	_, portStr, _ := net.SplitHostPort(strings.TrimPrefix(up.URL, "http://"))
-	dir := t.TempDir()
-	rp := filepath.Join(dir, "routes.json")
-	os.WriteFile(rp, []byte(`{"vms":{"abc-1":{"ip":"127.0.0.1","ports":[`+portStr+`],"desktopPort":`+portStr+`}}}`), 0o644)
-	g := &gateway{domain: "boat.test", key: []byte(strings.Repeat("k", 32)), routes: &routes{path: rp}, now: time.Now}
-	port, _ := strconv.Atoi(portStr)
-	return g, up, rp, port
+	_, ps, _ := net.SplitHostPort(strings.TrimPrefix(up.URL, "http://"))
+	rp := filepath.Join(t.TempDir(), "routes.json")
+	writeRoutes(t, rp, `{"vms":{"abc-1":{"ip":"127.0.0.1","ports":[`+ps+`],"desktopPort":`+ps+`},
+		"xyz-2":{"ip":"127.0.0.1","ports":[`+ps+`],"public":[`+ps+`],"desktopPort":`+ps+`}}}`)
+	g := &gateway{domain: "boat.test", vmDomain: "vm.boatvms.test", desktopDomain: "desktop.boat.test",
+		key: []byte(strings.Repeat("k", 32)), routes: &routes{path: rp}, now: time.Now}
+	port, _ := strconv.Atoi(ps)
+	return g, rp, port
 }
 
-func do(g http.Handler, host, path string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+func writeRoutes(t *testing.T, path, s string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func req(g http.Handler, host, path string, mod ...func(*http.Request)) *httptest.ResponseRecorder {
 	r := httptest.NewRequest("GET", "http://"+host+path, nil)
-	for _, c := range cookies {
-		r.AddCookie(c)
+	for _, m := range mod {
+		m(r)
 	}
 	w := httptest.NewRecorder()
 	g.ServeHTTP(w, r)
 	return w
 }
 
-func TestPortRoutes(t *testing.T) {
-	g, _, rp, port := setup(t)
-	p := itoa(port)
-	if w := do(g, p+"-abc-1.vm.boat.test", "/x"); w.Code != 200 || !strings.Contains(w.Body.String(), "path=/x") ||
-		!strings.Contains(w.Body.String(), "host="+p+"-abc-1.vm.boat.test") {
-		t.Fatalf("route: %d %s", w.Code, w.Body)
+func cookie(name, value string) func(*http.Request) {
+	return func(r *http.Request) { r.AddCookie(&http.Cookie{Name: name, Value: value}) }
+}
+
+func header(k, v string) func(*http.Request) {
+	return func(r *http.Request) { r.Header.Set(k, v) }
+}
+
+func tok(sig func(int64) string, d time.Duration) (string, int64) {
+	exp := time.Now().Add(d).Unix()
+	return strconv.FormatInt(exp, 10) + "." + sig(exp), exp
+}
+
+func TestPortRoutesPrivateByDefault(t *testing.T) {
+	g, rp, port := setup(t)
+	p := strconv.Itoa(port)
+	priv, pub := p+"-abc-1.vm.boatvms.test", p+"-xyz-2.vm.boatvms.test"
+
+	if w := req(g, pub, "/x"); w.Code != 200 || !strings.Contains(w.Body.String(), "host="+pub) {
+		t.Fatalf("public route: %d %s", w.Code, w.Body)
 	}
-	for _, h := range []string{"1-abc-1.vm.boat.test", p + "-nope.vm.boat.test", "x-abc-1.vm.boat.test", p + "-abc-1.vm.evil.test", "a." + p + "-abc-1.vm.boat.test"} {
-		if w := do(g, h, "/"); w.Code != 404 {
-			t.Fatalf("%s: want 404, got %d", h, w.Code)
+	if w := req(g, priv, "/x"); w.Code != 401 {
+		t.Fatalf("private route without token: %d", w.Code)
+	}
+	good, exp := tok(func(e int64) string { return signRoute(g.key, port, "abc-1", e) }, time.Hour)
+	w := req(g, priv, "/x", header(routeHeader, good), cookie("app", "1"))
+	if b := w.Body.String(); w.Code != 200 || strings.Contains(b, good) || !strings.Contains(b, "cookie=app=1") {
+		t.Fatalf("header token: %d %s", w.Code, b)
+	}
+	bad := map[string]string{
+		"expired":    first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", e) }, -time.Second)),
+		"other vm":   first(tok(func(e int64) string { return signRoute(g.key, port, "xyz-2", e) }, time.Hour)),
+		"other port": first(tok(func(e int64) string { return signRoute(g.key, port+1, "abc-1", e) }, time.Hour)),
+		"desktop":    first(tok(func(e int64) string { return signDesktop(g.key, "abc-1", e) }, time.Hour)),
+		"garbage":    "1.00",
+	}
+	for name, b := range bad {
+		if w := req(g, priv, "/", header(routeHeader, b)); w.Code != 401 {
+			t.Errorf("%s token: want 401, got %d", name, w.Code)
+		}
+		if w := req(g, priv, "/", cookie(routeCookie, b)); w.Code != 401 {
+			t.Errorf("%s cookie: want 401, got %d", name, w.Code)
 		}
 	}
-	// Route removed on disk -> gone without restart (mtime/size changes).
-	time.Sleep(10 * time.Millisecond)
-	os.WriteFile(rp, []byte(`{"vms":{}}`), 0o644)
-	if w := do(g, p+"-abc-1.vm.boat.test", "/"); w.Code != 404 {
+	// Link -> host-only cookie, signature dropped from the URL.
+	sig := strings.SplitN(good, ".", 2)[1]
+	w = req(g, priv, "/a?q=1&boat_exp="+strconv.FormatInt(exp, 10)+"&boat_sig="+sig)
+	c := w.Result().Cookies()
+	if w.Code != 200 || len(c) != 1 || c[0].Name != routeCookie || c[0].Domain != "" || c[0].Path != "/" ||
+		!c[0].Secure || !c[0].HttpOnly || !strings.Contains(w.Body.String(), `url=/a?q=1"`) {
+		t.Fatalf("route link: %d %v %s", w.Code, c, w.Body)
+	}
+	if w := req(g, priv, "/a", cookie(routeCookie, "junk"), cookie(routeCookie, c[0].Value)); w.Code != 200 ||
+		strings.Contains(w.Body.String(), routeCookie) {
+		t.Fatalf("route cookie: %d %s", w.Code, w.Body)
+	}
+	for _, h := range []string{"1-abc-1.vm.boatvms.test", p + "-nope.vm.boatvms.test", "x-abc-1.vm.boatvms.test",
+		p + "-abc-1.vm.boat.test", "a." + priv} {
+		if w := req(g, h, "/", header(routeHeader, good)); w.Code != 404 {
+			t.Errorf("%s: want 404, got %d", h, w.Code)
+		}
+	}
+	// Route removed on disk -> gone without restart (size changes).
+	writeRoutes(t, rp, `{"vms":{}}`)
+	if w := req(g, pub, "/"); w.Code != 404 {
 		t.Fatalf("stale route served: %d", w.Code)
 	}
 }
 
-func TestDesktopAuth(t *testing.T) {
-	g, _, _, _ := setup(t)
-	link := func(key []byte, vmid string, d time.Duration) string {
+func first(s string, _ int64) string { return s }
+
+func TestDesktopPerVMOrigin(t *testing.T) {
+	g, _, _ := setup(t)
+	link := func(vmid string, d time.Duration) string {
 		exp := time.Now().Add(d).Unix()
-		return "exp=" + strconv.FormatInt(exp, 10) + "&sig=" + sign(key, vmid, exp)
+		return "exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.key, vmid, exp)
 	}
-	good := link(g.key, "abc-1", time.Hour)
-	cases := map[string]int{
-		"/abc-1/?" + good: 302,
-		"/abc-1/?" + link(g.key, "abc-1", -time.Second):        403, // expired
-		"/abc-1/?" + link(g.key, "other", time.Hour):           403, // other VM
-		"/abc-1/?" + link([]byte("wrong"), "abc-1", time.Hour): 403,
-		"/abc-1/?exp=1&sig=00":                                 403,
-		"/abc-1/?sig=":                                         403,
-		"/abc-1/":                                              401,
-		"/abc-1?" + good:                                       302, // boat-api's link has no trailing slash
-		"/nope/":                                               404,
+	a, b := "abc-1.desktop.boat.test", "xyz-2.desktop.boat.test"
+
+	// boat-api's shared-origin link -> the VM's own origin, nothing set here.
+	w := req(g, "desktop.boat.test", "/abc-1?"+link("abc-1", time.Hour), header("X-Forwarded-Proto", "https"))
+	loc := w.Header().Get("Location")
+	if w.Code != 302 || !strings.HasPrefix(loc, "https://"+a+"/?exp=") || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("legacy link: %d %q", w.Code, loc)
 	}
-	for path, want := range cases {
-		if w := do(g, "desktop.boat.test", path); w.Code != want {
-			t.Errorf("%s: want %d, got %d", path, want, w.Code)
+	for _, p := range []string{"/abc-1/", "/abc-1", "/nope?" + link("nope", time.Hour), "/"} {
+		if w := req(g, "desktop.boat.test", p); w.Code != 404 {
+			t.Errorf("desktop.boat.test%s: want 404, got %d", p, w.Code)
 		}
 	}
-	if w := do(g, "desktop.boat.test", "/abc-1?"+good); w.Header().Get("Location") != "/abc-1/?"+good {
-		t.Fatalf("slash redirect drops the link: %q", w.Header().Get("Location"))
+
+	cases := map[string]int{
+		"/?" + link("abc-1", -time.Second): 403, // expired
+		"/?" + link("xyz-2", time.Hour):    403, // B's link on A's origin
+		"/?exp=1&sig=00":                   403,
+		"/":                                401,
 	}
-	w := do(g, "desktop.boat.test", "/abc-1/vnc.html?"+good+"&a=1")
-	if loc := w.Header().Get("Location"); loc != "/abc-1/vnc.html?a=1" {
-		t.Fatalf("redirect keeps the signature: %q", loc)
+	for p, want := range cases {
+		if w := req(g, a, p); w.Code != want {
+			t.Errorf("%s%s: want %d, got %d", a, p, want, w.Code)
+		}
 	}
-	c := w.Result().Cookies()[0]
-	if c.Path != "/abc-1/" || !c.HttpOnly || !c.Secure {
-		t.Fatalf("cookie: %+v", c)
+	w = req(g, a, "/vnc.html?a=1&"+link("abc-1", time.Hour))
+	c := w.Result().Cookies()
+	if w.Code != 200 || len(c) != 1 || c[0].Name != desktopCookie || c[0].Domain != "" || c[0].Path != "/" ||
+		!c[0].Secure || !c[0].HttpOnly || c[0].SameSite != http.SameSiteStrictMode ||
+		!strings.Contains(w.Body.String(), `url=/vnc.html?a=1"`) {
+		t.Fatalf("desktop session: %d %+v %s", w.Code, c, w.Body)
 	}
-	w = do(g, "desktop.boat.test", "/abc-1/vnc.html", c, &http.Cookie{Name: "app", Value: "1"},
-		&http.Cookie{Name: guestCookie, Value: "client-chosen"})
+	w = req(g, a, "/vnc.html", cookie(desktopCookie, c[0].Value), cookie("app", "1"), cookie(guestCookie, "client-chosen"))
 	body := w.Body.String()
-	if w.Code != 200 || !strings.Contains(body, "path=/vnc.html") || strings.Contains(body, cookieName) ||
+	if w.Code != 200 || !strings.Contains(body, "path=/vnc.html") || strings.Contains(body, desktopCookie) ||
 		!strings.Contains(body, "app=1") || strings.Contains(body, "client-chosen") ||
 		!strings.Contains(body, guestCookie+"="+guestToken(g.key, "abc-1")) {
 		t.Fatalf("proxied desktop: %d %s", w.Code, body)
 	}
+	// A's session cookie is worthless on B's origin (and vice versa).
+	if w := req(g, b, "/", cookie(desktopCookie, c[0].Value)); w.Code != 401 {
+		t.Fatalf("A's cookie opened B's desktop: %d", w.Code)
+	}
+	if w := req(g, "x.abc-1.desktop.boat.test", "/", cookie(desktopCookie, c[0].Value)); w.Code != 404 {
+		t.Fatalf("nested desktop host: %d", w.Code)
+	}
 }
 
 func TestAsk(t *testing.T) {
-	g, _, _, port := setup(t)
+	g, _, port := setup(t)
+	p := strconv.Itoa(port)
 	for host, want := range map[string]int{
-		itoa(port) + "-abc-1.vm.boat.test": 200, "desktop.boat.test": 200, "api.boat.test": 200,
-		"9-abc-1.vm.boat.test": 404, "evil.test": 404, "": 404,
+		p + "-abc-1.vm.boatvms.test": 200, "desktop.boat.test": 200, "api.boat.test": 200,
+		"abc-1.desktop.boat.test": 200, "nope.desktop.boat.test": 404,
+		"9-abc-1.vm.boatvms.test": 404, "evil.test": 404, "": 404,
 	} {
 		w := httptest.NewRecorder()
 		g.ask(w, httptest.NewRequest("GET", "/ask?domain="+host, nil))
@@ -115,8 +188,6 @@ func TestAsk(t *testing.T) {
 		}
 	}
 }
-
-func itoa(n int) string { return strconv.Itoa(n) }
 
 func TestLoadKey(t *testing.T) {
 	dir := t.TempDir()

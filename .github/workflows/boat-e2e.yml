@@ -2,8 +2,11 @@ name: boat-e2e
 
 # Real Firecracker end-to-end test of boat on a KVM-capable ubuntu runner:
 # guest image (cached) -> boatd + boat-api + boat-gateway built from source
-# and run as plain processes -> every feature driven through the `boat` CLI.
-# See components/boat/e2e.sh.
+# and run as plain processes -> every feature driven through the `boat` CLI
+# (components/boat/e2e.sh). Then the edge (components/boat/gateway/e2e-edge.sh):
+# real Caddy with its internal CA + the ssh jump host on 2222 in front of a
+# fresh stack: private/public port routes, per-VM desktop origins, ssh -J,
+# plus guest/desktop-check.sh, sdk/e2e-live.sh and api/e2e-auth.sh.
 
 on:
   push:
@@ -96,6 +99,11 @@ jobs:
 
       - name: e2e
         run: components/boat/e2e.sh "$OUT" 2>&1 | tee e2e.log; test "${PIPESTATUS[0]}" = 0
+
+      - name: e2e edge (Caddy TLS, private routes, desktop origins, ssh jump)
+        env:
+          E2E_WORK: /mnt/boat-edge
+        run: components/boat/gateway/e2e-edge.sh "$OUT" 2>&1 | tee -a e2e.log; test "${PIPESTATUS[0]}" = 0
 
       - name: Metrics
         if: always()

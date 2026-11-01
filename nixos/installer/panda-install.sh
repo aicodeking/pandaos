@@ -26,6 +26,10 @@ readonly HASH_RE='^[$][A-Za-z0-9./$=]+$'
 readonly KEY_RE='^(ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[A-Za-z0-9@.-]+) [A-Za-z0-9+/=]+( [^"\\$]*)?$'
 readonly TZ_RE='^[A-Za-z0-9_+/-]+$'
 # No quotes, '$' or spaces: the URL also goes into a Nix string.
+# Server profile. All three also go into Nix strings: no quotes, '$' or spaces.
+readonly DOMAIN_RE='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.])+[a-z]{2,63}$'
+readonly EMAIL_RE='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+[.][A-Za-z]{2,}$'
+readonly IPV6_PREFIX_RE='^[0-9a-fA-F:]{2,39}/([1-9][0-9]?|1[01][0-9]|12[0-8])$'
 readonly RELAY_RE='^(https?)://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
 
 die() {
@@ -59,6 +63,12 @@ $UEFI_NOTE
   --timezone TZ           e.g. Europe/Berlin (default: UTC)
   --relay URL             enable the optional panda-agentd with this relay (https)
   --allow-insecure-relay  accept an http:// relay URL
+
+ server profile (boat VMs, see docs/boat.md):
+  --domain D              base domain: api.D, desktop.D, *.desktop.D, ssh.D, *.vm.D
+  --acme-email E          Let's Encrypt account e-mail
+  --ipv6-prefix P         routed IPv6 prefix for VMs, e.g. 2a01:4f8:1:2:b0a7::/80
+  --data-disk DEV         second disk for VM data (/var/lib/boat), ERASED, btrfs
   --yes                   no questions; --disk and --password-hash are required
   -h, --help              this text
 EOF
@@ -136,6 +146,24 @@ check_relay() {
     bad "relay '$1' is not https; use https, or pass --allow-insecure-relay"
 }
 
+check_domain() {
+  [[ $1 =~ $DOMAIN_RE ]] || bad "bad domain '$1': lower-case DNS name like boat.example.com"
+}
+
+check_email() {
+  [[ $1 =~ $EMAIL_RE ]] || bad "bad e-mail '$1'"
+}
+
+check_ipv6_prefix() {
+  [[ -z $1 || $1 =~ $IPV6_PREFIX_RE ]] || bad "bad IPv6 prefix '$1': like 2a01:4f8:1:2:b0a7::/80"
+}
+
+check_data_disk() {
+  [[ -z $1 ]] && return
+  check_disk "$1" || return
+  [[ $(readlink -f -- "$1") != "$(readlink -f -- "$disk")" ]] || bad "--data-disk must differ from --disk"
+}
+
 check_disk() {
   local dev size mounts
   [[ -n $1 ]] || bad "no disk given" || return
@@ -167,7 +195,8 @@ parse_args() {
         allow_insecure_relay=1
         shift
         ;;
-      --disk | --profile | --hostname | --user | --password-hash | --ssh-key | --timezone | --relay)
+      --disk | --profile | --hostname | --user | --password-hash | --ssh-key | --timezone | --relay | \
+        --domain | --acme-email | --ipv6-prefix | --data-disk)
         (($# >= 2)) || die "$1 needs a value"
         case $1 in
           --disk) disk=$2 ;;
@@ -184,6 +213,10 @@ parse_args() {
             relay=$2
             relay_set=1
             ;;
+          --domain) domain=$2 ;;
+          --acme-email) acme_email=$2 ;;
+          --ipv6-prefix) ipv6_prefix=$2 ;;
+          --data-disk) data_disk=$2 ;;
         esac
         shift 2
         ;;
@@ -243,10 +276,33 @@ gather() {
   if ((relay_set || yes)); then check_relay "$relay" || exit 1; else
     ask_valid relay check_relay "panda-agentd relay URL (optional, most boxes skip it; Enter to skip)"
   fi
+  gather_server
   if [[ -n $password_hash ]]; then check_hash "$password_hash" || exit 1; else
     ask_password
   fi
   disk=$(readlink -f -- "$disk")
+  [[ -z $data_disk ]] || data_disk=$(readlink -f -- "$data_disk")
+}
+
+# Server-only settings; refused for other profiles so nothing is silently ignored.
+gather_server() {
+  if [[ $profile != server ]]; then
+    [[ -z $domain$acme_email$ipv6_prefix$data_disk ]] ||
+      die "--domain, --acme-email, --ipv6-prefix and --data-disk need --profile server"
+    return
+  fi
+  if [[ -n $domain ]]; then check_domain "$domain" || exit 1; elif ((yes)); then
+    die "--domain is required with --profile server --yes"
+  else
+    ask_valid domain check_domain "Base domain for boat (api.D, *.vm.D ...)"
+  fi
+  if [[ -n $acme_email ]]; then check_email "$acme_email" || exit 1; elif ((yes)); then
+    die "--acme-email is required with --profile server --yes"
+  else
+    ask_valid acme_email check_email "ACME (Let's Encrypt) e-mail"
+  fi
+  check_ipv6_prefix "$ipv6_prefix" || exit 1
+  check_data_disk "$data_disk" || exit 1
 }
 
 confirm() {
@@ -260,6 +316,12 @@ confirm() {
   echo "ALL DATA ON $disk WILL BE ERASED."
   read -r -p "Type the disk name (${disk##*/}) to confirm: " reply || reply=
   [[ $reply == "${disk##*/}" || $reply == "$disk" ]] || die "confirmation did not match; nothing was changed"
+  if [[ -n $data_disk ]]; then
+    lsblk -p -o NAME,SIZE,FSTYPE,LABEL,MODEL -- "$data_disk"
+    echo "ALL DATA ON THE DATA DISK $data_disk WILL BE ERASED TOO."
+    read -r -p "Type the data disk name (${data_disk##*/}) to confirm: " reply || reply=
+    [[ $reply == "${data_disk##*/}" || $reply == "$data_disk" ]] || die "confirmation did not match; nothing was changed"
+  fi
 }
 
 # part N: partition N of $disk. Names ending in a digit (nvme0n1, mmcblk0) get a 'p'.
@@ -299,15 +361,31 @@ partition() {
   done
   mkdir -p "$MNT/boot"
   mount -o fmask=0077,dmask=0077 "$boot_dev" "$MNT/boot"
+  if [[ -n $data_disk ]]; then
+    log "Formatting data disk $data_disk (btrfs, PANDADATA)"
+    wipefs -af "$data_disk" >/dev/null
+    sgdisk --zap-all "$data_disk" >/dev/null
+    mkfs.btrfs -f -L PANDADATA "$data_disk" >/dev/null
+    udevadm settle
+    mkdir -p "$MNT/var/lib/boat"
+    mount -o "$BTRFS_OPTS" "$data_disk" "$MNT/var/lib/boat"
+  fi
 }
 
 # disk.nix: this machine's filesystems by UUID, so a second disk carrying the
 # PANDAOS/PANDABOOT labels can never be mounted instead.
 write_disk_nix() {
-  local root_uuid boot_uuid sv
+  local root_uuid boot_uuid sv data_uuid
   root_uuid=$(blkid -s UUID -o value "$root_dev")
   boot_uuid=$(blkid -s UUID -o value "$boot_dev")
   [[ -n $root_uuid && -n $boot_uuid ]] || die "could not read filesystem UUIDs of $disk"
+  data_uuid=""
+  if [[ -n $data_disk ]]; then
+    data_uuid=$(blkid -s UUID -o value "$data_disk")
+    [[ -n $data_uuid ]] || die "could not read the filesystem UUID of $data_disk"
+    # Read by boat's units: refuse to run if this disk is not mounted.
+    printf 'PANDADATA %s %s\n' "$data_uuid" "$data_disk" >"$1/data-disk"
+  fi
   {
     echo "# Written by panda-install: mount this disk by UUID, not by label."
     echo "{ lib, ... }:"
@@ -316,12 +394,17 @@ write_disk_nix() {
       echo "  fileSystems.\"/${sv#*:}\".device = lib.mkForce \"/dev/disk/by-uuid/$root_uuid\";"
     done
     echo "  fileSystems.\"/boot\".device = lib.mkForce \"/dev/disk/by-uuid/$boot_uuid\";"
+    if [[ -n $data_disk ]]; then
+      # Required (no nofail): boat must not run without its data disk.
+      echo "  fileSystems.\"/var/lib/boat\".device = lib.mkForce \"/dev/disk/by-uuid/$data_uuid\";"
+      echo "  fileSystems.\"/var/lib/boat\".options = lib.mkForce [ \"compress=zstd:1\" \"noatime\" ];"
+    fi
     echo "}"
   } >"$1/disk.nix"
 }
 
 write_local_nix() {
-  local keys="" extra="" agent=""
+  local keys="" extra="" agent="" boat=""
   [[ -z $ssh_key ]] || keys=" \"$ssh_key\" "
   if [[ $user != panda ]]; then
     extra='    isNormalUser = true;
@@ -335,6 +418,13 @@ write_local_nix() {
     [[ $relay == https://* ]] || agent+="  services.panda-agentd.allowInsecure = true;
 "
   fi
+  if [[ $profile == server ]]; then
+    boat="  services.boat.domain = \"$domain\";
+  services.boat.acmeEmail = \"$acme_email\";
+"
+    [[ -z $ipv6_prefix ]] || boat+="  services.boat.ipv6Prefix = \"$ipv6_prefix\";
+"
+  fi
   {
     cat <<EOF
 # Machine settings written by panda-install.
@@ -345,7 +435,7 @@ write_local_nix() {
 
   networking.hostName = "$hostname";
   time.timeZone = "$timezone";
-$agent
+$agent$boat
   users.users.$user = {
 $extra    hashedPassword = "$password_hash";
     openssh.authorizedKeys.keys = [$keys];
@@ -434,6 +524,7 @@ personalise() {
 
 main() {
   disk="" profile="" hostname="" user="" password_hash="" ssh_key="" timezone="" relay=""
+  domain="" acme_email="" ipv6_prefix="" data_disk=""
   yes=0 ssh_key_set=0 relay_set=0 allow_insecure_relay=0 boot_dev="" root_dev=""
   [[ -d ${PANDA_SYSTEMS:-} && -n ${PANDA_FLAKE_URL:-} && -n ${PANDA_DEFAULT_PROFILE:-} ]] ||
     die "PANDA_SYSTEMS/PANDA_FLAKE_URL/PANDA_DEFAULT_PROFILE unset; run the packaged panda-install"
@@ -457,6 +548,10 @@ main() {
   umount -R "$MNT"
   trap - EXIT
   log "Done. Remove the install media and reboot."
+  if [[ $profile == server ]]; then
+    log "Server: after the first boot run 'sudo nixos-rebuild switch --flake /etc/pandaos#pandaos'"
+    log "(needs network) to apply the boat domain and data disk now; the daily update does it otherwise."
+  fi
 }
 
 main "$@"

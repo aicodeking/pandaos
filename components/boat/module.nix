@@ -37,6 +37,9 @@ let
     };
   };
 
+  credFile = "${cfg.dataDir}/secrets/boat-master-key.cred";
+  masterCred = "boat-master-key:${credFile}";
+
   # Exit status for "this host cannot run boatd" (EX_CONFIG): no restart loop.
   exConfig = 78;
   kvmCheck = pkgs.writeShellScript "boatd-kvm-check" ''
@@ -46,6 +49,16 @@ let
       echo "  Inside a VM: the hypervisor must expose nested virtualization" >&2
       echo "  (kvm_intel nested=1 / kvm_amd nested=1 on the host, CPU model 'host')." >&2
       echo "  Set services.boat.requireKvm = false only for tests with a stub boatd." >&2
+      exit ${toString exConfig}
+    fi
+  '';
+
+  # panda-install --data-disk writes the marker; then dataDir must be that disk.
+  dataCheck = pkgs.writeShellScript "boat-data-check" ''
+    if [ -e /etc/pandaos/data-disk ] && ! ${pkgs.util-linux}/bin/mountpoint -q ${cfg.dataDir}; then
+      echo "boat: ${cfg.dataDir} is not mounted, but this machine has a boat data disk" >&2
+      echo "  ($(cat /etc/pandaos/data-disk)). Refusing to write VM data to the system disk." >&2
+      echo "  Check: lsblk -f; journalctl -b -u '$(${config.systemd.package}/bin/systemd-escape -p --suffix=mount ${cfg.dataDir})'" >&2
       exit ${toString exConfig}
     fi
   '';
@@ -107,19 +120,39 @@ let
     "-ssh-user" "dev" # the guest image's login user
     "-desktop-url" "https://desktop.${cfg.domain}"
     "-desktop-key-file" "${cfg.dataDir}/secrets/desktop.key"
+    "-ssh-jump-keys-file" "${cfg.dataDir}/ssh/jump_authorized_keys"
+    "-vm-domain" cfg.vmDomain
   ]
   ++ lib.optionals cfg.sshGateway.enable [ "-ssh-jump" "jump@ssh.${cfg.domain}:${toString cfg.sshGateway.port}" ]
   ++ lib.optionals (imageIds != [ ]) [ "-images" (lib.concatStringsSep "," imageIds) ];
 in
 {
-  imports = [ ./gateway/module.nix ];
+  imports = [ ./gateway/module.nix ./ops.nix ];
 
   options.services.boat = {
     enable = lib.mkEnableOption "boat, persistent Firecracker microVMs for agents";
     domain = mkOption {
       type = types.strMatching "[a-z0-9]([a-z0-9.-]*[a-z0-9])?";
       example = "boat.example.com";
-      description = "Base domain: api., desktop., ssh. and *.vm. live under it (see docs/boat.md for DNS).";
+      description = "Base domain: api., desktop., *.desktop. and ssh. live under it (see docs/boat.md for DNS).";
+    };
+    vmDomain = mkOption {
+      type = types.strMatching "[a-z0-9]([a-z0-9.-]*[a-z0-9])?";
+      default = "vm.${cfg.domain}";
+      defaultText = lib.literalExpression ''"vm.''${config.services.boat.domain}"'';
+      example = "boatvms.example.net";
+      description = ''
+        Port routes live at `<port>-<vmid>.<vmDomain>`; that is tenant-controlled
+        content. Use a different registrable domain from {option}`domain` (or one
+        on the Public Suffix List), so tenant apps cannot set cookies for `api.`
+        or the desktops.
+      '';
+    };
+    desktopDomain = mkOption {
+      type = types.strMatching "[a-z0-9]([a-z0-9.-]*[a-z0-9])?";
+      default = "desktop.${cfg.domain}";
+      defaultText = lib.literalExpression ''"desktop.''${config.services.boat.domain}"'';
+      description = "Each VM's desktop is its own origin, `<vmid>.<desktopDomain>`.";
     };
     acmeEmail = mkOption {
       type = types.nullOr types.str;
@@ -225,6 +258,15 @@ in
       default = 8740;
       description = "boat-api listens on 127.0.0.1 only; Caddy publishes it as api.<domain>.";
     };
+    stopTimeoutSec = mkOption {
+      type = types.ints.positive;
+      default = 900;
+      description = ''
+        How long boatd may take to stop. On stop (reboot, shutdown) it pauses
+        every running VM and writes its memory to disk, in parallel; budget the
+        total RAM of all running VMs over the disk's write speed.
+      '';
+    };
     requireKvm = mkOption {
       type = types.bool;
       default = true;
@@ -271,7 +313,6 @@ in
     users.groups.boat = { };
 
     environment.etc."boat/boatd.json".text = builtins.toJSON boatdConfig;
-    environment.systemPackages = [ cfg.cliPackage ];
 
     systemd.tmpfiles.rules = [
       "d /run/boat 0750 root boat - -"
@@ -285,16 +326,45 @@ in
       "d ${cfg.dataDir}/ssh 0750 boat boat - -"
     ];
 
+    # Operator entry point to boat-api's admin commands with the sealed master
+    # key, e.g. `sudo boat-admin init -user me -team ops`.
+    environment.systemPackages = [
+      cfg.cliPackage
+      (pkgs.writeShellScriptBin "boat-admin" ''
+        [ "''${1-}" = init ] && shift
+        exec ${config.systemd.package}/bin/systemd-run --quiet --pipe --wait --collect \
+          -p User=boat -p Group=boat \
+          -p LoadCredentialEncrypted=${masterCred} \
+          -p RequiresMountsFor=${cfg.dataDir} \
+          ${lib.getExe' cfg.apiPackage "boat-api"} admin init -data ${cfg.dataDir}/api "$@"
+      '')
+    ];
+
     systemd.services.boat-secrets = {
-      description = "boat: create the desktop-link signing key";
+      description = "boat: create the desktop-link key and the sealed API master key";
       wantedBy = [ "multi-user.target" ];
       after = [ "systemd-tmpfiles-setup.service" ];
+      unitConfig.RequiresMountsFor = cfg.dataDir;
+      path = [ pkgs.coreutils config.systemd.package ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
         UMask = "0077";
       };
       script = ''
+        # boat-api's master key (seals secrets and webhook keys) lives only as a
+        # systemd credential, encrypted with the TPM2 when present and the host
+        # key (/var/lib/systemd/credential.secret). A plaintext key left by an
+        # older install is sealed, verified, then removed.
+        cred=${credFile} plain=${cfg.dataDir}/api/master.key
+        if [ ! -s "$cred" ]; then
+          if [ -s "$plain" ]; then src=$plain; else src=$(mktemp); head -c 32 /dev/urandom >"$src"; fi
+          systemd-creds encrypt --with-key=auto --name=boat-master-key "$src" "$cred.tmp"
+          systemd-creds decrypt --name=boat-master-key "$cred.tmp" - | cmp -s - "$src" ||
+            { echo "boat-secrets: sealed master key does not decrypt; keeping $src" >&2; rm -f "$cred.tmp"; exit 1; }
+          mv "$cred.tmp" "$cred"
+          if [ "$src" = "$plain" ]; then shred -u "$plain" 2>/dev/null || rm -f "$plain"; else rm -f "$src"; fi
+        fi
         f=${cfg.dataDir}/secrets/desktop.key
         if [ ! -s "$f" ]; then
           ${pkgs.coreutils}/bin/head -c 32 /dev/urandom >"$f.tmp"
@@ -331,16 +401,24 @@ in
       # auto-upgrade; a new boatd takes effect on reboot or a manual restart.
       restartIfChanged = false;
       stopIfChanged = false;
-      path = [ cfg.firecrackerPackage pkgs.iproute2 pkgs.nftables pkgs.e2fsprogs pkgs.btrfs-progs pkgs.util-linux ];
+      path = [
+        cfg.firecrackerPackage pkgs.iproute2 pkgs.nftables pkgs.coreutils pkgs.procps
+        pkgs.e2fsprogs pkgs.btrfs-progs pkgs.util-linux
+      ];
+      # VM disks live there: never start on (or write to) the bare mountpoint.
+      unitConfig.RequiresMountsFor = cfg.dataDir;
       serviceConfig = {
-        ExecStartPre = lib.optional cfg.requireKvm kvmCheck;
+        ExecStartPre = [ dataCheck ] ++ lib.optional cfg.requireKvm kvmCheck;
         ExecStart = lib.getExe' cfg.boatdPackage "boatd";
         Restart = "on-failure";
         RestartSec = 5;
         RestartPreventExitStatus = exConfig;
         # SIGTERM lets boatd pause/snapshot VMs; then everything in the cgroup dies.
         KillMode = "mixed";
-        TimeoutStopSec = 120;
+        TimeoutStopSec = cfg.stopTimeoutSec;
+        # The host OOM killer should take a VM, not the manager of all of them.
+        # boatd sets each Firecracker's oom_score_adj back up (they inherit this).
+        OOMScoreAdjust = -900;
         # jailer puts each Firecracker in a child cgroup of this unit.
         Delegate = true;
         # Root: jailer needs chroot/mknod/setuid/namespaces, boatd needs
@@ -363,8 +441,14 @@ in
       wants = [ "boatd.service" ];
       after = [ "boatd.service" "boat-secrets.service" "network-online.target" ];
       requires = [ "boat-secrets.service" ];
+      unitConfig.RequiresMountsFor = cfg.dataDir;
       serviceConfig = {
         ExecStart = lib.escapeShellArgs ([ (lib.getExe' cfg.apiPackage "boat-api") ] ++ apiArgs);
+        ExecStartPre = dataCheck;
+        RestartPreventExitStatus = exConfig;
+        # Read by boat-api from $CREDENTIALS_DIRECTORY/boat-master-key.
+        LoadCredentialEncrypted = masterCred;
+        OOMScoreAdjust = -900;
         User = "boat";
         Group = "boat";
         Restart = "always";

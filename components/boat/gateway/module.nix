@@ -1,26 +1,34 @@
 # boat edge: Caddy terminates TLS, boat-gateway routes by host, sshd's
 # `jump` user forwards ssh into VMs. Imported by ../module.nix.
 #
-#   api.<domain>                 -> boat-api (127.0.0.1:apiPort); /internal/* is never public
-#   desktop.<domain>/<vmid>/     -> boat-gateway -> VM desktop port (signed link -> cookie)
-#   <port>-<vmid>.vm.<domain>    -> boat-gateway -> VM ip:port (from /run/boat/routes.json)
+#   api.<domain>                  -> boat-api (127.0.0.1:apiPort); /internal/* is never public
+#   desktop.<domain>/<vmid>?sig   -> 302 to <vmid>.desktop.<domain> (nothing served or set here)
+#   <vmid>.desktop.<domain>       -> boat-gateway -> VM desktop (signed link -> host-only cookie)
+#   <port>-<vmid>.<vmDomain>      -> boat-gateway -> VM ip:port; private unless the port is public
 #   ssh -J jump@ssh.<domain>:2222 dev@<vm ip>   (permitopen per key, written by boat-api)
 #
-# boat-gateway re-reads routes.json on change, so Caddy is never reloaded for
-# VM or port changes. TLS for *.vm.<domain>: a wildcard via DNS-01 when
-# gateway.dnsProvider is set, else per-host HTTP-01 certs on demand, allowed
-# only for hosts boat-gateway confirms (its ask endpoint).
+# Each desktop and each port route is its own origin. boat-gateway re-reads
+# routes.json on change, so Caddy is never reloaded for VM or port changes.
+# TLS for the two wildcards: DNS-01 when gateway.dnsProvider is set, else
+# per-host HTTP-01 certs on demand, only for hosts boat-gateway confirms
+# (its ask endpoint).
 { config, lib, pkgs, ... }:
 let
   boat = config.services.boat;
   cfg = boat.gateway;
   inherit (lib) mkOption types;
   d = boat.domain;
+  inherit (boat) vmDomain desktopDomain;
+  tlsBlock = ''
+    tls {
+      ${if cfg.dnsProvider == null then "on_demand" else "dns ${cfg.dnsProvider}"}
+    }
+  '';
   listen = "127.0.0.1:8742";
   askListen = "127.0.0.1:8743";
 
   jumpKeys = pkgs.writeShellScript "boat-jump-keys" ''
-    PATH=${pkgs.gnugrep}/bin
+    PATH=${lib.makeBinPath [ pkgs.gnugrep pkgs.gawk pkgs.jq pkgs.coreutils ]}
     ${builtins.readFile ./jump-keys.sh}
   '';
 in
@@ -49,8 +57,8 @@ in
       default = null;
       example = "cloudflare {env.CF_API_TOKEN}";
       description = ''
-        Caddy `dns` directive body for the DNS-01 wildcard certificate of
-        `*.vm.<domain>`. Null: per-host HTTP-01 certificates on demand instead
+        Caddy `dns` directive body for the DNS-01 wildcard certificates of
+        `*.<vmDomain>` and `*.<desktopDomain>` (the provider must manage both zones). Null: per-host HTTP-01 certificates on demand instead
         (first request to a new port URL waits for issuance; Let's Encrypt
         rate limits apply, see docs/boat.md).
       '';
@@ -82,13 +90,14 @@ in
             }
             reverse_proxy 127.0.0.1:${toString boat.apiPort}
           '';
-          "desktop.${d}".extraConfig = ''
+          ${desktopDomain}.extraConfig = ''
             reverse_proxy ${listen}
           '';
-          "*.vm.${d}".extraConfig = ''
-            tls {
-              ${if cfg.dnsProvider == null then "on_demand" else "dns ${cfg.dnsProvider}"}
-            }
+          "*.${desktopDomain}".extraConfig = tlsBlock + ''
+            header Referrer-Policy no-referrer
+            reverse_proxy ${listen}
+          '';
+          "*.${vmDomain}".extraConfig = tlsBlock + ''
             reverse_proxy ${listen}
           '';
         };
@@ -103,10 +112,13 @@ in
         after = [ "boat-secrets.service" ];
         requires = [ "boat-secrets.service" ];
         before = [ "caddy.service" ];
+        unitConfig.RequiresMountsFor = boat.dataDir;
         serviceConfig = {
           ExecStart = lib.escapeShellArgs [
             (lib.getExe cfg.package)
             "-domain" d
+            "-vm-domain" vmDomain
+            "-desktop-domain" desktopDomain
             "-listen" listen
             "-ask-listen" askListen
             "-routes" "/run/boat/routes.json"
@@ -165,7 +177,7 @@ in
           AllowUsers jump
         Match User jump
           AuthorizedKeysFile none
-          AuthorizedKeysCommand /etc/boat/jump-keys ${boat.dataDir}/ssh/jump_authorized_keys
+          AuthorizedKeysCommand /etc/boat/jump-keys ${boat.dataDir}/ssh/jump_authorized_keys /run/boat/routes.json
           AuthorizedKeysCommandUser boat
           AllowTcpForwarding local
           AllowAgentForwarding no

@@ -2,34 +2,51 @@
 
 `boat` turns one dedicated server into a self-hosted alternative to boat.dev.
 Each agent gets a persistent Firecracker microVM, and you get an API, a CLI,
-SDKs, ssh, public port URLs, a browser desktop, forks and snapshots. The
-server profile (`nixos/profiles/server.nix`) is headless PandaOS with
+SDKs, ssh, port URLs, a browser desktop, forks and snapshots. The server
+profile (`nixos/profiles/server.nix`) is headless PandaOS with
 `services.boat.enable = true`.
 
 | Part | Where | What it does |
 |---|---|---|
-| `boatd` | `components/boat/boatd` | Root VM manager: Firecracker + jailer, tap/bridge `boatbr0`, `10.200.0.0/16` NAT, nftables tenant isolation, snapshots. Writes `/run/boat/routes.json`. |
-| `boat-api` | `components/boat/api` | Public REST API on 127.0.0.1:8740 (keys, teams, secrets, webhooks, metering). Runs as user `boat` and talks to boatd's socket. |
-| `boat` | `components/boat/cli`, `sdk` | CLI (`--json` everywhere) and SDKs. |
-| guest | `components/boat/guest` | Ubuntu 24.04 rootfs + kernel, with the `boat-agent` and a KasmVNC desktop on guest port 6080. |
-| gateway | `components/boat/gateway` | Caddy (TLS), `boat-gateway` (HTTP routes, desktop links) and the ssh jump host. |
-| module | `components/boat/module.nix` | NixOS options and units for all of the above. |
+| `boatd` | `components/boat/boatd` | Root VM manager: Firecracker + jailer, bridge `boatbr0`, `10.200.0.0/16` NAT, nftables tenant isolation, snapshots. Writes `/run/boat/routes.json`. |
+| `boat-api` | `components/boat/api` | REST API on 127.0.0.1:8740 (keys, teams, secrets, webhooks, metering, link minting). User `boat`. |
+| `boat` | `components/boat/cli`, `sdk` | CLI (`--json` everywhere) and the Python/TypeScript SDKs. |
+| guest | `components/boat/guest` | Ubuntu 24.04 rootfs + kernel with `boat-agent`; the `full` image adds a KasmVNC desktop on guest port 6080. |
+| gateway | `components/boat/gateway` | Caddy (TLS), `boat-gateway` (port routes, desktops) and the ssh jump host. |
+| module | `components/boat/module.nix`, `ops.nix` | NixOS options and units: the above plus reboot detection, maintenance reboots, backups. |
 
-## Setup on a dedicated server (Hetzner, OVH)
+## Operator checklist
 
-1. **Hardware.** You need bare metal with VT-x or AMD-V. Run `ls /dev/kvm` in the rescue system to check. A cloud VM works only if the provider offers nested virtualization. Without `/dev/kvm`, boatd refuses to start and logs `boatd: /dev/kvm is missing ...`, with exit code 78 and no restart loop.
-2. **Install.** Boot the PandaOS ISO (Hetzner: mount it as a virtual ISO in the Robot console or via KVM-over-IP; OVH: IPMI). Then run:
+Before you hand out API keys:
+
+1. **Hardware with KVM.** `ls /dev/kvm` in the rescue system. Without it, boatd refuses to start (`boatd: /dev/kvm is missing ...`, exit 78, no restart loop).
+2. **Two domains.** Pick a base domain (`boat.example.com`) and a **separate registrable domain for tenant port routes** (`boatvms.example.net`, or a name under a suffix on the [Public Suffix List](https://publicsuffix.org/)). Set it as `services.boat.vmDomain`. The default, `vm.<domain>`, works, but then a tenant's app is a sibling of `api.` and the desktops and can set cookies on the parent domain.
+3. **DNS** (see below), including both wildcards.
+4. **TLS.** A DNS-01 provider for the wildcards, or accept the HTTP-01 fallback's limits.
+5. **Backups.** Set `services.boat.backup` to a restic repository you control, keep the repository password off the box, and keep an offline copy of the master key (see "Secrets").
+6. **Reboot schedule.** Turn on `services.boat.maintenance.reboot` (default: Sunday 04:00, only when a reboot is pending), or watch `boat_reboot_pending` and reboot by hand.
+7. **Abuse policy.** You are the hosting provider for everything your tenants run: public port URLs, outbound traffic from your IPs, mail, scanning and mining. Publish an acceptable-use policy, keep `abuse@` working for your provider (Hetzner and OVH forward complaints and can null-route the server), keep team quotas tight, and give keys only to people you trust. boat has no outbound rate limits or port 25 block yet; add an nftables rule if you need one (see "Honest gaps").
+8. **Monitoring.** node-exporter is on :9100 (not opened in the firewall). It includes the textfile metric `boat_reboot_pending`. Usage per team is at `GET /v1/usage`.
+
+## Install on a dedicated server (Hetzner, OVH)
+
+1. Boot the PandaOS ISO (Hetzner: virtual ISO in the Robot console or KVM-over-IP; OVH: IPMI).
+2. Run:
    ```sh
-   panda-install --profile server --disk /dev/nvme0n1 [--data-disk /dev/nvme1n1] \
-     --domain boat.example.com --acme-email ops@example.com --ssh-key "ssh-ed25519 ..."
+   panda-install --profile server --disk /dev/nvme0n1 --data-disk /dev/nvme1n1 \
+     --domain boat.example.com --acme-email ops@example.com \
+     [--ipv6-prefix 2a01:4f8:xxx:yyy:b0a7::/80] --ssh-key "ssh-ed25519 ..."
    ```
-   `--data-disk` formats the second disk as btrfs labelled `PANDADATA` and mounts it at `/var/lib/boat`. Without it, `/var/lib/boat` is a btrfs subvolume on the system disk. Either way, VM disks are reflink copies, so fork and snapshot cost no extra space. For a two-disk mirror, convert later with `btrfs device add` and `btrfs balance start -dconvert=raid1 -mconvert=raid1`. *(`--profile server`, `--data-disk`, `--domain` and `--acme-email` need installer support; see "Integration notes".)*
-3. **Configure** in `/etc/pandaos/local.nix`, then `sudo nixos-rebuild switch`:
+   `--data-disk` erases the second disk and formats it as btrfs (`PANDADATA`) for `/var/lib/boat`. It is pinned by UUID as a required mount in `/etc/pandaos/disk.nix` and recorded in `/etc/pandaos/data-disk`. If that disk is ever missing, boatd and boat-api refuse to start rather than write VM data to the system disk. Without `--data-disk`, `/var/lib/boat` is a btrfs subvolume on the system disk. VM disks are reflink copies either way, so fork and snapshot are near-free. To mirror later: `btrfs device add` + `btrfs balance start -dconvert=raid1 -mconvert=raid1`.
+   *The ISOs need the server system on board for `--profile server`; see "Integration notes".*
+3. Reboot, log in, and apply your settings now (the daily update would also do it):
+   ```sh
+   sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
+   ```
+4. Add more settings to `/etc/pandaos/local.nix`:
    ```nix
    services.boat = {
-     domain = "boat.example.com";
-     acmeEmail = "ops@example.com";
-     ipv6Prefix = "2a01:4f8:xxx:yyy:b0a7::/80";   # optional, see IPv6 below
+     vmDomain = "boatvms.example.net";
      images."ubuntu-24.04/vmlinux" = { url = "https://.../vmlinux"; sha256 = "..."; };
      images."ubuntu-24.04/rootfs.ext4.zst" = { url = "https://.../rootfs-full.ext4.zst"; sha256 = "..."; };
      gateway.caddyPackage = pkgs.caddy.withPlugins {
@@ -37,133 +54,164 @@ server profile (`nixos/profiles/server.nix`) is headless PandaOS with
      };
      gateway.dnsProvider = "cloudflare {env.CF_API_TOKEN}";
      gateway.environmentFile = "/var/lib/secrets/caddy-dns.env";   # CF_API_TOKEN=...
+     backup = {
+       enable = true;
+       repository = "sftp:u123@u123.your-storagebox.de:/boat";
+       passwordFile = "/var/lib/secrets/restic-boat.pass";
+     };
+     maintenance.reboot = true;
    };
    ```
-   Until a domain is set, the profile uses `boat.localhost`, which Caddy serves from its own local CA.
-4. **First admin key:** `sudo -u boat boat-api admin init -data /var/lib/boat/api` prints an owner API key once. Then run `boat login`.
+5. **First admin key:** run `sudo boat-admin init -user me -team ops`. It prints an owner API key once. boat-admin runs `boat-api admin init` as `boat` with the sealed master key. Then run `boat login --url https://api.boat.example.com --key ...`.
 
 ### DNS records
-
-Use `boat.example.com` as the base domain and the server's addresses:
 
 | Name | Type | Value |
 |---|---|---|
 | `api.boat.example.com` | A / AAAA | server |
 | `desktop.boat.example.com` | A / AAAA | server |
+| `*.desktop.boat.example.com` | A / AAAA | server (one origin per VM desktop) |
 | `ssh.boat.example.com` | A / AAAA | server |
-| `*.vm.boat.example.com` | A / AAAA | server |
+| `*.boatvms.example.net` (= `vmDomain`) | A / AAAA | server (port routes `<port>-<vmid>.<vmDomain>`) |
 
-Port URLs look like `https://<port>-<vmid>.vm.boat.example.com`.
+### TLS
 
-### TLS: wildcard (DNS-01) or per-host (HTTP-01)
-
-- **Wildcard (recommended).** Set `gateway.dnsProvider` and a Caddy build that has the matching [caddy-dns](https://github.com/caddy-dns) plugin (`pkgs.caddy.withPlugins`). Caddy gets one `*.vm.<domain>` certificate through DNS-01. New port URLs then work instantly and no hostnames show up in Certificate Transparency logs.
-- **Fallback, no DNS API.** Leave `dnsProvider = null`. Caddy then gets a certificate per port URL on demand (HTTP-01/TLS-ALPN) on the first request. It asks boat-gateway's `ask` endpoint (127.0.0.1:8743) first, so certificates are issued only for live `<port>-<vmid>` routes. The costs: the first request to a new URL waits a few seconds; Let's Encrypt allows 50 certificates per registered domain per week, so churny port use can hit that limit; and every port URL is published in CT logs.
-- `api.`, `desktop.` and `ssh.` are fixed names and always use normal certificates (ssh needs none).
+- **Wildcards via DNS-01 (recommended).** Set `gateway.dnsProvider` and use a Caddy build with the matching [caddy-dns](https://github.com/caddy-dns) plugin. Caddy then gets `*.<desktopDomain>` and `*.<vmDomain>` certificates, so the provider must manage both zones. New VMs and ports work instantly, and their names stay out of Certificate Transparency logs.
+- **HTTP-01 fallback.** Leave `dnsProvider = null`. Caddy then gets one certificate per desktop and per port URL on the first request, after asking boat-gateway (127.0.0.1:8743) whether that host is live. The costs: a few seconds' wait on first use; Let's Encrypt's limit of 50 certificates per registered domain per week (a separate `vmDomain` gives routes their own budget); and every name is published in CT logs.
 
 ### IPv6 subnet routing
 
-- **Hetzner** routes a `/64` to the server. Use a sub-prefix for VMs, e.g. `ipv6Prefix = "2a01:4f8:a:b:b0a7::/80"`, and keep `::2` on the uplink. Because the /64 is routed (not on-link), no NDP proxy is needed.
-- **OVH** puts the `/64` on-link. Either ask OVH to route it, or enable NDP proxying (`net.ipv6.conf.<uplink>.proxy_ndp=1` plus `ip -6 neigh add proxy ...`, or `ndppd`). The module sets `accept_ra=2` so the uplink still takes router advertisements while forwarding is on.
-- **Extra IPv4.** Route additional IPs or a subnet to the server, list them in `publicIPv4Pool`, and boatd maps them 1:1 to VMs.
+- **Hetzner** routes a `/64` to the server. Give VMs a sub-prefix such as `2a01:4f8:a:b:b0a7::/80` and keep `::2` on the uplink; no NDP proxy is needed.
+- **OVH** puts the `/64` on-link. Either have it routed, or use NDP proxying (`proxy_ndp=1` + `ip -6 neigh add proxy`, or `ndppd`). The module sets `accept_ra=2` so the uplink keeps taking RAs while forwarding.
+- **Extra IPv4:** route the addresses to the server and list them in `publicIPv4Pool`; boatd maps them 1:1 to VMs.
 
 ## Sizing
 
-The defaults are sizes `small` 2 vCPU/4 GiB, `default` 4/8, `large` 8/16 and `xlarge` 16/32, all with sparse disks, plus a team quota of 10 VMs / 32 vCPU / 64 GiB.
+The default sizes are `small` 2 vCPU/4 GiB, `default` 4/8, `large` 8/16 and `xlarge` 16/32, with sparse disks. The default team quota is 10 VMs / 32 vCPU / 64 GiB.
 
-- **RAM** is the limit. Firecracker does not overcommit guest memory the way balloons do. Budget about the sum of running VMs' `mem_mib` plus 2 GiB for the host. Stopped VMs cost only disk.
-- **CPU** may be overcommitted about 2-4x for agent workloads, which are mostly idle and waiting on LLMs.
-- **Disk**: about 3 GB per image, plus each VM's written blocks (reflink, copy-on-write). Snapshots of running VMs also store guest memory.
-- Example: an AX102 (16 cores, 128 GB RAM, 2x1.92 TB NVMe) fits about 14 `default` VMs running at once and hundreds stopped.
+- **RAM** is the limit, because guest memory is not overcommitted. Budget the sum of running VMs' memory plus 2 GiB for the host.
+- **Stop time.** On stop or reboot, boatd writes every running VM's memory to disk. `services.boat.stopTimeoutSec` (default 900 s) must cover the total RAM of running VMs divided by the disk's write speed. That is about 128 GiB at 1 GB/s ≈ 2-3 min, so 900 s leaves room.
+- **CPU** can be overcommitted about 2-4x for agent workloads, which mostly wait on LLMs.
+- **Disk** needs about 3 GB per image, plus the blocks each VM writes, plus memory snapshots.
+- **Example:** an AX102 (16 cores, 128 GB, 2x1.92 TB NVMe) runs about 14 `default` VMs at once and holds hundreds stopped.
 
 ## Gateway design
 
 ```
-Internet --443--> Caddy --api.D---------------------> boat-api 127.0.0.1:8740   (/internal/* -> 404)
-                        --desktop.D/<vmid>/---------> boat-gateway :8742 --> <vm ip>:6080 (guest token proxy)
-                        --<port>-<vmid>.vm.D--------> boat-gateway :8742 --> <vm ip>:<port>
+Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/internal/* -> 404)
+                        --desktop.D/<id>?sig----------> boat-gateway: 302 -> <id>.desktop.D (sets nothing)
+                        --<id>.desktop.D--------------> boat-gateway --> <vm ip>:6080 (guest token proxy)
+                        --<port>-<id>.<vmDomain>------> boat-gateway --> <vm ip>:<port>
          --2222--> sshd (user jump only) --direct-tcpip, permitopen--> <vm ip>:22
 ```
 
-- **HTTP routes.** boat-gateway is a small Go stdlib reverse proxy (websockets included). It re-reads `/run/boat/routes.json` whenever the file's mtime or size changes, so adding a port or a VM never reloads Caddy. Only ports a VM has published (`boat ports add`) are routed. Everything else returns 404. Port URLs are public; a VM service that needs auth must do it itself.
-- **Desktop links.** `GET /v1/vms/<id>/desktop` returns `https://desktop.D/<id>?exp=<unix>&sig=<hex HMAC-SHA256(key, "<id>.<exp>")>`, valid for 5 minutes by default. The gateway checks it, trades it for an HttpOnly, Secure cookie `boat_gw` scoped to `Path=/<id>/`, and redirects to a URL without the signature. The link is useless for any other VM. Toward the guest, the gateway strips the client's `boat_*` cookies and sends the guest proxy's `boat_desktop=<hex HMAC(key, "guest-desktop.<id>")>`. boat-api starts the guest desktop with that same token. `key` is `/var/lib/boat/secrets/desktop.key` (32 random bytes, 0600 `boat`), created once by `boat-secrets.service`.
-- **SSH** uses stock OpenSSH ProxyJump, chosen over sshpiper or a custom proxy. The reasons: no extra daemon or dependency, the Go side stays stdlib, and the bastion is plain sshd, already hardened and watched by sshguard. Usage:
+- **One origin per VM.** Each desktop is `<id>.desktop.D` and each port route is `<port>-<id>.<vmDomain>`. Session cookies are `__Host-` prefixed: host-only, `Secure`, `Path=/`, `HttpOnly`. Browsers refuse a `__Host-` cookie that carries a `Domain`, so a page on another VM's origin can neither read nor plant one. Desktop cookies are `SameSite=Strict`. The gateway sets them on a small same-origin page that then navigates on, because a Strict cookie set during a cross-site redirect chain is withheld. Every VM's credential is bound to its id by the HMAC: VM A's cookie or link gets 401/403 on VM B's origin. This is checked in the e2e.
+- **Desktop links.** `GET /v1/vms/<id>/desktop` returns `https://desktop.D/<id>?exp&sig` (sig = `hex(HMAC-SHA256(key, "<id>.<exp>"))`, 5 min by default). The gateway 302s it to `https://<id>.desktop.D/?exp&sig`, which checks the signature, sets `__Host-boat_gw` and drops the signature from the URL. Toward the guest, the gateway removes the client's `boat_*`/`__Host-boat_*` cookies and sends `boat_desktop=hex(HMAC(key, "guest-desktop.<id>"))`. boat-api starts the guest desktop with that same token.
+- **Port routes are private by default.** A route needs a token: `token = <exp>.hex(HMAC(key, "route.<port>-<id>.<exp>"))`, minted by `GET /v1/vms/<id>/ports/<port>/url` (`boat ports url VM PORT`). Programs send it as `X-Boat-Route-Token`; browsers open `…/?boat_exp&boat_sig` once, which sets the host-only `__Host-boat_route` (SameSite=Lax). A port is reachable without a token only if added with `--public`, which boatd lists in routes.json `"public"`. When the list is missing, routes stay private (fail-closed). Tokens and cookies never reach the VM.
+- **Live routes.** boat-gateway (Go stdlib, websockets included) re-reads `/run/boat/routes.json` whenever its mtime or size changes, so new VMs and ports never reload Caddy.
+- **SSH:** OpenSSH ProxyJump.
   ```sh
-  boat ssh <vmid>                                  # same, via ProxyCommand ssh -W
+  boat ssh <vmid>                                    # ProxyCommand ssh -W via the jump host
   ssh -J jump@ssh.boat.example.com:2222 dev@10.200.x.y
-  boat scp ./a.txt <vmid>:/tmp/a.txt               # via the files API
   ```
-  Port 2222 accepts only the system user `jump`. jump has no password, shell, tty, agent, X11 or socket forwarding (`ForceCommand false`). It can open only `direct-tcpip` channels to the targets its key's `permitopen="<ip>:22"` lists. boat-api writes those lines to `/var/lib/boat/ssh/jump_authorized_keys`. `/etc/boat/jump-keys`, the AuthorizedKeysCommand, passes only lines that start with `restrict,port-forwarding,permitopen="<ip>:22"`, so a bad write cannot grant more. The guest's `dev` user trusts the same public key; boat-api installs it. Port 22 is for admins as usual.
-  The trade-off: the user sees an IP rather than `ssh <vmid>@ssh.D`. An `~/.ssh/config` `Host *.boat` block with `ProxyJump` hides that. If `<vmid>@host` UX matters, swap in sshpiper (workingdir plugin) on 2222 later; the key file stays the same.
+  Port 2222 admits only the system user `jump`. jump has no password, shell, tty, agent, X11 or socket forwarding (`ForceCommand false`). It can open only `direct-tcpip` channels to the targets in its key's `permitopen="<ip>:22"`. boat-api writes those lines to `/var/lib/boat/ssh/jump_authorized_keys` and rebuilds them on grants, VM deletion and VM events. The AuthorizedKeysCommand `/etc/boat/jump-keys` passes only lines of exactly the form `restrict,port-forwarding,permitopen=...`. It also drops every target that is not a running VM in boatd's routes.json, so a grant dies the moment its VM stops, expires (TTL) or is deleted, even before boat-api prunes it. An IP reused by a new VM is never reachable with an old grant.
 
 ## Security model
 
-- **VM isolation.** Each VM is a KVM guest run by Firecracker, a small Rust VMM with a minimal device model, inside the jailer: its own uid/gid per VM (from 900000), a chroot, a mount namespace and its own cgroup under `boatd.service` (`Delegate=yes`), plus Firecracker's seccomp filters. A guest root exploit has to escape KVM first, then the jailed, unprivileged Firecracker process.
-- **Tenant network isolation.** Each VM gets a tap on `boatbr0`. boatd's nftables rules drop tap-to-tap traffic, except within one team when `allowIntraTeam` is set, and NAT only outbound traffic. VMs reach the host only on the ports open in the firewall (80/443/22/2222), never on 127.0.0.1 services (boat-api, the gateway, node-exporter).
-- **Host services.** boatd is the only root daemon (it needs KVM, taps, nftables and the jailer). boat-api and boat-gateway run as `boat` with a strict systemd sandbox: no capabilities, `ProtectSystem=strict`, a syscall filter and MemoryDenyWriteExecute. `/internal/*` API paths are never published. The boatd socket is 0660 `root:boat`.
-- **Secrets.** User secrets and webhook signing keys are AES-256-GCM sealed by boat-api's master key in `/var/lib/boat/api` (0700 `boat`); systemd `LoadCredential` is supported. API keys are stored only as salted HMACs. The desktop key and the jump key file never leave the host. Caddy's DNS token belongs in `gateway.environmentFile`, not in the Nix store.
-- **Host hardening** comes from PandaOS: nftables firewall, key-only ssh, sshguard, kernel sysctl hardening, daily unattended updates with health-check rollback. boatd is never restarted by an update (`restartIfChanged = false`), so VMs survive; it picks up a new version on reboot or `systemctl restart boatd`.
-- **Not defended:** a malicious server admin, side channels between VMs on shared cores (no core pinning yet), and DoS by one team against the host's uplink (no bandwidth shaping yet).
+- **VM isolation.** Each VM is a KVM guest run by Firecracker (a minimal Rust VMM) inside the jailer: its own uid/gid (from 900000), a chroot, a mount namespace, its own cgroup under `boatd.service`, and seccomp. A guest root exploit must escape KVM, then the jailed, unprivileged Firecracker process.
+- **Tenant network isolation.** Every VM has its own tap on `boatbr0`. nftables drops tap-to-tap traffic, except within a team that has `allowIntraTeam`, and NAT is outbound only. VMs reach the host only on the firewall's open ports (80/443/22/2222), never 127.0.0.1 services.
+- **Web isolation.** Every VM's desktop and every port route has its own origin and host-only `__Host-` cookies, and credentials are HMAC-bound to the VM (and port). Port routes are private by default. With a separate registrable `vmDomain`, tenant apps cannot touch `api.`/`desktop.` cookies either. `api.D` uses bearer tokens, not cookies.
+- **Host services.** boatd is the only root daemon. boat-api and boat-gateway run as `boat` with no capabilities, `ProtectSystem=strict`, a syscall filter and MemoryDenyWriteExecute. `/internal/*` is never published. The boatd socket is 0660 `root:boat`. boatd and boat-api have `OOMScoreAdjust=-900`, so the host OOM killer takes a VM before them. Both carry `RequiresMountsFor=/var/lib/boat`.
+- **Secrets.** Tenant secrets and webhook keys are AES-256-GCM sealed under boat-api's master key. That key exists on disk only as a systemd credential (`/var/lib/boat/secrets/boat-master-key.cred`), encrypted with the TPM2 when present plus the host key `/var/lib/systemd/credential.secret`, and handed to boat-api with `LoadCredentialEncrypted`. An older plaintext `master.key` is sealed, verified and deleted on upgrade. **Keep an offline copy:** `sudo systemd-creds decrypt --name=boat-master-key /var/lib/boat/secrets/boat-master-key.cred - | base64`. Without it, a new motherboard (TPM) or a lost credential.secret makes sealed secrets unreadable. API keys are stored as salted HMACs. The desktop/route HMAC key (`secrets/desktop.key`, 0600 `boat`) never leaves the host. Caddy's DNS token belongs in `gateway.environmentFile`.
+- **Host hardening** comes from PandaOS: nftables, key-only ssh, sshguard, sysctl hardening, daily updates with health-check rollback.
+- **Not defended:** a malicious server admin; side channels between VMs on shared cores (no core pinning); one team saturating the uplink or disk (no bandwidth/IOPS limits); and abuse from your IPs beyond what your policy and quotas stop.
+
+### Tenant model
+
+- **Teams** own VMs, secrets, webhooks and keys. A key belongs to one user in one team and has scopes (`vms:read`, `vms:write`, `exec`, `admin`). Admins manage members and secrets.
+- A team sees and reaches only its own VMs: API objects are filtered by team, nftables blocks other teams' VMs, jump grants list only the team's VM IPs, and every desktop link and route token is bound to one VM.
+- **Quotas** (`services.boat.quotas`, per-team overrides in boatd) cap VMs, vCPU and memory. Metering (`/v1/usage`) records VM-seconds per size and snapshot-days per team. There is no billing.
+
+## Upgrades and reboots
+
+- **Updates.** The daily unattended update (`updates.nix`) switches to the new system with a health check and rolls back on failure. boatd is never restarted by a switch (`restartIfChanged = false`), so running VMs are untouched. boat-api, boat-gateway and Caddy restart in seconds; the API's clients retry.
+- **Pending reboot.** `boat-reboot-check` (hourly) compares the booted kernel, initrd and modules, and boatd plus its config and Firecracker paths, with the installed ones. It logs `boat: reboot pending (changed: ...)`, writes `/run/boat/reboot-pending` and exports `boat_reboot_pending` (0/1) with a `reason` label.
+- **Maintenance reboot.** With `maintenance.reboot = true`, a timer (`onCalendar`, default Sunday 04:00, ±10 min) reboots when a reboot is pending (`onlyWhenPending = false` reboots every time). The reboot drains on its own: stopping boatd pauses and memory-snapshots every running VM (`stopTimeoutSec`), and boatd resumes them after boot, with processes, tmux sessions and open files intact. TCP connections into VMs drop.
+- **Manual:** `sudo systemctl restart boatd` applies a new boatd without a reboot (VMs snapshot and resume); `sudo reboot` for a kernel.
+- **Rollback:** pick the previous generation in the boot menu, or `sudo nixos-rebuild switch --rollback`. VM state on `/var/lib/boat` is independent of the system generation.
+
+## Backups
+
+`services.boat.backup` (restic, to a repository you provide):
+
+1. Each run (default 03:00, `Persistent`) takes a **read-only btrfs snapshot** of `/var/lib/boat`, so VM disks, memory snapshots, the API database and the sealed master key are consistent to one instant (crash-consistent).
+2. restic uploads the snapshot (images excluded; they are re-downloadable), the btrfs snapshot is deleted, and `pruneOpts` apply (7 daily, 4 weekly, 6 monthly).
+
+Restore onto a fresh boat host:
+1. Stop boatd and boat-api.
+2. `restic restore latest --target /` (the paths are `/var/lib/boat/.backup/...`; move them into `/var/lib/boat`).
+3. Restore the master key: `systemd-creds encrypt --name=boat-master-key <key> /var/lib/boat/secrets/boat-master-key.cred`.
+4. Start boatd and boat-api again.
+
+Test a restore before you need one.
 
 ## Feature parity with boat.dev
 
 | Feature | Here | Notes |
 |---|---|---|
-| Create / delete VMs | yes | `POST /v1/vms`, `boat new`; sizes and images from the module |
-| Stop / start | yes | the disk persists across stops |
-| Pause / resume (memory) | yes | Firecracker pause/resume and memory snapshots (boatd) |
-| Fork | yes | `POST /v1/vms/{id}/fork`; btrfs reflink, near-instant |
-| Snapshots | yes | create/list/delete; memory + disk (boatd restores from them) |
-| ssh | yes | ProxyJump via `ssh.<domain>:2222` |
-| scp / files | yes | `boat scp` via the files API; real `scp -J` works too |
-| Ports (public URLs) | yes | `https://<port>-<vmid>.vm.<domain>` |
-| Public IPs | partial | IPv6 per VM from `ipv6Prefix`; IPv4 only from `publicIPv4Pool`, otherwise NAT |
-| Desktop (browser) | yes | KasmVNC in the `full` image, signed links |
-| Prompt (run an agent) | yes | `POST /v1/vms/{id}/prompt` |
+| Create / delete VMs | yes | `boat new`, sizes and images from the module |
+| Stop / start | yes | the disk persists |
+| Pause / resume (memory) | yes | stop → start restores memory (same `boot_id`; e2e) |
+| Fork | yes | reflink, near-instant; new hostname, IP, machine-id, ssh host keys |
+| Snapshots | yes | create / list / delete, `new --snapshot` |
+| ssh | yes | ProxyJump via `ssh.<domain>:2222` (`boat ssh`); IP target, not `<vmid>@host` |
+| scp / files | yes | `boat scp` via the files API; `scp -J` works |
+| Ports | yes | `https://<port>-<id>.<vmDomain>`, **private by default** (token/cookie), `--public` to open |
+| Public IPs | partial | IPv6 per VM with `ipv6Prefix`; IPv4 only from `publicIPv4Pool`, otherwise NAT + host port forwards |
+| Desktop (browser) | yes | KasmVNC (`full` image), one origin per VM, signed links |
+| Prompt (run an agent) | yes | `boat prompt` |
 | CLI with JSON | yes | `--json` |
 | REST API | yes | `components/boat/api/openapi.json` |
-| SDKs | yes | `components/boat/sdk` |
-| Webhooks | yes | signed (`X-Boat-Signature`), delivery log, test |
+| SDKs | yes | Python, TypeScript |
+| Webhooks | yes | HMAC-signed, delivery log, test |
 | API keys, scopes | yes | |
-| Secrets | yes | sealed at rest, injected into VMs as env vars |
-| Teams, quotas | yes | default quota from `services.boat.quotas` |
-| Auto-stop on idle / TTL | yes | `idle_stop_s`, `ttl_s` per VM |
-| Metering | yes | `GET /v1/usage`: VM-seconds (per size), snapshot-days, per team |
+| Secrets | yes | sealed at rest, injected as env vars |
+| Teams, quotas | yes | |
+| Auto-stop on idle / TTL | yes | `idle_stop_s`, `ttl_s` |
+| Metering | yes | `/v1/usage`: VM-seconds by size, snapshot-days |
+| Backups | yes | restic of btrfs snapshots (operator-run) |
 | Billing | no | metering only; no payments, invoices or plans |
-| Regions | N/A | one server is one region; run several servers for more |
+| Regions | N/A | one server is one region |
+| HA / live migration | no | single host |
+| GPUs | no | Firecracker has no PCI passthrough |
 
 ### What the `boat-e2e` workflow proves
 
-`components/boat/e2e.sh` (first green: run 41286609943) runs real Firecracker (jailer on) on a GitHub
-KVM runner with boatd, boat-api and boat-gateway as plain processes, and drives everything through
-the `boat` CLI: `new` (slim image) and `new --image full`, `exec`, `ssh` via the returned endpoint,
-`scp` both ways, VM egress, secrets in the exec env, `ports add --public` (host port and gateway
-route), stop -> start as a memory restore (same `boot_id`, the guest's HTTP server survives), `fork`
-(file kept; new hostname, IP, machine-id and ssh host key; both running), snapshot + `new --snapshot`,
-`prompt` (a stub `claude` proves argv and env), `desktop` (signed link -> cookie -> KasmVNC page via
-boat-gateway), the team quota (429), TTL auto-stop, HMAC-valid webhooks (checked with the Python SDK),
-usage metering and `rm`. Its `METRIC` line records create, ssh-ready, fork, stop, resume and
-from-snapshot times and the image sizes.
+Both parts run on a GitHub KVM runner with real Firecracker (jailer on) and the real guest image.
 
-Not covered there: Caddy/TLS and the ssh jump host (only in `checks.boat-module`, with stubs), idle
-auto-stop, IPv6 and public IPv4, cross-team network isolation, boatd restart/reconcile, and the SDKs
-against a live server.
+1. `components/boat/e2e.sh` drives every feature through the `boat` CLI: new (slim/full), exec, ssh, scp, egress, secrets, ports, stop/start as memory restore, fork, snapshots, prompt, desktop, quota (429), TTL, signed webhooks, usage, rm.
+2. `components/boat/gateway/e2e-edge.sh` puts **real Caddy with its internal CA (`tls internal`)** and the **jump sshd on 2222** (module settings and filter) in front of a fresh stack. Every check runs over verified TLS:
+   - a private route gets 401 without a token and 200 with one (header, and link → host-only cookie); a token for another port gets 401; a public route gets 200;
+   - the desktop link moves to `<id>.desktop.D`, its `__Host-` cookie is host-only, and VM D's cookie/link get 401/403 on VM A's origin;
+   - `ssh -J jump@localhost:2222 dev@<vm>` and `boat ssh` through it work; the jump host gives no shell, refuses targets without a grant and other users on 2222, and the grant and routes are gone after `boat rm`;
+   - it then calls `guest/desktop-check.sh` (desktop websocket + a frame), `sdk/e2e-live.sh` and `api/e2e-auth.sh` against that stack. Any of the three that is missing is reported as a workflow warning, not a pass.
+
+`checks.boat-module` (NixOS VM, stubs for boatd and boat-api) proves the module itself: units, the sealed master key loaded into boat-api, the data-disk guard, the reboot metric, Caddy + gateway over TLS (private/public routes, per-VM desktop origins) and the jump host.
+
+Not covered: idle auto-stop, IPv6 and public IPv4, cross-team network isolation between live VMs, boatd restart/reconcile under load, backup/restore, maintenance reboots and the installer's `--data-disk` path.
 
 ## Honest gaps
 
-- **One host.** No live migration, no cross-host scheduling and no HA. If the box dies, its VMs go down with it. Back up `/var/lib/boat` with `btrfs send` of snapshots.
-- **No nested KVM inside guests.** Docker works in VMs; KVM in VMs does not.
-- **No GPUs.** Firecracker has no PCI passthrough.
-- **SSH UX** is `-J jump@... dev@<ip>` (wrapped by `boat ssh`), not `ssh <vmid>@host`.
-- **HTTP-01 fallback** limits: CT-log exposure, Let's Encrypt rate limits, and a first-request delay.
-- **Port URLs are public.** There is no per-port auth option yet.
-- **No bandwidth or IOPS limits per VM** yet; CPU and memory are limited by size.
-- **Guest images** must be published (URL + sha256) before `boat-images` has anything to fetch. Until then, build them with `components/boat/guest/build.sh` and copy them to `/var/lib/boat/images/<id>/`.
-- **Metrics:** node-exporter (:9100, not opened in the firewall) covers the host. There is no per-VM Prometheus endpoint; `GET /v1/usage` has the per-VM numbers.
+- **One host:** no HA, migration or cross-host scheduling.
+- **No GPUs, no nested KVM** in guests (Docker works).
+- **SSH UX** is `-J jump@… dev@<ip>` (wrapped by `boat ssh`).
+- **No egress controls:** no bandwidth/IOPS limits, no port-25 block, no per-team egress rate limit. Add nftables rules for your abuse policy.
+- **HTTP-01 fallback:** CT-log exposure, rate limits, first-request delay.
+- **The master key** is bound to this host's TPM/host key. Keep the offline copy, or a hardware change loses sealed secrets.
+- **Guest images** must be published (URL + sha256) for `boat-images`. Until then, build them with `components/boat/guest/build.sh` and copy them to `/var/lib/boat/images/<id>/`.
+- **Metrics:** host metrics and `boat_reboot_pending` only; per-VM numbers come from `/v1/usage`.
 
 ## Integration notes
 
-- **Flake.** Wired: `services.boat` is in `nixosModules.default` (off unless enabled), `nixosModules.server`, `nixosConfigurations.server`, `packages.{boatd,boat-api,boat,boat-gateway}`. The ISOs do not ship the server profile yet: install `headless`, then switch to `server` (import `nixosModules.server` in `/etc/pandaos/flake.nix`).
-- **Tests.** `checks.boat-module` (`components/boat/vmtest.nix`: stub boatd/boat-api, real gateway, Caddy and sshd) and `checks.boat-packages` (Nix builds, so `go test`, of the four Go packages). The `boat-e2e` workflow runs `components/boat/e2e.sh` on a KVM runner: real guest image, boatd + boat-api + boat-gateway as processes, every feature through the `boat` CLI.
-- **Health.** Consider adding `boat-api.service`, `boat-gateway.service` and `caddy.service` to `panda-health`'s units in `nixos/modules/boot.nix`. Leave out `boatd`: on a box without KVM it fails on purpose.
-- **Installer** (`panda-install --profile server`): write `services.boat.domain` and `acmeEmail` into `local.nix` from `--domain`/`--acme-email`. For optional `--data-disk DEV`: `mkfs.btrfs -L PANDADATA DEV`; no fstab edit is needed, because the profile mounts the label with `nofail`. The installer's `disk.nix` can pin it by UUID like the other mounts.
+- **Flake.** `services.boat` is in `nixosModules.default`, with `nixosModules.server`, `nixosConfigurations.server` and the `boat*` packages. **Open:** the ISOs must carry the server system for `panda-install --profile server`. Add `"server"` to the `iso-desktop` targets (or a new `iso-server = mkIso system "headless" [ "headless" "server" ]`) and to `packages.panda-install`'s `systems` in `flake.nix`. Until then, install `headless` and change `profile = "server"` in `/etc/pandaos/flake.nix`.
+- **Health.** Consider adding `boat-api`, `boat-gateway` and `caddy` to `panda-health`'s units (`nixos/modules/boot.nix`). Leave out `boatd`, which fails on purpose without KVM.

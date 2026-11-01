@@ -20,25 +20,31 @@
   # Firewall: the gateway opens 80/443 (tcp) + 443 (udp, HTTP/3); the openssh
   # module opens 22 and the jump port 2222 (services.boat.sshGateway.port).
 
-  # Optional second disk for VM data: `panda-install --data-disk DEV` formats
-  # it btrfs, labelled PANDADATA. Without it, /var/lib/boat is a subvolume on
-  # the system disk (tmpfiles `v`). nofail + short timeout: a missing disk
-  # never blocks boot.
+  # VM data disk: `panda-install --data-disk DEV` formats it btrfs (label
+  # PANDADATA), writes /etc/pandaos/data-disk, and pins the mount by UUID in
+  # /etc/pandaos/disk.nix without nofail (from the first nixos-rebuild on).
+  # The prebuilt system copied at install time mounts by label with nofail,
+  # so a box without a second disk still boots; there /var/lib/boat is a
+  # btrfs subvolume on the system disk. boatd and boat-api refuse to start
+  # when /etc/pandaos/data-disk exists but the disk is not mounted, so they
+  # never write VM data to the bare mountpoint.
   fileSystems."/var/lib/boat" = {
     device = lib.mkDefault "/dev/disk/by-label/PANDADATA";
     fsType = "btrfs";
-    options = [
+    options = lib.mkDefault [
       "compress=zstd:1"
       "noatime"
       "nofail"
-      "x-systemd.device-timeout=5s"
+      "x-systemd.device-timeout=30s"
     ];
   };
 
   # Host metrics on :9100, not opened in the firewall: scrape over ssh,
   # WireGuard or add the port to networking.firewall.interfaces.<if>.
+  # boat-reboot-check writes boat_reboot_pending to the textfile collector.
   services.prometheus.exporters.node = {
     enable = true;
-    enabledCollectors = [ "systemd" ];
+    enabledCollectors = [ "systemd" "textfile" ];
+    extraFlags = [ "--collector.textfile.directory=/var/lib/boat-metrics" ];
   };
 }
