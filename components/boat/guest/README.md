@@ -171,7 +171,7 @@ and the connection stays usable.
 | `exec` | `argv, env?, cwd?, stdin_b64?, timeout_s? (600), tty?, user? ("dev")` | `{stream, data_b64}`... then `{exit, signal?, timed_out?}` |
 | `put_file` | `path, data_b64, mode? ("0644"), offset?, last? (true), owner?` | `{ok, size, complete}` |
 | `get_file` | `path` | `{offset, data_b64}` (1 MiB each)... then `{eof, size, mode}` |
-| `set_identity` | `hostname, ipv4_cidr, gw, dns, mac?, ipv6_cidr?, ipv6_gw?` | `{ok}` |
+| `set_identity` | `hostname, ipv4_cidr, gw, dns, mac?, ipv6_cidr?, ipv6_gw?` | `{ok, ms: {network, secrets}}` |
 | `set_env` | `vars` | `{ok, count}` |
 | `desktop` | `action: start\|stop\|status, token?` | `{ok, port, token, path}` / `{ok}` / `{ok, running, port}` |
 | `shutdown` | | `{ok}`, then the VM reboots and Firecracker exits |
@@ -204,6 +204,8 @@ Additions to the PROTOCOL.md contract (all optional):
   regenerated. If both requests carry `generation` (boatd's restore counter), they
   must match. A request that fails validation does not use up the reseed; a
   failure after validation does, so the host reseeds again before a retry.
+- `set_identity` replies once the new keys are on disk; sshd restarts just after
+  (`--no-block`), so a client may need to retry its first connection for a moment.
 - Host keys are ed25519 and ecdsa only. RSA keygen took a random 59-555 ms per key on
   an M-series Mac (the other two: ~25 ms), which showed up as `identity=349-1208ms`
   on forks in CI. No RSA host key means a client that only accepts RSA can't connect.
@@ -216,7 +218,7 @@ Additions to the PROTOCOL.md contract (all optional):
 
 ## Tests
 
-- `cd agent && python3 -m unittest -v test_boat_agent`: 20 tests over a socketpair
+- `cd agent && python3 -m unittest -v test_boat_agent`: 21 tests over a socketpair
   (exec streaming/exit/stdin/env/cwd/tty/3 MB output/timeout + group kill,
   set_env, chunked put/get, validation, reseed gating set_identity, sync, the
   desktop token check and proxy, and `desktop-check.sh` end to end through the

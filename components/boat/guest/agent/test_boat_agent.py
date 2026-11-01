@@ -16,6 +16,11 @@ agent = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(agent)
 
 
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
 class Client:
     def __init__(self):
         a, b = socket.socketpair()
@@ -189,14 +194,16 @@ class AgentTest(unittest.TestCase):
             self.assertEqual((m, fed), ({"ok": True, "bytes": 64}, [b"\x01" * 64]))
             # a bad request must not use up the reseed
             self.assertIn("error", self.c.call(dict(ident, hostname="bad!")))
-            self.assertEqual(self.c.call(ident), {"ok": True})
+            m = self.c.call(ident)
+            self.assertTrue(m["ok"], m)
+            self.assertEqual(sorted(m["ms"]), ["network", "secrets"])
             self.assertEqual(calls, ["net", "keys"])
             self.assertIn("reseed required", self.c.call(ident)["error"])  # used up
             # generation must match when given
             self.c.call({"op": "reseed", "entropy_b64": base64.b64encode(b"\x02" * 32).decode(),
                          "generation": 7})
             self.assertIn("generation", self.c.call(dict(ident, generation=6))["error"])
-            self.assertEqual(self.c.call(dict(ident, generation=7)), {"ok": True})
+            self.assertTrue(self.c.call(dict(ident, generation=7))["ok"])
         finally:
             agent.rnd_ioctl, agent.apply_network, agent.regenerate_secrets, agent.IDENTITY_FILE = saved
 
@@ -227,6 +234,19 @@ class AgentTest(unittest.TestCase):
 
     def test_sync(self):
         self.assertEqual(self.c.call({"op": "sync"}), {"ok": True})
+
+    def test_desktop_start_failure_explains_itself(self):
+        saved = agent.run, agent.wait_port, agent.os.path.exists
+        logs = types_ns(stdout="Xvnc did not start\n")
+        agent.run = lambda argv, check=True: logs
+        agent.wait_port = lambda addr, timeout: False
+        agent.os.path.exists = lambda p: True
+        try:
+            err = self.c.call({"op": "desktop", "action": "start"})["error"]
+        finally:
+            agent.run, agent.wait_port, agent.os.path.exists = saved
+        self.assertIn("did not come up", err)
+        self.assertIn("Xvnc did not start", err)
 
     def test_desktop_bad_action(self):
         self.assertIn("error", self.c.call({"op": "desktop", "action": "dance"}))

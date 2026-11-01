@@ -11,8 +11,14 @@ Xvnc :1 -interface 127.0.0.1 -rfbport 5901 -websocketPort 6081 \
   -FrameRate 60 -geometry "$GEOMETRY" -depth 24 -dpi 96 &
 xvnc=$!
 
-for _ in $(seq 100); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done
-xdpyinfo >/dev/null || { echo "Xvnc did not start" >&2; exit 1; }
+# Generous: exiting early makes systemd kill a slow Xvnc and start over from
+# scratch, which on a cold VM under load never catches up.
+for _ in $(seq 600); do
+  xdpyinfo >/dev/null 2>&1 && break
+  kill -0 "$xvnc" 2>/dev/null || { echo "Xvnc exited during startup" >&2; exit 1; }
+  sleep 0.1
+done
+xdpyinfo >/dev/null || { echo "Xvnc did not start in 60 s" >&2; exit 1; }
 xset s off -dpms || true
 
 dbus-run-session -- startxfce4 &

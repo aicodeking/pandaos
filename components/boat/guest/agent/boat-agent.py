@@ -43,6 +43,8 @@ IFACE = os.environ.get("BOAT_IFACE", "eth0")
 DESKTOP_PORT = 6080           # token-checking proxy, reached by the host
 DESKTOP_BACKEND = ("127.0.0.1", 6081)  # KasmVNC websocket/http, local only
 DESKTOP_UNIT = "boat-desktop.service"
+DESKTOP_START_TIMEOUT_S = 60  # a fresh VM starts Xvnc from a cold page cache
+DESKTOP_DIAG_CHARS = 1500
 DESKTOP_DISPLAY = ":1"
 TOKEN_COOKIE = "boat_desktop"
 HOST_KEY_TYPES = ("ed25519", "ecdsa")  # keep in sync with rootfs sshd HostKey lines
@@ -450,7 +452,9 @@ def regenerate_host_keys(ssh_dir):
 def regenerate_secrets():
     write_atomic("/etc/machine-id", uuid.uuid4().hex + "\n", 0o444)
     regenerate_host_keys("/etc/ssh")
-    run(["systemctl", "restart", "ssh.service"], check=False)  # also revives a failed sshd
+    # Keys are on disk now. Don't hold the reply for sshd's start; clients retry.
+    # restart (not reload) also revives a failed sshd.
+    run(["systemctl", "--no-block", "restart", "ssh.service"], check=False)
 
 
 def rnd_ioctl(data):
@@ -497,11 +501,14 @@ def op_sync(req, send):
 def op_set_identity(req, send):
     ident = validate_identity(req)
     take_reseed(req)
+    t0 = time.monotonic()
     apply_network(ident)
+    t1 = time.monotonic()
     regenerate_secrets()
+    t2 = time.monotonic()
     os.makedirs(os.path.dirname(IDENTITY_FILE), exist_ok=True)
     write_atomic(IDENTITY_FILE, json.dumps(ident), 0o600)
-    send({"ok": True})
+    send({"ok": True, "ms": {"network": round((t1 - t0) * 1000), "secrets": round((t2 - t1) * 1000)}})
 
 
 def restore_identity():
@@ -649,6 +656,16 @@ def desktop_running():
     return run(["systemctl", "is-active", "--quiet", DESKTOP_UNIT], check=False).returncode == 0
 
 
+def desktop_diagnostics():
+    """The unit's recent log, so a failed start explains itself in the API error."""
+    try:
+        out = run(["journalctl", "-u", DESKTOP_UNIT, "-n", "15", "--no-pager", "-o", "cat"],
+                  check=False).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        return "no journal: %s" % e
+    return out[-DESKTOP_DIAG_CHARS:].strip() or "no unit log"
+
+
 def op_desktop(req, send):
     action = req.get("action")
     if action == "start":
@@ -658,8 +675,9 @@ def op_desktop(req, send):
         if not re.match(r"^[A-Za-z0-9_-]{16,128}$", token):
             raise OpError("token must be 16-128 url-safe chars")
         run(["systemctl", "start", DESKTOP_UNIT])
-        if not wait_port(DESKTOP_BACKEND, 30):
-            raise OpError("desktop did not come up on %s:%d" % DESKTOP_BACKEND)
+        if not wait_port(DESKTOP_BACKEND, DESKTOP_START_TIMEOUT_S):
+            raise OpError("desktop did not come up on %s:%d: %s"
+                          % (DESKTOP_BACKEND + (desktop_diagnostics(),)))
         if _desktop["proxy"] is None:
             _desktop["proxy"] = start_proxy()
         _desktop["token"] = token
