@@ -30,12 +30,16 @@ jobs:
             fallback = true
             connect-timeout = 15
 
-      # Everything `nix flake check` does except building the checks. --no-build
-      # opens the store read-only, so the inputs have to be in it already.
-      - name: nix flake check --no-build
+      # What `nix flake check` validates besides the checks, which their own jobs
+      # evaluate. Not --no-build: its read-only store can't evaluate the NixOS tests.
+      - name: Evaluate the other flake outputs
         run: |
-          .github/scripts/nix-retry.sh eval.log nix flake archive --no-write-lock-file
-          .github/scripts/nix-retry.sh eval.log nix flake check --no-build --no-update-lock-file
+          set -euo pipefail
+          retry() { .github/scripts/nix-retry.sh eval.log "$@" --no-update-lock-file; }
+          retry nix flake show
+          retry nix eval --json .#nixosConfigurations --apply 'builtins.mapAttrs (_: c: c.config.system.build.toplevel.drvPath)'
+          retry nix eval --json .#packages.x86_64-linux --apply 'builtins.mapAttrs (_: p: p.drvPath)'
+          retry nix eval --raw .#formatter.x86_64-linux.drvPath
 
       - name: List the checks
         id: list
