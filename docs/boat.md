@@ -1,6 +1,6 @@
 # boat: self-hosted agent VMs on a dedicated server
 
-> **Status: pre-release.** No tagged release has shipped it. Do not offer it to untrusted tenants until
+> **Status: pre-release.** The first release has not been tagged, so no release has shipped it. Do not offer it to untrusted tenants until
 > you have done the [operator checklist](#operator-checklist) **and** had an external penetration test.
 > It has had internal review rounds only, and those kept finding serious bugs: the latest was a cross-tenant
 > desktop takeover through a same-site websocket. It is single-host, and it is not API-compatible with
@@ -192,7 +192,7 @@ Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list
 | | find in files, replace, upload/download URLs, artifacts | no | |
 | Connect | ssh | yes | through the jump host; IP target; no `boat ssh-config` for editors |
 | | VS Code, Cursor | partial | works with a hand-written `ProxyJump`; not automated |
-| | desktop in the browser | yes | KasmVNC (`full` image), websocket and first frame checked |
+| | desktop in the browser | partial | KasmVNC over a websocket (`full` image), no WebRTC. 1080p through the TLS edge in CI, software rendering: 34-40 fps shown, 47-55 decoded; 60 not reached. See [frame rate](#what-the-tests-prove) |
 | | browser-only view, record to MP4, custom wallpaper | no | |
 | | embed desktop in an iframe | no | refused on purpose, see Origin checks |
 | Public URLs | HTTPS port URL, token protection | yes | private by default |
@@ -213,7 +213,7 @@ Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list
 | | resize | unit | `boat resize` |
 | | nested virtualization, fail-fast | no | |
 | | Docker in the sandbox | yes | `full` image |
-| Agents | `boat prompt` | yes | with a stub agent; real agent only if CI has a key (`e2e-agent-from-env.sh` otherwise reports SKIPPED) |
+| Agents | `boat prompt` | partial | with a stub agent. No real agent has run: CI has no keys, so `e2e-agent-from-env.sh` reports SKIPPED |
 | | harnesses | partial | Claude Code, Codex, OpenCode preinstalled; boat.dev lists seven |
 | | async prompts, steer, conversations | yes | with a stub agent, through `sdk/e2e-live.sh` |
 | | interrupt | unit | |
@@ -238,6 +238,8 @@ Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list
 | Billing | metering | yes | `/v1/usage`; no prices |
 | | plans, wallets, invoices, trial | no | |
 | Integrations | Harbor, Eve adapters, Windows apps recipes | no | |
+| Guests | KVM inside a guest | no | off by design: a deliberate deviation, see [Honest gaps](#honest-gaps) |
+| Platforms | CLI on Windows | partial | `boat_windows_{amd64,arm64}.exe` are cross-compiled in `release.yml`; never run on Windows |
 | Hosted service | reliability, support, capacity | n/a | you run it: one host, no HA |
 
 ### What the tests prove
@@ -258,13 +260,17 @@ NixOS VM tests, with stubs for boatd and boat-api unless noted (`boat-install` a
 
 **Not tested by anything:** a running guest through a NixOS `switch`, boatd restart or reboot on NixOS (guest survival is only shown by `e2e-edge.sh` on Ubuntu, process survival only by `boat-real`, and no CI here boots a guest under NixOS, so try it on your hardware before you rely on it), `local.nix` taking effect after the first rebuild, real ACME/DNS-01, a real TPM, public IPv4, maintenance reboots, restoring a backup into a running service, and two tenants' real browsers.
 
-Desktop frame rate, from one CI run through the whole edge (TLS, gateway; run 41328694293, 2 vCPU, synthetic animation, runner load): 33.6 fps measured in real Chrome, 15.6 fps as raw 8bpp updates. Expect a different number on your hardware and over an internet link.
+Desktop frame rate at 1080p through the whole edge (TLS, gateway), measured in real Chrome on CI runners with software rendering, encoding and decoding: 34-40 fps shown and 47-55 fps decoded, across runs. 60 fps is not reached, and there is no WebRTC path. Details in `components/boat/guest/README.md`. Expect a different number on your hardware and over an internet link.
 
 ## Honest gaps
 
 - **Unreviewed:** no external penetration test. See the status note at the top.
 - **One host:** no HA, migration or cross-host scheduling.
-- **No GPUs, no nested KVM** in guests (Docker works).
+- **No GPUs, and guest KVM is off by design** (Docker works). This deviates from boat.dev on purpose: guests get no `/dev/kvm`.
+- **No guest is proven to survive a switch under NixOS.** Guest survival across a boatd restart is only shown on Ubuntu runners; see "Not tested by anything" above.
+- **No real agent run:** CI has no API keys, so agents are only exercised with a stub.
+- **Windows CLI:** cross-compiled only, never run on Windows. `install.sh` and `boat upgrade` were not tested there.
+- **First release not tagged:** `release.yml` has a `workflow_dispatch` dry run that builds every asset without publishing.
 - **Not API-compatible with boat.dev**, and much of the surface above is **unit** or **no**.
 - **SSH UX** is `-J jump@… dev@<ip>` (wrapped by `boat ssh`).
 - **Egress controls are basic:** SMTP is blocked by default and egress can be capped per VM (`egressMbit`), but there are no IOPS limits, no per-team egress budget and no destination filtering.
