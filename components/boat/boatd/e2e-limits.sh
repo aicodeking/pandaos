@@ -359,10 +359,16 @@ sudo sync
 avail=$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')
 echo "small btrfs after the fill ($(($(date +%s) - fill_t0)) s): ${avail} MiB available"
 sudo btrfs filesystem df -m "$SMALL" || true
-if [ "$avail" -ge 100 ]; then
+# btrfs holds back a global reserve (~256 MiB on this size) that df still counts as
+# available, so "full" can stop short of 100 MiB (run 41393227711: 257 MiB). Accept
+# that only with evidence the writer hit ENOSPC/EIO; above 512 MiB it never got full.
+guest_err=""
+grep -qE 'head=[1-9]|No space left|I/O error|Input/output error' "$WORK/fill.out" && guest_err=1
+if [ "$avail" -ge 512 ] || { [ "$avail" -ge 100 ] && [ -z "$guest_err" ]; }; then
   cat "$WORK/fill.out"; sudo dmesg | tail -40 || true
   fail "the fill left $avail MiB: the host disk never got full"
 fi
+echo "disk full: ${avail} MiB available (btrfs reserve), guest write error seen: ${guest_err:-no}"
 curl -fsS --unix-socket "$SOCK" http://boatd/v1/health >/dev/null || fail "boatd died on ENOSPC"
 [ "$(bdcode POST /v1/vms '{"name":"over","team":"lim"}')" = 507 ] || fail "create on a full disk: $(cat "$WORK/tmp/bd.out")"
 [ "$(bdcode POST "/v1/vms/$fill/snapshots" '{}')" = 507 ] || fail "snapshot on a full disk: $(cat "$WORK/tmp/bd.out")"
