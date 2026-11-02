@@ -30,9 +30,12 @@ jobs:
             fallback = true
             connect-timeout = 15
 
-      # Everything `nix flake check` does except building the checks.
+      # Everything `nix flake check` does except building the checks. --no-build
+      # opens the store read-only, so the inputs have to be in it already.
       - name: nix flake check --no-build
-        run: .github/scripts/nix-retry.sh eval.log nix flake check --no-build --no-update-lock-file
+        run: |
+          .github/scripts/nix-retry.sh eval.log nix flake archive --no-write-lock-file
+          .github/scripts/nix-retry.sh eval.log nix flake check --no-build --no-update-lock-file
 
       - name: List the checks
         id: list
