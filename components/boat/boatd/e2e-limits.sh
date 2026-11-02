@@ -350,13 +350,17 @@ fill=$(newvm '{"name":"fill","team":"lim"}')
 bx "$fill" 'resize2fs /dev/vda' >/dev/null 2>&1 || true
 [ "$(bx "$fill" 'df --output=size -BG / | tail -1' | tr -d ' G')" -ge 7 ] || fail "guest filesystem did not reach its disk size"
 fill_t0=$(date +%s)
+fill_pid=$(vmf "$fill" pid)
+fill_cg=/sys/fs/cgroup$(sudo sed -n 's/^0:://p' "/proc/$fill_pid/cgroup" || true)
+( while sudo kill -0 "$fill_pid" 2>/dev/null; do sudo cat "$fill_cg/memory.events" "$fill_cg/memory.current" >"$WORK/fill.mem" 2>/dev/null; sleep 1; done ) &
 bx "$fill" 'head -c 7G /dev/urandom >/home/dev/fill; echo "head=$?"; sync; echo "sync=$?"; dmesg | tail -5' >"$WORK/fill.out" 2>&1 || true
+echo "fill VM cgroup $fill_cg (alive: $(sudo kill -0 "$fill_pid" 2>/dev/null && echo yes || echo no)):"; cat "$WORK/fill.mem" 2>/dev/null | tr '\n' ' ' || true; echo
 sudo sync
 avail=$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')
 echo "small btrfs after the fill ($(($(date +%s) - fill_t0)) s): ${avail} MiB available"
 sudo btrfs filesystem df -m "$SMALL" || true
 if [ "$avail" -ge 100 ]; then
-  cat "$WORK/fill.out"; sudo btrfs filesystem usage "$SMALL" || true; dmesg | tail -20 || true
+  cat "$WORK/fill.out"; sudo dmesg | tail -40 || true
   fail "the fill left $avail MiB: the host disk never got full"
 fi
 curl -fsS --unix-socket "$SOCK" http://boatd/v1/health >/dev/null || fail "boatd died on ENOSPC"
