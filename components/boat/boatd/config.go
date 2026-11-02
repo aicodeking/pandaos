@@ -72,7 +72,8 @@ type Config struct {
 	HostReserveMiB int     `json:"hostReserveMiB"` // RAM kept for the host itself
 	HostMemMiB     int     `json:"hostMemMiB"`     // 0 = /proc/meminfo
 	HostCPUs       int     `json:"hostCPUs"`       // 0 = runtime.NumCPU
-	VMOverheadMiB  int     `json:"vmOverheadMiB"`  // cgroup memory.max = VM RAM + this
+	VMOverheadMiB  int     `json:"vmOverheadMiB"`  // cgroup memory.high = VM RAM + this
+	VMPageCacheMiB int     `json:"vmPageCacheMiB"` // memory.max = memory.high + this: host page cache of the VM's disk I/O
 	CgroupParent   string  `json:"cgroupParent"`   // jailer --parent-cgroup, outside boatd's unit so VMs survive a crash
 	BtrfsQgroups   bool    `json:"btrfsQgroups"`   // each VM dir is a subvolume with an exclusive-bytes limit
 	DiffSnapshots  bool    `json:"diffSnapshots"`  // dirty-page snapshots merged onto a reflinked base
@@ -132,6 +133,7 @@ func defaultConfig() Config {
 		CPUOvercommit:  4.0,
 		HostReserveMiB: 1024,
 		VMOverheadMiB:  256,
+		VMPageCacheMiB: 512,
 		DiffSnapshots:  true,
 		CgroupParent:   "boat-vms",
 		DiskMBps:       1000,
@@ -201,7 +203,7 @@ func (c Config) validate() error {
 	if c.MemOvercommit <= 0 || c.CPUOvercommit <= 0 || c.MinFreePct < 0 || c.MinFreePct > 90 || c.MinFreeGiB < 0 || c.ReapS < 1 {
 		return fmt.Errorf("memOvercommit/cpuOvercommit must be > 0, minFreePct 0-90, minFreeGiB >= 0, reapIntervalS >= 1")
 	}
-	for _, n := range []int{c.AIProxyPort, c.EgressMbit, c.IngressMbit, c.DiskMBps, c.DiskIOPS, c.IOMaxMBps, c.IOMaxIOPS, c.CtPerVM, c.MaxPortsPerVM} {
+	for _, n := range []int{c.AIProxyPort, c.EgressMbit, c.IngressMbit, c.DiskMBps, c.DiskIOPS, c.IOMaxMBps, c.IOMaxIOPS, c.CtPerVM, c.MaxPortsPerVM, c.VMOverheadMiB, c.VMPageCacheMiB} {
 		if n < 0 {
 			return fmt.Errorf("limits must be >= 0")
 		}

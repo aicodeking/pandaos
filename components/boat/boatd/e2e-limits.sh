@@ -334,10 +334,8 @@ bd DELETE "/v1/vms/$d1" >/dev/null
 
 log "limits e2e: a really full disk (small btrfs)"
 SMALL=/var/lib/boat-e2e-small
-# On a small btrfs, metadata chunks can run out first (ENOSPC with GiBs of data
-# space left: runs 41337017113, 41338947434). Mixed block groups instead go read-only
-# when full (run 41376747187). metadata_ratio=1 allocates a metadata chunk with every
-# data chunk, so data is what fills.
+# Split data/metadata chunks: mixed block groups went read-only when full (run
+# 41376747187). metadata_ratio=1 keeps metadata allocated ahead, so data is what fills.
 truncate -s 7G "$WORK/small.img" && mkfs.btrfs -q -f -m single "$WORK/small.img"
 sudo mkdir -p "$SMALL" && sudo mount -o loop,metadata_ratio=1 "$WORK/small.img" "$SMALL"
 sudo mkdir -p "$SMALL/images/slim"
@@ -354,7 +352,9 @@ fill_pid=$(vmf "$fill" pid)
 fill_cg=/sys/fs/cgroup$(sudo sed -n 's/^0:://p' "/proc/$fill_pid/cgroup" || true)
 ( while sudo kill -0 "$fill_pid" 2>/dev/null; do sudo cat "$fill_cg/memory.events" "$fill_cg/memory.current" >"$WORK/fill.mem" 2>/dev/null; sleep 1; done ) &
 bx "$fill" 'head -c 7G /dev/urandom >/home/dev/fill; echo "head=$?"; sync; echo "sync=$?"; dmesg | tail -5' >"$WORK/fill.out" 2>&1 || true
-echo "fill VM cgroup $fill_cg (alive: $(sudo kill -0 "$fill_pid" 2>/dev/null && echo yes || echo no)):"; cat "$WORK/fill.mem" 2>/dev/null | tr '\n' ' ' || true; echo
+echo "fill VM cgroup $fill_cg: $(cat "$WORK/fill.mem" 2>/dev/null | tr '\n' ' ' || true)"
+# A fast writer used to pin memory.max with host page cache and get OOM-killed.
+sudo kill -0 "$fill_pid" 2>/dev/null || { sudo dmesg | tail -40 || true; fail "the fill VM's firecracker died (OOM in its cgroup?)"; }
 sudo sync
 avail=$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')
 echo "small btrfs after the fill ($(($(date +%s) - fill_t0)) s): ${avail} MiB available"

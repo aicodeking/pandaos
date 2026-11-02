@@ -29,6 +29,21 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+func TestJailerMemoryLimits(t *testing.T) {
+	c := defaultConfig()
+	c.cgroupLimits = true
+	args := strings.Join(jailerArgs(c, VM{ID: "vm-x", MemMiB: 2048, VCPU: 2}, 900001, 900001, "/d"), " ")
+	for _, want := range []string{"memory.high=2415919104", "memory.max=2952790016", "cpu.max=300000 100000"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("missing %s in %s", want, args)
+		}
+	}
+	c.cgroupLimits = false
+	if args := strings.Join(jailerArgs(c, VM{ID: "vm-x", MemMiB: 2048}, 1, 1, "/d"), " "); strings.Contains(args, "memory.") {
+		t.Fatalf("limits without delegated controllers: %s", args)
+	}
+}
+
 func TestSetupBridge(t *testing.T) {
 	h := newFakeHost()
 	c := defaultConfig()
