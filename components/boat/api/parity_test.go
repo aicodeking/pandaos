@@ -1017,10 +1017,8 @@ func TestOpenTelemetry(t *testing.T) {
 	col := &collector{}
 	ts := httptest.NewServer(col)
 	defer ts.Close()
-	e.srv.otel = newOTel(ts.URL, map[string]string{"X-Vendor": "v"})
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { e.srv.otel.run(ctx); close(done) }()
+	otel := newOTel(ts.URL, map[string]string{"X-Vendor": "v"})
+	e.srv.otel = otel
 
 	trace := strings.Repeat("a", 32)
 	req, _ := http.NewRequest("GET", e.api.URL+"/v1/me", nil)
@@ -1033,6 +1031,13 @@ func TestOpenTelemetry(t *testing.T) {
 	resp.Body.Close()
 	id := e.createVM()
 	e.srv.hooks.handleRaw(context.Background(), "vm.state", `{"type":"vm.state","vm_id":"`+id+`","team":"`+e.teamID()+`","state":"running"}`)
+	// A span is queued after its response is written, so the client can get ahead of it.
+	waitFor(t, "two spans and a log queued", func() bool { return len(otel.spans) >= 2 && len(otel.logs) >= 1 })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { otel.run(ctx); close(done) }()
+	// run only flushes what it has taken off the queues when ctx ends (see its select).
+	waitFor(t, "queues drained", func() bool { return len(otel.spans) == 0 && len(otel.logs) == 0 })
 	cancel()
 	<-done // run flushes on the way out
 
