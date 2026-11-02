@@ -334,10 +334,12 @@ bd DELETE "/v1/vms/$d1" >/dev/null
 
 log "limits e2e: a really full disk (small btrfs)"
 SMALL=/var/lib/boat-e2e-small
-# Mixed block groups: on a small btrfs, split data/metadata chunks can run out of
-# metadata (ENOSPC) while df still shows GiBs of data space, which made this flaky.
-truncate -s 7G "$WORK/small.img" && mkfs.btrfs -q -f -M "$WORK/small.img"
-sudo mkdir -p "$SMALL" && sudo mount -o loop "$WORK/small.img" "$SMALL"
+# On a small btrfs, metadata chunks can run out first (ENOSPC with GiBs of data
+# space left: runs 41337017113, 41338947434). Mixed block groups instead go read-only
+# when full (run 41376747187). metadata_ratio=1 allocates a metadata chunk with every
+# data chunk, so data is what fills.
+truncate -s 7G "$WORK/small.img" && mkfs.btrfs -q -f -m single "$WORK/small.img"
+sudo mkdir -p "$SMALL" && sudo mount -o loop,metadata_ratio=1 "$WORK/small.img" "$SMALL"
 sudo mkdir -p "$SMALL/images/slim"
 sudo cp --sparse=always "$STATE/images/slim/vmlinux" "$STATE/images/slim/rootfs.ext4" "$SMALL/images/slim/"
 sudo sync
@@ -352,6 +354,7 @@ bx "$fill" 'head -c 7G /dev/urandom >/home/dev/fill; echo "head=$?"; sync; echo 
 sudo sync
 avail=$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')
 echo "small btrfs after the fill ($(($(date +%s) - fill_t0)) s): ${avail} MiB available"
+sudo btrfs filesystem df -m "$SMALL" || true
 if [ "$avail" -ge 100 ]; then
   cat "$WORK/fill.out"; sudo btrfs filesystem usage "$SMALL" || true; dmesg | tail -20 || true
   fail "the fill left $avail MiB: the host disk never got full"
