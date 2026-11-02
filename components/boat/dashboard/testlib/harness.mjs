@@ -84,12 +84,24 @@ function waitForDevtoolsUrl(proc) {
   });
 }
 
+// Signals a process group; false once no process is left in it.
+function killGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch (e) {
+    if (e.code === "ESRCH" || e.code === "EPERM") return false; // EPERM: macOS, only zombies left
+    throw e;
+  }
+}
+
 // Launches Chrome and opens one page. Records requests, CSP errors and console errors.
 export async function launch(chromePath, { width = 1280, height = 900 } = {}) {
   const profile = mkdtempSync(join(tmpdir(), "boat-dash-"));
   const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, `--window-size=${width},${height}`, "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-extensions", "--disable-gpu", "about:blank"];
   if (process.getuid?.() === 0) args.push("--no-sandbox");
-  const proc = spawn(chromePath, args, { stdio: ["ignore", "ignore", "pipe"] });
+  // Its own process group, so close() can stop and wait for the helpers too.
+  const proc = spawn(chromePath, args, { stdio: ["ignore", "ignore", "pipe"], detached: true });
   const wsUrl = await waitForDevtoolsUrl(proc);
   const port = new URL(wsUrl).port;
   const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();
@@ -168,10 +180,14 @@ export async function launch(chromePath, { width = 1280, height = 900 } = {}) {
     screenshot: async () => Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64"),
     close: async () => {
       ws.close();
-      const exited = new Promise((r) => proc.once("exit", r));
-      proc.kill("SIGKILL");
+      const exited = proc.exitCode !== null || proc.signalCode !== null || new Promise((r) => proc.once("exit", r));
+      killGroup(proc.pid, "SIGKILL");
       await exited;
-      rmSync(profile, { recursive: true, force: true });
+      // Chrome's helpers write the profile until the last of them is gone.
+      const deadline = Date.now() + 10000;
+      while (killGroup(proc.pid, 0) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      // A helper that left the group (crashpad) can still write; the retries cover it.
+      rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     },
   };
 }
