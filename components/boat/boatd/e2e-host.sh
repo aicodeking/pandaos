@@ -27,10 +27,10 @@ RESUME_MAX=${E2E_RESUME_MAX:-5}
 
 bd() { curl -fsS --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json' ${3:+-d "$3"}; }
 bdcode() { curl -s -o "$WORK/tmp/bd.out" -w '%{http_code}' --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json' ${3:+-d "$3"}; }
-# bx ID CMD -> stdout of `bash -c CMD` as root in the VM; non-zero unless it exits 0
+# bx ID CMD [TIMEOUT_S] -> stdout of `bash -c CMD` as root in the VM; non-zero unless it exits 0
 bx() {
   local out
-  out=$(bd POST "/v1/vms/$1/exec" "$(jq -nc --arg c "$2" '{argv: ["bash", "-c", $c], user: "root", timeout_s: 180}')") || return 1
+  out=$(bd POST "/v1/vms/$1/exec" "$(jq -nc --arg c "$2" --argjson t "${3:-180}" '{argv: ["bash", "-c", $c], user: "root", timeout_s: $t}')") || return 1
   [ "$(jq -s 'map(select(has("exit")))[0].exit' <<<"$out")" = 0 ] || { jq -rs 'map(select(.stream=="stderr").data_b64 | @base64d) | join("")' <<<"$out" >&2; return 1; }
   jq -rs 'map(select(.stream=="stdout").data_b64 | @base64d) | join("")' <<<"$out"
 }

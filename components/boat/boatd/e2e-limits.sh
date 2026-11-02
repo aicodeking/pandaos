@@ -343,46 +343,38 @@ sudo cp --sparse=always "$STATE/images/slim/vmlinux" "$STATE/images/slim/rootfs.
 sudo sync
 restart_boatd "$(cfg_with ".stateDir = \"$SMALL\" | .minFreeGiB = 1 | .minFreePct = 0" small)"
 fill=$(newvm '{"name":"fill","team":"lim"}')
-# Past what the host has: the guest gets I/O errors, not the host. Grow the guest's
-# filesystem first, or the fill ends on its ENOSPC (first boot grows it in the background).
+# Fill from the host, not by a guest writing past it: such a guest never errors
+# cleanly here, its writeback stalls (memory.high throttling on the VM cgroup), and
+# where it stalled decided pass or fail. Every run up to 41486010277 hit the exec
+# timeout (180 s, then 900 s); the disk was left at 1 or 257 MiB. dd to ENOSPC on the
+# host is deterministic. The guest first writes 3 GiB of its own (reclaimed by the
+# delete below), then writes into the full disk to show firecracker survives that.
 bx "$fill" 'resize2fs /dev/vda' >/dev/null 2>&1 || true
 [ "$(bx "$fill" 'df --output=size -BG / | tail -1' | tr -d ' G')" -ge 7 ] || fail "guest filesystem did not reach its disk size"
 fill_t0=$(date +%s)
 fill_pid=$(vmf "$fill" pid)
 fill_cg=/sys/fs/cgroup$(sudo sed -n 's/^0:://p' "/proc/$fill_pid/cgroup" || true)
 ( while sudo kill -0 "$fill_pid" 2>/dev/null; do sudo cat "$fill_cg/memory.events" "$fill_cg/memory.current" >"$WORK/fill.mem" 2>/dev/null; sleep 1; done ) &
-sudo btrfs filesystem usage -m "$SMALL" >"$WORK/fill.usage0" 2>&1 || true
-# Write past both the host's free space and the guest's 8 GiB disk, so the run ends
-# on an error either way. Not through bx: its 180 s exec timeout used to kill a slow
-# fill part-way (run 41470010397 attempt 2: 180 s, 257 MiB left, nothing captured,
-# because bx drops the output of a command that does not exit 0).
-fill_cmd='head -c 12G /dev/urandom >/home/dev/fill; echo "head=$?"; sync; echo "sync=$?"
-dmesg | grep -iE "I/O error|EXT4-fs (error|warning)|blk_update|No space" | tail -5; df -m /'
-bd POST "/v1/vms/$fill/exec" "$(jq -nc --arg c "$fill_cmd" '{argv: ["bash", "-c", $c], user: "root", timeout_s: 900}')" \
-  >"$WORK/fill.ndjson" 2>&1 || true
-jq -rs '(map(select(.stream).data_b64 | @base64d) | join("")),
-  "exec exit=\(map(select(has("exit")))[0].exit // "none") error=\(map(.error // empty) | join(";"))"' \
-  "$WORK/fill.ndjson" >"$WORK/fill.out" 2>&1 || cat "$WORK/fill.ndjson" >"$WORK/fill.out"
-echo "--- guest fill output"; cat "$WORK/fill.out"
-grep -q '^head=' "$WORK/fill.out" || fail "the fill's exec never finished (timeout or agent loss): $(tail -3 "$WORK/fill.out")"
+echo "--- host btrfs before the fill"; sudo btrfs filesystem usage -m "$SMALL" || true
+bx "$fill" 'head -c 3G /dev/urandom >/home/dev/own && sync' 600 >/dev/null || fail "guest could not write 3 GiB with the disk not yet full"
+sudo dd if=/dev/zero of="$SMALL/hostfill" bs=1M status=none 2>"$WORK/fill.dd" && fail "host fill ended without ENOSPC"
+grep -q 'No space left' "$WORK/fill.dd" || fail "host fill: $(cat "$WORK/fill.dd")"
+sudo btrfs filesystem sync "$SMALL"
+# btrfs frees reservations at commit: top up until nothing more fits.
+for _ in 1 2 3; do sudo dd if=/dev/zero of="$SMALL/hostfill" bs=1M oflag=append conv=notrunc status=none 2>/dev/null || true; sudo btrfs filesystem sync "$SMALL"; done
+avail=$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')
+echo "small btrfs after the host fill ($(($(date +%s) - fill_t0)) s): ${avail} MiB available"
+echo "--- host btrfs after the fill"; sudo btrfs filesystem usage -m "$SMALL" || true
+[ "$avail" -lt 100 ] || fail "the host fill left $avail MiB: the disk is not full"
+# The guest writes past what the host has. Bounded: it gets I/O errors or stalls,
+# both fine; what matters is that firecracker and boatd survive it.
+bx "$fill" 'timeout -k 5 60 head -c 1G /dev/urandom >/home/dev/over; echo "head=$?"
+dmesg | grep -ciE "I/O error|blk_update" | sed "s/^/guest I\/O error lines: /"' 120 >"$WORK/fill.out" 2>&1 || true
+echo "--- guest write into the full disk"; cat "$WORK/fill.out"
 echo "fill VM cgroup $fill_cg: $(cat "$WORK/fill.mem" 2>/dev/null | tr '\n' ' ' || true)"
 # A fast writer used to pin memory.max with host page cache and get OOM-killed.
 sudo kill -0 "$fill_pid" 2>/dev/null || { sudo dmesg | tail -40 || true; fail "the fill VM's firecracker died (OOM in its cgroup?)"; }
-sudo sync
-avail=$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')
-echo "small btrfs after the fill ($(($(date +%s) - fill_t0)) s): ${avail} MiB available"
-echo "--- host btrfs before the fill"; cat "$WORK/fill.usage0"
-echo "--- host btrfs after the fill"; sudo btrfs filesystem usage -m "$SMALL" || true
-# btrfs holds back a global reserve (~256 MiB on this size) that df still counts as
-# available, so "full" can stop short of 100 MiB (run 41393227711: 257 MiB). Accept
-# that only with evidence the writer hit ENOSPC/EIO; above 512 MiB it never got full.
-guest_err=""
-grep -qE 'head=[1-9]|No space left|I/O error|Input/output error' "$WORK/fill.out" && guest_err=1
-if [ "$avail" -ge 512 ] || { [ "$avail" -ge 100 ] && [ -z "$guest_err" ]; }; then
-  sudo dmesg | tail -40 || true
-  fail "the fill left $avail MiB: the host disk never got full"
-fi
-echo "disk full: ${avail} MiB available (btrfs reserve), guest write error seen: ${guest_err:-no}"
+echo "disk full: $(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ') MiB available"
 curl -fsS --unix-socket "$SOCK" http://boatd/v1/health >/dev/null || fail "boatd died on ENOSPC"
 [ "$(bdcode POST /v1/vms '{"name":"over","team":"lim"}')" = 507 ] || fail "create on a full disk: $(cat "$WORK/tmp/bd.out")"
 [ "$(bdcode POST "/v1/vms/$fill/snapshots" '{}')" = 507 ] || fail "snapshot on a full disk: $(cat "$WORK/tmp/bd.out")"
@@ -392,7 +384,7 @@ bd DELETE "/v1/vms/$fill" >/dev/null
 sudo btrfs filesystem sync "$SMALL"
 ok=""
 for _ in $(seq 60); do
-  [ "$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')" -gt 1100 ] && { ok=1; break; }
+  [ "$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')" -gt 2048 ] && { ok=1; break; }
   sleep 1
 done
 [ -n "$ok" ] || fail "space not reclaimed after the delete"
@@ -400,5 +392,6 @@ again=$(newvm '{"name":"again","team":"lim"}')
 [ "$(vmf "$again" agent_ready)" = true ] || fail "no recovery after ENOSPC: $(bd GET "/v1/vms/$again")"
 bd DELETE "/v1/vms/$again" >/dev/null
 restart_boatd "$WORK/boatd.json"
+sudo rm -f "$SMALL/hostfill"
 sudo umount -l "$SMALL"
 rm -f "$WORK/small.img"
