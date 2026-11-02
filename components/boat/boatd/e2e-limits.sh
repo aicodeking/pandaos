@@ -334,7 +334,9 @@ bd DELETE "/v1/vms/$d1" >/dev/null
 
 log "limits e2e: a really full disk (small btrfs)"
 SMALL=/var/lib/boat-e2e-small
-truncate -s 7G "$WORK/small.img" && mkfs.btrfs -q -f "$WORK/small.img"
+# Mixed block groups: on a small btrfs, split data/metadata chunks can run out of
+# metadata (ENOSPC) while df still shows GiBs of data space, which made this flaky.
+truncate -s 7G "$WORK/small.img" && mkfs.btrfs -q -f -M "$WORK/small.img"
 sudo mkdir -p "$SMALL" && sudo mount -o loop "$WORK/small.img" "$SMALL"
 sudo mkdir -p "$SMALL/images/slim"
 sudo cp --sparse=always "$STATE/images/slim/vmlinux" "$STATE/images/slim/rootfs.ext4" "$SMALL/images/slim/"
@@ -345,11 +347,15 @@ fill=$(newvm '{"name":"fill","team":"lim"}')
 # filesystem first, or the fill ends on its ENOSPC (first boot grows it in the background).
 bx "$fill" 'resize2fs /dev/vda' >/dev/null 2>&1 || true
 [ "$(bx "$fill" 'df --output=size -BG / | tail -1' | tr -d ' G')" -ge 7 ] || fail "guest filesystem did not reach its disk size"
-bx "$fill" 'head -c 7G /dev/urandom >/home/dev/fill; sync' >/dev/null 2>&1 || true
+fill_t0=$(date +%s)
+bx "$fill" 'head -c 7G /dev/urandom >/home/dev/fill; echo "head=$?"; sync; echo "sync=$?"; dmesg | tail -5' >"$WORK/fill.out" 2>&1 || true
 sudo sync
 avail=$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')
-echo "small btrfs after the fill: ${avail} MiB available"
-[ "$avail" -lt 100 ] || fail "the fill left $avail MiB: the host disk never got full"
+echo "small btrfs after the fill ($(($(date +%s) - fill_t0)) s): ${avail} MiB available"
+if [ "$avail" -ge 100 ]; then
+  cat "$WORK/fill.out"; sudo btrfs filesystem usage "$SMALL" || true; dmesg | tail -20 || true
+  fail "the fill left $avail MiB: the host disk never got full"
+fi
 curl -fsS --unix-socket "$SOCK" http://boatd/v1/health >/dev/null || fail "boatd died on ENOSPC"
 [ "$(bdcode POST /v1/vms '{"name":"over","team":"lim"}')" = 507 ] || fail "create on a full disk: $(cat "$WORK/tmp/bd.out")"
 [ "$(bdcode POST "/v1/vms/$fill/snapshots" '{}')" = 507 ] || fail "snapshot on a full disk: $(cat "$WORK/tmp/bd.out")"
