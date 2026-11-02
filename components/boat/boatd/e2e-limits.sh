@@ -351,21 +351,35 @@ fill_t0=$(date +%s)
 fill_pid=$(vmf "$fill" pid)
 fill_cg=/sys/fs/cgroup$(sudo sed -n 's/^0:://p' "/proc/$fill_pid/cgroup" || true)
 ( while sudo kill -0 "$fill_pid" 2>/dev/null; do sudo cat "$fill_cg/memory.events" "$fill_cg/memory.current" >"$WORK/fill.mem" 2>/dev/null; sleep 1; done ) &
-bx "$fill" 'head -c 7G /dev/urandom >/home/dev/fill; echo "head=$?"; sync; echo "sync=$?"; dmesg | tail -5' >"$WORK/fill.out" 2>&1 || true
+sudo btrfs filesystem usage -m "$SMALL" >"$WORK/fill.usage0" 2>&1 || true
+# Write past both the host's free space and the guest's 8 GiB disk, so the run ends
+# on an error either way. Not through bx: its 180 s exec timeout used to kill a slow
+# fill part-way (run 41470010397 attempt 2: 180 s, 257 MiB left, nothing captured,
+# because bx drops the output of a command that does not exit 0).
+fill_cmd='head -c 12G /dev/urandom >/home/dev/fill; echo "head=$?"; sync; echo "sync=$?"
+dmesg | grep -iE "I/O error|EXT4-fs (error|warning)|blk_update|No space" | tail -5; df -m /'
+bd POST "/v1/vms/$fill/exec" "$(jq -nc --arg c "$fill_cmd" '{argv: ["bash", "-c", $c], user: "root", timeout_s: 900}')" \
+  >"$WORK/fill.ndjson" 2>&1 || true
+jq -rs '(map(select(.stream).data_b64 | @base64d) | join("")),
+  "exec exit=\(map(select(has("exit")))[0].exit // "none") error=\(map(.error // empty) | join(";"))"' \
+  "$WORK/fill.ndjson" >"$WORK/fill.out" 2>&1 || cat "$WORK/fill.ndjson" >"$WORK/fill.out"
+echo "--- guest fill output"; cat "$WORK/fill.out"
+grep -q '^head=' "$WORK/fill.out" || fail "the fill's exec never finished (timeout or agent loss): $(tail -3 "$WORK/fill.out")"
 echo "fill VM cgroup $fill_cg: $(cat "$WORK/fill.mem" 2>/dev/null | tr '\n' ' ' || true)"
 # A fast writer used to pin memory.max with host page cache and get OOM-killed.
 sudo kill -0 "$fill_pid" 2>/dev/null || { sudo dmesg | tail -40 || true; fail "the fill VM's firecracker died (OOM in its cgroup?)"; }
 sudo sync
 avail=$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')
 echo "small btrfs after the fill ($(($(date +%s) - fill_t0)) s): ${avail} MiB available"
-sudo btrfs filesystem df -m "$SMALL" || true
+echo "--- host btrfs before the fill"; cat "$WORK/fill.usage0"
+echo "--- host btrfs after the fill"; sudo btrfs filesystem usage -m "$SMALL" || true
 # btrfs holds back a global reserve (~256 MiB on this size) that df still counts as
 # available, so "full" can stop short of 100 MiB (run 41393227711: 257 MiB). Accept
 # that only with evidence the writer hit ENOSPC/EIO; above 512 MiB it never got full.
 guest_err=""
 grep -qE 'head=[1-9]|No space left|I/O error|Input/output error' "$WORK/fill.out" && guest_err=1
 if [ "$avail" -ge 512 ] || { [ "$avail" -ge 100 ] && [ -z "$guest_err" ]; }; then
-  cat "$WORK/fill.out"; sudo dmesg | tail -40 || true
+  sudo dmesg | tail -40 || true
   fail "the fill left $avail MiB: the host disk never got full"
 fi
 echo "disk full: ${avail} MiB available (btrfs reserve), guest write error seen: ${guest_err:-no}"

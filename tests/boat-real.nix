@@ -113,7 +113,13 @@ pkgs.testers.runNixOSTest {
       with subtest("switch to the next generation: boatd and Firecracker untouched, boat-api updated"):
           boatd_before = machine.succeed("systemctl show -P MainPID boatd.service").strip()
           api_before = machine.succeed("systemctl show -P MainPID boat-api.service").strip()
-          machine.succeed("/run/current-system/specialisation/next/bin/switch-to-configuration test >&2", timeout=300)
+          # No unit blocks this switch: boatd is not restarted and boat-api stops in
+          # under 1 s. The time goes to the activation script itself (/etc, users,
+          # daemon-reload) in a nested VM that also runs a spinning L3 guest. Run
+          # 41470010397: attempt 1 took 205 s (16 s to /etc, 100 s from /etc to the
+          # unit restarts); attempt 2 needed 74 s just to reach /etc and passed the
+          # old 300 s limit inside that same /etc-to-restart step.
+          machine.succeed("/run/current-system/specialisation/next/bin/switch-to-configuration test >&2", timeout=900)
           assert machine.succeed("systemctl show -P MainPID boatd.service").strip() == boatd_before, "the switch restarted boatd"
           assert fc_pids() == pids, "the switch touched the VM's process"
           machine.wait_for_unit("boat-api.service")
