@@ -3,18 +3,28 @@ name: release
 # On a v* tag: check, build the ISOs, the boat CLI and guest images, publish a GitHub release, then move the
 # `release` branch to the tag. Installed boxes auto-update from
 # github:AICodeKing/pandaos/release, so that branch only moves after all of this passes.
+# Run by hand (workflow_dispatch), it is a dry run: the same checks and builds, the
+# assets kept as run artifacts, nothing attested or published and no branch moved.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions: {}
 
 # One release at a time, so the release branch can't be moved out of order.
+# Dry runs queue apart: GitHub drops a waiting run when a newer one joins its group.
 concurrency:
-  group: release
+  group: release-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
+  checks:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/nix-checks.yml
+    secrets: inherit
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 240
@@ -65,9 +75,6 @@ jobs:
           name: ${{ vars.CACHIX_CACHE || 'pandaos' }}
           authToken: ${{ env.CACHIX_AUTH_TOKEN }}
 
-      - name: nix flake check
-        run: .github/scripts/nix-retry.sh check.log nix flake check -L --keep-going --no-update-lock-file
-
       - name: Build ISOs
         run: |
           set -euo pipefail
@@ -83,6 +90,7 @@ jobs:
           tee -a "$GITHUB_STEP_SUMMARY" < SHA256SUMS
 
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        if: github.event_name == 'push'
         with:
           subject-path: dist/*.iso
 
@@ -110,15 +118,17 @@ jobs:
           go-version-file: components/boat/cli/go.mod
           cache: false
 
-      # boat_<os>_<arch> + boat_SHA256SUMS: what cli/install.sh and `boat upgrade` fetch.
+      # boat_<os>_<arch>[.exe] + boat_SHA256SUMS: what cli/install.sh and `boat upgrade` fetch.
       - name: Build the boat CLI
         run: |
           set -euo pipefail
           mkdir -p dist
-          for os in linux darwin; do
+          for os in linux darwin windows; do
+            ext=""
+            [ "$os" = windows ] && ext=.exe
             for arch in amd64 arm64; do
               (cd components/boat/cli && CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
-                -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o "$GITHUB_WORKSPACE/dist/boat_${os}_${arch}" .)
+                -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o "$GITHUB_WORKSPACE/dist/boat_${os}_${arch}${ext}" .)
             done
           done
           (cd dist && sha256sum boat_* > boat_SHA256SUMS)
@@ -147,6 +157,7 @@ jobs:
           tee -a "$GITHUB_STEP_SUMMARY" < dist/boat_guest_SHA256SUMS
 
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        if: github.event_name == 'push'
         with:
           subject-path: |
             dist/boat_*_*
@@ -160,7 +171,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [build, boat-assets]
+    if: github.event_name == 'push'
+    needs: [checks, build, boat-assets]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and move the release branch
