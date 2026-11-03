@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -98,6 +100,39 @@ func (m *Manager) convertImages() {
 			continue
 		}
 		log.Printf("images: %s converted to NOCOW in %dms", disk, time.Since(t0).Milliseconds())
+	}
+}
+
+// ---- cgroup memory limits ----
+
+func (c Config) memLimits(v VM) (high, hard int64) {
+	high = int64(v.MemMiB+c.VMOverheadMiB) << 20
+	return high, high + int64(c.VMPageCacheMiB)<<20
+}
+
+func (m *Manager) writeCgroup(v VM, file, val string) {
+	err := os.WriteFile(filepath.Join("/sys/fs/cgroup", m.cfg.CgroupParent, v.ID, file), []byte(val), 0)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) { // deleted meanwhile
+		log.Printf("%s: %s: %v", v.ID, file, err)
+	}
+}
+
+// liftMemLimits for a memory dump. Its page cache is charged to the paused VM, which
+// sits near memory.high: dumping 3.8 GiB took 22 s of reclaim, throttled to the
+// disk's speed (run 41584046201). A paused guest allocates nothing, and the guest
+// cannot pass its RAM once resumed; the limits come back when the dump is on disk.
+func (m *Manager) liftMemLimits(v VM) {
+	if m.cfg.cgroupLimits {
+		m.writeCgroup(v, "memory.max", "max")
+		m.writeCgroup(v, "memory.high", "max")
+	}
+}
+
+func (m *Manager) setMemLimits(v VM) {
+	if m.cfg.cgroupLimits {
+		high, hard := m.cfg.memLimits(v)
+		m.writeCgroup(v, "memory.high", strconv.FormatInt(high, 10)) // reclaims first
+		m.writeCgroup(v, "memory.max", strconv.FormatInt(hard, 10))
 	}
 }
 
@@ -323,6 +358,9 @@ func (m *Manager) buildWarm(ctx context.Context, image, size string) error {
 	withMem, err := m.freeze(ctx, v, tmp)
 	if err == nil && !withMem {
 		err = fmt.Errorf("no memory snapshot")
+	}
+	if err == nil {
+		err = fsyncFile(filepath.Join(tmp, memFile)) // creates clone it: flushed now, not by each of them
 	}
 	if err == nil {
 		err = writeJSONAtomic(filepath.Join(tmp, "warm.json"), map[string]string{"stamp": m.warmStamp(image)}, 0o600)

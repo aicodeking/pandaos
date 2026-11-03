@@ -23,6 +23,9 @@ import (
 // renamed over it. root/mem is only ever replaced, never modified in place, so
 // a running VM's backing file and its forks' copies stay intact.
 
+// reportDelay: the guest kernel reports freed pages after about 2 s.
+const reportDelay = 2500 * time.Millisecond
+
 const (
 	snapState = "snap." + vmstate
 	snapDiff  = "snap.diff"
@@ -33,42 +36,80 @@ const (
 // an updated root/mem. The VM stays paused: callers resume (fork, snapshot)
 // or kill (stop) it.
 func (m *Manager) takeSnapshot(ctx context.Context, v VM) (VM, error) {
+	diff, err := m.dumpSnapshot(ctx, v)
+	if err != nil {
+		return v, err
+	}
+	return m.installSnapshot(v, diff)
+}
+
+// dumpSnapshot leaves the VM paused and root/snap.vmstate + its memory (a sparse
+// diff if the return is true) written, not yet installed as root/mem.
+func (m *Manager) dumpSnapshot(ctx context.Context, v VM) (bool, error) {
 	root := m.root(v.ID)
 	t0 := time.Now()
 	m.guestSync(ctx, v)
 	t1 := time.Now()
 	fc := newFC(filepath.Join(root, apiSock))
 	if err := fc.pause(ctx); err != nil {
-		return v, err
+		return false, err
 	}
 	t2 := time.Now()
 	diff := m.cfg.DiffSnapshots && v.DiffOK
 	os.Remove(filepath.Join(root, memNew))
+	m.liftMemLimits(v)
 	var err error
 	if diff {
 		err = fc.snapshot(ctx, "Diff", snapState, snapDiff)
 	} else {
 		err = fc.snapshot(ctx, "Full", snapState, memNew)
 	}
-	t3 := time.Now()
+	if err != nil {
+		m.setMemLimits(v)
+		m.failSnapshot(v)
+		return false, err
+	}
 	written := allocatedBytes(filepath.Join(root, snapDiff)) + allocatedBytes(filepath.Join(root, memNew))
-	if err == nil && diff {
+	log.Printf("%s: snapshot (%s) sync=%dms pause=%dms write=%dms written=%dMiB", v.ID, map[bool]string{true: "diff", false: "full"}[diff],
+		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), time.Since(t2).Milliseconds(), written>>20)
+	return diff, nil
+}
+
+// failSnapshot drops a partial snapshot. Firecracker may have cleared its dirty
+// bitmap: only a full snapshot is safe next.
+func (m *Manager) failSnapshot(v VM) VM {
+	root := m.root(v.ID)
+	for _, f := range []string{snapDiff, memNew, snapState} {
+		os.Remove(filepath.Join(root, f))
+	}
+	nv, _ := m.update(v.ID, "", func(x *VM) { x.DiffOK = false })
+	return nv
+}
+
+// installSnapshot makes what dumpSnapshot wrote root/mem. The VM may be running:
+// root/mem is only replaced, and this is where a dirty base gets flushed (a reflink
+// waits for its source's writeback), which is no reason to keep the guest paused.
+func (m *Manager) installSnapshot(v VM, diff bool) (VM, error) {
+	root := m.root(v.ID)
+	t0 := time.Now()
+	var err error
+	if diff {
 		err = m.mergeDiff(v, filepath.Join(root, snapDiff), filepath.Join(root, memNew))
 	}
 	os.Remove(filepath.Join(root, snapDiff))
 	if err == nil {
+		err = sealMem(filepath.Join(root, memNew))
+	}
+	if err == nil {
 		err = os.Rename(filepath.Join(root, memNew), filepath.Join(root, memFile))
 	}
 	if err != nil {
-		os.Remove(filepath.Join(root, memNew))
-		os.Remove(filepath.Join(root, snapState))
-		// Firecracker may have cleared its dirty bitmap: only a full snapshot is safe next.
-		v, _ = m.update(v.ID, "", func(x *VM) { x.DiffOK = false })
-		return v, err
+		return m.failSnapshot(v), err
 	}
-	log.Printf("%s: snapshot (%s) sync=%dms pause=%dms write=%dms merge=%dms written=%dMiB", v.ID, map[bool]string{true: "diff", false: "full"}[diff],
-		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), time.Since(t3).Milliseconds(), written>>20)
-	return m.update(v.ID, "", func(x *VM) { x.DiffOK = m.cfg.DiffSnapshots })
+	t1 := time.Now()
+	nv, err := m.update(v.ID, "", func(x *VM) { x.DiffOK = m.cfg.DiffSnapshots })
+	log.Printf("%s: snapshot install merge=%dms state=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
+	return nv, err
 }
 
 // mergeDiff makes dst the VM's full memory: the data extents of the sparse
@@ -85,17 +126,41 @@ func (m *Manager) mergeDiff(v VM, diff, dst string) error {
 	if err := m.cp(base, dst); err != nil {
 		return err
 	}
+	if err := os.Chmod(dst, 0o600); err != nil { // the sealed base's mode came along
+		return err
+	}
 	if err := os.Truncate(dst, int64(v.MemMiB)<<20); err != nil {
 		return err
 	}
-	if err := copyExtents(diff, dst); err != nil {
-		return err
+	return copyExtents(diff, dst)
+}
+
+// sealMem: memory files are immutable, owned by root and world-readable, because
+// VMs of one team hard-link them (see copyMem). Only the VM's chroot reaches one.
+func sealMem(path string) error {
+	if os.Geteuid() == 0 {
+		if err := os.Chown(path, 0, 0); err != nil {
+			return err
+		}
 	}
-	uid, gid := m.ids(v)
-	if uid != 0 {
-		return os.Chown(dst, uid, gid)
+	return os.Chmod(path, 0o444)
+}
+
+// copyMem gives dst the memory file src. Within a team that is a hard link: no
+// flush of a dirty file (a reflink of 3.8 GiB waits for the disk, 15 s on the CI
+// runner) and no space. Across teams it must stay a clone: one inode means shared
+// host page cache, which is a page-sharing side channel between guests.
+func (m *Manager) copyMem(src, dst string, sameTeam bool) error {
+	if sameTeam {
+		if err := sealMem(src); err != nil {
+			return err
+		}
+		os.Remove(dst)
+		if os.Link(src, dst) == nil { // EXDEV across btrfsQgroups subvolumes
+			return nil
+		}
 	}
-	return nil
+	return m.cp(src, dst)
 }
 
 // copyExtents copies every data region of src (SEEK_DATA/SEEK_HOLE) to the
@@ -153,6 +218,15 @@ func (m *Manager) syncSnapshot(id string) {
 	m.update(id, "", func(x *VM) { x.SnapSynced = x.HasSnapshot })
 }
 
+// settleAfterDump starts the base's writeback now, so that the next merge finds
+// it clean, then gives the VM its memory limits back.
+func (m *Manager) settleAfterDump(v VM) {
+	if err := fsyncFile(filepath.Join(m.root(v.ID), memFile)); err != nil {
+		log.Printf("%s: flush mem: %v", v.ID, err)
+	}
+	m.setMemLimits(v)
+}
+
 func allocatedBytes(path string) int64 {
 	var st syscall.Stat_t
 	if syscall.Stat(path, &st) != nil {
@@ -203,6 +277,9 @@ func (m *Manager) guestSync(ctx context.Context, v VM) {
 	sock := filepath.Join(m.root(v.ID), vsockUDS)
 	var ae *agentErr
 	if _, err := agentCall(c, sock, map[string]any{"op": "sync", "drop_caches": m.cfg.SnapshotDropCaches}); err == nil || !errors.As(err, &ae) {
+		if err == nil && m.cfg.SnapshotDropCaches && m.cfg.mincoreTracking() {
+			time.Sleep(reportDelay) // mincore skips a free page only once it is reported
+		}
 		return
 	}
 	a, err := dialAgent(c, sock) // older agents: no "sync" op
@@ -233,33 +310,48 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 			files = append(files, vmstate, memFile)
 		}
 		for _, f := range files {
-			if err := m.cp(filepath.Join(root, f), filepath.Join(dst, f)); err != nil {
+			var err error
+			if f == memFile {
+				err = m.copyMem(filepath.Join(root, f), filepath.Join(dst, f), true)
+			} else {
+				err = m.cp(filepath.Join(root, f), filepath.Join(dst, f))
+			}
+			if err != nil {
 				return false, err
 			}
 		}
 		return v.HasSnapshot, nil
 	}
-	v, err := m.takeSnapshot(ctx, v)
+	diff, err := m.dumpSnapshot(ctx, v)
 	t0 := time.Now()
 	if err == nil {
 		err = m.cp(filepath.Join(root, diskFile), filepath.Join(dst, diskFile))
+		if err != nil {
+			m.failSnapshot(v)
+		}
 	}
 	t1 := time.Now()
 	if rerr := newFC(filepath.Join(root, apiSock)).resume(context.WithoutCancel(ctx)); rerr != nil {
 		log.Printf("%s: resume after snapshot: %v", v.ID, rerr)
 	}
+	if err != nil {
+		m.setMemLimits(v)
+		return false, err
+	}
 	// The rest is immutable (root/mem is only ever renamed over): no need to stay paused.
-	for _, f := range []string{kernFile, memFile, snapState} {
-		if err == nil {
-			target := f
-			if f == snapState {
-				target = vmstate
-			}
-			err = m.cp(filepath.Join(root, f), filepath.Join(dst, target)) // VM dirs may be subvolumes: no rename
-		}
+	_, err = m.installSnapshot(v, diff)
+	if err == nil {
+		err = m.cp(filepath.Join(root, kernFile), filepath.Join(dst, kernFile))
+	}
+	if err == nil {
+		err = m.copyMem(filepath.Join(root, memFile), filepath.Join(dst, memFile), true)
+	}
+	if err == nil {
+		err = m.cp(filepath.Join(root, snapState), filepath.Join(dst, vmstate)) // VM dirs may be subvolumes: no rename
 	}
 	os.Remove(filepath.Join(root, snapState))
-	log.Printf("%s: freeze disk=%dms copies=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
+	go m.settleAfterDump(v)
+	log.Printf("%s: freeze disk=%dms rest=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
 	return err == nil, err
 }
 

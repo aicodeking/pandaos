@@ -385,6 +385,7 @@ func (m *Manager) reconcile() error {
 		}
 		alive := v.PID > 0 && m.procs.Alive(v.PID, v.ID)
 		if alive && v.State == Running {
+			go m.setMemLimits(v) // a crash may have left them lifted for a dump
 			done := m.procs.Adopt(v.PID, v.ID)
 			m.dones[v.ID] = done
 			go m.watch(v.ID, v.PID, done)

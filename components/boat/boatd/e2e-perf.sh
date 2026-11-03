@@ -17,18 +17,17 @@ perf_cfg() { # JQ_FILTER NAME: the base config without the e2e's caps, plus JQ_F
   restart_boatd "$WORK/boatd-perf-$2.json"
 }
 perf_vm() { bd POST /v1/vms "$(jq -nc --arg n "$1" '{name: $n, team: "perf", size: "default"}')" | jq -r .id; }
-perf_del() { for v in "$@"; do bd DELETE "/v1/vms/$v" >/dev/null; done; }
+perf_del() { local d; for d in "$@"; do bd DELETE "/v1/vms/$d" >/dev/null; done; }
 # Same dirty state on every run: 2 GiB in tmpfs, 1 GiB of guest page cache.
+# (A first-touch random writer on a sparse disk is the worst case for extents:
+# 337k and a 2.2 s reflink in run 41584046201, not what boatbench's fio does.)
 perf_dirty() { bx "$1" 'mkdir -p /dev/shm/d && head -c 2G /dev/urandom >/dev/shm/d/dirty; head -c 1G /dev/urandom >/root/cache; sync; cat /root/cache >/dev/null' 300; }
-perf_rand() { # fragment the disk the way fio does in boatbench
-  bx "$1" 'fio --name=f --filename=/root/f --size=2G --direct=1 --ioengine=libaio --iodepth=32 --rw=randwrite --bs=4k --runtime=15 --time_based --output-format=json >/dev/null; sync' 200
-}
 vm_extents() { sudo filefrag "$STATE/vms/$1/firecracker/$1/root/rootfs.ext4" | awk '{print $2}'; }
 rss_mib() { # idle RSS of a VM's firecracker, and its cgroup's memory.current
   local pid; pid=$(vmf "$1" pid)
   echo "$(( $(sudo awk '/^VmRSS:/ {print $2}' "/proc/$pid/status") / 1024 )) $(( $(cat "/sys/fs/cgroup/boat-e2e/$1/memory.current") >> 20 ))"
 }
-last_snap_log() { sudo grep -E "snapshot \(|freeze " "$WORK/boatd.log" | tail -n 2 | sed -E 's/^[0-9/]+ [0-9:]+ //' | tr '\n' ' '; }
+last_snap_log() { sudo grep -E "snapshot |freeze " "$WORK/boatd.log" | tail -n 3 | sed -E 's/^[0-9/]+ [0-9:]+ //' | tr '\n' ' '; }
 sudo apt-get install -y -qq fio >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq fio >/dev/null; }
 (cd "$HERE/../../bench/boatbench" && python3 -c 'import workloads; print(workloads.DISK)') >"$WORK/tmp/disk.sh"
 
@@ -58,9 +57,10 @@ echo "extents after boatbench's fio: $(vm_extents "$pv")"
 log "perf e2e: snapshot, new-from-snapshot, fork (4/8, 2 GiB dirty, fragmented disk)"
 perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s forkN_s
   local v sn f; v=$(perf_vm "s$1")
-  bx "$v" 'command -v fio >/dev/null || { apt-get update -qq; apt-get install -y -qq fio; } >/dev/null 2>&1'
-  perf_rand "$v"
+  put_disk "$v"
+  bx "$v" 'bash /tmp/disk.sh' 300 >/dev/null
   perf_dirty "$v"
+  echo "$1: dirtying 4 GiB of tmpfs took $(bx "$v" 's=$(date +%s.%N); head -c 4G /dev/zero >/dev/shm/d/w; e=$(date +%s.%N); rm /dev/shm/d/w; awk -v a="$s" -v b="$e" "BEGIN {print b-a}"')s"
   echo "$1: extents $(vm_extents "$v"), guest $(bx "$v" 'free -m | awk "/Mem:/ {print \"used=\"\$3,\"cache=\"\$6}"')"
   local t; t=$(now); sn=$(bd POST "/v1/vms/$v/snapshots" '{"name":"x"}' | jq -r .id); snap_s=$(secs "$t" "$(now)")
   echo "$1: snapshot ${snap_s}s: $(last_snap_log)"
@@ -78,9 +78,12 @@ perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s
 }
 perf_snap kvm
 kvm_snap=$snap_s kvm_from=$fromsnap_s kvm_fork=$fork_s
-perf_cfg '.snapshotTracking = "mincore" | .snapshotDropCaches = true' mincore
+perf_cfg '.snapshotTracking = "mincore"' mincore
 perf_snap mincore
 min_snap=$snap_s min_from=$fromsnap_s min_fork=$fork_s
+perf_cfg '.snapshotTracking = "mincore" | .snapshotDropCaches = true' mincoredrop
+perf_snap mincoredrop
+mind_snap=$snap_s mind_from=$fromsnap_s mind_fork=$fork_s
 perf_del "$pv"
 
 log "perf e2e: density (idle default VMs)"
@@ -160,10 +163,11 @@ echo "METRIC $(jq -nc --argjson disk "$disk" --arg blk "$guest_blk" \
   --argjson csw "$c_sw" --argjson crw "$c_rw" --argjson crr "$c_rr" \
   --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" \
   --argjson ms "$min_snap" --argjson mf "$min_from" --argjson mk "$min_fork" \
+  --argjson ds "$mind_snap" --argjson df "$mind_from" --argjson dk "$mind_fork" \
   --argjson nbr "$nb_rss" --argjson nbc "$nb_cg" --argjson br "$b_rss" --argjson bc "$b_cg" \
   --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fb "$fit_before" --argjson fa "$fit_after" \
   --argjson ct "$cold_ten" --argjson wt "$warm_ten" \
   '{test: "boat-perf", disk: $disk, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
-    kvm: {snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk}, mincore: {snapshotS: $ms, fromSnapshotS: $mf, forkS: $mk},
+    kvm: {snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk}, mincore: {snapshotS: $ms, fromSnapshotS: $mf, forkS: $mk}, mincoreDrop: {snapshotS: $ds, fromSnapshotS: $df, forkS: $dk},
     idleRssMiB: {noBalloon: $nbr, balloon: $br, ksm: $kr}, idleCgroupMiB: {noBalloon: $nbc, balloon: $bc},
     ksmDedupMiB: $ksm, fitsIn8GiB: {before: $fb, after: $fa}, tenCreatesS: {cold: $ct, warm: $wt}}')"

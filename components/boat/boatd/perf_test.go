@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -241,5 +242,59 @@ func TestInterruptedTemplateBuildIsRemoved(t *testing.T) {
 	m.resumeAll(ctx)
 	if _, err := m.get(v.ID); !errors.Is(err, errNotFound) {
 		t.Fatalf("builder left behind: %v", err)
+	}
+}
+
+func TestMemFileHardLinkedWithinTeamOnly(t *testing.T) {
+	m, _ := newTestManager(t, func(c *Config) { c.WarmPool = true })
+	m.warmSettle = 0
+	ctx := context.Background()
+	p, err := m.Create(ctx, CreateReq{Team: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ino := func(path string) uint64 {
+		var st syscall.Stat_t
+		if err := syscall.Stat(path, &st); err != nil {
+			t.Fatal(err)
+		}
+		return uint64(st.Ino)
+	}
+	eventually(t, "template", func() bool { return m.warmTemplate(p.Image, p.Size) != "" })
+	sn, err := m.CreateSnapshot(ctx, p.ID, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapMem := filepath.Join(m.snapDir(sn.ID), memFile)
+	if st, _ := os.Stat(snapMem); st.Mode().Perm() != 0o444 {
+		t.Fatalf("mem not sealed: %v", st.Mode())
+	}
+	if ino(filepath.Join(m.root(p.ID), memFile)) != ino(snapMem) {
+		t.Fatal("snapshot mem is not the parent's inode")
+	}
+	s1, err := m.Create(ctx, CreateReq{Team: "t", Snapshot: sn.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ino(filepath.Join(m.root(s1.ID), memFile)) != ino(snapMem) {
+		t.Fatal("new-from-snapshot must link within the team")
+	}
+	w1, err := m.Create(ctx, CreateReq{Team: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2, err := m.Create(ctx, CreateReq{Team: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ino(filepath.Join(m.root(w1.ID), memFile)) == ino(filepath.Join(m.root(w2.ID), memFile)) {
+		t.Fatal("two teams share a memory inode: page cache would cross the tenant boundary")
+	}
+	// A later diff replaces the file; the snapshot keeps the old inode, sealed and unchanged.
+	if _, err := m.Fork(ctx, p.ID, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if ino(filepath.Join(m.root(p.ID), memFile)) == ino(snapMem) {
+		t.Fatal("a diff must replace root/mem, never write it in place")
 	}
 }

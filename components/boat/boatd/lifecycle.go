@@ -119,7 +119,7 @@ func (m *Manager) createFrom(ctx context.Context, r CreateReq, warm string) (VM,
 	}
 	unlock := m.lock(v.ID)
 	defer unlock()
-	if err := m.materialize(v, src, restore); err != nil {
+	if err := m.materialize(v, src, restore, warm == ""); err != nil {
 		return m.fail(v.ID, err)
 	}
 	return m.bootNew(ctx, v, restore, r.Env)
@@ -127,11 +127,15 @@ func (m *Manager) createFrom(ctx context.Context, r CreateReq, warm string) (VM,
 
 // materialize reflink-copies disk, kernel (+ vmstate/mem) from src into the
 // VM root, grows the disk to the size quota and hands it to the jail uid.
-func (m *Manager) materialize(v VM, src string, withMem bool) error {
+// sameTeam: src belongs to v's team (see copyMem).
+func (m *Manager) materialize(v VM, src string, withMem, sameTeam bool) error {
 	root := m.root(v.ID)
 	files := []string{diskFile, kernFile}
 	if withMem {
-		files = append(files, vmstate, memFile)
+		files = append(files, vmstate)
+		if err := m.copyMem(filepath.Join(src, memFile), filepath.Join(root, memFile), sameTeam); err != nil {
+			return err
+		}
 	}
 	for _, f := range files {
 		if err := m.cp(filepath.Join(src, f), filepath.Join(root, f)); err != nil {
@@ -169,9 +173,12 @@ func (m *Manager) chownRoot(v VM) error {
 	if uid == 0 {
 		return nil
 	}
-	return filepath.Walk(m.root(v.ID), func(p string, _ os.FileInfo, err error) error {
+	return filepath.Walk(m.root(v.ID), func(p string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
+		}
+		if fi.Name() == memFile && fi.Mode().Perm() == 0o444 {
+			return nil // sealed: maybe the same inode as another VM's (see copyMem)
 		}
 		return os.Lchown(p, uid, gid)
 	})

@@ -273,10 +273,10 @@ func jailerArgs(c Config, v VM, uid, gid int, vmDir string) []string {
 		// as a hard max, a guest writing fast pinned the cgroup at the limit and was
 		// sometimes OOM-killed (boat-e2e 41379327901). memory.high reclaims and throttles
 		// from RAM + overhead; the hard max leaves vmPageCacheMiB on top for dirty pages.
-		high := int64(v.MemMiB+c.VMOverheadMiB) << 20
+		high, hard := c.memLimits(v)
 		args = append(args,
 			"--cgroup", fmt.Sprintf("memory.high=%d", high),
-			"--cgroup", fmt.Sprintf("memory.max=%d", high+int64(c.VMPageCacheMiB)<<20),
+			"--cgroup", fmt.Sprintf("memory.max=%d", hard),
 			"--cgroup", fmt.Sprintf("cpu.max=%d 100000", (v.VCPU+1)*100000), // vCPUs + 1 for the VMM threads
 			"--cgroup", "pids.max=256")
 		if c.swapControl {
