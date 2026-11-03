@@ -26,7 +26,7 @@ log() { printf '\033[1m==> %s\033[0m\n' "$*" >&2; }
 
 build_kernel() {
   local key cache
-  key=$( (echo "$KERNEL_VERSION $KERNEL_SHA256 $FC_COMMIT $FC_CONFIG_SHA256"; cat "$HERE/kernel/docker.config") | sha256sum | cut -c1-16)
+  key=$( (echo "$KERNEL_VERSION $KERNEL_SHA256 $FC_COMMIT $FC_CONFIG_SHA256"; cat "$HERE/kernel/docker.config" "$HERE/kernel/fix-mballoc.sh") | sha256sum | cut -c1-16)
   cache="$OUT/kernel-cache/vmlinux-$KERNEL_VERSION-$key"
   if [[ -f $cache ]]; then
     log "kernel: cached $cache"
@@ -45,6 +45,7 @@ echo "$KSHA  linux.tar.xz" | sha256sum -c -
 curl -fsSLo fc.config "https://raw.githubusercontent.com/firecracker-microvm/firecracker/$FC/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config"
 echo "$FCSHA  fc.config" | sha256sum -c -
 tar -xJf linux.tar.xz && cd "linux-$KV"
+sh /frag/fix-mballoc.sh
 cp ../fc.config .config
 scripts/kconfig/merge_config.sh -m .config /frag/docker.config >/dev/null
 make olddefconfig >/dev/null

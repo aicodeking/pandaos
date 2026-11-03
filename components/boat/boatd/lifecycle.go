@@ -113,15 +113,18 @@ func (m *Manager) createFrom(ctx context.Context, r CreateReq, warm string) (VM,
 	if err := m.checkFloor(0); err != nil {
 		return VM{}, err
 	}
+	t0 := time.Now()
 	v, err := m.alloc(base, Creating)
 	if err != nil {
 		return VM{}, err
 	}
+	t1 := time.Now()
 	unlock := m.lock(v.ID)
 	defer unlock()
 	if err := m.materialize(v, src, restore, warm == ""); err != nil {
 		return m.fail(v.ID, err)
 	}
+	log.Printf("%s: create alloc=%dms materialize=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
 	return m.bootNew(ctx, v, restore, r.Env)
 }
 

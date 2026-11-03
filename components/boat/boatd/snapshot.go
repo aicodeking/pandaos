@@ -121,9 +121,11 @@ func (m *Manager) mergeDiff(v VM, diff, dst string) error {
 		}
 		return os.Truncate(dst, int64(v.MemMiB)<<20)
 	}
+	t0 := time.Now()
 	if err := m.cp(base, dst); err != nil {
 		return err
 	}
+	log.Printf("%s: merge reflink=%dms", v.ID, time.Since(t0).Milliseconds())
 	if err := os.Chmod(dst, 0o600); err != nil { // the sealed base's mode came along
 		return err
 	}

@@ -32,35 +32,19 @@ sudo apt-get install -y -qq fio >/dev/null 2>&1 || { sudo apt-get update -qq && 
 
 sudo grep -E "snapshot |freeze " "$WORK/boatd.log" | head -n 24 | sed -E 's/^[0-9/]+ [0-9:]+ //' # e2e-host's timings
 
-# Can a restored guest still read its disk? Each case: VM, snapshot, new VM from it, read past a dropped cache.
-# Prints PASS/HANG per case. MEASUREMENT for now: a hang here would wedge every warm create.
-restore_case() { # LABEL DROP_BEFORE_SNAPSHOT
-  local v sn f r
-  v=$(newvm "{\"name\":\"rc\",\"team\":\"rc\"}")
-  if [ "$2" = 1 ]; then bx "$v" 'sync; echo 1 >/proc/sys/vm/drop_caches; sleep 3'; fi
-  sn=$(bd POST "/v1/vms/$v/snapshots" '{}' | jq -r .id)
-  f=$(curl -m 40 -fsS --unix-socket "$SOCK" -X POST http://boatd/v1/vms -H 'content-type: application/json' -d "{\"team\":\"rc\",\"snapshot\":\"$sn\"}" | jq -r .id || true)
-  r=created
-  if [ -z "$f" ] || [ "$f" = null ]; then r=HANG-create; else
-    if curl -m 25 -fsS --unix-socket "$SOCK" -X POST "http://boatd/v1/vms/$f/exec" -H 'content-type: application/json' \
-      -d '{"argv":["bash","-c","echo 1 >/proc/sys/vm/drop_caches; md5sum /usr/bin/python3 /usr/bin/ssh-keygen >/dev/null && echo READ-OK"],"user":"root","timeout_s":20}' >"$WORK/tmp/rc.out"; then
-      r=$(jq -rs 'map(select(.stream=="stdout").data_b64 | @base64d) | join("")' "$WORK/tmp/rc.out")
-    else r=HANG-read; fi
-    perf_del "$f" || true
-  fi
-  echo "restore case $1: $r"
-  bd DELETE "/v1/vms/$v/snapshots/$sn" >/dev/null || true
-  perf_del "$v" || true
-}
-perf_cfg '.' rc1
-restore_case async-balloon 0
-restore_case async-balloon-drop 1
-perf_cfg '.balloon = false' rc2
-restore_case async-noballoon-drop 1
-perf_cfg '.diskEngine = "Sync"' rc3
-restore_case sync-balloon-drop 1
-perf_cfg '.diskEngine = "Sync" | .balloon = false' rc4
-restore_case sync-noballoon-drop 1
+# A guest whose ext4 buddy pages are gone (dropped cache, memory pressure) must survive
+# allocating blocks, also across a snapshot: linux 6.1.191 oopsed (guest/kernel/fix-mballoc.sh).
+log "perf e2e: guest allocates blocks with no page cache, before and after a restore"
+perf_cfg '.' rc
+rc1=$(newvm '{"name":"rc","team":"rc"}')
+bx "$rc1" 'sync; echo 3 >/proc/sys/vm/drop_caches; head -c 1M /dev/urandom >/root/a; sync; rm /root/a; sync; echo 3 >/proc/sys/vm/drop_caches' || fail "guest died allocating blocks with a dropped cache"
+rcs=$(bd POST "/v1/vms/$rc1/snapshots" '{}' | jq -r .id)
+rc2=$(newvm "{\"name\":\"rd\",\"team\":\"rc\",\"snapshot\":\"$rcs\"}")
+[ "$(vmf "$rc2" agent_ready)" = true ] || fail "restored guest did not take its identity"
+bx "$rc2" 'head -c 1M /dev/urandom >/root/b; sync; md5sum /usr/bin/ssh-keygen >/dev/null' || fail "restored guest cannot use its disk"
+perf_del "$rc2"
+bd DELETE "/v1/vms/$rc1/snapshots/$rcs" >/dev/null
+perf_del "$rc1"
 
 log "perf e2e: ceiling (fio on the host, NOCOW file in the state dir)"
 hostfio() {
@@ -82,8 +66,18 @@ echo "guest: $guest_blk"
 put_disk() { curl -fsS --unix-socket "$SOCK" -X PUT --data-binary "@$WORK/tmp/disk.sh" "http://boatd/v1/vms/$1/files?path=/tmp/disk.sh&mode=755" >/dev/null; }
 put_disk "$pv"
 disk=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p')
-echo "disk: $disk"
+echo "disk (Async): $disk"
 echo "extents after boatbench's fio: $(vm_extents "$pv")"
+
+perf_del "$pv"
+perf_cfg '.diskEngine = "Sync"' sync
+pv=$(perf_vm pv)
+put_disk "$pv"
+disk_sync=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p')
+echo "disk (Sync, same runner): $disk_sync"
+perf_del "$pv"
+perf_cfg '.' again
+pv=$(perf_vm pv)
 
 log "perf e2e: snapshot, new-from-snapshot, fork (4/8, 2 GiB dirty + 1 GiB cache)"
 perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s fork_s fork2_s
@@ -96,7 +90,7 @@ perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s
   echo "$1: snapshot ${snap_s}s: $(last_snap_log)"
   t=$(now); f=$(bd POST /v1/vms "{\"name\":\"n$1\",\"team\":\"perf\",\"snapshot\":\"$sn\"}" | jq -r .id); fromsnap_s=$(secs "$t" "$(now)")
   [ "$(vmf "$f" agent_ready)" = true ] || fail "new-from-snapshot not ready"
-  echo "$1: new-from-snapshot ${fromsnap_s}s: $(sudo grep -E "$f: (boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
+  echo "$1: new-from-snapshot ${fromsnap_s}s: $(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
   perf_del "$f"
   t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"f$1\"}" | jq -r .id); fork_s=$(secs "$t" "$(now)")
   [ "$(vmf "$f" agent_ready)" = true ] || fail "fork not ready"
@@ -191,13 +185,13 @@ perf_del $(cat "$WORK/tmp/ten-warm"/*)
 sudo rm -rf "$STATE/warm"
 restart_boatd "$WORK/boatd.json"
 
-echo "METRIC $(jq -nc --argjson disk "$disk" --arg blk "$guest_blk" \
+echo "METRIC $(jq -nc --argjson disk "$disk" --argjson disks "$disk_sync" --arg blk "$guest_blk" \
   --argjson csw "$c_sw" --argjson crw "$c_rw" --argjson crr "$c_rr" \
   --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" --argjson kk2 "$kvm_fork2" \
   --argjson nbr "$nb_rss" --argjson nbc "$nb_cg" --argjson br "$b_rss" --argjson bc "$b_cg" \
   --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fb "$fit_before" --argjson fa "$fit_after" \
   --argjson ct "$cold_ten" --argjson wt "$warm_ten" --argjson wr "$warm_rss" \
-  '{test: "boat-perf", disk: $disk, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
+  '{test: "boat-perf", disk: $disk, diskSync: $disks, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
     snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2,
     idleRssMiB: {noBalloon: $nbr, balloon: $br, ksm: $kr, warm: $wr}, idleCgroupMiB: {noBalloon: $nbc, balloon: $bc},
     ksmDedupMiB: $ksm, fitsIn8GiB: {before: $fb, after: $fa}, tenCreatesS: {cold: $ct, warm: $wt}}')"
