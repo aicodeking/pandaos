@@ -314,11 +314,11 @@ func (m *Manager) ImportSnapshot(ctx context.Context, body io.Reader, team, name
 }
 
 // unprivileged: the decompressor parses a tenant's bytes, so it gets no root.
-func unprivileged() *syscall.SysProcAttr {
-	if os.Geteuid() != 0 {
+func unprivileged(euid int) *syscall.SysProcAttr {
+	if euid != 0 {
 		return nil
 	}
-	return &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: nobodyID, Gid: nobodyID, NoSetGroups: false, Groups: []uint32{}}}
+	return &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: nobodyID, Gid: nobodyID, Groups: []uint32{}}}
 }
 
 const nobodyID = 65534
@@ -328,7 +328,7 @@ func (m *Manager) importInto(ctx context.Context, body io.Reader, dir string, s 
 	defer cancel()
 	cmd := exec.CommandContext(ctx, m.unpackArgv[0], m.unpackArgv[1:]...)
 	cmd.Stdin = body
-	cmd.Dir, cmd.Env, cmd.SysProcAttr = "/", []string{}, unprivileged()
+	cmd.Dir, cmd.Env, cmd.SysProcAttr = "/", []string{}, unprivileged(os.Geteuid())
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return s, err

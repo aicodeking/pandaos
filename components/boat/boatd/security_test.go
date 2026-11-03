@@ -193,8 +193,12 @@ func TestReapDoesNotWaitForOneVM(t *testing.T) {
 		v, _ := m.get(other.ID)
 		return v.State == Stopped
 	})
-	m.reap(ctx) // the stuck one is still being handled: no second goroutine
+	m.reapWG.Wait() // the busy VM holds no reap slot: it is simply tried again
+	if v, _ := m.get(stuck.ID); v.State != Running {
+		t.Fatalf("stopped through a held lock: %s", v.State)
+	}
 	unlock()
+	m.reap(ctx)
 	m.reapWG.Wait()
 	if v, _ := m.get(stuck.ID); v.State != Stopped {
 		t.Fatalf("stuck VM not stopped once its lock was free: %s", v.State)
@@ -279,9 +283,12 @@ func TestImportChargedWhileExtracting(t *testing.T) {
 	}
 }
 
-func TestUnpackerHasNoRootEnvironment(t *testing.T) {
-	if os.Geteuid() != 0 && unprivileged() != nil {
-		t.Fatal("no credential to drop when not root")
+func TestUnpackerDropsRoot(t *testing.T) {
+	if a := unprivileged(0); a == nil || a.Credential.Uid != nobodyID || a.Credential.Gid != nobodyID || a.Credential.Groups == nil {
+		t.Fatalf("root's decompressor keeps privileges: %+v", a)
+	}
+	if unprivileged(1000) != nil {
+		t.Fatal("no credential to change when not root")
 	}
 }
 

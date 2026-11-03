@@ -150,6 +150,19 @@ func (m *Manager) lock(id string) func() {
 	return l.Unlock
 }
 
+func (m *Manager) lockBusy(id string) bool {
+	m.mu.Lock()
+	l := m.locks[id]
+	m.mu.Unlock()
+	if l == nil || l.TryLock() {
+		if l != nil {
+			l.Unlock()
+		}
+		return false
+	}
+	return true
+}
+
 func (m *Manager) get(id string) (VM, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -728,7 +741,7 @@ func (m *Manager) reapVM(ctx context.Context, v VM, now time.Time) {
 	} else if limit := m.idleLimit(v); limit > 0 && now.Sub(m.lastActive(ctx, v)) > limit {
 		reason = "idle"
 	}
-	if reason == "" {
+	if reason == "" || m.lockBusy(v.ID) { // busy: next tick, and no slot held meanwhile
 		return
 	}
 	select {

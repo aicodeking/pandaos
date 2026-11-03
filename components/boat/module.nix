@@ -415,15 +415,9 @@ in
       # A VM's flows are capped at ctPerVM (default 4096), so about 256 VMs at the cap fit.
       # The kernel's default, about 260k on 16 GiB, is 64: one team could fill it.
       "net.netfilter.nf_conntrack_max" = 1048576;
-      "fs.protected_hardlinks" = 1;
-      "fs.protected_symlinks" = 1;
     }
     // lib.optionalAttrs cfg.untrustedTenants {
       "kernel.io_uring_disabled" = 2; # diskEngine Sync; absent before Linux 6.6
-      "kernel.unprivileged_bpf_disabled" = 1;
-      "net.core.bpf_jit_harden" = 2;
-      "kernel.kptr_restrict" = 2;
-      "kernel.dmesg_restrict" = 1;
     }
     // lib.optionalAttrs (cfg.ipv6Prefix != null) {
       "net.ipv6.conf.all.forwarding" = 1;
