@@ -257,7 +257,7 @@ runDir/routes.json
 - `hostDirtyRatio` (default 50, 0 leaves it alone): boatd sets the host's `vm.dirty_ratio` at startup, so that a memory dump goes to the page cache instead of being throttled to the disk's speed. A host crash can lose more, and VM disks in writeback were never durable before a guest flush anyway (Firecracker's default `Unsafe` cache mode).
 - Guest: scheduler `none` on `vda` (udev rule). No `discard` mount option: Firecracker's block device does not offer discard (`discard_max_bytes` = 0 in the guest), so it would do nothing. Space freed inside a guest is not returned to the host while the VM runs.
 
-**Async or Sync?** On the CI runner, in the same run, reads the host has cached favour `Sync` (46-78k against 27-53k rand read IOPS; each read costs one more wakeup through io_uring). Reads that reach the disk favour `Async` (7.2-7.4k against 5.8k IOPS, host cache dropped). Sequential I/O and rand writes differ by less than the runs vary. This runner cannot say which wins on NVMe; `diskEngine: "Sync"` is the switch. `Async` stays the default because a queue depth is the only way past one I/O at a time on a real disk. `untrustedTenants` takes `Sync` and disables io_uring in the kernel: for a VMM that broke out, io_uring is a large kernel surface, worth more than those IOPS.
+**Async or Sync?** On the CI runner, in the same run, reads the host has cached favour `Sync` (46-145k against 27-98k rand read IOPS; each read costs one more wakeup through io_uring). Reads that reach the disk favour `Async` (5.0-7.4k against 4.3-5.8k IOPS, host cache dropped), and so do sequential writes (770-973 against 640-712 MB/s, runs 41646323823, 41652556991, 41660971823). Rand writes differ by less than the runs vary. The host's own rand read moved from 75k to 143k IOPS between those runs, so one run's VM/host ratio says little. This runner cannot say which wins on NVMe; `diskEngine: "Sync"` is the switch. `Async` stays the default because a queue depth is the only way past one I/O at a time on a real disk. `untrustedTenants` takes `Sync` and disables io_uring in the kernel: for a VMM that broke out, io_uring is a large kernel surface, worth more than those IOPS.
 
 **Restore** is lazy already: Firecracker's `File` memory backend mmaps `mem` MAP_PRIVATE and faults pages on demand, which is why a UFFD handler would add a process and no speed here. Every restore gets a new VMGenID from Firecracker, and a create, fork or new-from-snapshot gets fresh host entropy before its new identity (see `reseed`).
 
@@ -283,9 +283,13 @@ runDir/routes.json
 | rand read | 44.1k IOPS | 43.9k IOPS | 53.5k IOPS |
 | fork | 6.93 s | 1.77 s | 1.50 s |
 | snapshot | 17.1 s | 4.68 s | 8.12 s (3.8 GiB written) |
-| new-from-snapshot | 7.39 s | 4.57 s | 1.08 s |
+| new-from-snapshot | 7.39 s | 4.57 s (5.65 s in 41614646999) | 1.08 s |
 | 10 creates, cold | 28.4 s | 25.1 s | 23.2 s |
 | 10 creates, `warmPool` | | | 8.12 s |
+
+boatbench's new-from-snapshot went from 5.65 s to 2.73 s (run 41652606509) when `routes.json` stopped being fsynced: that fsync sat behind the dump's writeback, up to 5.3 s (`net=` in the phase log, run 41628497611). Of the 2.73 s, boatd accounts for 0.76 s and the first exec for 0.08 s; the rest is outside boatd, in boat-api. boatbench's guest also dirties less than e2e-perf's: 2.8 GiB against 3.8 GiB, which is why its snapshot is quicker.
+
+Simple quotas, on (the default) against off, same run (41660971823, 41652556991, 41646323823): seq write 973/1101, 939/969, 770/804 MB/s; rand write 47.0k/46.2k, 44.6k/50.4k, 43.8k/45.3k IOPS; snapshot 7.48/7.21, 8.02/7.92, 8.89/7.77 s; new-from-snapshot 1.22/0.82, 1.41/0.84, 1.77/1.31 s; fork 1.11/0.96, 1.14/1.12, 2.23/1.64 s. So up to about 10% on sequential writes, and about 0.4 s on a new-from-snapshot, which writes to a new subvolume's metadata.
 
 A snapshot's time follows what the guest dirtied since boot: 3.8 GiB at about 480 MB/s here, which is page cache on this runner's btrfs-on-loop. Cold creates are CPU: 10 boots of 4 vCPUs on 4 shared host CPUs.
 
