@@ -376,6 +376,23 @@ func TestDiskFloor(t *testing.T) {
 	}
 }
 
+func TestNoQuotasWithoutBtrfs(t *testing.T) {
+	quotaCtl = func(string) error { return syscall.ENOTTY }
+	defer func() { quotaCtl = func(string) error { return nil } }()
+	m, h := newTestManager(t, nil)
+	if _, err := m.Create(context.Background(), CreateReq{}); err != nil {
+		t.Fatal(err)
+	}
+	if h.ran("btrfs") || m.cfg.BtrfsQgroups {
+		t.Fatal("quotas where stateDir has none")
+	}
+	c := m.cfg
+	c.BtrfsQgroups, c.UntrustedTenants = true, true
+	if _, err := newManager(c, h.run, h); err == nil {
+		t.Fatal("untrustedTenants went on without quotas")
+	}
+}
+
 func TestBtrfsQgroups(t *testing.T) {
 	m, h := newTestManager(t, func(c *Config) {
 		c.BtrfsQgroups, c.IPv6Prefix = true, "fd42::/64"
@@ -387,7 +404,7 @@ func TestBtrfsQgroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	vol := filepath.Join(m.cfg.StateDir, "teams", "t_t1")
-	if !h.ran("btrfs quota enable") || !h.ran("btrfs subvolume create "+vol) ||
+	if !h.ran("btrfs subvolume create "+vol) ||
 		!h.ran(fmt.Sprintf("btrfs qgroup limit -e %d %s", int64(100)<<30/100*125, vol)) {
 		t.Fatal(h.cmds)
 	}

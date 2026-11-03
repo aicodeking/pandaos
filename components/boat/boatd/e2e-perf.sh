@@ -28,6 +28,11 @@ check_min() { # NAME VALUE MIN
   awk -v a="$2" -v b="$3" 'BEGIN { exit !(a >= b) }' || perf_fail+="$1 was $2 < $3; "
 }
 
+disk_stuck() { # fio has 5 minutes: what the host was doing when it missed them
+  echo "--- blocked tasks"; echo w | sudo tee /proc/sysrq-trigger >/dev/null; sudo dmesg | tail -n 60
+  sudo btrfs qgroup show --raw "$STATE" | head -n 20 || true
+  fail "$1"
+}
 perf_cfg() { # JQ_FILTER NAME: the base config without the e2e's caps, plus JQ_FILTER
   jq ".ioMaxMBps = 0 | .egressMbit = 0 | .memOvercommit = 8 | .cpuOvercommit = 12 | .defaultTeam.maxVMs = 16 | $1" \
     "$WORK/boatd.json" >"$WORK/boatd-perf-$2.json"
@@ -90,7 +95,7 @@ cold_read() {
 }
 put_disk() { curl -fsS --unix-socket "$SOCK" -X PUT --data-binary "@$WORK/tmp/disk.sh" "http://boatd/v1/vms/$1/files?path=/tmp/disk.sh&mode=755" >/dev/null; }
 put_disk "$pv"
-disk=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p')
+disk=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p') || disk_stuck "fio with quotas on"
 echo "disk (Async): $disk"
 cold_async=$(cold_read "$pv")
 echo "cold rand read (Async): $cold_async IOPS"
@@ -100,7 +105,7 @@ perf_del "$pv"
 perf_cfg '.diskEngine = "Sync"' sync
 pv=$(perf_vm pv)
 put_disk "$pv"
-disk_sync=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p')
+disk_sync=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p') || disk_stuck "fio on the Sync engine"
 echo "disk (Sync, same runner): $disk_sync"
 cold_sync=$(cold_read "$pv")
 echo "cold rand read (Sync): $cold_sync IOPS"
@@ -142,7 +147,7 @@ perf_cfg '.btrfsQgroups = false' noq
 sudo btrfs quota disable "$STATE"
 pv=$(perf_vm pv)
 put_disk "$pv"
-disk_noq=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p')
+disk_noq=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p') || disk_stuck "fio with quotas off"
 echo "disk (quotas off): $disk_noq"
 perf_del "$pv"
 perf_snap q

@@ -38,6 +38,8 @@ type fakeHost struct {
 	hangOps    map[string]bool // agent ops the guest never answers
 }
 
+func init() { quotaCtl = func(string) error { return nil } }
+
 func newFakeHost() *fakeHost { return &fakeHost{next: 1000, vms: map[int]*fakeFC{}} }
 
 func (h *fakeHost) run(stdin, name string, args ...string) error {

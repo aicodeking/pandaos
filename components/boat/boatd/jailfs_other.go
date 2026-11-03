@@ -28,4 +28,4 @@ func dialJail(ctx context.Context, path string) (net.Conn, error) {
 	return d.DialContext(ctx, "unix", path)
 }
 
-func isBtrfs(string) bool { return false }
+func enableSimpleQuota(string) error { return errors.ErrUnsupported }

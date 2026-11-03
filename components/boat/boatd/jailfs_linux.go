@@ -14,7 +14,9 @@ const (
 	atFdcwd         = -100
 	atSymlinkFollow = 0x400
 	oPath           = 0x200000
-	btrfsMagic      = 0x9123683e
+
+	btrfsIocQuotaCtl       = 0xc0109428
+	btrfsQuotaEnableSimple = 4
 )
 
 func ficlone(dst, src *os.File) error {
@@ -61,7 +63,17 @@ func dialJail(ctx context.Context, path string) (net.Conn, error) {
 	return d.DialContext(ctx, "unix", fmt.Sprintf("/proc/self/fd/%d", fd))
 }
 
-func isBtrfs(path string) bool {
-	var st syscall.Statfs_t
-	return syscall.Statfs(path, &st) == nil && uint64(st.Type) == btrfsMagic
+// enableSimpleQuota: BTRFS_IOC_QUOTA_CTL. An ioctl, because btrfs-progs had no option
+// for it before 6.7 and the kernel is what counts. Already enabled: not an error.
+func enableSimpleQuota(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	args := struct{ cmd, status uint64 }{cmd: btrfsQuotaEnableSimple}
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), btrfsIocQuotaCtl, uintptr(unsafe.Pointer(&args))); e != 0 {
+		return e
+	}
+	return nil
 }

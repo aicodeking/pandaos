@@ -343,17 +343,22 @@ func (m *Manager) limitTeamVol(team string) error {
 	return m.run("", "btrfs", "qgroup", "limit", "-e", limit, m.teamVol(team))
 }
 
-// enableQuota at startup. Quotas are the default, also on a stateDir that is not btrfs,
-// where they cannot be had: only there may boatd go on without them.
+// quotaCtl is a variable for the tests.
+var quotaCtl = enableSimpleQuota
+
+// enableQuota at startup. Simple quotas (Linux >= 6.7), not full ones: those walk every
+// extent's references at each commit, and with them fio in a guest on a sparse disk did
+// not finish in 5 minutes (boat-e2e 41633591417). Simple quotas charge an extent to the
+// subvolume that wrote it, which is the question here: an image's reflinks cost a team nothing.
 func (m *Manager) enableQuota() error {
 	if !m.cfg.BtrfsQgroups {
 		return nil
 	}
-	if err := m.run("", "btrfs", "quota", "enable", m.cfg.StateDir); err != nil {
-		if isBtrfs(m.cfg.StateDir) || m.cfg.UntrustedTenants {
-			return err
+	if err := quotaCtl(m.cfg.StateDir); err != nil {
+		if m.cfg.UntrustedTenants {
+			return fmt.Errorf("btrfsQgroups: %s: %w", m.cfg.StateDir, err)
 		}
-		log.Printf("btrfsQgroups: %s has no btrfs quotas: %v", m.cfg.StateDir, err)
+		log.Printf("btrfsQgroups: no simple quotas on %s (needs btrfs and Linux 6.7), so no per-team limit: %v", m.cfg.StateDir, err)
 		m.cfg.BtrfsQgroups = false
 		return nil
 	}
