@@ -51,7 +51,12 @@ rss_mib() { # idle RSS of a VM's firecracker, and its cgroup's memory.current
 }
 last_snap_log() { sudo grep -E "snapshot |freeze " "$WORK/boatd.log" | tail -n 3 | sed -E 's/^[0-9/]+ [0-9:]+ //' | tr '\n' ' '; }
 sudo apt-get install -y -qq fio >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq fio >/dev/null; }
-(cd "$HERE/../../bench/boatbench" && python3 -c 'import workloads; print(workloads.DISK)') >"$WORK/tmp/disk.sh"
+# Without boatbench's three PTS jobs: 85 s each, for numbers not gated here, on 3 engines and configs.
+(cd "$HERE/../../bench/boatbench" && python3 -c '
+import re, workloads
+disk, n = re.subn(r",\s*\(\"pts_.*?\)\]:", "]:", workloads.DISK, flags=re.S)
+assert n == 1, "boatbench changed its job list"
+print(disk)') >"$WORK/tmp/disk.sh"
 
 sudo grep -E "snapshot |freeze |merge " "$WORK/boatd.log" | head -n 30 | sed -E 's/^[0-9/]+ [0-9:]+ //' # e2e-host's timings
 

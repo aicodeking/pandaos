@@ -347,9 +347,9 @@ func (m *Manager) limitTeamVol(team string) error {
 var quotaCtl = enableSimpleQuota
 
 // enableQuota at startup. Simple quotas (Linux >= 6.7), not full ones: those walk every
-// extent's references at each commit, and with them fio in a guest on a sparse disk did
-// not finish in 5 minutes (boat-e2e 41633591417). Simple quotas charge an extent to the
-// subvolume that wrote it, which is the question here: an image's reflinks cost a team nothing.
+// extent's references at each commit, which took a fork from 1.31 to 3.25 s (run
+// 41305928387). Simple quotas charge an extent to the subvolume that wrote it, which is
+// the question here: an image's reflinks cost a team nothing.
 func (m *Manager) enableQuota() error {
 	if !m.cfg.BtrfsQgroups {
 		return nil
