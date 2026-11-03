@@ -7,14 +7,17 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // ponytail: the whole state lives in one JSON file that is rewritten on every
 // change and cloned (marshal/unmarshal) per Update. Fine for a single server
 // with thousands of keys/webhooks; past ~10 MB of state or ~50 writes/s move
-// to SQLite (deliveries first, they are the hottest writer).
+// to SQLite (deliveries first, they are the hottest writer). Writers queue on
+// one mutex; readers (auth included) never wait for them.
 
 type User struct {
 	ID       string    `json:"id"`
@@ -117,6 +120,10 @@ type State struct {
 	AIProxyOff map[string]bool           `json:"ai_proxy_off"` // team id: proxy off, raw keys injected
 	AIUsage    map[string]*AIUsageRow    `json:"ai_usage"`     // key: team_id + "/" + vm_id + "/" + provider + "/" + model
 	Telemetry  map[string]*TeamTelemetry `json:"telemetry"`
+	// ForeignVMs: VMs whose disk came from a share, an import, or such a VM.
+	ForeignVMs map[string]bool `json:"foreign_vms"`
+	// RouteGens: per VM, bumped to revoke its port tokens (see SignRoute).
+	RouteGens map[string]int `json:"route_gens"`
 }
 
 // CommandRecord remembers a detached command after its VM stops or forgets it.
@@ -304,35 +311,92 @@ func (st *State) init() {
 	if st.Telemetry == nil {
 		st.Telemetry = map[string]*TeamTelemetry{}
 	}
-
+	if st.ForeignVMs == nil {
+		st.ForeignVMs = map[string]bool{}
+	}
+	if st.RouteGens == nil {
+		st.RouteGens = map[string]int{}
+	}
 }
 
 // Store hands out immutable snapshots: Update builds a fresh copy, persists
 // it, then swaps it in, so a snapshot obtained earlier is never mutated.
 type Store struct {
-	mu   sync.Mutex
+	mu   sync.Mutex // writers only
 	path string
-	cur  *State
+	cur  atomic.Pointer[State]
+	kr   *Keyring // nil = plaintext state.json (tests)
 }
 
-func OpenStore(dir string) (*Store, error) {
+// sealedPrefix marks a state.json sealed under the master key.
+const (
+	sealedPrefix = "boatseal1:"
+	stateAAD     = "boat-api state v1"
+)
+
+// OpenStore keeps state.json in plaintext.
+func OpenStore(dir string) (*Store, error) { return openStore(dir, nil) }
+
+// OpenSealedStore seals state.json: it holds env vars, setup scripts, argv and
+// prompts. A plaintext file from an older version is sealed on open.
+func OpenSealedStore(dir string, kr *Keyring) (*Store, error) { return openStore(dir, kr) }
+
+func openStore(dir string, kr *Keyring) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	s := &Store{path: filepath.Join(dir, "state.json"), cur: &State{}}
+	s := &Store{path: filepath.Join(dir, "state.json"), kr: kr}
+	st := &State{}
 	b, err := os.ReadFile(s.path)
+	plain := false
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
 		return nil, err
 	default:
-		if err := json.Unmarshal(b, s.cur); err != nil {
+		plain = !strings.HasPrefix(string(b), sealedPrefix)
+		if b, err = s.decode(b); err != nil {
+			return nil, fmt.Errorf("open %s: %w", s.path, err)
+		}
+		if err := json.Unmarshal(b, st); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", s.path, err)
 		}
 	}
-	s.cur.init()
-	migrateOperator(s.cur)
+	st.init()
+	migrateOperator(st)
+	s.cur.Store(st)
+	if plain && kr != nil {
+		if err := s.persist(st); err != nil {
+			return nil, fmt.Errorf("seal %s: %w", s.path, err)
+		}
+	}
 	return s, nil
+}
+
+func (s *Store) decode(b []byte) ([]byte, error) {
+	sealed, ok := strings.CutPrefix(string(b), sealedPrefix)
+	if !ok {
+		return b, nil
+	}
+	if s.kr == nil {
+		return nil, errors.New("state is sealed and no key was given")
+	}
+	return s.kr.Open(sealed, stateAAD)
+}
+
+func (s *Store) persist(st *State) error {
+	out, err := json.MarshalIndent(st, "", " ")
+	if err != nil {
+		return err
+	}
+	if s.kr != nil {
+		sealed, err := s.kr.Seal(out, stateAAD)
+		if err != nil {
+			return err
+		}
+		out = []byte(sealedPrefix + sealed)
+	}
+	return writeAtomic(s.path, out)
 }
 
 // migrateOperator handles state written before the operator role: the oldest
@@ -355,17 +419,13 @@ func migrateOperator(st *State) {
 }
 
 // Snapshot returns the current state. Callers must treat it as read-only.
-func (s *Store) Snapshot() *State {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.cur
-}
+func (s *Store) Snapshot() *State { return s.cur.Load() }
 
 // Update applies fn to a deep copy; on error or failed write nothing changes.
 func (s *Store) Update(fn func(*State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b, err := json.Marshal(s.cur)
+	b, err := json.Marshal(s.cur.Load())
 	if err != nil {
 		return err
 	}
@@ -377,14 +437,10 @@ func (s *Store) Update(fn func(*State) error) error {
 	if err := fn(next); err != nil {
 		return err
 	}
-	out, err := json.MarshalIndent(next, "", " ")
-	if err != nil {
+	if err := s.persist(next); err != nil {
 		return err
 	}
-	if err := writeAtomic(s.path, out); err != nil {
-		return err
-	}
-	s.cur = next
+	s.cur.Store(next)
 	return nil
 }
 

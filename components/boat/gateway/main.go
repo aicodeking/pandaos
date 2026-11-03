@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -95,6 +96,7 @@ type gateway struct {
 	desktopDomain string // <vmid>.<desktopDomain>
 	key           []byte // HMAC key shared with boat-api
 	routes        *routes
+	gens          *routeGens // nil = no revocation (no -api)
 	now           func() time.Time
 }
 
@@ -218,7 +220,12 @@ func (g *gateway) portRoute(w http.ResponseWriter, r *http.Request, port int, vm
 		return
 	}
 	if !slices.Contains(v.Public, port) {
-		sign := func(exp int64) string { return signRoute(g.key, port, vmid, exp) }
+		gen, ready := g.gens.gen(r.Context(), vmid)
+		if !ready {
+			http.Error(w, "private port: token revocations are unavailable, retry shortly", http.StatusServiceUnavailable)
+			return
+		}
+		sign := func(exp int64) string { return signRoute(g.key, port, vmid, gen, exp) }
 		check := func(tok string) error { _, err := checkToken(tok, g.now(), sign); return err }
 		if q := r.URL.Query(); q.Has("boat_sig") {
 			tok := q.Get("boat_exp") + "." + q.Get("boat_sig")
@@ -264,9 +271,25 @@ func withoutQuery(r *http.Request, drop ...string) string {
 	return u.RequestURI()
 }
 
+// hostOnlyCookie drops a Set-Cookie line's Domain attribute. Every VM origin is a
+// sibling under vmDomain, so a Domain cookie from one tenant's app would reach
+// all the others. Without the attribute the browser keeps it for this host.
+func hostOnlyCookie(line string) string {
+	parts := strings.Split(line, ";")
+	kept := make([]string, 0, len(parts))
+	for i, p := range parts {
+		name, _, _ := strings.Cut(p, "=")
+		if i == 0 || !strings.EqualFold(strings.TrimSpace(name), "domain") {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, ";")
+}
+
 // proxy forwards to ip:port. Our cookies and route header never reach the
 // guest; for the desktop, guestCookie ("name=value") is added for the guest
-// agent's own token check. Caddy's X-Forwarded-* headers are kept.
+// agent's own token check. Caddy's X-Forwarded-* headers are kept. Responses
+// lose any cookie Domain (hostOnlyCookie).
 func proxy(ip string, port int, guestCookie string) http.Handler {
 	target := &url.URL{Scheme: "http", Host: net.JoinHostPort(ip, strconv.Itoa(port))}
 	return &httputil.ReverseProxy{Rewrite: func(pr *httputil.ProxyRequest) {
@@ -292,6 +315,16 @@ func proxy(ip string, port int, guestCookie string) http.Handler {
 		if len(kept) > 0 {
 			pr.Out.Header.Set("Cookie", strings.Join(kept, "; "))
 		}
+	}, ModifyResponse: func(resp *http.Response) error {
+		cookies := resp.Header["Set-Cookie"]
+		out := make([]string, len(cookies))
+		for i, c := range cookies {
+			out[i] = hostOnlyCookie(c)
+		}
+		if len(out) > 0 {
+			resp.Header["Set-Cookie"] = out
+		}
+		return nil
 	}}
 }
 
@@ -323,6 +356,7 @@ func main() {
 	desktopDomain := flag.String("desktop-domain", "", "desktops live at <vmid>.<desktop-domain> (default desktop.<domain>)")
 	routesPath := flag.String("routes", "/run/boat/routes.json", "boatd route table")
 	keyPath := flag.String("desktop-key", "/var/lib/boat/secrets/desktop.key", "HMAC key shared with boat-api")
+	api := flag.String("api", "", "boat-api base URL (http://127.0.0.1:8740), for port token revocations; empty disables them")
 	flag.Parse()
 	if *domain == "" {
 		log.Fatal("-domain is required")
@@ -335,6 +369,10 @@ func main() {
 	g := &gateway{
 		domain: d, vmDomain: strings.ToLower(*vmDomain), desktopDomain: strings.ToLower(*desktopDomain),
 		key: key, routes: &routes{path: *routesPath}, now: time.Now,
+	}
+	if *api != "" {
+		g.gens = newRouteGens(strings.TrimRight(*api, "/"))
+		go g.gens.poll(context.Background())
 	}
 	if g.vmDomain == "" {
 		g.vmDomain = "vm." + d

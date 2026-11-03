@@ -19,7 +19,8 @@ import (
 // Taking a shared snapshot copies it into the taker's team through boatd's
 // download + import, so tenant isolation in boatd stays as it is. A snapshot
 // holds the VM's disk, so anything on it (secrets in /etc/boat/env included)
-// goes with the share; proxied AI keys do not, they were never on the disk.
+// goes with the share. Proxied AI keys do not, they were never on the disk, but
+// the VM's proxy token is, so creating a share ends that token (rotateAIToken).
 
 const (
 	defaultLinkTTL = 7 * 24 * time.Hour
@@ -236,13 +237,69 @@ func (s *server) createShare(w http.ResponseWriter, r *http.Request, p *principa
 			view.URL = strings.TrimRight(s.cfg.PublicURL, "/") + "/v1/snapshot-links/" + view.Code + "/download"
 		}
 	}
-	if err := s.store.Update(func(st *State) error { st.SnapShares[sh.ID] = sh; return nil }); err != nil {
+	// Before the share exists: if this fails, no live token has left the team.
+	if err := s.rotateAIToken(r, sh.VMID, p.Team.ID); err != nil {
+		log.Printf("%s: rotate AI token of %s: %v", info(r).id, sh.VMID, err)
+		writeErr(w, r, 500, "secrets_unavailable", "cannot rotate the VM's AI token")
+		return
+	}
+	err := s.store.Update(func(st *State) error {
+		n := 0
+		for k, x := range st.SnapShares {
+			switch {
+			case x.TeamID != p.Team.ID:
+			case !shareLive(x):
+				delete(st.SnapShares, k)
+			default:
+				n++
+			}
+		}
+		if n >= maxSharesPerTeam {
+			return errLimit
+		}
+		st.SnapShares[sh.ID] = sh
+		return nil
+	})
+	if err != nil {
 		s.storeErr(w, r, err)
 		return
 	}
 	v := viewShare(sh)
 	v.Code, v.URL = view.Code, view.URL
 	writeJSON(w, 201, v)
+}
+
+// rotateAIToken moves the VM to a new proxy token generation, so the token on
+// any of its snapshots stops working, and gives a running VM the new one. Its
+// running processes keep the old token until they restart. Raw keys (proxy off)
+// cannot be taken back this way; docs/boat.md says so.
+func (s *server) rotateAIToken(r *http.Request, vmID, team string) error {
+	if s.store.Snapshot().AIVMs[vmID] == nil {
+		return nil // never had a token
+	}
+	if _, err := s.aiBumpVM(vmID, team); err != nil {
+		return err
+	}
+	ai, err := s.aiEnv(vmID, team, false)
+	if err != nil {
+		return err
+	}
+	var vm VM
+	if err := s.boatd.call(r.Context(), "GET", vmPath(vmID), nil, &vm); err != nil {
+		return err
+	}
+	if str(vm, "state") != "running" || len(ai) == 0 {
+		return nil // the next start gets a fresh token
+	}
+	base := map[string]string{}
+	cur, _ := vm["env"].(map[string]any)
+	for k, v := range cur {
+		if sv, ok := v.(string); ok {
+			base[k] = sv
+		}
+	}
+	s.pushEnv(r, vmID, base, ai)
+	return nil
 }
 
 func (s *server) listShares(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -383,6 +440,12 @@ func (s *server) linkDownload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, 404, "not_found", "link not found or expired")
 		return
 	}
+	// Its own bucket: link holders must not use up the sharing team's streams.
+	release, ok := s.acquireOr429(w, r, s.streams, "link:"+sh.TeamID)
+	if !ok {
+		return
+	}
+	defer release()
 	s.countShareUse(sh.ID)
 	s.relayDownload(w, r, sh.VMID, sh.SnapshotID)
 }

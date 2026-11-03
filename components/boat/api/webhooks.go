@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"sort"
@@ -305,23 +306,42 @@ func newDispatcher(s *server, allowPrivate bool) *dispatcher {
 	}
 }
 
-// denyPrivate blocks SSRF into the host or LAN (checked after DNS resolution).
+// nonPublicNets are never webhook targets: the IANA special-purpose registries
+// plus cloud metadata. The IPv6 entries that embed an IPv4 address (::/96,
+// NAT64, 6to4, Teredo, translated) would otherwise reach any IPv4 target.
+var nonPublicNets = func() []netip.Prefix {
+	var out []netip.Prefix
+	for _, c := range []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "168.63.129.16/32", "169.254.0.0/16", "172.16.0.0/12",
+		"192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+		"203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+		"::/96", "::ffff:0:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64", "2001::/32", "2001:db8::/32", "2002::/16",
+		"fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8",
+	} {
+		out = append(out, netip.MustParsePrefix(c))
+	}
+	return out
+}()
+
+// denyPrivate is the Dialer's Control: it sees the address actually being
+// connected to, after DNS, so a name that rebinds to a private address fails
+// here. It blocks SSRF into the host, the LAN and cloud metadata.
 func denyPrivate(_, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return err
 	}
-	ip := net.ParseIP(host)
-	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) || isCGNAT(ip) {
-		return fmt.Errorf("webhook target %s is not a public address", host)
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("webhook target %s is not an address", host)
+	}
+	ip = ip.Unmap().WithZone("")
+	for _, n := range nonPublicNets {
+		if n.Contains(ip) {
+			return fmt.Errorf("webhook target %s is not a public address", host)
+		}
 	}
 	return nil
-}
-
-func isCGNAT(ip net.IP) bool {
-	v4 := ip.To4()
-	return v4 != nil && v4[0] == 100 && v4[1]&0xc0 == 64
 }
 
 func matchEvent(filters []string, typ string) bool {

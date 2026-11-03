@@ -115,7 +115,7 @@ func (s *server) startDetached(r *http.Request, p *principal, vmID, kind string,
 		return "", fmt.Errorf("agent cmd_start returned no cmd_id")
 	}
 	// Prompts hold secrets in argv only as the user's text; env is never stored.
-	rec := CommandRecord{ID: id, Cmd: cmd, Cwd: cwd, Kind: kind, StartedAt: time.Now().UTC(), State: "running"}
+	rec := CommandRecord{ID: id, Cmd: capArgv(cmd), Cwd: preview(cwd), Kind: kind, StartedAt: time.Now().UTC(), State: "running"}
 	if p != nil {
 		rec.KeyID = p.Key.ID
 	}

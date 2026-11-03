@@ -69,7 +69,7 @@ func (c *common) open() (*Store, *Keyring, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	st, err := OpenStore(c.dataDir)
+	st, err := OpenSealedStore(c.dataDir, kr)
 	return st, kr, err
 }
 
@@ -166,6 +166,9 @@ func serve(args []string) int {
 	hookTeam := fs.Int("webhook-team-inflight", 8, "webhook HTTP attempts in flight per team")
 	hookPending := fs.Int("webhook-team-pending", 1000, "webhook deliveries pending per team; more are dropped and logged")
 	maxFile := fs.Int64("max-file-bytes", 256<<20, "max upload size for PUT files")
+	teamStreams := fs.Int("team-streams", defaultTeamStreams, "exec, SSE, log and download streams open per team (0 = unlimited)")
+	teamUploads := fs.Int("team-uploads", defaultTeamUploads, "file uploads and snapshot imports in flight per team (0 = unlimited)")
+	aiInflight := fs.Int("ai-vm-inflight", defaultAIVMInflight, "AI proxy requests in flight per VM (0 = unlimited)")
 	fs.Parse(args)
 
 	store, kr, err := c.open()
@@ -208,6 +211,7 @@ func serve(args []string) int {
 	s.teamLim = newLimiter(*teamRate, *teamBurst)
 	s.aiLim = newLimiter(*aiRate, *aiRate*5)
 	s.hooks.teamInflight, s.hooks.teamPending = *hookTeam, *hookPending
+	s.streams, s.uploads, s.aiInflight = newInflight(*teamStreams), newInflight(*teamUploads), newInflight(*aiInflight)
 	if *otlp != "" {
 		s.otel = newOTel(*otlp, otlpHeaders)
 	}
@@ -248,7 +252,8 @@ func newServer(store *Store, kr *Keyring, bd *boatdClient, cfg Config, lim *limi
 		cfg.MaxImportBytes = 200 << 30
 	}
 	s := &server{store: store, keys: kr, boatd: bd, limiter: lim, audit: audit, cfg: cfg, mux: http.NewServeMux(),
-		aiMeter: newAIMeter(), aiClient: newAIClient()}
+		aiMeter: newAIMeter(), aiClient: newAIClient(),
+		streams: newInflight(defaultTeamStreams), uploads: newInflight(defaultTeamUploads), aiInflight: newInflight(defaultAIVMInflight)}
 	s.hooks = newDispatcher(s, cfg.AllowPrivateHook)
 	s.routes()
 	return s
@@ -261,6 +266,7 @@ func (s *server) routes() {
 		w.Write(openapiSpec)
 	})
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, r, 404, "not_found", "no such endpoint") })
+	s.mux.HandleFunc("GET /internal/route-gens", s.routeGens) // boat-gateway; Caddy never publishes /internal/
 
 	s.route("GET /v1/me", "", s.me)
 	s.route("GET /v1/images", "", s.images)
@@ -281,6 +287,7 @@ func (s *server) routes() {
 	s.route("POST /v1/vms/{id}/ports", "vms:write", s.addPort)
 	s.route("DELETE /v1/vms/{id}/ports/{port}", "vms:write", s.removePort)
 	s.route("GET /v1/vms/{id}/ports/{port}/url", "exec", s.portURL)
+	s.route("POST /v1/vms/{id}/port-tokens/revoke", "exec", s.revokePortTokens)
 	s.route("GET /v1/vms/{id}/snapshots", "vms:read", s.proxySnapshots)
 	s.route("POST /v1/vms/{id}/snapshots", "vms:write", s.proxySnapshots)
 	s.route("DELETE /v1/vms/{id}/snapshots/{sid}", "vms:write", s.proxySnapshots)

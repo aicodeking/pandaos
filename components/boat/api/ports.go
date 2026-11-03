@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -110,15 +112,60 @@ func (s *server) removePort(w http.ResponseWriter, r *http.Request, p *principal
 		writeUpstream(w, r, err)
 		return
 	}
+	// A later add of this port must not bring its old tokens back. The route is
+	// already gone, so a failure here is only logged.
+	if _, err := s.bumpRouteGen(id); err != nil {
+		log.Printf("%s: revoke tokens of %s: %v", info(r).id, id, err)
+	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // SignRoute: hex(HMAC-SHA256(desktopKey, "route.<label>.<exp>")), label =
 // "<port>-<vmid>" (the gateway's host label). Desktop links sign
 // "<vmid>.<exp>"; boatd ids are "vm-<hex>", so the "route." prefix keeps the
-// payload spaces apart. Matches boat-gateway.
-func SignRoute(key []byte, label string, exp int64) string {
-	return signHex(key, fmt.Sprintf("route.%s.%d", label, exp))
+// payload spaces apart. Matches boat-gateway. After a VM's tokens are revoked
+// (gen > 0) the payload is "route.<label>.g<gen>.<exp>", which kills every
+// earlier token and cookie of that VM.
+func SignRoute(key []byte, label string, gen int, exp int64) string {
+	if gen == 0 {
+		return signHex(key, fmt.Sprintf("route.%s.%d", label, exp))
+	}
+	return signHex(key, fmt.Sprintf("route.%s.g%d.%d", label, gen, exp))
+}
+
+func (s *server) bumpRouteGen(vmID string) (int, error) {
+	gen := 0
+	err := s.store.Update(func(st *State) error {
+		st.RouteGens[vmID]++
+		gen = st.RouteGens[vmID]
+		return nil
+	})
+	return gen, err
+}
+
+// revokePortTokens ends every token, link and cookie of the VM's private ports.
+func (s *server) revokePortTokens(w http.ResponseWriter, r *http.Request, p *principal) {
+	if _, ok := s.ownVM(w, r, p); !ok {
+		return
+	}
+	gen, err := s.bumpRouteGen(r.PathValue("id"))
+	if err != nil {
+		s.storeErr(w, r, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "generation": gen})
+}
+
+// routeGens is what boat-gateway polls. The generations are not secret, but only
+// the gateway on this host has a reason to ask: Caddy, which adds
+// X-Forwarded-For, never forwards /internal/.
+func (s *server) routeGens(w http.ResponseWriter, r *http.Request) {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() || r.Header.Get("X-Forwarded-For") != "" {
+		writeErr(w, r, 404, "not_found", "no such endpoint")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"gens": s.store.Snapshot().RouteGens})
 }
 
 // vmDomainURL turns -vm-domain into a base URL: "vm.example.com" means
@@ -179,7 +226,7 @@ func (s *server) portURL(w http.ResponseWriter, r *http.Request, p *principal) {
 	out := map[string]any{"url": "", "auth": route["auth"], "guest_port": port}
 	if route["auth"] == "private" {
 		exp := time.Now().Add(ttl).Unix()
-		sig := SignRoute(s.cfg.DesktopKey, label, exp)
+		sig := SignRoute(s.cfg.DesktopKey, label, s.store.Snapshot().RouteGens[id], exp)
 		u.RawQuery = url.Values{"boat_exp": {strconv.FormatInt(exp, 10)}, "boat_sig": {sig}}.Encode()
 		out["expires_at"] = time.Unix(exp, 0).UTC()
 		out["token"] = fmt.Sprintf("%d.%s", exp, sig) // header X-Boat-Route-Token

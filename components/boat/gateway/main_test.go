@@ -72,15 +72,15 @@ func TestPortRoutesPrivateByDefault(t *testing.T) {
 	if w := req(g, priv, "/x"); w.Code != 401 {
 		t.Fatalf("private route without token: %d", w.Code)
 	}
-	good, exp := tok(func(e int64) string { return signRoute(g.key, port, "abc-1", e) }, time.Hour)
+	good, exp := tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 0, e) }, time.Hour)
 	w := req(g, priv, "/x", header(routeHeader, good), cookie("app", "1"))
 	if b := w.Body.String(); w.Code != 200 || strings.Contains(b, good) || !strings.Contains(b, "cookie=app=1") {
 		t.Fatalf("header token: %d %s", w.Code, b)
 	}
 	bad := map[string]string{
-		"expired":    first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", e) }, -time.Second)),
-		"other vm":   first(tok(func(e int64) string { return signRoute(g.key, port, "xyz-2", e) }, time.Hour)),
-		"other port": first(tok(func(e int64) string { return signRoute(g.key, port+1, "abc-1", e) }, time.Hour)),
+		"expired":    first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 0, e) }, -time.Second)),
+		"other vm":   first(tok(func(e int64) string { return signRoute(g.key, port, "xyz-2", 0, e) }, time.Hour)),
+		"other port": first(tok(func(e int64) string { return signRoute(g.key, port+1, "abc-1", 0, e) }, time.Hour)),
 		"desktop":    first(tok(func(e int64) string { return signDesktop(g.key, "abc-1", e) }, time.Hour)),
 		"garbage":    "1.00",
 	}
@@ -228,7 +228,7 @@ func TestCrossOriginRefused(t *testing.T) {
 	// Private port route: another VM is refused, another port of the same VM is
 	// allowed, and the explicit token header needs no Origin rule.
 	priv := p + "-abc-1.vm.boatvms.test"
-	rt := first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", e) }, time.Hour))
+	rt := first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 0, e) }, time.Hour))
 	cR := cookie(routeCookie, rt)
 	for name, c := range map[string]struct {
 		mods []func(*http.Request)
@@ -280,5 +280,93 @@ func TestLoadKey(t *testing.T) {
 	}
 	if _, err := loadKey(bad); err == nil {
 		t.Fatal("short key accepted")
+	}
+}
+
+// A tenant's Domain cookie must not reach sibling tenants.
+func TestCookieDomainStripped(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "evil=1; Domain=vm.boatvms.test; Path=/; Secure")
+		w.Header().Add("Set-Cookie", "evil2=1;domain=.vm.boatvms.test")
+		w.Header().Add("Set-Cookie", "keep=domain=x; Path=/; HttpOnly")
+		w.Header().Add("Set-Cookie", "domain=kept; Path=/")
+	}))
+	defer up.Close()
+	_, ps, _ := net.SplitHostPort(strings.TrimPrefix(up.URL, "http://"))
+	rp := filepath.Join(t.TempDir(), "routes.json")
+	writeRoutes(t, rp, `{"vms":{"xyz-2":{"ip":"127.0.0.1","ports":[`+ps+`],"public":[`+ps+`]}}}`)
+	g := &gateway{domain: "boat.test", vmDomain: "vm.boatvms.test", desktopDomain: "desktop.boat.test",
+		key: []byte(strings.Repeat("k", 32)), routes: &routes{path: rp}, now: time.Now}
+	got := req(g, ps+"-xyz-2.vm.boatvms.test", "/").Header().Values("Set-Cookie")
+	want := []string{"evil=1; Path=/; Secure", "evil2=1", "keep=domain=x; Path=/; HttpOnly", "domain=kept; Path=/"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// A revoked generation kills earlier tokens, and only for that VM's routes.
+func TestRouteTokenRevocation(t *testing.T) {
+	g, _, port := setup(t)
+	gens := `{"gens":{}}`
+	status := 200
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/route-gens" {
+			t.Errorf("polled %s", r.URL.Path)
+		}
+		w.WriteHeader(status)
+		w.Write([]byte(gens))
+	}))
+	defer api.Close()
+	g.gens = newRouteGens(api.URL)
+	host := strconv.Itoa(port) + "-abc-1.vm.boatvms.test"
+	old := first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 0, e) }, time.Hour))
+	withTok := func(tk string) int {
+		return req(g, host, "/", func(r *http.Request) { r.Header.Set(routeHeader, tk) }).Code
+	}
+	if c := withTok(old); c != 200 {
+		t.Fatalf("generation 0 token before any revocation: %d", c)
+	}
+	gens = `{"gens":{"abc-1":1}}`
+	if err := g.gens.refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if c := withTok(old); c != 401 {
+		t.Errorf("revoked token: %d", c)
+	}
+	fresh := first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 1, e) }, time.Hour))
+	if c := withTok(fresh); c != 200 {
+		t.Errorf("token of the new generation: %d", c)
+	}
+	// A failing API keeps the table: no way back to accepting the old token.
+	status = 500
+	if err := g.gens.refresh(t.Context()); err == nil {
+		t.Error("HTTP 500 accepted")
+	}
+	if c := withTok(old); c != 401 {
+		t.Errorf("revoked token while the API fails: %d", c)
+	}
+}
+
+// Before the first answer a revoked token cannot be recognised, so none passes;
+// public routes do not depend on it. An API without the route (404) has no
+// revocations.
+func TestRouteGensFailClosedAtStart(t *testing.T) {
+	g, _, port := setup(t)
+	status := 500
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+	defer api.Close()
+	g.gens = newRouteGens(api.URL)
+	good := first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 0, e) }, time.Hour))
+	withTok := func(r *http.Request) { r.Header.Set(routeHeader, good) }
+	host := strconv.Itoa(port) + "-abc-1.vm.boatvms.test"
+	if c := req(g, host, "/", withTok).Code; c != 503 {
+		t.Errorf("no table yet: %d", c)
+	}
+	if c := req(g, strconv.Itoa(port)+"-xyz-2.vm.boatvms.test", "/").Code; c != 200 {
+		t.Errorf("public route without a table: %d", c)
+	}
+	status = 404
+	if c := req(g, host, "/", withTok).Code; c != 200 {
+		t.Errorf("API without revocation: %d", c)
 	}
 }

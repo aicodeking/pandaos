@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -42,6 +43,42 @@ func teamHookCount(st *State, team string) int {
 func underLimit(n, max int) bool { return max <= 0 || n < max }
 
 const maxSecretBytes = 64 << 10
+
+func roleRank(role string) int {
+	switch role {
+	case "owner":
+		return 3
+	case "admin":
+		return 2
+	case "member":
+		return 1
+	}
+	return 0
+}
+
+// canManageKey decides who may see, rotate or delete a key. Rotation returns a
+// working token for that key, so nobody may touch a key that can do more than
+// the caller: a key's user alone does not decide it (a vms:read key belongs to
+// the same user as that user's full key). Another user's key also needs the
+// admin scope and no higher role, and the operator's only the operator.
+func canManageKey(st *State, p *principal, k *APIKey) bool {
+	if k == nil || k.TeamID != p.Team.ID {
+		return false
+	}
+	role := p.Team.role(k.UserID)
+	for _, sc := range effectiveScopes(k.Scopes, role) {
+		if !p.has(sc) {
+			return false
+		}
+	}
+	if k.UserID == p.User.ID {
+		return true
+	}
+	if u := st.Users[k.UserID]; u != nil && u.Operator && !p.Operator {
+		return false
+	}
+	return p.has("admin") && roleRank(role) <= roleRank(p.Role)
+}
 
 // rotateNote: secrets are copied into VMs (env file, process env, disk),
 // so a new value reaches only VMs created or started afterwards.
@@ -235,6 +272,11 @@ func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request, p *principal
 			return
 		}
 	}
+	// Imported snapshots belong to no VM, so nothing else would ever delete them.
+	if err := s.deleteSnapshotsOf(r, id); err != nil {
+		writeUpstream(w, r, err)
+		return
+	}
 	err := s.store.Update(func(st *State) error {
 		delete(st.Teams, id)
 		for k, v := range st.Keys {
@@ -287,7 +329,29 @@ func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request, p *principal
 		s.storeErr(w, r, err)
 		return
 	}
+	// An import racing the first pass finished while the team's keys still worked.
+	if err := s.deleteSnapshotsOf(r, id); err != nil {
+		log.Printf("%s: snapshots of deleted team %s: %v", info(r).id, id, err)
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "id": id})
+}
+
+func (s *server) deleteSnapshotsOf(r *http.Request, team string) error {
+	var list struct {
+		Snapshots []map[string]any `json:"snapshots"`
+	}
+	if err := s.boatd.call(r.Context(), "GET", "/v1/snapshots?team="+url.QueryEscape(team), nil, &list); err != nil {
+		return err
+	}
+	for _, sn := range list.Snapshots {
+		if str(sn, "team") != team {
+			continue
+		}
+		if err := s.boatd.call(r.Context(), "DELETE", "/v1/snapshots/"+url.PathEscape(str(sn, "id")), nil, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pruneOrphanUsers removes non-operator users that belong to no team.
@@ -422,7 +486,7 @@ func (s *server) removeMember(w http.ResponseWriter, r *http.Request, p *princip
 
 func (s *server) storeErr(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, errLimit) {
-		writeErr(w, r, 403, "limit_reached", "team limit reached (keys or webhooks); delete unused ones or ask the operator")
+		writeErr(w, r, 403, "limit_reached", "team limit reached (keys, webhooks, secrets, shares, environments or ssh keys); delete unused ones or ask the operator")
 		return
 	}
 	if errors.Is(err, errConflict) {
@@ -436,8 +500,9 @@ func (s *server) storeErr(w http.ResponseWriter, r *http.Request, err error) {
 
 func (s *server) listKeys(w http.ResponseWriter, r *http.Request, p *principal) {
 	out := []keyView{}
-	for _, k := range s.store.Snapshot().Keys {
-		if k.TeamID == p.Team.ID && (k.UserID == p.User.ID || p.has("admin")) {
+	st := s.store.Snapshot()
+	for _, k := range st.Keys {
+		if canManageKey(st, p, k) {
 			out = append(out, viewKey(k, ""))
 		}
 	}
@@ -474,6 +539,10 @@ func (s *server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 	scopes := body.Scopes
 	if len(scopes) == 0 {
 		scopes = p.Scopes // never broader than the minting key
+	}
+	if len(scopes) == 0 { // stored empty, it would mean the role's full scopes
+		writeErr(w, r, 403, "forbidden", "this key has no scopes to grant")
+		return
 	}
 	allowed := effectiveScopes(nil, t.role(p.User.ID))
 	for _, sc := range scopes {
@@ -517,8 +586,8 @@ func (s *server) rotateKey(w http.ResponseWriter, r *http.Request, p *principal)
 		return
 	}
 	id := r.PathValue("id")
-	k := s.store.Snapshot().Keys[id]
-	if k == nil || k.TeamID != p.Team.ID || (k.UserID != p.User.ID && !p.has("admin")) {
+	st := s.store.Snapshot()
+	if !canManageKey(st, p, st.Keys[id]) {
 		writeErr(w, r, 404, "not_found", "key not found")
 		return
 	}
@@ -558,8 +627,8 @@ func (s *server) countKeyUse(id string) {
 // keyUsageView reports requests since this process started and the last use.
 func (s *server) keyUsageView(w http.ResponseWriter, r *http.Request, p *principal) {
 	id := r.PathValue("id")
-	k := s.store.Snapshot().Keys[id]
-	if k == nil || k.TeamID != p.Team.ID || (k.UserID != p.User.ID && !p.has("admin")) {
+	st := s.store.Snapshot()
+	if !canManageKey(st, p, st.Keys[id]) {
 		writeErr(w, r, 404, "not_found", "key not found")
 		return
 	}
@@ -574,8 +643,8 @@ func (s *server) keyUsageView(w http.ResponseWriter, r *http.Request, p *princip
 
 func (s *server) deleteKey(w http.ResponseWriter, r *http.Request, p *principal) {
 	id := r.PathValue("id")
-	k := s.store.Snapshot().Keys[id]
-	if k == nil || k.TeamID != p.Team.ID || (k.UserID != p.User.ID && !p.has("admin")) {
+	st := s.store.Snapshot()
+	if !canManageKey(st, p, st.Keys[id]) {
 		writeErr(w, r, 404, "not_found", "key not found")
 		return
 	}
@@ -623,7 +692,11 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request, p *principal)
 	now := time.Now().UTC()
 	existed := s.store.Snapshot().Secrets[secretKey(p.Team.ID, name)] != nil
 	err = s.store.Update(func(st *State) error {
-		st.Secrets[secretKey(p.Team.ID, name)] = &Secret{TeamID: p.Team.ID, Name: name, Sealed: sealed, Updated: now}
+		k := secretKey(p.Team.ID, name)
+		if !secretFits(st, p.Team.ID, k, len(sealed)) {
+			return errLimit
+		}
+		st.Secrets[k] = &Secret{TeamID: p.Team.ID, Name: name, Sealed: sealed, Updated: now}
 		return nil
 	})
 	if err != nil {
@@ -636,6 +709,19 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request, p *principal)
 		out["note"] = rotateNote
 	}
 	writeJSON(w, 200, out)
+}
+
+// secretFits reports whether the team stays within its caps after storing size
+// sealed bytes under key k; replacing a secret frees the old value.
+func secretFits(st *State, team, k string, size int) bool {
+	n, total := 0, size
+	for key, sec := range st.Secrets {
+		if sec.TeamID == team && key != k {
+			n++
+			total += len(sec.Sealed)
+		}
+	}
+	return n < maxSecretsPerTeam && total <= maxSecretBytesPerTeam
 }
 
 func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request, p *principal) {

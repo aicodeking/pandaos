@@ -32,6 +32,15 @@ func (s *server) grantJump(r *http.Request, team, vmID, pub string) error {
 	err := s.store.Update(func(st *State) error {
 		g := st.SSHGrants[grantKey(team, norm)]
 		if g == nil {
+			n := 0
+			for _, x := range st.SSHGrants {
+				if x.TeamID == team {
+					n++
+				}
+			}
+			if n >= maxGrantsPerTeam {
+				return errLimit
+			}
 			g = &SSHGrant{TeamID: team, PublicKey: norm}
 			st.SSHGrants[grantKey(team, norm)] = g
 		}

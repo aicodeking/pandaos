@@ -83,6 +83,21 @@ func applyEnvReq(env *Environment, e *envReq) bool {
 	return changed
 }
 
+// teamEnvBytes is what the team's environments add to state.json.
+func teamEnvBytes(st *State, team string) int {
+	n := 0
+	for _, e := range st.Environments {
+		if e.TeamID != team {
+			continue
+		}
+		n += len(e.SetupScript)
+		for k, v := range e.Env {
+			n += len(k) + len(v)
+		}
+	}
+	return n
+}
+
 func envByName(st *State, team, name string) *Environment {
 	for _, e := range st.Environments {
 		if e.TeamID == team && e.Name == name {
@@ -156,6 +171,9 @@ func (s *server) createEnv(w http.ResponseWriter, r *http.Request, p *principal)
 			return errConflict
 		}
 		st.Environments[env.ID] = env
+		if teamEnvBytes(st, p.Team.ID) > maxEnvBytesPerTeam {
+			return errLimit
+		}
 		clearOtherDefaults(st, env)
 		return nil
 	})
@@ -219,6 +237,9 @@ func (s *server) updateEnv(w http.ResponseWriter, r *http.Request, p *principal)
 		}
 		if applyEnvReq(env, &e) {
 			env.Version++ // an existing build no longer matches
+		}
+		if teamEnvBytes(st, p.Team.ID) > maxEnvBytesPerTeam {
+			return errLimit
 		}
 		env.Updated = time.Now().UTC()
 		clearOtherDefaults(st, env)

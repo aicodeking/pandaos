@@ -98,6 +98,9 @@ func (s *server) aiEnv(vmID, team string, bump bool) (map[string]string, error) 
 	}
 	env := map[string]string{}
 	if st.AIProxyOff[team] {
+		if vm := st.AIVMs[vmID]; vm != nil && vm.Blocked {
+			return nil, nil // raw keys cannot be blocked later, so they never go in
+		}
 		for _, c := range creds {
 			key, err := s.keys.Open(c.Sealed, "ai/"+aiCredKey(c.TeamID, c.Provider))
 			if err != nil {
@@ -342,6 +345,13 @@ func (s *server) aiProxy(w http.ResponseWriter, r *http.Request) {
 		aiError(w, 429, "AI proxy rate limit for this VM")
 		return
 	}
+	release, ok := s.aiInflight.acquire(vmID)
+	if !ok {
+		w.Header().Set("Retry-After", "5")
+		aiError(w, 429, "too many AI proxy requests in flight for this VM")
+		return
+	}
+	defer release()
 	cred := s.store.Snapshot().AICreds[aiCredKey(vm.TeamID, provider)]
 	if cred == nil {
 		aiError(w, 404, "the team has no "+provider+" credential")

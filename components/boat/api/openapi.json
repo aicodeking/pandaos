@@ -2312,6 +2312,53 @@
     }
    }
   },
+  "/v1/vms/{id}/port-tokens/revoke": {
+   "post": {
+    "summary": "End every token, link and cookie of the VM's private ports, effective at the gateway within about 2 s. Removing a port does this too",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "generation": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "ok",
+          "generation"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/v1/vms/{id}/snapshots": {
    "get": {
     "summary": "List snapshots",
@@ -4852,7 +4899,7 @@
       "items": {
        "type": "string"
       },
-      "description": "team secret names (absent = all, [] = none). Forks inherit it"
+      "description": "team secret names (absent = all, [] = none). A disk from a share or import gets none unless named here, which needs the exec scope. Forks inherit it"
      },
      "environment": {
       "type": "string",

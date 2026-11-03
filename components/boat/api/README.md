@@ -61,6 +61,7 @@ The full schema is in `openapi.json` (OpenAPI 3.1), which the server also serves
 | `GET/PUT /v1/vms/{id}/files?path=` | exec | raw bytes; the path must be absolute; `-max-file-bytes` |
 | `GET/POST /v1/vms/{id}/ports`, `DELETE …/ports/{port}` | vms:read / vms:write | `{port,auth:private\|public}`, default private; `public:true` is shorthand for `auth:public` |
 | `GET /v1/vms/{id}/ports/{port}/url[?ttl_s=]` | exec | `{url,auth,token?,expires_at?}`; private routes get a signed token (see Port routes) |
+| `POST /v1/vms/{id}/port-tokens/revoke` | exec | `{ok,generation}`; ends every token, link and cookie of the VM's private ports within about 2 s. Removing a port does this too |
 | `GET/POST /v1/vms/{id}/snapshots`, `DELETE …/snapshots/{sid}` | vms:read / vms:write | proxied to boatd |
 | `POST /v1/vms/{id}/ssh` | exec | `{public_key}` is appended (deduped) to `/home/<ssh-user>/.ssh/authorized_keys`; returns `{host,port,user,jump?}` |
 | `GET /v1/vms/{id}/desktop` | exec | `{url,expires_at}`, signed and short-lived (`-desktop-ttl`, default 5m) |
@@ -100,8 +101,7 @@ Errors use the shape `{"error":{"code","message","request_id"}}`. Every response
 - **Hash:** `hex(HMAC-SHA256(pepper, salt ‖ 0x00 ‖ secret))` with a 16-byte salt per key.
   A slow KDF (PBKDF2/scrypt) only helps against low-entropy passwords. Brute-forcing
   256-bit secrets is already infeasible, and the HMAC keeps auth cheap on every request.
-  The pepper is derived from the master key, so a leaked `state.json` alone cannot be
-  used to test guesses. Comparison is constant-time.
+  The pepper is derived from the master key, and `state.json` is sealed under it too. Comparison is constant-time.
 - **Master key:** 32 bytes (raw or hex), taken from the first source that exists:
   1. `-master-key-file`;
   2. the systemd credential `$CREDENTIALS_DIRECTORY/boat-master-key`. This is the
@@ -131,7 +131,9 @@ Errors use the shape `{"error":{"code","message","request_id"}}`. Every response
   strips the `env` field from any VM object it returns.
   - **Per VM:** `secrets:[names]` at create limits what a VM gets; `[]` gives it none.
     Forks inherit their parent's selection, because they inherit its disk anyway.
-    The default (no field) is every team secret.
+    The default (no field) is every team secret, except on a disk the team did not
+    build (a share, an import, or a fork or snapshot of such a VM): that gets none
+    unless named, which needs the `exec` scope, and it starts blocked at the AI proxy.
   - **What encryption does not cover:** anyone with the `exec` scope on a VM can read
     every secret injected into it. They sit in `/etc/boat/env`, in the environment of
     every process, and in whatever the agent writes to disk. Encryption at rest
@@ -211,7 +213,8 @@ build end up on the snapshot's disk**, so select only what the setup needs.
 ## Snapshot sharing
 
 A snapshot holds the VM's disk, so anything on it goes with a share, including
-`/etc/boat/env` (raw secrets; proxy tokens, which die with their run). Taking a share
+`/etc/boat/env` (raw secrets; the proxy token, which creating a share rotates so the
+copy on the snapshot is dead). Taking a share
 copies the snapshot into the taker's team; revoking stops further copies, not ones
 already taken. A copy from another host is disk-only: it cold boots.
 
@@ -300,11 +303,13 @@ reachable through an old grant. Grants for VMs that no longer exist are pruned.
 
 ## Store and scaling limits
 
-All state lives in a single `state.json`, guarded by one mutex:
+All state lives in a single `state.json`, sealed under the master key:
 
-- Each write deep-copies the state, applies the change, writes it atomically
-  (temp file + fsync + rename + dir fsync), and then swaps it in.
-- Readers get immutable snapshots.
+- Each write takes one mutex, deep-copies the state, applies the change, writes it
+  atomically (temp file + fsync + rename + dir fsync), and then swaps it in.
+- Readers, authentication included, get immutable snapshots and never wait for a write.
+- Per team: 200 secrets and 2 MiB of sealed values, 100 live shares, 4 MiB of environment
+  scripts and vars, 200 ssh keys. See `limits.go`.
 
 This setup suits one server with a few thousand keys, webhooks and secrets. Webhook
 delivery logs are the heaviest writer (≤100 per hook). Move to SQLite when the state

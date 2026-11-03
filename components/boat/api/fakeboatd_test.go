@@ -27,6 +27,9 @@ type fakeBoatd struct {
 	cmds     map[string]*fakeCmd
 	events   chan string
 	n        int
+	// discardPuts counts file uploads instead of keeping them (memory tests).
+	discardPuts bool
+	putBytes    int64
 }
 
 func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
@@ -205,6 +208,11 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 	})
 	mux.HandleFunc("PUT /v1/vms/{id}/files", func(w http.ResponseWriter, r *http.Request) {
 		if get(w, r) == nil {
+			return
+		}
+		if f.discardPuts {
+			f.putBytes, _ = io.Copy(io.Discard, r.Body)
+			writeJSON(w, 200, map[string]any{"ok": true})
 			return
 		}
 		b, _ := io.ReadAll(r.Body)

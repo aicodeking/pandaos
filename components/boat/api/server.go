@@ -38,22 +38,25 @@ type Config struct {
 }
 
 type server struct {
-	store    *Store
-	keys     *Keyring
-	boatd    *boatdClient
-	limiter  *limiter // per key
-	teamLim  *limiter // per team (all keys of a team share it)
-	aiLim    *limiter // AI proxy requests per VM
-	aiMeter  *aiMeter
-	aiClient *http.Client
-	otel     *otelExporter // nil = no instance export
-	ctx      context.Context
-	keyUse   sync.Map // key id -> *keyUsage
-	audit    *auditLog
-	hooks    *dispatcher
-	cfg      Config
-	mux      *http.ServeMux
-	jumpMu   sync.Mutex
+	store      *Store
+	keys       *Keyring
+	boatd      *boatdClient
+	limiter    *limiter  // per key
+	teamLim    *limiter  // per team (all keys of a team share it)
+	aiLim      *limiter  // AI proxy requests per VM
+	streams    *inflight // long responses per team
+	uploads    *inflight // uploads and imports per team
+	aiInflight *inflight // AI proxy requests per VM
+	aiMeter    *aiMeter
+	aiClient   *http.Client
+	otel       *otelExporter // nil = no instance export
+	ctx        context.Context
+	keyUse     sync.Map // key id -> *keyUsage
+	audit      *auditLog
+	hooks      *dispatcher
+	cfg        Config
+	mux        *http.ServeMux
+	jumpMu     sync.Mutex
 	// routeTable lists every registered "METHOD /path" (OpenAPI drift test).
 	routeTable []string
 	observe    func(pattern string, r *http.Request, status int) // OpenAPI drift test
@@ -144,7 +147,10 @@ type limiter struct {
 	burst   float64
 	buckets map[string]*bucket
 	now     func() time.Time
+	swept   time.Time
 }
+
+const limiterSweepEvery = time.Minute
 
 type bucket struct {
 	tokens float64
@@ -163,6 +169,9 @@ func (l *limiter) allow(key string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
+	if now.Sub(l.swept) >= limiterSweepEvery {
+		l.sweep(now)
+	}
 	b := l.buckets[key]
 	if b == nil {
 		b = &bucket{tokens: l.burst, last: now}
@@ -175,6 +184,17 @@ func (l *limiter) allow(key string) (bool, time.Duration) {
 		return true, 0
 	}
 	return false, time.Duration((1 - b.tokens) / l.rate * float64(time.Second))
+}
+
+// sweep drops refilled buckets: a new one would start the same, and keys can be
+// client IPs on the public snapshot link. Caller holds l.mu.
+func (l *limiter) sweep(now time.Time) {
+	l.swept = now
+	for k, b := range l.buckets {
+		if b.tokens+now.Sub(b.last).Seconds()*l.rate >= l.burst {
+			delete(l.buckets, k)
+		}
+	}
 }
 
 // ---- audit log ----
@@ -332,6 +352,44 @@ var auditedReads = map[string]bool{
 	"GET /v1/telemetry":                         true,
 }
 
+// streamRoutes hold a connection for as long as the guest or client keeps it open.
+var streamRoutes = map[string]bool{
+	"POST /v1/vms/{id}/exec":                    true,
+	"POST /v1/vms/{id}/prompt":                  true,
+	"GET /v1/events":                            true,
+	"GET /v1/vms/{id}/commands/{cid}/logs":      true,
+	"GET /v1/vms/{id}/prompts/{pid}/logs":       true,
+	"GET /v1/vms/{id}/files":                    true,
+	"GET /v1/vms/{id}/snapshots/{sid}/download": true,
+}
+
+var uploadRoutes = map[string]bool{
+	"PUT /v1/vms/{id}/files":          true,
+	"POST /v1/snapshots/import":       true,
+	"POST /v1/snapshots/import-share": true,
+}
+
+// holdSlot takes pattern's per-team slot; false means it already answered 429.
+func (s *server) holdSlot(w http.ResponseWriter, r *http.Request, pattern, team string) (func(), bool) {
+	lim := s.streams
+	switch {
+	case uploadRoutes[pattern]:
+		lim = s.uploads
+	case !streamRoutes[pattern]:
+		return func() {}, true
+	}
+	return s.acquireOr429(w, r, lim, team)
+}
+
+func (s *server) acquireOr429(w http.ResponseWriter, r *http.Request, lim *inflight, key string) (func(), bool) {
+	release, ok := lim.acquire(key)
+	if !ok {
+		w.Header().Set("Retry-After", "5")
+		writeErr(w, r, http.StatusTooManyRequests, "too_many_in_flight", "too many open streams or uploads for this team; wait for one to finish")
+	}
+	return release, ok
+}
+
 // handle registers an unauthenticated route.
 func (s *server) handle(pattern string, h http.HandlerFunc) {
 	s.routeTable = append(s.routeTable, pattern)
@@ -369,6 +427,11 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 			writeErr(w, r, http.StatusForbidden, "forbidden", "key lacks scope "+scope)
 			return
 		}
+		release, ok := s.holdSlot(w, r, pattern, p.Team.ID)
+		if !ok {
+			return
+		}
+		defer release()
 		h(w, r, p)
 	})
 }

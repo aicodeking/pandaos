@@ -190,9 +190,11 @@ in
             "-ask-listen" askListen
             "-routes" "/run/boat/routes.json"
             "-desktop-key" "%d/boat-desktop-key"
+            "-api" "http://127.0.0.1:${toString boat.apiPort}" # port token revocations
           ];
           # Faces the internet: its own uid, no access to boatd's socket or to
-          # boat-api's data. It reads routes.json and this one credential.
+          # boat-api's data. It reads routes.json and this one credential, and
+          # polls boat-api's loopback-only /internal/route-gens.
           User = "boat-gateway";
           Group = "boat-gateway";
           LoadCredentialEncrypted = "boat-desktop-key:${boat.dataDir}/secrets/boat-desktop-key.cred";

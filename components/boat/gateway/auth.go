@@ -37,9 +37,13 @@ func signDesktop(key []byte, vmid string, exp int64) string {
 	return mac(key, fmt.Sprintf("%s.%d", vmid, exp))
 }
 
-// signRoute: hex(HMAC(key, "route.<port>-<vmid>.<exp>")) (boat-api mints it).
-func signRoute(key []byte, port int, vmid string, exp int64) string {
-	return mac(key, fmt.Sprintf("route.%d-%s.%d", port, vmid, exp))
+// signRoute: hex(HMAC(key, "route.<port>-<vmid>.<exp>")) (boat-api mints it),
+// with ".g<gen>" before the expiry once the VM's tokens have been revoked.
+func signRoute(key []byte, port int, vmid string, gen int, exp int64) string {
+	if gen == 0 {
+		return mac(key, fmt.Sprintf("route.%d-%s.%d", port, vmid, exp))
+	}
+	return mac(key, fmt.Sprintf("route.%d-%s.g%d.%d", port, vmid, gen, exp))
 }
 
 // guestToken is the token boat-api starts the guest desktop with:

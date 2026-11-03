@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -83,6 +86,59 @@ func (s *server) teamEnv(teamID string, only []string) (map[string]string, error
 		env[sec.Name] = string(v)
 	}
 	return env, nil
+}
+
+// snapshotForeign reports whether a VM from this snapshot boots a disk the team
+// did not build: an import, or a snapshot of a VM that itself booted one. Such a
+// disk's init runs before anyone can look at it. Unknown means foreign.
+func (s *server) snapshotForeign(r *http.Request, team, sid string) (bool, error) {
+	var list struct {
+		Snapshots []map[string]any `json:"snapshots"`
+	}
+	if err := s.boatd.call(r.Context(), "GET", "/v1/snapshots?team="+url.QueryEscape(team), nil, &list); err != nil {
+		return true, err
+	}
+	for _, sn := range list.Snapshots {
+		if str(sn, "id") == sid && str(sn, "team") == team {
+			from := str(sn, "vm_id")
+			return from == "" || s.store.Snapshot().ForeignVMs[from], nil
+		}
+	}
+	return true, nil
+}
+
+// recordVM stores a new VM's secret selection (nil = all) and whether its disk
+// is foreign. A foreign VM starts blocked at the AI proxy; PUT .../ai-access
+// opens it.
+func (s *server) recordVM(vmID, team string, only []string, foreign bool) error {
+	if only == nil && !foreign {
+		return nil
+	}
+	return s.store.Update(func(st *State) error {
+		if only != nil {
+			st.VMSecrets[vmID] = append([]string{}, only...)
+		}
+		if foreign {
+			st.ForeignVMs[vmID] = true
+			st.AIVMs[vmID] = &AIVM{TeamID: team, Blocked: true}
+		}
+		return nil
+	})
+}
+
+// foreignSecrets applies the rule for a foreign disk to c: no team secrets unless
+// asked for by name, and only by a key that could read them from any VM anyway.
+// explicit is what the request itself said, not its environment.
+func foreignSecrets(c *createReq, explicit *[]string, p *principal) string {
+	if explicit == nil {
+		c.Secrets = &[]string{}
+		return ""
+	}
+	c.Secrets = explicit
+	if len(*explicit) > 0 && !p.has("exec") {
+		return "naming secrets for a shared or imported disk needs the exec scope"
+	}
+	return ""
 }
 
 // vmSecrets is the VM's secret selection (nil = all team secrets).
@@ -246,6 +302,7 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 	if !decode(w, r, &c) {
 		return
 	}
+	explicit := c.Secrets
 	env, msg := s.resolveEnv(&c, p.Team.ID)
 	if msg == "" {
 		msg = s.validateCreate(&c)
@@ -256,6 +313,20 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 	if msg != "" {
 		writeErr(w, r, 400, "invalid_request", msg)
 		return
+	}
+	foreign := c.From != ""
+	if c.Snapshot != "" {
+		var err error
+		if foreign, err = s.snapshotForeign(r, p.Team.ID, c.Snapshot); err != nil {
+			writeUpstream(w, r, err)
+			return
+		}
+	}
+	if foreign {
+		if msg := foreignSecrets(&c, explicit, p); msg != "" {
+			writeErr(w, r, 403, "forbidden", msg)
+			return
+		}
 	}
 	var only []string
 	if c.Secrets != nil {
@@ -278,6 +349,11 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 			writeErr(w, r, 404, "not_found", "share not found or expired")
 			return
 		}
+		release, ok := s.acquireOr429(w, r, s.uploads, p.Team.ID)
+		if !ok {
+			return
+		}
+		defer release()
 		snap, err := s.copyShare(r, sh, p.Team.ID, "")
 		if err != nil {
 			writeUpstream(w, r, err)
@@ -298,14 +374,12 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 		return
 	}
 	id := str(vm, "id")
-	if only != nil {
-		if err := s.setVMSecrets(id, only); err != nil {
-			// Fail loudly: without the record a later start would inject all secrets.
-			log.Printf("%s: record secret selection for %s: %v; deleting the VM", info(r).id, id, err)
-			s.boatd.call(r.Context(), "POST", vmPath(id, "delete"), nil, nil)
-			writeErr(w, r, 500, "store_error", "could not record the secret selection")
-			return
-		}
+	if err := s.recordVM(id, p.Team.ID, only, foreign); err != nil {
+		// Fail loudly: without the record a later start would inject all secrets.
+		log.Printf("%s: record secret selection for %s: %v; deleting the VM", info(r).id, id, err)
+		s.boatd.call(r.Context(), "POST", vmPath(id, "delete"), nil, nil)
+		writeErr(w, r, 500, "store_error", "could not record the secret selection")
+		return
 	}
 	// The AI proxy token depends on the VM id, so it goes in after create.
 	if ai, err := s.aiEnv(id, p.Team.ID, true); err != nil {
@@ -352,17 +426,6 @@ func (s *server) applyEnvToVM(r *http.Request, p *principal, vmID string, env *E
 		return
 	}
 	out["setup_cmd_id"] = cid
-}
-
-func (s *server) setVMSecrets(vmID string, names []string) error {
-	return s.store.Update(func(st *State) error {
-		if names == nil {
-			delete(st.VMSecrets, vmID)
-		} else {
-			st.VMSecrets[vmID] = append([]string{}, names...)
-		}
-		return nil
-	})
 }
 
 func (s *server) startVM(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -422,14 +485,20 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 		writeUpstream(w, r, err)
 		return
 	}
-	// The child inherits the parent's disk, hence its secrets, so it keeps
-	// the parent's selection for later starts too.
-	if sel, ok := s.store.Snapshot().VMSecrets[parent]; ok {
-		if err := s.setVMSecrets(str(child, "id"), append([]string{}, sel...)); err != nil {
-			log.Printf("%s: copy secret selection to fork %s: %v", info(r).id, str(child, "id"), err)
-		}
-	}
 	childID := str(child, "id")
+	// The child inherits the parent's disk, hence its secrets, so it keeps the
+	// parent's selection for later starts too, and its foreign mark.
+	st := s.store.Snapshot()
+	var sel []string
+	if names, ok := st.VMSecrets[parent]; ok {
+		sel = append([]string{}, names...)
+	}
+	if err := s.recordVM(childID, p.Team.ID, sel, st.ForeignVMs[parent]); err != nil {
+		log.Printf("%s: record secret selection for fork %s: %v; deleting it", info(r).id, childID, err)
+		s.boatd.call(r.Context(), "POST", vmPath(childID, "delete"), nil, nil)
+		writeErr(w, r, 500, "store_error", "could not record the secret selection")
+		return
+	}
 	// The child's disk holds the parent's token; give it its own. Its native
 	// agent sessions came along too, so its conversations do as well.
 	if ai, err := s.aiEnv(childID, p.Team.ID, true); err != nil {
@@ -466,6 +535,8 @@ func (s *server) forgetVM(id string) {
 		delete(st.Prompts, id)
 		delete(st.Conversations, id)
 		delete(st.VMEnvs, id)
+		delete(st.ForeignVMs, id)
+		delete(st.RouteGens, id)
 		for k, sh := range st.SnapShares {
 			if sh.VMID == id {
 				delete(st.SnapShares, k)
@@ -673,20 +744,54 @@ func (s *server) putFile(w http.ResponseWriter, r *http.Request, p *principal) {
 	if _, ok := s.ownVM(w, r, p); !ok {
 		return
 	}
-	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxFileBytes))
-	if err != nil {
-		writeErr(w, r, http.StatusRequestEntityTooLarge, "too_large", "file exceeds limit")
+	spool, n, ok := s.spoolUpload(w, r)
+	if !ok {
 		return
 	}
-	if err := s.putVMFile(r, r.PathValue("id"), path, data); err != nil {
+	defer spool.Close()
+	if err := s.putVMFile(r, r.PathValue("id"), path, spool); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "path": path, "bytes": len(data)})
+	writeJSON(w, 200, map[string]any{"ok": true, "path": path, "bytes": n})
 }
 
-func (s *server) putVMFile(r *http.Request, id, path string, data []byte) error {
-	resp, err := s.boatd.do(r.Context(), "PUT", vmPath(id, "files")+"?path="+url.QueryEscape(path), bytes.NewReader(data), "application/octet-stream")
+// spoolUpload copies the body to an unlinked temp file instead of memory. It
+// does not relay the body straight to boatd because boatd cannot tell a client
+// that gave up from the end of the file (boatd/api.go putFileHandler treats
+// io.ErrUnexpectedEOF as the last chunk): a dropped upload would replace the
+// guest's file with its first part.
+func (s *server) spoolUpload(w http.ResponseWriter, r *http.Request) (*os.File, int64, bool) {
+	if r.ContentLength > s.cfg.MaxFileBytes {
+		writeErr(w, r, http.StatusRequestEntityTooLarge, "too_large", "file exceeds limit")
+		return nil, 0, false
+	}
+	f, err := os.CreateTemp(filepath.Dir(s.store.path), ".upload-*")
+	if err != nil {
+		log.Printf("%s: spool upload: %v", info(r).id, err)
+		writeErr(w, r, 500, "store_error", "could not store the upload")
+		return nil, 0, false
+	}
+	os.Remove(f.Name()) // gone as soon as it is closed, even after a crash
+	n, err := io.Copy(f, http.MaxBytesReader(w, r.Body, s.cfg.MaxFileBytes))
+	if err == nil {
+		_, err = f.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		f.Close()
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeErr(w, r, http.StatusRequestEntityTooLarge, "too_large", "file exceeds limit")
+		} else {
+			writeErr(w, r, 400, "invalid_request", "could not read the upload")
+		}
+		return nil, 0, false
+	}
+	return f, n, true
+}
+
+func (s *server) putVMFile(r *http.Request, id, path string, data io.Reader) error {
+	resp, err := s.boatd.do(r.Context(), "PUT", vmPath(id, "files")+"?path="+url.QueryEscape(path), data, "application/octet-stream")
 	if err != nil {
 		return err
 	}
@@ -767,6 +872,10 @@ func (s *server) sshVM(w http.ResponseWriter, r *http.Request, p *principal) {
 			return
 		}
 		if err := s.grantJump(r, p.Team.ID, r.PathValue("id"), pub); err != nil {
+			if errors.Is(err, errLimit) {
+				s.storeErr(w, r, err)
+				return
+			}
 			log.Printf("%s: jump keys: %v", info(r).id, err)
 			writeErr(w, r, 500, "jump_sync_failed", "could not update ssh jump host")
 			return
@@ -815,7 +924,7 @@ func (s *server) authorizeKey(r *http.Request, id, pub string) error {
 	if next != "" && !strings.HasSuffix(next, "\n") {
 		next += "\n"
 	}
-	return s.putVMFile(r, id, path, []byte(next+pub+"\n"))
+	return s.putVMFile(r, id, path, strings.NewReader(next+pub+"\n"))
 }
 
 func (s *server) desktopVM(w http.ResponseWriter, r *http.Request, p *principal) {

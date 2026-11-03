@@ -143,7 +143,7 @@ if [[ $help == *-ai-proxy-listen* ]]; then api_args+=(-ai-proxy-listen 10.200.0.
 boat-api serve "${api_args[@]}" >"$WORK/api.log" 2>&1 &
 PIDS+=($!)
 boat-gateway -listen 127.0.0.1:8742 -ask-listen 127.0.0.1:8743 -domain "$D" -vm-domain "$VMD" \
-  -desktop-domain "desktop.$D" -routes "$WORK/run/routes.json" -desktop-key "$KEYF" >"$WORK/gateway.log" 2>&1 &
+  -desktop-domain "desktop.$D" -routes "$WORK/run/routes.json" -desktop-key "$KEYF" -api "$API" >"$WORK/gateway.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 100); do curl -fs "$API/healthz" >/dev/null && break; sleep 0.1; done
 
@@ -382,6 +382,13 @@ if [ -f "$HERE/dashboard/web/index.html" ]; then
 else
   warn "components/boat/dashboard/web not present yet"
 fi
+
+log "port tokens: revocation ends the old token, a new one works"
+curl -fsS -X POST -H "Authorization: Bearer $KEY" "$API/v1/vms/$id_a/port-tokens/revoke" >/dev/null || fail "revoke port tokens"
+sleep 3 # the gateway polls every 2 s
+[ "$(hc "$priv" -H "X-Boat-Route-Token: $rt_new")" = 401 ] || fail "revoked token still accepted: $(hc "$priv" -H "X-Boat-Route-Token: $rt_new")"
+rt_gen=$(curl -fsS -H "Authorization: Bearer $KEY" "$API/v1/vms/$id_a/ports/8080/url" | jq -r .token)
+[ "$(hc "$priv" -H "X-Boat-Route-Token: $rt_gen")" = 200 ] || fail "token minted after the revocation"
 
 log "rm: the VM's jump grant and routes go away"
 boat rm edge-a --json >/dev/null
