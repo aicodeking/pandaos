@@ -313,8 +313,8 @@ in
     boatdSettings = mkOption {
       type = types.attrsOf types.anything;
       default = { };
-      example = { egressMbit = 200; btrfsQgroups = true; idleStopS = 3600; teams.ci = { maxVMs = 50; }; };
-      description = "Extra keys merged into /etc/boat/boatd.json (see boatd/config.go); they win over the module's.";
+      example = { egressMbit = 200; btrfsQgroups = true; idleStopS = 3600; warmPool = true; ksmTeam = "ci"; teams.ci = { maxVMs = 50; }; };
+      description = "Extra keys merged into /etc/boat/boatd.json (see boatd/config.go and PROTOCOL.md \"Performance and density\"); they win over the module's.";
     };
     stopTimeoutSec = mkOption {
       type = types.ints.positive;

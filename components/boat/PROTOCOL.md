@@ -173,7 +173,8 @@ Framing:
 | `file_move` | `{"op":"file_move","from":"/a","to":"/b","overwrite"?:false}` | `{"ok":true}` |
 | `file_search` | `{"op":"file_search","path":"/abs","query":"…","limit"?:100,"regex"?:false}` | `{"ok":true,"matches":[{path,line,text}],"truncated"}` |
 | `reseed` | `{"op":"reseed","entropy_b64":"<32..4096 bytes>","generation"?:N}` | `{"ok":true,"bytes":n}` |
-| `sync` | `{"op":"sync"}` | `{"ok":true}` after sync(2) |
+| `sync` | `{"op":"sync","drop_caches"?:false}` | `{"ok":true}` after sync(2) (and dropping clean page cache) |
+| `set_clock` | `{"op":"set_clock","unix_ns":N}` | `{"ok":true}` |
 
 Semantics:
 
@@ -187,7 +188,8 @@ Semantics:
   - boatd sends 1 MiB chunks.
 - **cmd_\***, **file_\***: the ops `POST /v1/vms/{id}/agent` passes through; nothing else is allowed there. Commands outlive the connection. Log offsets are absolute in the merged stdout+stderr stream, with the newest ~64 MiB kept; `cmd_logs` `limit` is at most 4 MiB. `state:"lost"` means the supervisor died, for example across a reboot. `file_delete` refuses `/`, and a non-empty directory without `recursive`. An unknown `cmd_id` or missing path gives an error containing "No such" (404).
 - **reseed**: the agent credits the bytes to the kernel pool with `RNDADDENTROPY`, then forces a CRNG reseed with `RNDRESEEDCRNG`. boatd sends 64 bytes from its own `crypto/rand` right before every `set_identity`, that is, for every new VM (create, fork, from-snapshot). `set_identity` refuses to run unless a reseed came after the previous `set_identity`, and each reseed is good for one `set_identity`. A snapshot holds the parent's used-up state, so siblings forked from one snapshot each derive their machine-id and host keys from fresh entropy. In addition, Firecracker ≥ 1.10 (x86_64) bumps VMGenID on every snapshot load, and the 6.1 `vmgenid` driver reseeds the kernel CRNG at that point; that event is invisible to userspace. Old agents reply `unknown op`, which boatd logs and ignores.
-- **sync**: flushes every guest filesystem. boatd calls it before each pause/snapshot (stop, fork, named snapshot). For agents without this op, it falls back to `exec ["sync"]` as root.
+- **sync**: flushes every guest filesystem. boatd calls it before each pause/snapshot (stop, fork, named snapshot). For agents without this op, it falls back to `exec ["sync"]` as root. Only template builds set `drop_caches`.
+- **set_clock**: sets `CLOCK_REALTIME` in the agent process. boatd calls it after every restore. For agents without this op, it falls back to `exec date` (150 ms of cold pages per restore).
 - **set_identity**
   - The agent sets the MAC (link down, set address, up), flushes and adds IPv4 (and IPv6), sets the default route(s), `/etc/resolv.conf`, hostname and `/etc/hosts`.
   - It **always** regenerates `/etc/machine-id` and the ed25519 and ecdsa ssh host keys (no RSA host key), and they are on disk before the reply. sshd restarts with `--no-block`, so it may refuse connections for a moment after the reply. `ms` holds the guest-side step timings.
@@ -209,11 +211,12 @@ stateDir/vms/<id>/firecracker.log
 stateDir/vms/<id>/<root>/{rootfs.ext4,vmlinux,fc.sock,v.sock,vmstate?,mem?}
     <root> = firecracker/<id>/root (jailer chroot) or root (no jailer)
 stateDir/snapshots/<sid>/{snap.json,rootfs.ext4,vmlinux,vmstate?,mem?}
+stateDir/warm/<image>@<size>/{warm.json,rootfs.ext4,vmlinux,vmstate,mem}   warmPool templates
 stateDir/usage.jsonl
 runDir/routes.json
 ```
 
-- The disk is a `cp --reflink=always` copy of the image rootfs (instant on btrfs). A cold-booted disk is then grown with `truncate` to the size's `disk_gib`; the guest grows its filesystem on first boot.
+- The disk is a `cp --reflink=always` copy of the image rootfs (instant on btrfs, see "Performance and density" for NOCOW). A cold-booted disk is then grown with `truncate` to the size's `disk_gib`; the guest grows its filesystem on first boot.
 - boatd gives Firecracker only **relative** paths (`rootfs.ext4`, `v.sock`, `vmstate`, `mem`), and Firecracker runs with that dir as its cwd or chroot. Because of this, a snapshot never names a host path, and a copy of the dir restores anywhere. That is how forks and snapshots work.
 - Every VM's tap is named `tap0` inside its own netns, so restored VMs and forks all find theirs. boatd still passes `network_overrides` on restore (Firecracker 1.12 or later).
 
@@ -221,22 +224,49 @@ runDir/routes.json
 
 - `root/mem` is the VM's memory as of its last snapshot point. A restored VM is mmapped from it (MAP_PRIVATE, never written). After a cold boot it is absent, which stands for all zeros.
 - With `diffSnapshots` (default on) VMs run with `track_dirty_pages`. A snapshot is a Firecracker `Diff`: only pages dirtied since the last snapshot point go into a sparse file. boatd merges that file's data extents (`SEEK_DATA`/`SEEK_HOLE`) onto a `cp --reflink` copy of `root/mem` and renames the result over `root/mem`. The cost follows dirty memory, not VM size.
-- `root/mem` is replaced, never modified in place, so a running VM's backing file and its forks' copies stay intact.
+- `root/mem` is replaced, never modified in place, so a running VM's backing file and its forks' copies stay intact. That makes it safe to share: memory files are sealed (root-owned, mode 0444) and hard-linked between a VM, its forks and its snapshots, so they cost no flush and no space. They stay clones across team boundaries, and across btrfsQgroups subvolumes.
+- Order of a fork or named snapshot: `sync`, pause, Firecracker writes the diff with `sync_snapshot_files:false`, disk reflink, resume, merge, copies. The guest is paused for the dump and the reflink only. Writeback of the dump runs behind the call, so the next merge is likely to find its base clean: a reflink of a dirty file waits for that file's writeback. A stop keeps Firecracker's fsync, since its file is the next start's base.
+- The dump's page cache is charged to the VM's cgroup, usually close to `memory.high`, which throttled it to disk speed. `memory.high` and `memory.max` are lifted for the dump and restored once the file is on disk. A paused guest allocates nothing and a running one cannot pass its RAM, so this window adds only host page cache. A restarted boatd re-applies them to the VMs it adopts.
+- A saved snapshot is usable when the API returns, and durable shortly after: `snap.json` carries `unsynced:true` until its memory is fsynced. After a host crash an unsynced snapshot keeps its disk and loses its memory (it restores cold), and a `snap.json` torn by the crash removes the snapshot.
 - If a snapshot fails after Firecracker may have cleared its dirty bitmap, `diff_ok` goes false and the next snapshot is `Full`.
-- boatd asks the guest to `sync` before each pause. Phase timings are logged: `snapshot (diff) sync= pause= write= merge=`.
+- boatd asks the guest to `sync` before each pause. Phase timings are logged: `snapshot (diff) sync= pause= write= written=`, `snapshot install merge=`, `freeze disk= rest=`.
 - `vmstate` is consumed by a restore; `mem` stays until the next snapshot or cold boot.
 
 ### Admission and storage limits
 
 - **Team quotas** (`teams.<team>` or `defaultTeam`, 429): `maxVMs`, `maxVCPU`, `maxMemMiB` count active VMs. `maxTotalVMs` counts VMs in any state. `maxSnapshots` counts snapshots. `maxDiskGiB` limits committed storage: each VM's disk + RAM size, and each snapshot's disk (+ RAM size if it has memory).
-- **Host admission** (503): active VM RAM across all teams may not exceed (`hostMemMiB`, default MemTotal, minus `hostReserveMiB`, default 1024) × `memOvercommit` (default 1.0). Active vCPUs may not exceed `hostCPUs` × `cpuOvercommit` (default 4.0). Enforced on create, fork and start.
+- **Host admission** (503): active VM RAM across all teams may not exceed (`hostMemMiB`, default MemTotal, minus `hostReserveMiB`, default 1024) × `memOvercommit` (default 1.5). Above 1.0, a new VM also needs real memory: `MemAvailable` ≥ `hostReserveMiB` + its RAM / `memOvercommit`. Active vCPUs may not exceed `hostCPUs` × `cpuOvercommit` (default 4.0). Enforced on create, fork and start.
 - **Free-space floor** (507): create is refused when stateDir's free space is below the larger of `minFreeGiB` (5) and `minFreePct` (10%); fork and snapshot also require room for the VM's RAM. A stop below that level skips the snapshot and shuts the guest down cleanly (`has_snapshot:false`, the next start is a cold boot).
 - **Defaults are finite**: `defaultTeam` starts at `maxTotalVMs` 100, `maxSnapshots` 200, `maxDiskGiB` 4096, `maxPorts` 512. Keys under `teams.<team>` replace these: 0 there means unlimited.
 - **btrfs qgroups** (`btrfsQgroups`, default off because they slow reflinks: fork 1.31 s without, 3.25 s with, run 41305928387): each VM dir is a subvolume with an exclusive-bytes limit of disk + 2 × RAM + 1 GiB. Past it, the guest's disk writes fail instead of filling the host. Reflinked data shared with the image or parent does not count.
-- **Per-VM limits**: `diskMBps` (default 1000) and `diskIOPS` (50000) are Firecracker drive limiters, `ingressMbit` its rx limiter (these apply from the next cold boot; a restored VM keeps those in its snapshot). `ioMaxMBps`/`ioMaxIOPS` set cgroup `io.max` on stateDir's disk (default off). `ctPerVM` (default 32768) refuses new forwarded connections past that count; counts restart whenever the rules reload, so it is a limit on bursts between VM changes, not an absolute one.
+- **Per-VM limits**: `diskMBps` and `diskIOPS` (default 0, none: the old 50000 IOPS cap sat just above what the CI runner measured, and below any NVMe) are Firecracker drive limiters, `ingressMbit` its rx limiter (these apply from the next cold boot; a restored VM keeps those in its snapshot). `ioMaxMBps`/`ioMaxIOPS` set cgroup `io.max` on stateDir's disk (default off). `ctPerVM` (default 32768) refuses new forwarded connections past that count; counts restart whenever the rules reload, so it is a limit on bursts between VM changes, not an absolute one.
 - **Logs**: guest serial and VMM output go to `firecracker.log` (O_APPEND, so no reader is needed and a boatd restart does not disturb it). boatd checks it every second and past 16 MiB moves the last 1 MiB to `firecracker.log.1` and truncates. Bytes written while boatd is down are bounded only by the disk until it returns. Both files count in `/v1/usage`, and `vmCommit` reserves room for them.
 - `GET /v1/health` reports `conntrack_flush_errors`: flushes that failed, so stale flows may survive.
 - `GET /v1/usage` adds `storage[]` per team (`vms`, `snapshots`, `committed_bytes`, `vm_apparent_bytes`, `vm_allocated_bytes`, `snapshot_apparent_bytes`, `snapshot_allocated_bytes`) and, when not filtered by team, `disk` (`free_bytes`, `total_bytes`, `floor_bytes`). Allocated bytes count reflinked extents once per file, so they are an upper bound.
+
+### Performance and density
+
+**Disk**
+
+- `diskEngine` (default `auto`): Firecracker's `Async` engine (io_uring), and `Sync` when Firecracker refuses it (host kernel < 5.10.51, io_uring disabled). `Async` is a Firecracker developer preview. It is saved in snapshots, so a restore on a host without io_uring fails and a start falls back to a cold boot.
+- `diskNoCow` (default on): at startup boatd rewrites each image's rootfs as a btrfs NOCOW file, once. `cp --reflink` carries the flag, so VM disks and their forks are NOCOW too. On other filesystems it does nothing. CoW turned each random guest write into an extent, and a reflink is O(extents), with the source VM paused: 4.5 s after boatbench's fio.
+  - The trade-off: NOCOW data has **no btrfs checksums** and no compression, so bitrot on a VM disk is not detected by btrfs. Run a guest filesystem or the host's RAID scrub if that matters. Reflink sharing still works: the first write to a shared extent copies it once, then writes go in place. A guest writing randomly into never-written parts of its sparse disk still allocates one small extent per write: 337k extents and a 2.2 s reflink in the worst case measured (run 41584046201).
+- `hostDirtyRatio` (default 50, 0 leaves it alone): boatd sets the host's `vm.dirty_ratio` at startup, so that a memory dump goes to the page cache instead of being throttled to the disk's speed. A host crash can lose more, and VM disks in writeback were never durable before a guest flush anyway (Firecracker's default `Unsafe` cache mode).
+- Guest: scheduler `none` on `vda` (udev rule). No `discard` mount option: Firecracker's block device does not offer discard (`discard_max_bytes` = 0 in the guest), so it would do nothing. Space freed inside a guest is not returned to the host while the VM runs.
+
+**Restore** is lazy already: Firecracker's `File` memory backend mmaps `mem` MAP_PRIVATE and faults pages on demand, which is why a UFFD handler would add a process and no speed here. Every restore gets a new VMGenID from Firecracker, and a create, fork or new-from-snapshot gets fresh host entropy before its new identity (see `reseed`).
+
+**`warmPool`** (default off): a create restores a template instead of booting. boatd boots one VM of each image + size in use (default image + size at startup, others after their first cold create), under team `_warm`, waits for it to settle, drops its page cache and saves a memory snapshot in `stateDir/warm/`. Templates are not VMs in RAM, so an idle pool costs disk only. A template is rebuilt when the image, kernel or Firecracker binary changes, and one that fails to restore is deleted.
+
+- Template VMs share boot-time randomness: kernel and process ASLR, `boot_id`, early userspace state. Keys and machine identity are regenerated from fresh entropy, but ASLR offsets of already-running processes are the same in every VM from one template, across tenants. Keep it off if your threat model counts on them differing.
+- Memory files stay per-VM clones here, so tenants share no page cache.
+
+**Density**
+
+- `balloon` (default on): each cold-booted VM gets a virtio-balloon with free page reporting and `deflate_on_oom`, at size 0. The guest reports free memory, Firecracker `MADV_DONTNEED`s it. The kernel reports in about 2 s batches, so it is for idle VMs, not for squeezing a snapshot. Firecracker's free page *hinting* is not used: its documented race can corrupt guest memory.
+- Host pressure: when `MemAvailable` falls below `hostReserveMiB`, boatd inflates every running VM's balloon by 10% of its RAM per 5 s (up to 50%), which makes guests give up page cache, and deflates them at twice the reserve. VMs still run at `oom_score_adj` 500, so if that is not enough the host OOM killer takes a VM, not the host. A compromised guest driver can ignore the balloon; the real bound on a VM stays its cgroup.
+- `memOvercommit` above 1.0 is a bet that guests stay idle. If they all use their RAM at once, the host OOM killer will kill some.
+- `ksmTeam` (default off): page merging for one team's VMs, or `"*"` for all. **KSM is a cross-VM side channel**: a guest can time a write to learn whether another guest holds the same page contents, so it must not span a trust boundary. Linux has no KSM domains, so the only scope that is safe between tenants is one team: only VMs of `ksmTeam` are mergeable, others are not. Use `"*"` only when every team on the host trusts the others. It needs host kernel ≥ 6.4 (`PR_SET_MEMORY_MERGE`, set by re-executing boatd before the jailer) and costs a kernel thread scanning 200 MB/s.
 
 ### Reconcile and restart
 
@@ -293,5 +323,7 @@ runDir/routes.json
 ---
 
 ## 5. Measured deviations
+
+- **Firecracker block**: no discard support, see "Performance and density".
 
 - **Nested KVM**: measured in e2e (`METRIC` fields `nestedHost`, `nestedGuestCpus`, `nestedGuestKvm`). On a host with `nested=1`, Firecracker 1.17 passes VMX/SVM to the guest with no CPU template (run 41315786226: 4 of 4 vCPUs). `/dev/kvm` in the guest then depends only on the guest kernel's config, and on the host enabling nested virtualization. Firecracker does not save KVM nested state, so do not expect a stop snapshot or fork taken while a nested VM runs to restore that nested VM.

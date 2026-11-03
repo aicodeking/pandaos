@@ -9,6 +9,24 @@
 #   snapshot  named snapshot, new-from-snapshot, fork of a VM after fio and 3 GiB of writes
 #   density   idle RSS per default VM with and without the balloon, KSM saving
 #   warm      10 concurrent creates, cold and from a warm template
+#
+# Gates: measured on GitHub's EPYC 7763 runner (4 shared vCPU, loop btrfs, host fio
+# 329-449 MB/s) in runs 41600185173 and the run named in PROTOCOL.md, plus margin. They
+# catch regressions, not runner noise; rand IOPS here move by a factor of 2 between runs.
+PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-18}    # 3.8 GiB to write: 9-12.7 s
+PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-3}             # 1.0-1.6 s
+PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-4}             # right after that snapshot: 1.7-2.5 s
+PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-12}    # 7.9 s; 10 x 4 vCPU on 4 host CPUs
+PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 528 MiB
+PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 259 MiB
+PERF_FREED_RSS_MAX=${E2E_PERF_FREED_RSS_MAX:-1000} # 3 GiB used, freed, 20 s later: 535 MiB
+PERF_SEQ_WRITE_MIN=${E2E_PERF_SEQ_WRITE_MIN:-250}  # MB/s: 754-1085
+PERF_RAND_READ_MIN=${E2E_PERF_RAND_READ_MIN:-15000} # IOPS: 27k-76k
+PERF_RAND_WRITE_MIN=${E2E_PERF_RAND_WRITE_MIN:-15000} # IOPS: 41k-56k
+check_min() { # NAME VALUE MIN
+  printf 'e2e: %-14s %s (min %s)\n' "$1" "$2" "$3"
+  awk -v a="$2" -v b="$3" 'BEGIN { exit !(a >= b) }' || perf_fail+="$1 was $2 < $3; "
+}
 
 perf_cfg() { # JQ_FILTER NAME: the base config without the e2e's caps, plus JQ_FILTER
   jq ".ioMaxMBps = 0 | .egressMbit = 0 | .memOvercommit = 8 | .cpuOvercommit = 12 | .defaultTeam.maxVMs = 16 | $1" \
@@ -30,7 +48,7 @@ last_snap_log() { sudo grep -E "snapshot |freeze " "$WORK/boatd.log" | tail -n 3
 sudo apt-get install -y -qq fio >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq fio >/dev/null; }
 (cd "$HERE/../../bench/boatbench" && python3 -c 'import workloads; print(workloads.DISK)') >"$WORK/tmp/disk.sh"
 
-sudo grep -E "snapshot |freeze " "$WORK/boatd.log" | head -n 24 | sed -E 's/^[0-9/]+ [0-9:]+ //' # e2e-host's timings
+sudo grep -E "snapshot |freeze |merge " "$WORK/boatd.log" | head -n 30 | sed -E 's/^[0-9/]+ [0-9:]+ //' # e2e-host's timings
 
 # A guest whose ext4 buddy pages are gone (dropped cache, memory pressure) must survive
 # allocating blocks, also across a snapshot: linux 6.1.191 oopsed (guest/kernel/fix-mballoc.sh).
@@ -63,10 +81,19 @@ perf_cfg '.' base
 pv=$(perf_vm pv)
 guest_blk=$(bx "$pv" 'printf "sched=%s discard_max=%s" "$(cat /sys/block/vda/queue/scheduler)" "$(cat /sys/block/vda/queue/discard_max_bytes)"')
 echo "guest: $guest_blk"
+# Random reads the host has no cache for: what a queue depth is for. (fio's other numbers read
+# back what they just wrote, from the host's page cache, where Sync's one-at-a-time is enough.)
+cold_read() {
+  bx "$1" 'fio --name=c --filename=/root/c --size=2G --direct=1 --ioengine=libaio --iodepth=32 --rw=write --bs=1M --output-format=json >/dev/null; sync' 200
+  sudo sh -c 'sync; echo 1 >/proc/sys/vm/drop_caches'
+  bx "$1" 'fio --name=c --filename=/root/c --size=2G --direct=1 --ioengine=libaio --iodepth=32 --rw=randread --bs=4k --runtime=15 --time_based --output-format=json | python3 -c "import json,sys; print(round(json.load(sys.stdin)[\"jobs\"][0][\"read\"][\"iops\"]))"; rm /root/c' 200
+}
 put_disk() { curl -fsS --unix-socket "$SOCK" -X PUT --data-binary "@$WORK/tmp/disk.sh" "http://boatd/v1/vms/$1/files?path=/tmp/disk.sh&mode=755" >/dev/null; }
 put_disk "$pv"
 disk=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p')
 echo "disk (Async): $disk"
+cold_async=$(cold_read "$pv")
+echo "cold rand read (Async): $cold_async IOPS"
 echo "extents after boatbench's fio: $(vm_extents "$pv")"
 
 perf_del "$pv"
@@ -75,6 +102,8 @@ pv=$(perf_vm pv)
 put_disk "$pv"
 disk_sync=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p')
 echo "disk (Sync, same runner): $disk_sync"
+cold_sync=$(cold_read "$pv")
+echo "cold rand read (Sync): $cold_sync IOPS"
 perf_del "$pv"
 perf_cfg '.' again
 pv=$(perf_vm pv)
@@ -139,8 +168,6 @@ ksm_shared=$(($(cat /sys/kernel/mm/ksm/pages_shared) / 256))
 echo "ksm: $ksm_sharing MiB deduplicated into $ksm_shared MiB, RSS column does not show it (cgroup: $k_cg MiB per VM before scan)"
 perf_del "${idle_vms[@]}"
 echo 0 | sudo tee /sys/kernel/mm/ksm/run >/dev/null
-fit_before=$((8192 / nb_cg)) fit_after=$((8192 / b_cg))
-echo "8 GiB budget: $fit_before idle VMs without the balloon, $fit_after with it"
 
 log "perf e2e: 10 concurrent creates, cold and warm"
 perf_ten() { # LABEL: sets ten_s
@@ -183,15 +210,31 @@ bx "$w1" 'curl -fsS --max-time 10 -o /dev/null https://github.com/' || fail "war
 # shellcheck disable=SC2046
 perf_del $(cat "$WORK/tmp/ten-warm"/*)
 sudo rm -rf "$STATE/warm"
+# How many idle default VMs an 8 GiB budget holds, by RSS (cgroup memory also counts the
+# reclaimable host page cache of their disks).
+ksm_each=$((ksm_sharing / 4)) # pages_sharing is the saving
+fit_cold=$((8192 / b_rss)) fit_warm=$((8192 / warm_rss)) fit_ksm=$((8192 / (k_rss - ksm_each)))
+echo "8 GiB budget: $fit_cold idle cold-booted VMs, $fit_warm warm, $fit_ksm cold with KSM (saves $ksm_each MiB each)"
+d() { jq -r ".$1" <<<"$disk"; }
+check_max perf_snapshot "$kvm_snap" "$PERF_SNAPSHOT_MAX"
+check_max perf_from_snap "$kvm_from" "$PERF_FROM_MAX"
+check_max perf_fork "$kvm_fork" "$PERF_FORK_MAX"
+check_max perf_warm_ten "$warm_ten" "$PERF_WARM_TEN_MAX"
+check_max perf_rss "$b_rss" "$PERF_RSS_MAX"
+check_max perf_warm_rss "$warm_rss" "$PERF_WARM_RSS_MAX"
+check_max perf_freed_rss "${back% *}" "$PERF_FREED_RSS_MAX"
+check_min perf_seq_write "$(d seq_write_mbps)" "$PERF_SEQ_WRITE_MIN"
+check_min perf_rand_read "$(d rand_read_iops)" "$PERF_RAND_READ_MIN"
+check_min perf_rand_write "$(d rand_write_iops)" "$PERF_RAND_WRITE_MIN"
 restart_boatd "$WORK/boatd.json"
 
 echo "METRIC $(jq -nc --argjson disk "$disk" --argjson disks "$disk_sync" --arg blk "$guest_blk" \
   --argjson csw "$c_sw" --argjson crw "$c_rw" --argjson crr "$c_rr" \
   --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" --argjson kk2 "$kvm_fork2" \
   --argjson nbr "$nb_rss" --argjson nbc "$nb_cg" --argjson br "$b_rss" --argjson bc "$b_cg" \
-  --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fb "$fit_before" --argjson fa "$fit_after" \
+  --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fc "$fit_cold" --argjson fw "$fit_warm" --argjson fk "$fit_ksm" --argjson ca "$cold_async" --argjson cs "$cold_sync" \
   --argjson ct "$cold_ten" --argjson wt "$warm_ten" --argjson wr "$warm_rss" \
   '{test: "boat-perf", disk: $disk, diskSync: $disks, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
     snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2,
     idleRssMiB: {noBalloon: $nbr, balloon: $br, ksm: $kr, warm: $wr}, idleCgroupMiB: {noBalloon: $nbc, balloon: $bc},
-    ksmDedupMiB: $ksm, fitsIn8GiB: {before: $fb, after: $fa}, tenCreatesS: {cold: $ct, warm: $wt}}')"
+    ksmDedupMiB: $ksm, fitsIn8GiB: {cold: $fc, warm: $fw, coldKsm: $fk}, coldRandReadIops: {async: $ca, sync: $cs}, tenCreatesS: {cold: $ct, warm: $wt}}')"

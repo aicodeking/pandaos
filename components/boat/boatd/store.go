@@ -113,6 +113,7 @@ func writeJSONNoSync(path string, v any, mode os.FileMode) error {
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(b, '\n'), mode); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, path)

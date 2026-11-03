@@ -392,6 +392,11 @@ func (m *Manager) Stop(ctx context.Context, id, reason string) (VM, error) {
 	}
 	m.killWait(id, v.PID)
 	if snap {
+		// Now, not behind the call: the next merge would wait for this writeback, and it
+		// is a fork that gets charged (fork 1.3 -> 2.5 s).
+		if err := fsyncFile(filepath.Join(root, memFile)); err != nil {
+			log.Printf("%s: flush mem: %v", id, err)
+		}
 		snap = os.Rename(filepath.Join(root, snapState), filepath.Join(root, vmstate)) == nil
 	}
 	if !snap {

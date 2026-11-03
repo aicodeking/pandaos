@@ -65,6 +65,17 @@ type Manager struct {
 	balloonPct int
 }
 
+// saveVMState fsyncs only a stop or an error, the states a host crash must not forget.
+// The others are recomputed after a crash (a dead VM's state comes from its files), and
+// each fsync ran under the global lock: 5.1 s with a memory dump in writeback (run 41600185173).
+func saveVMState(dir string, v VM) error {
+	path := filepath.Join(dir, "vm.json")
+	if v.State == Stopped || v.State == Error {
+		return writeJSONAtomic(path, v, 0o600)
+	}
+	return writeJSONNoSync(path, v, 0o600)
+}
+
 func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 	for _, d := range []string{"vms", "snapshots", "images"} {
 		if err := os.MkdirAll(filepath.Join(cfg.StateDir, d), 0o711); err != nil {
@@ -78,7 +89,7 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 		dones: map[string]<-chan struct{}{}, active: map[string]time.Time{}, statfs: statfs,
 		memAvail: func() int { return meminfoMiB("MemAvailable") }, warming: map[string]bool{}, warmSettle: 3 * time.Second,
 		exportArgv: tarZstdArgv, unpackArgv: []string{"zstd", "-dcq"}, dirty: map[string]bool{},
-		saveState: func(dir string, v VM) error { return writeJSONAtomic(filepath.Join(dir, "vm.json"), v, 0o600) }}
+		saveState: saveVMState}
 	m.hostMem, m.hostCPU = cfg.HostMemMiB, cfg.HostCPUs
 	if m.hostMem == 0 {
 		m.hostMem = hostMemMiB()
@@ -340,7 +351,8 @@ func (m *Manager) sock(id string) (string, error) {
 // reconcile loads state after a boatd (re)start: re-adopts live firecracker
 // processes, and marks VMs whose process is gone as stopped.
 func (m *Manager) reconcile() error {
-	m.dropTornSnapshots()
+	m.dropTorn("snapshots", "snap.json")
+	m.dropTorn("vms", "vm.json")
 	snaps, err := loadAll[Snapshot](filepath.Join(m.cfg.StateDir, "snapshots"), "snap.json")
 	if err != nil {
 		return err
@@ -417,14 +429,19 @@ func (m *Manager) reconcile() error {
 	return nil
 }
 
-// dropTornSnapshots: snap.json is first written without an fsync (CreateSnapshot),
-// so a host crash can leave it empty. Such a snapshot was never durable.
-func (m *Manager) dropTornSnapshots() {
-	paths, _ := filepath.Glob(filepath.Join(m.cfg.StateDir, "snapshots", "*", "snap.json"))
+// dropTorn: a first state file is written without an fsync, so a host crash can
+// leave it empty. Replacing renames are safe on btrfs and ext4; a new file is not.
+// Such a VM was still being created, and such a snapshot was never durable.
+func (m *Manager) dropTorn(sub, file string) {
+	paths, _ := filepath.Glob(filepath.Join(m.cfg.StateDir, sub, "*", file))
 	for _, p := range paths {
-		var s Snapshot
-		if err := readJSON(p, &s); err != nil {
-			log.Printf("%s: dropping a snapshot torn by a crash: %v", p, err)
+		var v map[string]any
+		if err := readJSON(p, &v); err != nil {
+			log.Printf("%s: dropping what a crash left torn: %v", p, err)
+			if sub == "vms" && m.cfg.BtrfsQgroups {
+				m.removeVMDir(filepath.Base(filepath.Dir(p)))
+				continue
+			}
 			os.RemoveAll(filepath.Dir(p))
 		}
 	}
