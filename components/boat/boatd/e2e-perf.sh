@@ -11,18 +11,18 @@
 #   warm      10 concurrent creates, cold and from a warm template
 #
 # Gates: measured on GitHub's EPYC 7763 runner (4 shared vCPU, loop btrfs, host fio
-# 329-449 MB/s) in runs 41600185173 and the run named in PROTOCOL.md, plus margin. They
+# 329-449 MB/s) in runs 41600185173, 41605574172 and 41609413499, plus margin. They
 # catch regressions, not runner noise; rand IOPS here move by a factor of 2 between runs.
-PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-18}    # 3.8 GiB to write: 9-12.7 s
-PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-3}             # 1.0-1.6 s
-PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-4}             # right after that snapshot: 1.7-2.5 s
-PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-12}    # 7.9 s; 10 x 4 vCPU on 4 host CPUs
+PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-18}    # 3.8 GiB to write: 8.1-9 s
+PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-3}             # 1.1-1.7 s
+PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-3}             # right after that snapshot: 1.5 s
+PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-13}    # 7.9-9.3 s; 10 x 4 vCPU on 4 host CPUs
 PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 528 MiB
-PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 259 MiB
-PERF_FREED_RSS_MAX=${E2E_PERF_FREED_RSS_MAX:-1000} # 3 GiB used, freed, 20 s later: 535 MiB
-PERF_SEQ_WRITE_MIN=${E2E_PERF_SEQ_WRITE_MIN:-250}  # MB/s: 754-1085
-PERF_RAND_READ_MIN=${E2E_PERF_RAND_READ_MIN:-15000} # IOPS: 27k-76k
-PERF_RAND_WRITE_MIN=${E2E_PERF_RAND_WRITE_MIN:-15000} # IOPS: 41k-56k
+PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 257-264 MiB
+PERF_FREED_RSS_MAX=${E2E_PERF_FREED_RSS_MAX:-1000} # 3 GiB used, freed, 20 s later: 531 MiB
+PERF_SEQ_WRITE_MIN=${E2E_PERF_SEQ_WRITE_MIN:-250}  # MB/s: 781-1085
+PERF_RAND_READ_MIN=${E2E_PERF_RAND_READ_MIN:-15000} # IOPS: 27k-76k (all Async)
+PERF_RAND_WRITE_MIN=${E2E_PERF_RAND_WRITE_MIN:-15000} # IOPS: 41k-56k (all Async)
 check_min() { # NAME VALUE MIN
   printf 'e2e: %-14s %s (min %s)\n' "$1" "$2" "$3"
   awk -v a="$2" -v b="$3" 'BEGIN { exit !(a >= b) }' || perf_fail+="$1 was $2 < $3; "
@@ -165,7 +165,7 @@ perf_idle ksm 4 120
 k_rss=$idle_rss k_cg=$idle_cg
 ksm_sharing=$(($(cat /sys/kernel/mm/ksm/pages_sharing) / 256))
 ksm_shared=$(($(cat /sys/kernel/mm/ksm/pages_shared) / 256))
-echo "ksm: $ksm_sharing MiB deduplicated into $ksm_shared MiB, RSS column does not show it (cgroup: $k_cg MiB per VM before scan)"
+echo "ksm: $ksm_sharing MiB saved, $ksm_shared MiB kept once (RSS counts shared pages in each VM; cgroup $k_cg MiB per VM)"
 perf_del "${idle_vms[@]}"
 echo 0 | sudo tee /sys/kernel/mm/ksm/run >/dev/null
 
@@ -220,9 +220,13 @@ check_max perf_snapshot "$kvm_snap" "$PERF_SNAPSHOT_MAX"
 check_max perf_from_snap "$kvm_from" "$PERF_FROM_MAX"
 check_max perf_fork "$kvm_fork" "$PERF_FORK_MAX"
 check_max perf_warm_ten "$warm_ten" "$PERF_WARM_TEN_MAX"
-check_max perf_rss "$b_rss" "$PERF_RSS_MAX"
-check_max perf_warm_rss "$warm_rss" "$PERF_WARM_RSS_MAX"
-check_max perf_freed_rss "${back% *}" "$PERF_FREED_RSS_MAX"
+check_mib() { # NAME MIB MAX
+  printf 'e2e: %-14s %s MiB (max %s)\n' "$1" "$2" "$3"
+  [ "$2" -le "$3" ] || perf_fail+="$1 was $2 MiB > $3; "
+}
+check_mib perf_rss "$b_rss" "$PERF_RSS_MAX"
+check_mib perf_warm_rss "$warm_rss" "$PERF_WARM_RSS_MAX"
+check_mib perf_freed_rss "${back% *}" "$PERF_FREED_RSS_MAX"
 check_min perf_seq_write "$(d seq_write_mbps)" "$PERF_SEQ_WRITE_MIN"
 check_min perf_rand_read "$(d rand_read_iops)" "$PERF_RAND_READ_MIN"
 check_min perf_rand_write "$(d rand_write_iops)" "$PERF_RAND_WRITE_MIN"

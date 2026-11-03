@@ -254,6 +254,8 @@ runDir/routes.json
 - `hostDirtyRatio` (default 50, 0 leaves it alone): boatd sets the host's `vm.dirty_ratio` at startup, so that a memory dump goes to the page cache instead of being throttled to the disk's speed. A host crash can lose more, and VM disks in writeback were never durable before a guest flush anyway (Firecracker's default `Unsafe` cache mode).
 - Guest: scheduler `none` on `vda` (udev rule). No `discard` mount option: Firecracker's block device does not offer discard (`discard_max_bytes` = 0 in the guest), so it would do nothing. Space freed inside a guest is not returned to the host while the VM runs.
 
+**Async or Sync?** On the CI runner `Sync` wins on random reads the host has cached (46-60k against 27-53k IOPS; each read costs one more wakeup through io_uring), and `Async` wins on sequential I/O (781-872 MB/s write against 573-781) and on reads that reach the disk, where a queue depth counts. Which of these a real host's workload looks like decides it; `diskEngine: "Sync"` is the switch.
+
 **Restore** is lazy already: Firecracker's `File` memory backend mmaps `mem` MAP_PRIVATE and faults pages on demand, which is why a UFFD handler would add a process and no speed here. Every restore gets a new VMGenID from Firecracker, and a create, fork or new-from-snapshot gets fresh host entropy before its new identity (see `reseed`).
 
 **`warmPool`** (default off): a create restores a template instead of booting. boatd boots one VM of each image + size in use (default image + size at startup, others after their first cold create), under team `_warm`, waits for it to settle, drops its page cache and saves a memory snapshot in `stateDir/warm/`. Templates are not VMs in RAM, so an idle pool costs disk only. A template is rebuilt when the image, kernel or Firecracker binary changes, and one that fails to restore is deleted.
@@ -267,6 +269,34 @@ runDir/routes.json
 - Host pressure: when `MemAvailable` falls below `hostReserveMiB`, boatd inflates every running VM's balloon by 10% of its RAM per 5 s (up to 50%), which makes guests give up page cache, and deflates them at twice the reserve. VMs still run at `oom_score_adj` 500, so if that is not enough the host OOM killer takes a VM, not the host. A compromised guest driver can ignore the balloon; the real bound on a VM stays its cgroup.
 - `memOvercommit` above 1.0 is a bet that guests stay idle. If they all use their RAM at once, the host OOM killer will kill some.
 - `ksmTeam` (default off): page merging for one team's VMs, or `"*"` for all. **KSM is a cross-VM side channel**: a guest can time a write to learn whether another guest holds the same page contents, so it must not span a trust boundary. Linux has no KSM domains, so the only scope that is safe between tenants is one team: only VMs of `ksmTeam` are mergeable, others are not. Use `"*"` only when every team on the host trusts the others. It needs host kernel ≥ 6.4 (`PR_SET_MEMORY_MERGE`, set by re-executing boatd before the jailer) and costs a kernel thread scanning 200 MB/s.
+
+**Measured** on GitHub's runner (EPYC 7763, 4 shared vCPU, 16 GiB, nested KVM, btrfs on a loop file; the host itself does 346-449 MB/s and 13k/75-83k rand write/read IOPS with fio direct). `boatd/e2e-perf.sh` prints `METRIC {"test":"boat-perf",...}` and holds the gates, whose margins are documented there.
+
+| 4 vCPU / 8 GiB | before (boatbench 41573512017) | boatbench 41605624552 | e2e-perf 41609413499 |
+|---|---|---|---|
+| seq write | 195 MB/s | 710 MB/s | 837 MB/s |
+| seq read | 745 MB/s | 3311 MB/s | 5846 MB/s |
+| rand write | 29.8k IOPS | 43.2k IOPS | 45.6k IOPS |
+| rand read | 44.1k IOPS | 43.9k IOPS | 53.5k IOPS |
+| fork | 6.93 s | 1.77 s | 1.50 s |
+| snapshot | 17.1 s | 4.68 s | 8.12 s (3.8 GiB written) |
+| new-from-snapshot | 7.39 s | 4.57 s | 1.08 s |
+| 10 creates, cold | 28.4 s | 25.1 s | 23.2 s |
+| 10 creates, `warmPool` | | | 8.12 s |
+
+A snapshot's time follows what the guest dirtied since boot: 3.8 GiB at about 480 MB/s here, which is page cache on this runner's btrfs-on-loop. Cold creates are CPU: 10 boots of 4 vCPUs on 4 shared host CPUs.
+
+Density, idle `default` VMs on the same runner:
+
+| | RSS per VM | fit in an 8 GiB budget, by RSS |
+|---|---|---|
+| cold boot, balloon or not | 528 MiB | 15 |
+| from a `warmPool` template | 264 MiB | 31 |
+| cold boot, `ksmTeam` | 528 MiB, minus 337 MiB merged | 42 |
+
+- A guest that used 3 GiB and freed it: RSS 3605 MiB, 20 s later 531 MiB (free page reporting). Without the balloon that memory stays with the VM. This, and not the idle figure, is what the balloon buys.
+- These are idle VMs. Nothing above says what a host holds under load, which is why `memOvercommit` caps at 1.5 by default: VM count on a host goes from RAM / 8 GiB to 1.5 x that.
+- Cgroup `memory.current` reads about 940 MiB per idle VM (it includes the reclaimable host page cache of the disk).
 
 ### Reconcile and restart
 
