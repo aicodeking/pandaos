@@ -29,6 +29,10 @@ concurrency:
   # result. GitHub keeps only the newest waiting run per group.
   cancel-in-progress: false
 
+# No magic-nix-cache here. GitHub throttles it (HTTP 418) on most runs. When that
+# hits while nix is fetching paths only it holds, nix can go silent until the job
+# times out (run 41492186307, attempts 2 and 4). cache.nixos.org plus local builds
+# took about as long when the cache was disabled from the start (attempt 3).
 jobs:
   # Heavy NixOS tests with a runner each, not in the shared `nix flake check`.
   vm-tests:
@@ -59,8 +63,6 @@ jobs:
             system-features = nixos-test benchmark big-parallel kvm
             fallback = true
             connect-timeout = 15
-      - uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4 # v9
-        continue-on-error: true
       - name: nix build ${{ matrix.test }}
         run: .github/scripts/nix-retry.sh build.log nix build --impure -f tests/standalone.nix ${{ matrix.test }} -L --no-link
 
@@ -138,9 +140,9 @@ jobs:
           extra_nix_config: |
             fallback = true
             connect-timeout = 15
-      - uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4 # v9
-        continue-on-error: true
+      # A cold build takes ~10 min. Fail a hang here instead of at the job's 120 min.
       - name: Build ISO
+        timeout-minutes: 60
         run: .github/scripts/nix-retry.sh build.log nix build .#iso-server -L --no-update-lock-file
       - name: ISO size
         run: du -hL result/iso/*.iso | tee -a "$GITHUB_STEP_SUMMARY"
