@@ -189,6 +189,21 @@ for c in "claude --version" "codex --version" "opencode --version" "gh --version
   v=$(vexec 120 dev bash -lc "$c" 2>/dev/null | head -1) || fail "$c"
   pass "$c: $v"
 done
+# The boat CLI is in both images: `host` is a symlink to it, and with no API key
+# in the VM it says how to give it one. Harnesses are in full only. --version
+# only: no model runs here, there are no keys.
+v=$(vexec 60 dev bash -lc 'boat version') || fail "boat version"
+pass "boat version: $v"
+if out=$(vexec 60 dev bash -lc 'host 3000' 2>&1); then fail "host with no key should fail: $out"; fi
+grep -q "no API key" <<<"$out" || fail "host with no key: $out"
+pass "host with no key explains itself"
+if [[ $VARIANT == full ]]; then
+  for c in "pi --version" "kimi --version" "prime-agent --version" "vibe --version"; do
+    v=$(vexec 120 dev bash -lc "$c" 2>/dev/null | tail -1) || fail "$c"
+    [[ -n $v ]] || fail "$c printed nothing"
+    pass "$c: $v"
+  done
+fi
 
 # ---- 8b. detached commands: survive an agent restart; signal; logs
 jget() { python3 -c 'import json,sys; v=json.loads(sys.argv[1])

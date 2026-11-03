@@ -74,7 +74,7 @@ build_rootfs() {
   log "rootfs: docker build --target $variant"
   # shellcheck disable=SC2086
   docker buildx build --load --platform linux/amd64 --target "$variant" -t "$tag" \
-    ${BUILDX_CACHE_ARGS:-} "$HERE"
+    --build-context cli="$HERE/../cli" ${BUILDX_CACHE_ARGS:-} "$HERE"
 
   log "rootfs: manifest"
   docker run --rm --platform linux/amd64 --entrypoint bash "$tag" -c '
@@ -85,10 +85,13 @@ build_rootfs() {
     v node     node --version; v npm npm --version; v bun bun --version
     v rustc    su dev -c "~/.cargo/bin/rustc --version"
     v claude   claude --version; v codex codex --version; v opencode opencode --version
+    v boat     boat version
     v tmux     tmux -V; v rg rg --version; v jq jq --version; v sshd dpkg-query -W -f=\${Version} openssh-server
     if command -v Xvnc >/dev/null; then
       v kasmvnc dpkg-query -W -f=\${Version} kasmvncserver; v chrome google-chrome --version
       v code-server code-server --version; v xfce4 dpkg-query -W -f=\${Version} xfce4-session
+      export HOME=/tmp
+      v pi pi --version; v kimi kimi --version; v prime-agent prime-agent --version; v vibe vibe --version
     fi' > "$OUT/manifest-$variant.txt"
   cat "$OUT/manifest-$variant.txt" >&2
 

@@ -2,6 +2,12 @@
 # (slim + XFCE/KasmVNC desktop, Chrome, code-server). build.sh exports the
 # container filesystem into an ext4 image; nothing here runs as a container.
 # Every download is pinned by version + sha256. Bump them together.
+# build.sh passes components/boat/cli as the named build context `cli`.
+
+# The boat CLI for use inside a VM, and as the `host` command (a symlink).
+FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 AS boat-cli
+COPY --from=cli . /src
+RUN cd /src && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '-s -w' -o /boat .
 
 FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS slim
 
@@ -76,8 +82,10 @@ RUN curl -fsSLo /tmp/rustup-init https://static.rust-lang.org/rustup/archive/${R
 
 COPY rootfs/ /
 COPY agent/boat-agent.py agent/boat_ops.py /usr/local/lib/boat/
+COPY --from=boat-cli /boat /usr/local/bin/boat
 
-RUN chmod 0440 /etc/sudoers.d/dev && visudo -cf /etc/sudoers.d/dev \
+RUN ln -s boat /usr/local/bin/host \
+ && chmod 0440 /etc/sudoers.d/dev && visudo -cf /etc/sudoers.d/dev \
  && chmod 755 /usr/local/lib/boat/boat-agent.py \
  && install -d -m 755 /etc/boat \
  && echo 'export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"' >> /home/dev/.profile \
@@ -102,6 +110,9 @@ ARG CODE_SERVER_SHA256=45f5533b502edac68b7eb09c5cec44fd281f80264af9a87fde0bfb2c5
 ARG GHOSTTY_DEB=ghostty_1.3.1-0.ppa2_amd64_24.04.deb
 ARG GHOSTTY_URL=https://github.com/mkasberg/ghostty-ubuntu/releases/download/1.3.1-0-ppa2
 ARG GHOSTTY_SHA256=478d440153ef544426418efc7d6d8901715359f452c46be29071901a94b8cd47
+
+ARG PRIME_AGENT_VERSION=0.10.2
+ARG PRIME_AGENT_SHA256=09659961dfde201cc39f1e69b607385d708da3e591f267a4fea04970afb8b005
 
 # XFCE (no recommends: no screensaver/locker), terminals, idle probe, fonts,
 # Mesa (llvmpipe: software GL 4.5 for Ghostty/glxgears under Xvnc), and the
@@ -144,5 +155,22 @@ RUN cd /usr/lib/x86_64-linux-gnu \
  && cd /usr/share/kasmvnc/www \
  && sed -i 's#<head>#<head><script src="boat-defaults.js"></script>#' index.html vnc.html \
  && grep -q boat-defaults index.html && grep -q boat-defaults vnc.html
+# The other four harnesses boat.dev ships. Each is pinned with its dependencies
+# and their checksums: npm lockfiles and a pip hash lock under
+# rootfs-full/opt/boat-harness, a sha256 for Prime Agent's release tarball.
+RUN H=/opt/boat-harness \
+ && for h in pi kimi; do (cd "$H/$h" && npm ci --no-fund --no-audit --ignore-scripts --omit=dev); done \
+ && ln -s "$H/pi/node_modules/.bin/pi" /usr/local/bin/pi \
+ && ln -s "$H/kimi/node_modules/.bin/kimi" /usr/local/bin/kimi \
+ && curl -fsSLo /tmp/prime-agent.tgz https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v${PRIME_AGENT_VERSION}/prime-agent-${PRIME_AGENT_VERSION}-linux-x64.tar.gz \
+ && echo "${PRIME_AGENT_SHA256}  /tmp/prime-agent.tgz" | sha256sum -c - \
+ && install -d "$H/prime-agent" && tar -xzf /tmp/prime-agent.tgz -C "$H/prime-agent" --no-same-owner \
+ && ln -s "$H/prime-agent/prime-agent" /usr/local/bin/prime-agent \
+ && python3 -m venv "$H/vibe/venv" \
+ && "$H/vibe/venv/bin/pip" install --no-cache-dir --require-hashes --only-binary=:all: -r "$H/vibe/requirements.lock" \
+ && ln -s "$H/vibe/venv/bin/vibe" /usr/local/bin/vibe \
+ && export HOME=/tmp/harness-home && mkdir "$HOME" \
+ && pi --version && kimi --version && prime-agent --version && vibe --version \
+ && rm -rf /tmp/harness-home /tmp/prime-agent.tgz /root/.npm /root/.cache
 RUN chmod 755 /usr/local/bin/boat-desktop-session /usr/local/bin/boat-desktop-animate \
  && rm -rf /var/cache/* /var/log/*.log /tmp/*

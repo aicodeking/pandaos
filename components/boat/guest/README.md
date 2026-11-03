@@ -99,6 +99,8 @@ old slim image.
 | docker.io + compose v2, git, gh, build-essential, python3, tmux, ripgrep, jq, openssh-server | yes | yes |
 | Node.js 26.13.0 LTS + npm, Bun 1.4.4, rustup 1.29.2 (stable, minimal, for `dev`) | yes | yes |
 | claude-code 2.1.316, codex 0.166.0, opencode 1.19.5 (npm, global) | yes | yes |
+| boat CLI (`/usr/local/bin/boat`, and `host` as a symlink to it) | yes | yes |
+| pi 1.5.0, Kimi Code 2.4.1, Prime Agent 0.10.2, Mistral Vibe 3.0.4 (`/opt/boat-harness`) | no | yes |
 | XFCE 4.18 + xfce4-terminal, Ghostty 1.3.1, KasmVNC 1.5.2, libav (H.264), Mesa llvmpipe, glxgears, xdotool | no | yes |
 | Google Chrome stable, code-server 4.144.0 | no | yes |
 
