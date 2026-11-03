@@ -251,7 +251,7 @@ bx "$d1" 'setsid nohup python3 /tmp/conns.py 8 60 >/tmp/held 2>&1 </dev/null & s
 reloader=$(newvm '{"name":"ctr","team":"lim2"}') # a whole VM change, by somebody else
 bd DELETE "/v1/vms/$reloader" >/dev/null
 after_reload=$(bx "$d1" 'python3 /tmp/conns.py 30')
-bx "$d1" 'pkill -f conns.py || true' >/dev/null
+bx "$d1" 'pkill -f "[c]onns.py" || true' >/dev/null # the bracket: not this shell's own command line
 restart_boatd "$WORK/boatd.json"
 echo "connections: 8 held, reload, then $after_reload/30 more with ctPerVM=10"
 [ "$after_reload" -le 4 ] || fail "a rules reload reset ctPerVM: $after_reload more connections on top of 8"
