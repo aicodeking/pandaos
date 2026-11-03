@@ -113,7 +113,8 @@ class Parsing(unittest.TestCase):
 
     def test_net_script_keeps_curl_format(self):
         self.assertIn("%{size_download} %{time_total}", W.NET)
-        self.assertIn("speed.cloudflare.com", W.NET)
+        self.assertIn("dl.google.com", W.NET)
+        self.assertIn("is not a throughput sample", W.NET)
 
 
 class FakeDriver:
@@ -143,7 +144,7 @@ class FakeDriver:
         if cmd == W.DISK:
             return 0, 'BB_JSON {"tool": "fio", "seq_read_mbps": 900, "rand_read_iops": 50000}', ""
         if cmd == W.NET:
-            return 0, 'BB_JSON {"dl_cloudflare_100MB_mbit": 800}', ""
+            return 0, 'BB_JSON {"dl_go_tarball_googlecdn_mbit": 800}', ""
         if cmd == W.NPM_COLD:
             assert set(self.files) == {f"{W.NPM_SRC}/package.json", f"{W.NPM_SRC}/package-lock.json"}
             return 0, 'BB_JSON {"npm_ci_s": 31.5, "packages": 500}', ""

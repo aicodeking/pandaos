@@ -54,7 +54,7 @@ Ascii Box, and its 27.67 is the "Ascii Box (bare metal)" row there. What that re
 | b | lifecycle | create→exec-ready, fork→exec-ready, resume→exec-ready, new-from-snapshot→exec-ready: time from the API call until `true` exits 0 (polled every 0.1 s, the same loop on both sides). stop: until the provider reports it stopped (PandaOS: synchronous call; boat.dev: `state == archived`). snapshot: until it can be used (PandaOS: synchronous; boat.dev saved snapshot `status == ready`). exec RTT: p50/p95 of 50 sequential `true` calls; HTTP 429 calls are retried and not counted |
 | c | 10 concurrent creates | wall time from one shared start until all 10 answer `true` |
 | d | disk | fio (apt-installed if missing; dd fallback, flagged in the report) in `$HOME`: 1M seq write/read MB/s, 4k rand write/read IOPS, O_DIRECT, libaio, iodepth 32, 1 job, 15 s each, 2 GiB file |
-| e | network | curl download of 100 MB from speed.cloudflare.com and of the pinned Node tarball from nodejs.org (Mbit/s); TCP connect time (connect minus DNS) to 1.1.1.1 and github.com, median of 10 |
+| e | network | curl download of two fixed files on two CDNs: the Go 1.25.0 linux-amd64 tarball (59.7 MB, dl.google.com) and the pinned Node tarball (nodejs.org) in Mbit/s; error pages (<1 MB) count as failures, not samples. speed.cloudflare.com was dropped because it answers curl with 403; TCP connect time (connect minus DNS) to 1.1.1.1 and github.com, median of 10 |
 | f | cold npm install | `npm ci --ignore-scripts` of `npm-project/` (committed lockfile, 538 packages: express, react, eslint, jest, typescript, webpack), empty cache, pinned Node's npm |
 
 Sizes: PandaOS `default` = 4 vCPU / 8192 MiB / 51 GiB (boatd's default). boat.dev

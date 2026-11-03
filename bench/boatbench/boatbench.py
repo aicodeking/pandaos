@@ -107,7 +107,7 @@ class Repeat:
         if "d" in self.parts:
             self.step("disk", lambda: self.disk(a))
         if "e" in self.parts:
-            self.step("net", lambda: m.update(W.parse_bb_json(gexec(self.d, a, W.NET))))
+            self.step("net", lambda: self.net(a))
         if "f" in self.parts:
             self.step("npm_cold", lambda: self.npm(a))
         if "b" in self.parts:
@@ -141,6 +141,11 @@ class Repeat:
         r = W.parse_bb_json(gexec(self.d, vm, W.DISK, 900))
         self.rec["disk_tool"] = r.pop("tool")
         self.rec["disk_errors"] = r.pop("errors", None)
+        self.rec["metrics"].update(r)
+
+    def net(self, vm):
+        r = W.parse_bb_json(gexec(self.d, vm, W.NET))
+        self.rec["net_errors"] = r.pop("errors", None)
         self.rec["metrics"].update(r)
 
     def npm(self, vm):

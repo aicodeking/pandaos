@@ -21,7 +21,7 @@ PTS_INSTALL_SHA256 = "ff36cde192b2dadc111dc53ac89073ba54bde935e7599feba473546f71
 PTS_PASSES = 3  # pts/node-web-tooling TimesToRun
 NPM_SRC = "/tmp/bb-npm-src"  # writable on both (boat.dev files API: /home/user or /tmp)
 DOWNLOADS = {
-    "cloudflare_100MB": "https://speed.cloudflare.com/__down?bytes=100000000",
+    "go_tarball_googlecdn": "https://dl.google.com/go/go1.25.0.linux-amd64.tar.gz",  # 59.7 MB
     "nodejs_tarball": f"https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-linux-x64.tar.xz",
 }
 LATENCY_TARGETS = {"cloudflare_1.1.1.1": "https://1.1.1.1/", "github.com": "https://github.com/"}
@@ -111,9 +111,12 @@ for name, url in json.loads(os.environ["BBDL"]).items():
                        capture_output=True, text=True)
     try:
         size, t = r.stdout.split()
+        if r.returncode != 0 or int(size) < 10**6:  # an error page is not a throughput sample
+            raise ValueError(f"curl exit {r.returncode}, {size} bytes")
         out[f"dl_{name}_mbit"] = round(int(size) * 8 / float(t) / 1e6, 1)
-    except ValueError:
+    except ValueError as e:
         out[f"dl_{name}_mbit"] = None
+        out.setdefault("errors", []).append(f"{name}: {e} {r.stderr.strip()[-200:]}")
 for name, url in json.loads(os.environ["BBLAT"]).items():
     v = []
     for _ in range(10):
@@ -135,7 +138,7 @@ D=$HOME/bbnpm; rm -rf "$D" "$HOME/.bbnpm-cache"; mkdir -p "$D"; cp {NPM_SRC}/pac
 s=$(date +%s.%N)
 PATH=/tmp/bb/node/bin:$PATH npm ci --ignore-scripts --no-audit --no-fund --cache "$HOME/.bbnpm-cache" --loglevel=error >/dev/null
 e=$(date +%s.%N)
-n=$(find node_modules -name package.json -path '*/node_modules/*/package.json' -not -path '*/node_modules/*/node_modules/*/*' | wc -l)
+n=$(python3 -c 'import json, os; print(sum(os.path.isdir(k) for k in json.load(open("package-lock.json"))["packages"] if k))')
 rm -rf "$D" "$HOME/.bbnpm-cache"
 echo "BB_JSON {{\\"npm_ci_s\\": $(awk -v a=$s -v b=$e 'BEGIN{{printf "%.3f", b-a}}'), \\"packages\\": $n}}"
 """
