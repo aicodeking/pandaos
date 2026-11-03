@@ -47,7 +47,9 @@ if command -v boat >/dev/null 2>&1; then
   boat telemetry --json | jq -e 'has("configured")' >/dev/null || fail "telemetry"
   boat snapshots --json >/dev/null || fail "snapshots team"
   boat ps "$vm" --json | jq -e 'has("pid")' >/dev/null || fail "ps"
-  # push, host, ssh-config, current; then run deletes its own VM.
+  # The fake boatd of api/livescripts_test.go answers every exec with "hello", so
+  # these need a real guest: push, host, ssh-config; current; run deletes its own VM.
+  if [ -z "${BOAT_LIVE_FAKE:-}" ]; then
   work=$(mktemp -d)
   mkdir "$work/proj" && echo pushed >"$work/proj/f.txt" && printf '#!/bin/sh\necho ran\n' >"$work/proj/run.sh" && chmod +x "$work/proj/run.sh"
   boat push "$vm" "$work/proj" --json | jq -e '.path == "/home/dev/proj" and .files == 2' >/dev/null || fail "push"
@@ -56,7 +58,9 @@ if command -v boat >/dev/null 2>&1; then
   boat host "$vm" 8123 --public --json | jq -e '.access == "public"' >/dev/null || fail "host --public"
   boat ports rm "$vm" 8123 --json >/dev/null || fail "ports rm"
   boat ssh-config "$vm" --print | grep -q "HostKeyAlias boat-$vm" || fail "ssh-config"
+  fi
   boat rm "$vm" --json >/dev/null || fail "rm"
+  if [ -z "${BOAT_LIVE_FAKE:-}" ]; then
   # current is per process that calls boat, so no $(...) here: this script is the "shell".
   trap 'boat rm current >/dev/null 2>&1 || true' EXIT
   boat new --name "$name-c" --no-secrets >/dev/null || fail "new for current"
@@ -75,6 +79,7 @@ yes
   code=0; boat run --no-env --timeout 1 -- sleep 30 >/dev/null 2>&1 || code=$?
   [ "$code" = 124 ] || fail "run --timeout exit $code"
   rm -rf "$work"
+  fi
   echo "ok - CLI commands"
 fi
 echo "e2e-live: ok"
