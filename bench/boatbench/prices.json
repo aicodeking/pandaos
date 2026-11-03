@@ -1,0 +1,45 @@
+{
+  "accessed": "2026-11-02",
+  "currency": "USD",
+  "pandaos": {
+    "usd_per_hour": 0.0322,
+    "source": "docs/cost.md: Hetzner AX102 (EUR 259/mo + EUR 129 setup/12 + EUR 3.20 backup, x1.12 USD/EUR) / 13 default VMs / 730 h, 100% utilization, no operator time. At 50% utilization: 0.0644; with 2 h/month operator time at $75/h: 0.048."
+  },
+  "boatdev": {
+    "usd_per_hour": 0.036,
+    "source": "https://docs.boat.dev/pricing.md default size",
+    "sizes": {
+      "small": 0.018,
+      "default": 0.036,
+      "large": 0.072,
+      "xlarge": 0.2
+    },
+    "plan_min_usd_per_month": 20,
+    "included_default_hours_at_min_plan": 555,
+    "extra_snapshot_usd_per_day": 0.056,
+    "extra_start_usd": [0.03, 0.07]
+  },
+  "servers": [
+    {"name": "Hetzner AX42", "headline": false, "usd_per_month": 110.88, "eur_per_month": 99.0, "setup_usd": 54.88, "setup_eur": 49.0, "cpu": "AMD Ryzen 7 PRO 8700GE", "cores": 8, "vcpu_threads": 16, "ram_gb": 64, "nvme": "2x 512 GB", "bandwidth": "1 Gbit/s, unlimited traffic", "location": "DE/FI", "backup_usd_per_month": 3.58, "default_vms": 6, "source": "https://www.hetzner.com/dedicated-rootserver/ax42/"},
+    {"name": "Hetzner AX102", "headline": true, "usd_per_month": 290.08, "eur_per_month": 259.0, "setup_usd": 144.48, "setup_eur": 129.0, "cpu": "AMD Ryzen 9 7950X3D", "cores": 16, "vcpu_threads": 32, "ram_gb": 128, "nvme": "2x 1.92 TB", "bandwidth": "1 Gbit/s, unlimited traffic", "location": "DE/FI", "backup_usd_per_month": 3.58, "default_vms": 13, "source": "https://www.hetzner.com/dedicated-rootserver/ax102/"},
+    {"name": "Hetzner AX162", "headline": false, "usd_per_month": 687.68, "eur_per_month": 614.0, "setup_usd": 340.48, "setup_eur": 304.0, "cpu": "AMD EPYC 9454P", "cores": 48, "vcpu_threads": 96, "ram_gb": 128, "nvme": "2x 1.92 TB", "bandwidth": "1 Gbit/s, unlimited traffic", "location": "DE/FI", "backup_usd_per_month": 3.58, "default_vms": 13, "source": "https://www.hetzner.com/dedicated-rootserver/ax162/"},
+    {"name": "OVH US ADVANCE-3 (2024)", "headline": true, "usd_per_month": 255.0, "setup_usd": 255.0, "cpu": "AMD EPYC 4464P", "cores": 12, "vcpu_threads": 24, "ram_gb": 64, "nvme": "2x 960 GB", "bandwidth": "3 Gbit/s unmetered", "location": "Hillsboro OR / Vint Hill VA", "backup_usd_per_month": 6.0, "backup_unverified": true, "default_vms": 6, "source": "https://us.ovhcloud.com/bare-metal/advance/"},
+    {"name": "Latitude.sh m4.metal.medium", "headline": true, "usd_per_month": 456.0, "setup_usd": 0, "setup_unverified": true, "cpu": "AMD EPYC 9124", "cores": 16, "vcpu_threads": 32, "threads_unverified": true, "ram_gb": 128, "nvme": "2x 480 GB + 2x 1.9 TB", "bandwidth": "2x 10 Gbit/s, 20 TB egress included", "location": "US (location list not on pricing page)", "backup_usd_per_month": 6.0, "backup_unverified": true, "default_vms": 13, "source": "https://www.latitude.sh/pricing"}
+  ],
+  "assumptions": {
+    "usd_per_eur": 1.12,
+    "usd_per_eur_source": "approx. spot, Oct 2026 (https://30rates.com/eur-usd-forecast-tomorrow-this-week); unverified for today",
+    "hours_per_month": 730,
+    "setup_amortization_months": 12,
+    "host_ram_reserve_gb": 6,
+    "per_vm_ram_gb": 8.75,
+    "per_vm_ram_note": "8 GiB guest + 0.25 GiB Firecracker/VMM overhead + 0.5 GiB page-cache headroom",
+    "memory_overcommit": 1.0,
+    "cpu_overcommit_default": 4.0,
+    "host_cpu_reserve_threads": 2,
+    "extra_ipv4": "none; boat.dev-style access uses IPv6 + gateway URLs. Primary IPv4 is in the Hetzner list price (EUR 1.70/mo per extra IPv4, EUR 4.90 setup); OVH US $2.00/mo per extra IP",
+    "operator_hours_per_month": 2,
+    "operator_usd_per_hour": 75,
+    "cost_per_run": "usd_per_hour * measured_seconds / 3600"
+  }
+}
