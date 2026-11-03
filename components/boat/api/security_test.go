@@ -341,9 +341,12 @@ func TestCommandHistoryCapsArgv(t *testing.T) {
 // Auth must not wait for a state rewrite.
 func TestReadsDoNotWaitForWriter(t *testing.T) {
 	e := setup(t)
-	entered, leave := make(chan struct{}), make(chan struct{})
-	defer close(leave)
-	go e.srv.store.Update(func(*State) error { close(entered); <-leave; return nil })
+	entered, leave, written := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	defer func() { close(leave); <-written }() // the write ends before the temp dir goes
+	go func() {
+		defer close(written)
+		e.srv.store.Update(func(*State) error { close(entered); <-leave; return nil })
+	}()
 	<-entered
 	done := make(chan *principal, 1)
 	go func() { done <- e.srv.authenticate("Bearer " + e.owner) }()
