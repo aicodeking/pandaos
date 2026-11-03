@@ -130,6 +130,7 @@ perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s
   t=$(now); f=$(bd POST /v1/vms "{\"name\":\"n$1\",\"team\":\"perf\",\"snapshot\":\"$sn\"}" | jq -r .id); fromsnap_s=$(secs "$t" "$(now)")
   [ "$(vmf "$f" agent_ready)" = true ] || fail "new-from-snapshot not ready"
   echo "$1: new-from-snapshot ${fromsnap_s}s: $(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
+  t=$(now); bx "$f" true; echo "$1: its first exec, with the dump in writeback: $(secs "$t" "$(now)")s" # boatbench counts this
   perf_del "$f"
   t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"f$1\"}" | jq -r .id); fork_s=$(secs "$t" "$(now)")
   [ "$(vmf "$f" agent_ready)" = true ] || fail "fork not ready"

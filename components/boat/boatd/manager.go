@@ -47,6 +47,7 @@ type Manager struct {
 	active map[string]time.Time // last exec/file/desktop seen by boatd
 	netMu  sync.Mutex
 
+	imagesReady   chan struct{}  // closed when images are NOCOW: a clone of one that is not stays CoW
 	reservedSnaps map[string]int // by team: storage being written, see reservation
 	reservedBytes map[string]int64
 	reaping       map[string]bool // VMs a reap goroutine is on
@@ -98,7 +99,7 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 		memAvail: func() int { return meminfoMiB("MemAvailable") }, warming: map[string]bool{}, warmSettle: 3 * time.Second,
 		exportArgv: tarZstdArgv, unpackArgv: []string{"zstd", "-dcq"}, dirty: map[string]bool{},
 		saveState: saveVMState, reservedSnaps: map[string]int{}, reservedBytes: map[string]int64{},
-		reaping: map[string]bool{}, reapSlots: make(chan struct{}, reapParallel)}
+		reaping: map[string]bool{}, reapSlots: make(chan struct{}, reapParallel), imagesReady: make(chan struct{})}
 	m.hostMem, m.hostCPU = cfg.HostMemMiB, cfg.HostCPUs
 	if m.hostMem == 0 {
 		m.hostMem = hostMemMiB()
@@ -110,9 +111,14 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 	if err := m.enableQuota(); err != nil {
 		return nil, err
 	}
-	if cfg.DiskNoCow {
-		m.convertImages()
-	}
+	// Minutes for big images on a slow disk (28 s for 5.5 GiB on the CI runner), once per
+	// image. boatd serves meanwhile, and VMs it re-adopts must not wait: only creates do.
+	go func() {
+		defer close(m.imagesReady)
+		if cfg.DiskNoCow {
+			m.convertImages()
+		}
+	}()
 	cfg.enableKSM()
 	return m, m.reconcile()
 }

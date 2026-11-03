@@ -93,6 +93,11 @@ func (m *Manager) createFrom(ctx context.Context, r CreateReq, warm string) (VM,
 	if err := r.validate(m.cfg); err != nil {
 		return VM{}, err
 	}
+	select {
+	case <-m.imagesReady:
+	case <-ctx.Done():
+		return VM{}, ctx.Err()
+	}
 	s := m.cfg.Sizes[r.Size]
 	base := VM{Name: r.Name, Team: r.Team, Image: r.Image, Size: r.Size, VCPU: s.VCPU, MemMiB: s.MemMiB,
 		DiskGiB: s.DiskGiB, Labels: r.Labels, TTLS: r.TTLS, IdleStopS: r.IdleStopS}

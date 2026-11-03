@@ -24,10 +24,11 @@
 # From 12 runs of this job, 41379327901 to 41625739091 (shared runner, 4 vCPU):
 #   fork_cli 0.77-1.42 s, fork 0.90-2.63 s; a first stop (stop_cli) 0.65-5.90 s, it writes
 #   and fsyncs all the guest touched since boot and is bound by the runner's disk at
-#   that moment; a diff stop (stop_diff) 0.61-4.15 s. Gates: the worst seen plus a third.
+#   that moment (6.96 s in 41652556991); a diff stop (stop_diff) 0.61-4.15 s. Gates: the
+#   worst seen plus about a third.
 FORK_MAX=${E2E_FORK_MAX:-4}
 STOP_MAX=${E2E_STOP_MAX:-6}
-STOP_CLI_MAX=${E2E_STOP_CLI_MAX:-8}
+STOP_CLI_MAX=${E2E_STOP_CLI_MAX:-10}
 RESUME_MAX=${E2E_RESUME_MAX:-5}
 
 bd() { curl -fsS --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json' ${3:+-d "$3"}; }
