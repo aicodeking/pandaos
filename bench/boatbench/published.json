@@ -4,9 +4,9 @@
   "note": "Vendor-published (boat.dev was formerly Ascii Box; its row is 'Ascii Box (bare metal)'). Despite that label, 27.67 is NOT a bare-metal host score: run.json's observedSpecs for that row report a 4 vCPU / 7.76 GiB KVM guest (virtualization kvm, manufacturer QEMU, Q35, SeaBIOS, detectedIsolation vm) with cpuModel AMD Ryzen 9 9950X, egress OVH Lille. It is a sandbox VM on a dedicated host. The host itself was not measured. boat.dev's '1,000 runs in 36 s' is 1000 / 27.67 runs/s. Their run: PTS pts/node-web-tooling-1.0.1 with DynamicRunCount, median of 21 trials on fresh machines; the Node version is not stated.",
   "metrics": {
     "node_runs_s": {"value": 27.67, "note": "p50 of 21 trials, 95% CI 26.01-28.34; p95 28.72"},
-    "rand_read_iops": {"value": 433500, "note": "PTS fio 4KB rand read, O_DIRECT, libaio, 1 job (their fio params, not ours)"},
-    "rand_write_iops": {"value": 412500, "note": "PTS fio 4KB rand write, O_DIRECT (their fio params)"},
-    "seq_write_mbps": {"value": 5839, "note": "PTS fio 1MB seq write, O_DIRECT (their fio params)"}
+    "pts_rand_read_iops": {"value": 433500, "note": "pts/fio-2.1.0: 4KB rand read, O_DIRECT, libaio, 1 job, iodepth 64, 1 GiB, 60 s. Same job here, but a loop file on a shared runner cannot speak for NVMe"},
+    "pts_rand_write_iops": {"value": 412500, "note": "pts/fio-2.1.0: 4KB rand write, same job. A loop file on a shared runner cannot speak for NVMe"},
+    "pts_seq_write_mibps": {"value": 5838.5, "note": "pts/fio-2.1.0: 1MB seq write, same job. PTS labels this MB/s, but it equals their 1MB IOPS (5837), so it is MiB/s. A loop file on a shared runner cannot speak for NVMe"}
   },
   "rows": [
     {"provider": "Ascii Box (bare metal), now boat.dev", "runs_s": 27.67, "cpu": "AMD Ryzen 9 9950X 16-Core Processor"},

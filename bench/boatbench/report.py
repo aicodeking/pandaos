@@ -22,6 +22,9 @@ METRICS = [
     ("seq_read_mbps", "(d) disk seq read 1M", "MB/s", True),
     ("rand_write_iops", "(d) disk rand write 4k", "IOPS", True),
     ("rand_read_iops", "(d) disk rand read 4k", "IOPS", True),
+    ("pts_rand_read_iops", "(d) PTS fio job: rand read 4k", "IOPS", True),
+    ("pts_rand_write_iops", "(d) PTS fio job: rand write 4k", "IOPS", True),
+    ("pts_seq_write_mibps", "(d) PTS fio job: seq write 1M", "MiB/s", True),
     ("dl_go_tarball_googlecdn_mbit", "(e) download Go 1.25.0 tarball, 59.7 MB (dl.google.com)", "Mbit/s", True),
     ("dl_nodejs_tarball_mbit", "(e) download Node.js 22.22.3 tarball, ~30 MB (nodejs.org)", "Mbit/s", True),
     ("tcp_connect_cloudflare_1.1.1.1_ms", "(e) TCP connect 1.1.1.1, median of 10", "ms", False),
@@ -44,12 +47,18 @@ CAVEATS = [
     "Network numbers mix the VM's egress path with the distance from each provider's region to the CDN edge.",
     "Lifecycle latencies include the API round trip from the harness host to the provider: the CI PandaOS job "
     "talks to localhost, the boat.dev job talks to boat.dev over the internet from a US runner.",
+    "Disk numbers on the runner come from a btrfs loop file on a shared cloud disk. They cannot speak for NVMe, "
+    "including boat.dev's published numbers, even when the fio job is the same.",
     "Small samples (default 5 fresh VMs per side). The table shows median and IQR; overlapping IQRs mean "
     "no clear winner.",
 ]
 
 # Measured both on the runner itself and in a VM on it.
-HOST_VM_METRICS = ("node_runs_s", "seq_write_mbps", "seq_read_mbps", "rand_write_iops", "rand_read_iops")
+HOST_VM_METRICS = ("node_runs_s", "seq_write_mbps", "seq_read_mbps", "rand_write_iops", "rand_read_iops",
+                   "pts_rand_read_iops", "pts_rand_write_iops", "pts_seq_write_mibps")
+WARM_POOL_CAVEAT = ("`warmPool` is ON in this run, and it is off by default. VMs from one template share boot-time "
+                    "randomness, including the ASLR offsets of already-running processes, across tenants "
+                    "(components/boat/PROTOCOL.md). Do not read warm numbers as the default configuration.")
 
 
 def percentile(values, p):
@@ -154,6 +163,8 @@ def merged(results):
 
 def auto_caveats(res):
     out = []
+    if any('"warmPool":true' in str(r.get("boatd_options", "")).replace(" ", "") for r in res.values()):
+        out.append(WARM_POOL_CAVEAT)
     probes = {s: [rep.get("probe") or {} for rep in r.get("repeats", [])] for s, r in res.items()}
     for side, ps in probes.items():
         for p in ps:
@@ -181,6 +192,7 @@ def side_table(res):
         ("Harness client CPU", lambda r: r.get("client", {}).get("cpu_model", "-")),
         ("Harness client egress (Cloudflare colo)", lambda r: r.get("client", {}).get("egress", "-")),
         ("Requested size", lambda r: r.get("size", "-")),
+        ("boatd options over the defaults", lambda r: r.get("boatd_options", "-")),
         ("VM vCPU / RAM / disk (measured)", lambda r: "{} vCPU / {} MiB / {} GiB".format(
             first_probe(r).get("nproc"), first_probe(r).get("mem_mib"), first_probe(r).get("disk_gib"))),
         ("VM CPU model", lambda r: first_probe(r).get("cpu_model", "-")),
@@ -236,8 +248,9 @@ def normalization(host_results, vm, published):
     desc = host.get("host", {}).get("desc", "-")
     table, overhead = host_vs_vm(host, vm)
     out = ["", "## Runner host vs PandaOS VM (MEASURED, same runner)", "",
-           f"Identical scripts. Host: {desc}. Disk: both sides use the same btrfs loop store, and the VM adds "
-           "its guest ext4, virtio and any boatd drive limit named above.", ""] + table
+           f"Identical scripts. Host: {desc}. Disk: both sides write NOCOW files on the same btrfs loop store. "
+           "The VM adds its guest ext4, virtio and Firecracker's I/O engine, and its O_DIRECT stops at the "
+           "host page cache, so a ratio above 1 does not mean a VM beats the host.", ""] + table
     host_node = summarize(samples(host, "node_runs_s"))
     if not published or not overhead or not host_node:
         return out
@@ -299,7 +312,8 @@ def render(results, prices=None, published=None):
         out.append("No `prices.json` with `usd_per_hour` per side: cost not computed, runs/s only.")
     else:
         out += ["Cost = side's price per hour (prices.json) x measured time. Per 1000 Node loop runs uses "
-                "1000 / runs_s seconds of one 4 vCPU / 8 GiB VM.", "",
+                "1000 / runs_s seconds of one 4 vCPU / 8 GiB VM. In CI this mixes a dedicated server's price "
+                "with a GitHub runner's speed, so read it as arithmetic, not as a measured cost.", "",
                 "| Side | USD/hour | Price source | USD per 1000 Node loop runs | USD per cold npm ci |",
                 "|---|---|---|---|---|"]
         for side, p, per_k, per_npm in rows:

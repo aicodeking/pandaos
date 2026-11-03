@@ -22,11 +22,10 @@ on:
         type: choice
         options: [both, pandaos, boatdev]
         default: both
-      disk_limits:
-        description: "boatd's per-VM disk limits (1000 MB/s, 50k IOPS). off: the VM/host disk ratio then shows overhead, not the cap"
-        type: choice
-        options: [production, "off"]
-        default: production
+      boatd_options:
+        description: 'JSON merged over the bench boatd.json, e.g. {"warmPool":true}. Printed in the report'
+        type: string
+        default: "{}"
 
 permissions: {}
 
@@ -58,6 +57,7 @@ jobs:
     timeout-minutes: 240
     env:
       OUT: /mnt/guest-out
+      BOATBENCH_BOATD_OPTIONS: ${{ inputs.boatd_options }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Free disk space, docker on /mnt
@@ -106,16 +106,12 @@ jobs:
           lscpu | grep -E 'Model name|^CPU\(s\)|Hypervisor|Virtualization' | tee hw.txt
           free -m | tee -a hw.txt
           curl -fsS https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(colo|loc)=' | tee -a hw.txt
-          echo "BOATBENCH_HOST_DESC=GitHub ubuntu-latest runner: $(lscpu | sed -n 's/^Model name: *//p' | head -1), $(nproc) shared vCPU, $(free -g | awk '/Mem:/{print $2}') GiB, KVM in a cloud VM, region $(curl -fsS https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^colo=//p') (US), boatd disk limits: $DISK_LIMITS" >>"$GITHUB_ENV"
-        env:
-          DISK_LIMITS: ${{ inputs.disk_limits }}
+          echo "BOATBENCH_HOST_DESC=GitHub ubuntu-latest runner: $(lscpu | sed -n 's/^Model name: *//p' | head -1), $(nproc) shared vCPU, $(free -g | awk '/Mem:/{print $2}') GiB, KVM in a cloud VM, region $(curl -fsS https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^colo=//p') (US)" >>"$GITHUB_ENV"
       - name: Stack up (boatd + boat-api from source)
-        env:
-          BENCH_BOATD_JSON: ${{ inputs.disk_limits == 'off' && '"diskMBps":0,"diskIOPS":0,' || '' }}
         run: bench/boatbench/stack.sh up "$OUT"
       # Workloads a and d alternate between this runner and a fresh VM on it, so slow
       # phases of a shared runner hit both. fio's host directory is on the btrfs
-      # store that holds the VM disks (stack.sh's STATE).
+      # store that holds the VM disks (stack.sh's STATE), NOCOW like those disks.
       - name: Host vs VM (workloads a, d)
         env:
           REPEATS: ${{ inputs.repeats }}
@@ -127,6 +123,7 @@ jobs:
           [ -n "$parts" ] || { echo "no a or d requested"; exit 0; }
           set -a; . /mnt/boatbench/env; set +a
           sudo mkdir -p "$BOATBENCH_HOST_DIR" && sudo chown "$(id -u):$(id -g)" "$BOATBENCH_HOST_DIR"
+          sudo chattr +C "$BOATBENCH_HOST_DIR"
           for _ in $(seq "$REPEATS"); do
             python3 bench/boatbench/boatbench.py run --driver host --repeats 1 --only "$parts" --out results
             python3 bench/boatbench/boatbench.py run --driver pandaos --repeats 1 --only "$parts" --out results

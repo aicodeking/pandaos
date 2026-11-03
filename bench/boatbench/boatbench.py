@@ -8,7 +8,7 @@
 pandaos needs BOAT_URL + BOAT_KEY; boatdev needs BOATDEV_API_KEY. Each repeat is a
 fresh 4 vCPU / 8 GiB VM. Raw per-repeat data goes to DIR/results-<driver>-<ts>.json.
 Optional env: BOATBENCH_HOST_DESC (hardware/location of the provider host, printed
-in the report), BOATBENCH_RUN_URL.
+in the report), BOATBENCH_RUN_URL, BOATBENCH_BOATD_OPTIONS (printed in the report).
 """
 import argparse
 import concurrent.futures
@@ -243,7 +243,8 @@ def cmd_run(a):
     parts = set(a.only.replace(",", ""))
     res = {"driver": a.driver, "run_id": run_id, "size": d.size,
            "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-           "host": {"desc": os.environ.get("BOATBENCH_HOST_DESC", "-")}, "run_url": os.environ.get("BOATBENCH_RUN_URL"),
+           "host": {"desc": os.environ.get("BOATBENCH_HOST_DESC", "-")},
+           "boatd_options": os.environ.get("BOATBENCH_BOATD_OPTIONS") or "-", "run_url": os.environ.get("BOATBENCH_RUN_URL"),
            "client": client_info(), "parts": "".join(sorted(parts)), "repeats": []}
     os.makedirs(a.out, exist_ok=True)
     path = os.path.join(a.out, f"results-{a.driver}-{res['started'].replace(':', '')}.json")

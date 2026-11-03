@@ -56,7 +56,7 @@ Ascii Box, and its 27.67 is the "Ascii Box (bare metal)" row there. What that re
 |---|---|---|
 | b | lifecycle | create→exec-ready, fork→exec-ready, resume→exec-ready, new-from-snapshot→exec-ready: time from the API call until `true` exits 0 (polled every 0.1 s, the same loop on both sides). stop: until the provider reports it stopped (PandaOS: synchronous call; boat.dev: `state == archived`). snapshot: until it can be used (PandaOS: synchronous; boat.dev saved snapshot `status == ready`). exec RTT: p50/p95 of 50 sequential `true` calls; HTTP 429 calls are retried and not counted |
 | c | 10 concurrent creates | wall time from one shared start until all 10 answer `true` |
-| d | disk | fio (apt-installed if missing; dd fallback, flagged in the report) in `$HOME`: 1M seq write/read MB/s, 4k rand write/read IOPS, O_DIRECT, libaio, iodepth 32, 1 job, 15 s each, 2 GiB file |
+| d | disk | fio (apt-installed if missing; dd fallback, flagged in the report) in `$HOME`, O_DIRECT, libaio, 1 job. Ours: 1M seq write/read MB/s, 4k rand write/read IOPS, iodepth 32, 15 s, 2 GiB file. `pts_*`: the job file of [`pts/fio-2.1.0`](https://github.com/phoronix-test-suite/test-profiles/blob/d2f1a150d388bd062737b445891edda0780f7e25/pts/fio-2.1.0/install.sh), which boat.dev's numbers used: 4k rand read/write, 1M seq write, iodepth 64, 1 GiB, 20 s start delay, 5 s ramp, 60 s. The published comparison uses these. A loop file on a shared runner still cannot speak for NVMe |
 | e | network | curl download of two fixed files on two CDNs: the Go 1.25.0 linux-amd64 tarball (59.7 MB, dl.google.com) and the pinned Node tarball (nodejs.org) in Mbit/s; error pages (<1 MB) count as failures, not samples. speed.cloudflare.com was dropped because it answers curl with 403; TCP connect time (connect minus DNS) to 1.1.1.1 and github.com, median of 10 |
 | f | cold npm install | `npm ci --ignore-scripts` of `npm-project/` (committed lockfile, 538 packages: express, react, eslint, jest, typescript, webpack), empty cache, pinned Node's npm |
 
@@ -71,13 +71,21 @@ each provider's default user. Lifecycle times include the API round trip from th
 harness host, so run `run-on-server.sh` on the server, or close to it, for a fair
 WAN picture.
 
+## boatd options and the warm pool
+
+The `boatd_options` input (or `BOATBENCH_BOATD_OPTIONS` for `stack.sh`) is JSON merged over
+the bench `boatd.json`, and the report prints it. With `{"warmPool":true}`, `stack.sh`
+waits for the template before measuring, so a create cannot boot cold and pass as warm.
+`warmPool` is off by default. VMs from one template share boot-time randomness, including
+the ASLR offsets of running processes, across tenants, and every warm report says so.
+
 ## Host vs VM, and the projection
 
 CI's `pandaos` job alternates workloads a and d between the runner itself
 (`--driver host`, same scripts, no VM) and a fresh VM on it. The report prints the VM /
 host ratio as a measurement. fio's host directory is on the same btrfs store as the VM
-disks. Dispatch with `disk_limits: off` to see disk overhead without boatd's production
-caps (1000 MB/s, 50k IOPS per VM).
+disks and NOCOW like them. A VM's O_DIRECT stops at the host page cache, so a disk ratio
+above 1 does not mean the VM beats the host.
 
 The report then prints a **projection** of PandaOS on the vendor's CPU, in its own section
 marked NOT A MEASUREMENT. It scales the measured VM / host ratio by the vendor's score, by

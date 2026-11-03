@@ -139,6 +139,40 @@ class Normalization(unittest.TestCase):
         self.assertEqual(pub["rows"][0]["runs_s"], pub["metrics"]["node_runs_s"]["value"])
 
 
+class Options(unittest.TestCase):
+    def test_warm_pool_is_labelled_with_the_aslr_cost(self):
+        warm = result("pandaos", [[10]], [1])
+        warm["boatd_options"] = '{"warmPool": true}'
+        md = report.render([warm], None, report.load_published())
+        self.assertIn('{"warmPool": true}', md)
+        self.assertIn("ASLR", md)
+        self.assertNotIn("ASLR", report.render([result("pandaos", [[10]], [1])]))
+
+    def test_published_disk_uses_the_pts_job_and_keeps_the_nvme_label(self):
+        for key in ("pts_rand_read_iops", "pts_rand_write_iops", "pts_seq_write_mibps"):
+            self.assertIn("cannot speak for NVMe", report.load_published()["metrics"][key]["note"])
+        for flag in ("--iodepth=64", "--size=1g", "--startdelay=20", "--ramp_time=5", "--runtime=60"):
+            self.assertIn(flag, W.DISK)
+        r = result("pandaos", [[10]], [1])
+        r["repeats"][0]["metrics"]["pts_rand_read_iops"] = 40000
+        self.assertIn("40,000", report.render([r], None, report.load_published()).split("## Published")[1])
+
+
+class Prices(unittest.TestCase):
+    def test_vm_counts_follow_manager_admission_and_prices_recompute(self):
+        with open(os.path.join(report.HERE, "prices.json")) as f:
+            p = json.load(f)
+        a = p["assumptions"]
+        for s in p["servers"]:
+            for key, oc in (("vms_overcommit_1_0", 1.0), ("vms_overcommit_1_5", 1.5)):
+                n = int((s["ram_gb"] * 1024 - a["host_reserve_mib"]) * oc // a["vm_mem_mib"])
+                self.assertEqual(s[key], min(n, int(s["vcpu_threads"] * a["cpu_overcommit_default"] // 4)), s["name"])
+        ax = next(s for s in p["servers"] if s["name"] == "Hetzner AX102")
+        month = ax["usd_per_month"] + ax["setup_usd"] / 12 + ax["backup_usd_per_month"]
+        self.assertAlmostEqual(p["pandaos"]["usd_per_hour"], month / (15 * 730), places=4)
+        self.assertAlmostEqual(p["pandaos"]["usd_per_hour_overcommit_1_5"], month / (23 * 730), places=4)
+
+
 class HostDriver(unittest.TestCase):
     def test_runs_scripts_locally_with_chosen_home(self):
         with tempfile.TemporaryDirectory() as d:

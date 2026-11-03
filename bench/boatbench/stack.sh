@@ -6,7 +6,7 @@
 # a 16 GiB runner.
 #
 #   stack.sh up GUEST_DIR   # GUEST_DIR has vmlinux, rootfs-slim.ext4; writes $WORK/env (BOAT_URL, BOAT_KEY)
-#   BENCH_BOATD_JSON='"diskMBps":0,"diskIOPS":0,' stack.sh up ...   # extra boatd.json keys, trailing comma
+#   BOATBENCH_BOATD_OPTIONS='{"warmPool":true}' stack.sh up ...   # JSON merged over boatd.json
 #   stack.sh down
 #
 # ponytail: components/boat/e2e.sh has no "stack only" mode and is outside this
@@ -85,16 +85,24 @@ up() {
   sudo mkdir -p /sys/fs/cgroup/boat-bench
 
   log "boatd (production defaults; overcommit raised for 10 x 8 GiB on the runner)"
-  cat >"$WORK/boatd.json" <<JSON
+  local options=${BOATBENCH_BOATD_OPTIONS:-'{}'}
+  jq -e 'type == "object"' <<<"$options" >/dev/null || { echo "stack: BOATBENCH_BOATD_OPTIONS must be a JSON object: $options" >&2; exit 2; }
+  jq --argjson options "$options" '. * $options' >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":"$WORK/dl/jailer","cgroupParent":"boat-bench","reflink":"always",
- "bootTimeoutS":120,"defaultImage":"slim",${BENCH_BOATD_JSON:-}"memOvercommit":${BENCH_MEM_OVERCOMMIT:-8},"cpuOvercommit":${BENCH_CPU_OVERCOMMIT:-12},
+ "bootTimeoutS":120,"defaultImage":"slim","memOvercommit":${BENCH_MEM_OVERCOMMIT:-8},"cpuOvercommit":${BENCH_CPU_OVERCOMMIT:-12},
  "defaultTeam":{"maxVMs":16}}
 JSON
   sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
     "$WORK/boatd.pid" "$WORK/bin/boatd" "$WORK/boatd.json" "$WORK/boatd.log" &
   for _ in $(seq 1200); do [ -S "$SOCK" ] && break; sleep 0.1; done
   curl -fsS --unix-socket "$SOCK" http://boatd/v1/health >/dev/null || { tail -50 "$WORK/boatd.log"; exit 1; }
+  # A create before the template exists boots cold and would be reported as warm.
+  if [ "$(jq -r .warmPool "$WORK/boatd.json")" = true ]; then
+    log "warm template of slim@default"
+    for _ in $(seq 300); do sudo test -f "$STATE/warm/slim@default/warm.json" && break; sleep 1; done
+    sudo test -f "$STATE/warm/slim@default/warm.json" || { tail -50 "$WORK/boatd.log"; exit 1; }
+  fi
 
   log "boat-api"
   local key
