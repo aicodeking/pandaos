@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -24,14 +25,18 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
 
   boat login --url URL --key KEY       save credentials (~/.config/boat/config.json)
   boat whoami | images | usage
-  boat new [--name N] [--size S] [--image I] [--ttl 2h] [--idle-stop 30m|never] [--snapshot SID] [--label k=v]
-                [--secrets A,B | --no-secrets] [--env NAME | --no-env] [--from CODE] [--wait-setup]
+  boat new [--name N] [--size|--type S] [--image I] [--ttl 2h] [--idle-stop 30m|never] [--snapshot SID] [--label k=v] [-e K=V]
+                [--secrets A,B | --no-secrets] [--env NAME | --no-env] [--from SNAPSHOT|CODE] [--count N] [--wait-setup]
+  boat run [--from S] [--type T] [--push DIR] [--cwd D] [--timeout SECS] [-e K=V] [--environment E] [--keep] [--no-env] -- cmd [args]
+  boat push <vm> <dir> [--to PATH]     copy a directory (git-tracked and new files)
   boat list | info <vm> | ps <vm> | vm-usage <vm>
   boat ssh <vm> [-- ssh-args]          boat scp <src> <dst>   (vm:/path on one side)
+  boat ssh-config <vm> [--print]       write ~/.ssh/boat/<vm>.conf for VS Code, Cursor, ...
+  boat forward <vm> --remote P [--local P] [--bind A]    boat forward <vm> --reverse --local P [--remote P] [--bind A]
   boat exec <vm> [--detach] -- cmd [args]
   boat cmd start|ls|status|logs [-f]|signal [--signal S]|stop|history <vm> [id] [-- cmd]
   boat files ls|rm [-r]|mv [--overwrite]|search [--content] [--regex]|info|mkdir|chmod <vm> ...
-  boat prompt <vm> "text" [--agent claude|codex|opencode] [--model M] [--async] [--new] [--resume CONV]
+  boat prompt <vm> "text" [--agent|--provider claude|codex|opencode] [--model M] [--async] [--new] [--resume CONV]
   boat prompts ls|status|logs [-f] <vm> [id]    boat conversations <vm>
   boat steer <vm> "text" [--prompt-id ID]       boat interrupt <vm> [--prompt-id ID]
   boat env ls | new NAME | show E | set E | default E | build E | rm E   [--image I] [--size S] [--setup TEXT|--setup-file F] [--var K=V] [--secrets A,B]
@@ -39,6 +44,7 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat resize <vm> [SIZE] [--disk GIB] [--discard-memory]
   boat desktop <vm> [--no-open]
   boat ports ls|add|rm|url <vm> [port] [--auth private|public] [--public] [--ttl 1h]
+  boat host <vm> <port> [--public|--private]   expose a port and print its URL
   boat snapshots <vm> [ls | create [--name N] | rm <id> | download <id> [-o F] | share <id> [--team T] [--ttl 24h] | shares <id> | unshare <id> <share>]
   boat snapshots team | shared | import FILE [--name N] [--image I] [--size S] | take --share ID | take --code CODE | delete <id>
   boat ai credentials [ls | set PROVIDER [KEY|-] | rm PROVIDER] | proxy [on|off] | usage [vm] | block <vm> | unblock <vm>
@@ -49,6 +55,8 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat upgrade [--version vX.Y.Z]       replace this binary with a release build (checksum-verified)
   boat webhooks [ls | create URL [--events a,b] | show ID | update ID [--url U] [--events a,b] | rm ID | deliveries ID | test ID | rotate ID [--overlap 24h]]
 
+A <vm> can be an id, a unique name, current (last created or forked in this shell) or self (inside a VM).
+Inside a VM: host <port> [--public] | host list | host url <port> | host hide <port>.
 Global: --json (JSON lines on stdout, errors as JSON on stderr). Env: BOAT_URL, BOAT_API_KEY, BOAT_CONFIG.`
 
 type app struct {
@@ -59,16 +67,29 @@ type app struct {
 	cfg       Config
 	c         *client
 	execProg  func(argv []string) error // replaces the process (ssh)
+	runProg   func(argv []string) error // runs and waits (forward)
+	shellID   int                       // parent process: scopes the current VM
 	open      func(url string) error
 	exe       func() (string, error) // os.Executable; replaced in tests
 }
 
 func main() {
-	a := &app{out: os.Stdout, errw: os.Stderr, in: os.Stdin, getenv: os.Getenv, execProg: execReplace, open: openURL}
-	os.Exit(a.run(os.Args[1:]))
+	a := &app{out: os.Stdout, errw: os.Stderr, in: os.Stdin, getenv: os.Getenv, execProg: execReplace,
+		runProg: runForeground, shellID: os.Getppid(), open: openURL}
+	args := os.Args[1:]
+	if filepath.Base(os.Args[0]) == "host" { // the symlink in the guest image
+		args = hostArgs(args)
+	}
+	os.Exit(a.run(args))
 }
 
 func isDarwin() bool { return runtime.GOOS == "darwin" }
+
+func runForeground(argv []string) error {
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
+}
 
 func openURL(u string) error {
 	name, args := openerArgs(u)
@@ -143,10 +164,13 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return err
 	}
 	if cfg.URL == "" || cfg.Key == "" {
+		if a.inGuest() {
+			return errors.New("this VM has no API key: on your computer, store a key as team secrets (boat keys create --scopes vms:read,vms:write,exec; boat secrets set BOAT_API_KEY; boat secrets set BOAT_URL) and restart the VM")
+		}
 		return errors.New("not logged in: run boat login --url URL --key KEY")
 	}
 	a.cfg = cfg
-	a.c = &client{base: cfg.URL, key: cfg.Key, hc: &http.Client{}}
+	a.c = &client{base: cfg.URL, key: cfg.Key, hc: &http.Client{}, alias: a.vmAlias}
 	return h(a, args)
 }
 

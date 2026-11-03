@@ -101,6 +101,7 @@ func cmdNew(a *app, args []string) error {
 	fs := flag.NewFlagSet("new", flag.ContinueOnError)
 	name := fs.String("name", "", "")
 	size := fs.String("size", "", "")
+	fs.StringVar(size, "type", "", "same as --size")
 	image := fs.String("image", "", "")
 	ttl := fs.Duration("ttl", 0, "")
 	idle := fs.String("idle-stop", "", "auto-stop after this idle time (e.g. 30m), or never")
@@ -112,8 +113,11 @@ func cmdNew(a *app, args []string) error {
 	envName := fs.String("env", "", "environment name")
 	fs.StringVar(envName, "environment", "", "same as --env")
 	noEnv := fs.Bool("no-env", false, "ignore the team's default environment")
-	from := fs.String("from", "", "a share code bsh_...")
+	from := fs.String("from", "", "a saved snapshot (id or name) or a share code bsh_...")
 	waitSetup := fs.Bool("wait-setup", false, "follow the environment's setup script; fail if it fails")
+	count := fs.Int("count", 1, "with --from: create this many VMs, all or none")
+	envv := labels{}
+	fs.Var(envv, "e", "KEY=VALUE for the VM (repeatable)")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -153,13 +157,26 @@ func cmdNew(a *app, args []string) error {
 	if *noEnv {
 		body["no_env"] = true
 	}
-	if *from != "" {
-		body["from"] = *from
+	if len(envv) > 0 {
+		body["env"] = envv
+	}
+	switch {
+	case *count < 1 || *count > maxBatch:
+		return fmt.Errorf("--count must be 1-%d: %w", maxBatch, errUsage)
+	case *count > 1 && (*from == "" || *name != "" || *waitSetup):
+		return fmt.Errorf("--count needs --from, and does not work with --name or --wait-setup: %w", errUsage)
+	}
+	if err := a.applyFrom(body, *from); err != nil {
+		return err
+	}
+	if *count > 1 {
+		return a.newBatch(body, *count)
 	}
 	var vm obj
 	if err := a.c.call("POST", "/v1/vms", body, &vm); err != nil {
 		return err
 	}
+	a.setCurrent(s(vm, "id"))
 	if err := a.emitVM(vm); err != nil {
 		return err
 	}
@@ -227,6 +244,7 @@ func cmdFork(a *app, args []string) error {
 	if err := a.c.call("POST", vmPath(s(vm, "id"), "fork"), obj{"name": *name}, &out); err != nil {
 		return err
 	}
+	a.setCurrent(s(out, "id"))
 	return a.emitVM(out)
 }
 
@@ -247,7 +265,7 @@ func cmdExec(a *app, args []string) error {
 	if len(cmd) == 0 {
 		return fmt.Errorf("usage: boat exec <vm> -- cmd: %w", errUsage)
 	}
-	vm, err := oneVM(a, pos)
+	vm, err := oneVM(a, orCurrent(pos, 1))
 	if err != nil {
 		return err
 	}
@@ -264,6 +282,7 @@ func cmdExec(a *app, args []string) error {
 func cmdPrompt(a *app, args []string) error {
 	fs := flag.NewFlagSet("prompt", flag.ContinueOnError)
 	agent := fs.String("agent", "claude", "")
+	fs.StringVar(agent, "provider", "claude", "same as --agent")
 	model := fs.String("model", "", "")
 	cwd := fs.String("cwd", "", "")
 	timeout := fs.Int("timeout", 0, "seconds")
@@ -273,6 +292,7 @@ func cmdPrompt(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
+	pos = orCurrent(pos, 2)
 	if err := need(pos, 2, `<vm> "<prompt>"`); err != nil {
 		return err
 	}
@@ -292,7 +312,7 @@ func cmdPrompt(a *app, args []string) error {
 		body := obj{"prompt": text, "model": *model, "cwd": *cwd}
 		// Only an explicit --agent: a conversation resumes with its own agent.
 		fs.Visit(func(f *flag.Flag) {
-			if f.Name == "agent" {
+			if f.Name == "agent" || f.Name == "provider" {
 				body["agent"] = *agent
 			}
 		})
@@ -316,10 +336,11 @@ func (a *app) stream(path string, body obj) error {
 	for sc.Scan() {
 		line := sc.Bytes()
 		var ev struct {
-			Stream  string `json:"stream"`
-			DataB64 string `json:"data_b64"`
-			Exit    *int   `json:"exit"`
-			Error   any    `json:"error"`
+			Stream   string `json:"stream"`
+			DataB64  string `json:"data_b64"`
+			Exit     *int   `json:"exit"`
+			TimedOut bool   `json:"timed_out"`
+			Error    any    `json:"error"`
 		}
 		if json.Unmarshal(line, &ev) != nil {
 			continue
@@ -329,6 +350,9 @@ func (a *app) stream(path string, body obj) error {
 		}
 		if ev.Exit != nil {
 			exit = *ev.Exit
+		}
+		if ev.TimedOut {
+			exit = 124
 		}
 		if a.json {
 			continue
@@ -381,28 +405,15 @@ func cmdSSH(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
-	vm, err := oneVM(a, pos)
+	vm, err := oneVM(a, orCurrent(pos, 1))
 	if err != nil {
 		return err
 	}
-	pub, err := a.publicKey(*ident)
+	info, err := a.sshTarget(s(vm, "id"), *ident)
 	if err != nil {
 		return err
 	}
-	var info obj
-	if err := a.c.call("POST", vmPath(s(vm, "id"), "ssh"), obj{"public_key": pub}, &info); err != nil {
-		return err
-	}
-	// VM ips are reused after a delete and every VM has its own host keys, so
-	// known_hosts is keyed by VM id: a new VM on an old ip is not a "changed key".
-	argv := []string{"ssh", "-p", s(info, "port"), "-o", "StrictHostKeyChecking=accept-new",
-		"-o", "HostKeyAlias=boat-" + s(vm, "id")}
-	if j := s(info, "jump"); j != "" {
-		// accept-new here too: with no tty the inner ssh cannot ask about the jump host.
-		argv = append(argv, "-o", "ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -W %h:%p "+sshJumpArgs(j))
-	}
-	argv = append(argv, s(info, "user")+"@"+s(info, "host"))
-	argv = append(argv, extra...)
+	argv := append(sshArgv(s(vm, "id"), info), extra...)
 	if a.json {
 		info["argv"] = argv
 		return a.emit(info, nil)

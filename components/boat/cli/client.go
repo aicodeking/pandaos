@@ -74,6 +74,8 @@ type client struct {
 	base string
 	key  string
 	hc   *http.Client
+	// alias expands VM refs like "current" before they are looked up.
+	alias func(string) (string, error)
 }
 
 // apiError is the server's {"error":{code,message,request_id}} envelope.
@@ -162,6 +164,12 @@ func vmPath(id string, rest ...string) string {
 
 // resolveVM accepts an id or a unique name.
 func (c *client) resolveVM(ref string) (obj, error) {
+	if c.alias != nil {
+		var err error
+		if ref, err = c.alias(ref); err != nil {
+			return nil, err
+		}
+	}
 	var vm obj
 	err := c.call("GET", vmPath(ref), nil, &vm)
 	var ae *apiError
