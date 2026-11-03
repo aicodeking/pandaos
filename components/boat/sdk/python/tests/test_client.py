@@ -1,15 +1,19 @@
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
+import shutil
 import sys
+import tarfile
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from boat import Boat, BoatError, verify_webhook  # noqa: E402
+from boat import Boat, BoatError, VM as VMRecord, verify_webhook  # noqa: E402
 
 TOKEN = "boat_test"
 VM = {"id": "vm1", "name": "dev", "size": "small", "state": "running", "image": "ubuntu-24.04", "team": "t1"}
@@ -45,6 +49,16 @@ class Mock(BaseHTTPRequestHandler):
             return self._send(201, dict(VM, id="vm2", name=json.loads(body).get("name", "")))
         if (m, p) == ("POST", "/v1/vms/vm1/stop"):
             return self._send(200, dict(VM, state="stopped"))
+        if m == "POST" and p == "/v1/vms/vm1/exec" and "tar xzf" in body.decode():
+            cmd = json.loads(body)["cmd"]
+            out = ("/home/dev/" + cmd[3] + "\n").encode()
+            lines = [{"stream": "stdout", "data_b64": base64.b64encode(out).decode()}, {"exit": 0}]
+            return self._send(200, raw=b"".join(json.dumps(x).encode() + b"\n" for x in lines),
+                              ctype="application/x-ndjson")
+        if m == "POST" and p == "/v1/vms/vm1/exec" and json.loads(body).get("timeout_s") == 5:
+            lines = [{"exit": 143, "signal": "SIGTERM", "timed_out": True}]
+            return self._send(200, raw=b"".join(json.dumps(x).encode() + b"\n" for x in lines),
+                              ctype="application/x-ndjson")
         if m == "POST" and p in ("/v1/vms/vm1/exec", "/v1/vms/vm1/prompt"):
             lines = [{"stream": "stdout", "data_b64": base64.b64encode(b"hello ").decode()},
                      {"stream": "stdout", "data_b64": base64.b64encode(b"world\n").decode()},
@@ -206,6 +220,70 @@ class ClientTest(unittest.TestCase):
         self.assertTrue(verify_webhook("new", hdr, body, now=1000))
         self.assertTrue(verify_webhook("old", hdr, body, now=1000))
         self.assertFalse(verify_webhook("other", hdr, body, now=1000))
+
+    def _tree(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        root = os.path.join(d, "proj")
+        os.makedirs(os.path.join(root, ".git"))
+        for rel, mode in (("run.sh", 0o755), ("a/b.txt", 0o644), (".git/config", 0o644)):
+            os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+            with open(os.path.join(root, rel), "w") as f:
+                f.write("x")
+            os.chmod(os.path.join(root, rel), mode)
+        os.symlink("run.sh", os.path.join(root, "link"))
+        return root
+
+    def test_push_packs_and_unpacks(self):
+        root = self._tree()  # .git has no HEAD, so git refuses it: a plain directory walk
+        got = self.b.push("vm1", root)
+        self.assertEqual(got, {"path": "/home/dev/proj", "files": 3})
+        put = [b for m, p, b in Mock.log if m == "PUT" and "boat-push" in p][-1]
+        with tarfile.open(fileobj=io.BytesIO(put), mode="r:gz") as tar:
+            self.assertEqual(sorted(tar.getnames()), ["a/b.txt", "link", "run.sh"])
+            self.assertTrue(tar.getmember("run.sh").mode & 0o100)
+            self.assertTrue(tar.getmember("link").issym())
+        with self.assertRaises(ValueError):
+            self.b.push("vm1", "/no/such/dir")
+
+    def _run_vm1(self):
+        def create(**kw):
+            create.kw = kw
+            return VMRecord.from_json({"id": "vm1", "name": "", "size": "large", "state": "running", "image": ""})
+        self.b.create_vm = create
+        return create
+
+    def test_run_job_deletes_and_returns_exit(self):
+        create = self._run_vm1()
+        before = len(Mock.log)
+        res = self.b.run_job(["true"], size="large")
+        self.assertEqual((res.exit_code, res.size, res.vm_id, res.deleted), (0, "large", "vm1", True))
+        self.assertEqual(create.kw["idle_stop_s"], 900)
+        self.assertIn(("DELETE", "/v1/vms/vm1"), [(m, p) for m, p, _ in Mock.log[before:]])
+
+    def test_run_job_timeout_is_124_and_keep_keeps(self):
+        self._run_vm1()
+        before = len(Mock.log)
+        res = self.b.run_job(["sleep", "9"], timeout_s=5, keep=True)
+        self.assertEqual((res.exit_code, res.deleted), (124, False))
+        self.assertNotIn(("DELETE", "/v1/vms/vm1"), [(m, p) for m, p, _ in Mock.log[before:]])
+
+    def test_run_job_push_runs_there(self):
+        self._run_vm1()
+        self.b.run_job(["make"], push=self._tree())
+        last = [json.loads(b) for m, p, b in Mock.log if p == "/v1/vms/vm1/exec"][-1]
+        self.assertEqual(last["cwd"], "/home/dev/proj")
+        self.b.run_job(["make"], cwd="sub")
+        last = [json.loads(b) for m, p, b in Mock.log if p == "/v1/vms/vm1/exec"][-1]
+        self.assertEqual(last["cmd"][3:], ["sub", "make"])
+        with self.assertRaises(ValueError):
+            self.b.run_job(["make"], push="/no/such/dir")
+
+    def test_host_port(self):
+        got = self.b.host_port("vm1", 8080, public=True, ttl_s=600)
+        self.assertIn("8080-vm1", got["url"])
+        posted = [json.loads(b) for m, p, b in Mock.log if (m, p) == ("POST", "/v1/vms/vm1/ports")][-1]
+        self.assertEqual(posted["auth"], "public")
 
     def test_verify_webhook(self):
         body = b'{"type":"vm.stopped"}'

@@ -47,8 +47,34 @@ if command -v boat >/dev/null 2>&1; then
   boat telemetry --json | jq -e 'has("configured")' >/dev/null || fail "telemetry"
   boat snapshots --json >/dev/null || fail "snapshots team"
   boat ps "$vm" --json | jq -e 'has("pid")' >/dev/null || fail "ps"
+  # push, host, ssh-config, current; then run deletes its own VM.
+  work=$(mktemp -d)
+  mkdir "$work/proj" && echo pushed >"$work/proj/f.txt" && printf '#!/bin/sh\necho ran\n' >"$work/proj/run.sh" && chmod +x "$work/proj/run.sh"
+  boat push "$vm" "$work/proj" --json | jq -e '.path == "/home/dev/proj" and .files == 2' >/dev/null || fail "push"
+  [ "$(boat exec "$vm" -- /home/dev/proj/run.sh)" = ran ] || fail "push kept the exec bit"
+  boat host "$vm" 8123 --json | jq -e '.access == "private" and .isProtected and (.url | length > 0)' >/dev/null || fail "host"
+  boat host "$vm" 8123 --public --json | jq -e '.access == "public"' >/dev/null || fail "host --public"
+  boat ports rm "$vm" 8123 --json >/dev/null || fail "ports rm"
+  boat ssh-config "$vm" --print | grep -q "HostKeyAlias boat-$vm" || fail "ssh-config"
   boat rm "$vm" --json >/dev/null || fail "rm"
+  # current is per process that calls boat, so no $(...) here: this script is the "shell".
+  trap 'boat rm current >/dev/null 2>&1 || true' EXIT
+  boat new --name "$name-c" --no-secrets >/dev/null || fail "new for current"
+  boat exec current -- true || fail "exec current"
+  boat exec -- true || fail "exec with no id uses current"
+  boat rm current >/dev/null || fail "rm current"
   trap - EXIT
+  before=$(boat list --json | wc -l)
+  out=$(cd "$work" && boat run --no-env --push proj -e RUN_VAR=yes -- sh -c 'cat f.txt; echo "$RUN_VAR"; pwd; exit 7' 2>"$work/err") && fail "run should exit 7" || code=$?
+  [ "$code" = 7 ] || fail "run exit $code: $(cat "$work/err")"
+  [ "$out" = "pushed
+yes
+/home/dev/proj" ] || fail "run output: $out"
+  grep -q '^exit 7 · .* deleted$' "$work/err" || fail "run summary: $(cat "$work/err")"
+  [ "$(boat list --json | wc -l)" = "$before" ] || fail "run left a VM behind"
+  code=0; boat run --no-env --timeout 1 -- sleep 30 >/dev/null 2>&1 || code=$?
+  [ "$code" = 124 ] || fail "run --timeout exit $code"
+  rm -rf "$work"
   echo "ok - CLI commands"
 fi
 echo "e2e-live: ok"

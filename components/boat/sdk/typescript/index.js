@@ -1,5 +1,5 @@
 // Boat SDK: fetch-based, zero dependencies. Types live in index.d.ts.
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 export class BoatError extends Error {
   constructor(status, code, message, requestId = "") {
@@ -10,6 +10,16 @@ export class BoatError extends Error {
     this.requestId = requestId;
   }
 }
+
+// The archive lands as root in sticky /tmp; a path outside home may need root.
+const UNPACK = `d=$0; case "$d" in /*) ;; *) d=$HOME/$d ;; esac
+mkdir -p -- "$d" 2>/dev/null || sudo -n install -d -o "$(id -u)" -g "$(id -g)" -- "$d" || exit 1
+tar xzf "$1" -C "$d"; rc=$?
+rm -f -- "$1" 2>/dev/null || sudo -n rm -f -- "$1"
+[ "$rc" = 0 ] && printf '%s\\n' "$d"; exit "$rc"`;
+// runJob has no limit by default; the agent's default exec timeout is 600 s.
+const NO_LIMIT_S = 30 * 24 * 60 * 60;
+const JOB_IDLE_STOP_S = 15 * 60;
 
 const q = encodeURIComponent;
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null));
@@ -62,7 +72,7 @@ export class Boat {
     let buf = "";
     const emit = (line) => {
       const ev = JSON.parse(line);
-      return { stream: ev.stream || "", data: ev.data_b64 ? b64decode(ev.data_b64) : new Uint8Array(), exitCode: ev.exit ?? null, error: ev.error ?? null };
+      return { stream: ev.stream || "", data: ev.data_b64 ? b64decode(ev.data_b64) : new Uint8Array(), exitCode: ev.timed_out ? 124 : ev.exit ?? null, error: ev.error ?? null };
     };
     for await (const chunk of res.body) {
       buf += decoder.decode(chunk, { stream: true });
@@ -115,11 +125,46 @@ export class Boat {
     const res = await this.request("GET", `/v1/vms/${q(id)}/files?path=${q(path)}`);
     return new Uint8Array(await res.arrayBuffer());
   }
+  /** Copy a local directory (Node only; needs git and tar). `to` defaults to ~/<dir name>. */
+  async push(id, directory, { to } = {}) {
+    const { packDirectory } = await import("./push.js");
+    const { name, data, files } = await packDirectory(directory);
+    const tmp = `/tmp/.boat-push-${randomBytes(8).toString("hex")}.tgz`;
+    await this.writeFile(id, tmp, data);
+    const res = await this.run(id, ["bash", "-c", UNPACK, to ?? name, tmp]);
+    if (res.exitCode !== 0) throw new BoatError(0, "push_failed", `unpack on the VM: ${res.stderr.trim()}`);
+    return { path: res.stdout.trim(), files };
+  }
+
+  /** `boat run`: new VM, optional push, run cmd, delete. Other options go to createVM. A timeout gives exitCode 124. */
+  async runJob(cmd, { push, cwd, timeoutS, keep = false, ...create } = {}) {
+    if (push !== undefined) await (await import("./push.js")).assertDirectory(push); // before a VM exists
+    const vm = await this.createVM({ idleStopS: JOB_IDLE_STOP_S, ...create });
+    const start = Date.now();
+    try {
+      let where = cwd ?? (push !== undefined ? (await this.push(vm.id, push)).path : undefined);
+      let argv = cmd;
+      if (where && !where.startsWith("/")) { // relative to home, which only the VM knows
+        argv = ["bash", "-c", 'cd -- "$HOME/$0" && exec "$@"', where, ...cmd];
+        where = undefined;
+      }
+      const res = await this.run(vm.id, argv, { cwd: where, timeoutS: timeoutS || NO_LIMIT_S });
+      return { ...res, elapsedS: (Date.now() - start) / 1000, size: vm.size, vmId: vm.id, deleted: !keep };
+    } finally {
+      if (!keep) await this.delete(vm.id);
+    }
+  }
+
   async writeFile(id, path, data) {
     const raw = typeof data === "string" ? new TextEncoder().encode(data) : data;
     await (await this.request("PUT", `/v1/vms/${q(id)}/files?path=${q(path)}`, { raw })).text();
   }
 
+  /** `boat host`: expose a port (private unless public) and return its URL. */
+  async hostPort(id, port, { public: pub = false, ttlS = 7 * 24 * 60 * 60 } = {}) {
+    await this.addPort(id, port, { auth: pub ? "public" : "private" });
+    return this.portUrl(id, port, { ttlS });
+  }
   async ports(id) { return (await this.call("GET", `/v1/vms/${q(id)}/ports`)).ports; }
   addPort(id, port, { public: pub = false, auth } = {}) {
     return this.call("POST", `/v1/vms/${q(id)}/ports`, { port, auth: auth || (pub ? "public" : "private") });

@@ -4,6 +4,10 @@ import hashlib
 import hmac
 import json
 import os
+import secrets as _secrets
+import subprocess
+import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -50,6 +54,18 @@ class ExecResult:
     stdout: bytes
     stderr: bytes
     exit_code: int
+
+
+@dataclass(frozen=True)
+class JobResult:
+    """What run_job() returns."""
+    stdout: bytes
+    stderr: bytes
+    exit_code: int
+    elapsed_s: float
+    size: str
+    vm_id: str
+    deleted: bool
 
 
 @dataclass(frozen=True)
@@ -115,6 +131,39 @@ def _config() -> Dict[str, str]:
         return {}
 
 
+# The archive lands as root in sticky /tmp; a path outside home may need root.
+_UNPACK = """d=$0; case "$d" in /*) ;; *) d=$HOME/$d ;; esac
+mkdir -p -- "$d" 2>/dev/null || sudo -n install -d -o "$(id -u)" -g "$(id -g)" -- "$d" || exit 1
+tar xzf "$1" -C "$d"; rc=$?
+rm -f -- "$1" 2>/dev/null || sudo -n rm -f -- "$1"
+[ "$rc" = 0 ] && printf '%s\\n' "$d"; exit "$rc"
+"""
+# run_job has no limit by default; the agent's default exec timeout is 600 s.
+_NO_LIMIT_S = 30 * 24 * 60 * 60
+_JOB_IDLE_STOP_S = 15 * 60
+
+
+def _push_files(folder: str) -> List[str]:
+    """In a git repository: tracked and new unignored files, with submodules. Else all but .git."""
+    try:
+        out = subprocess.run(["git", "-C", folder, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                             capture_output=True, check=True).stdout.decode()
+    except (OSError, subprocess.CalledProcessError):
+        found = []
+        for root, dirs, names in os.walk(folder):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            found += [os.path.relpath(os.path.join(root, n), folder) for n in names if n != ".git"]
+        return found
+    files: List[str] = []
+    for name in sorted(set(filter(None, out.split("\0")))):
+        path = os.path.join(folder, name)
+        if os.path.isdir(path) and not os.path.islink(path):  # a submodule
+            files += [os.path.join(name, x) for x in _push_files(path)]
+        elif os.path.lexists(path):  # git can track a file deleted here
+            files.append(name)
+    return files
+
+
 def _q(s: str) -> str:
     return urllib.parse.quote(str(s), safe="")
 
@@ -166,7 +215,7 @@ class Boat:
                 ev = json.loads(line)
                 yield ExecEvent(stream=ev.get("stream", ""),
                                 data=base64.b64decode(ev["data_b64"]) if ev.get("data_b64") else b"",
-                                exit_code=ev.get("exit"), error=ev.get("error"))
+                                exit_code=124 if ev.get("timed_out") else ev.get("exit"), error=ev.get("error"))
 
     @staticmethod
     def _clean(d: Dict[str, Any]) -> Dict[str, Any]:
@@ -228,6 +277,48 @@ class Boat:
         """exec() collected into stdout/stderr/exit_code."""
         return _collect(self.exec(vm_id, cmd, **kw))
 
+    def push(self, vm_id: str, directory: str, to: Optional[str] = None) -> Dict[str, Any]:
+        """Copy a local directory to `to` on the VM (default ~/<dir name>; relative = from home).
+        Same files as `boat push`. One archive is capped by the API's -max-file-bytes (256 MiB by default)."""
+        folder = os.path.abspath(directory)
+        if not os.path.isdir(folder):
+            raise ValueError(folder + " is not a directory")
+        files = _push_files(folder)
+        tmp = "/tmp/.boat-push-" + _secrets.token_hex(8) + ".tgz"
+        with tempfile.TemporaryFile() as packed:
+            with tarfile.open(fileobj=packed, mode="w:gz") as tar:
+                for name in files:
+                    tar.add(os.path.join(folder, name), arcname=name, recursive=False)
+            packed.seek(0)
+            self.write_file(vm_id, tmp, packed.read())
+        res = self.run(vm_id, ["bash", "-c", _UNPACK, to or os.path.basename(folder), tmp])
+        if res.exit_code != 0:
+            raise BoatError(0, "push_failed", "unpack on the VM: " + res.stderr.decode(errors="replace").strip())
+        return {"path": res.stdout.decode().strip(), "files": len(files)}
+
+    def run_job(self, cmd: List[str], push: Optional[str] = None, cwd: Optional[str] = None,
+                timeout_s: Optional[int] = None, keep: bool = False, **create: Any) -> JobResult:
+        """`boat run`: new VM, optional push, run cmd, delete. create: create_vm() arguments.
+        If this process dies, the VM stops by itself 15 minutes later. A timeout gives exit_code 124."""
+        if push is not None and not os.path.isdir(push):  # before a VM exists
+            raise ValueError(push + " is not a directory")
+        create.setdefault("idle_stop_s", _JOB_IDLE_STOP_S)
+        vm = self.create_vm(**create)
+        start = time.monotonic()
+        deleted = False
+        try:
+            where = cwd or (self.push(vm.id, push)["path"] if push is not None else None)
+            argv = list(cmd)
+            if where and not where.startswith("/"):  # relative to home, which only the VM knows
+                argv = ["bash", "-c", 'cd -- "$HOME/$0" && exec "$@"', where] + argv
+                where = None
+            res = self.run(vm.id, argv, cwd=where, timeout_s=timeout_s or _NO_LIMIT_S)
+        finally:
+            if not keep:
+                self.delete(vm.id)
+                deleted = True
+        return JobResult(res.stdout, res.stderr, res.exit_code, time.monotonic() - start, vm.size, vm.id, deleted)
+
     def prompt(self, vm_id: str, prompt: str, agent: str = "claude", model: Optional[str] = None,
                cwd: Optional[str] = None, timeout_s: Optional[int] = None) -> Iterator[ExecEvent]:
         """Run claude/codex/opencode headless in the VM with team secrets as env."""
@@ -250,6 +341,11 @@ class Boat:
         public=True / auth="public": open route plus a raw TCP host port."""
         mode = auth or ("public" if public else "private")
         return self._call("POST", f"/v1/vms/{_q(vm_id)}/ports", {"port": port, "auth": mode})
+
+    def host_port(self, vm_id: str, port: int, public: bool = False, ttl_s: int = 7 * 24 * 60 * 60) -> Dict[str, Any]:
+        """`boat host`: expose a port (private unless public=True) and return its URL."""
+        self.add_port(vm_id, port, auth="public" if public else "private")
+        return self.port_url(vm_id, port, ttl_s=ttl_s)
 
     def port_url(self, vm_id: str, port: int, ttl_s: Optional[int] = None) -> Dict[str, Any]:
         """{url, auth, token?, expires_at?}; send token as header X-Boat-Route-Token, or open url in a browser."""

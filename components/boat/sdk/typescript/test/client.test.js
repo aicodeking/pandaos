@@ -2,6 +2,10 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHmac } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Boat, BoatError, verifyWebhook } from "../index.js";
 
 const TOKEN = "boat_test";
@@ -25,6 +29,14 @@ before(async () => {
     if (k === "GET /v1/vms") return json(200, { vms: [VM] });
     if (k === "POST /v1/vms/vm1/fork") return json(201, { ...VM, id: "vm2", name: JSON.parse(body).name });
     if (k === "POST /v1/vms/vm1/stop") return json(200, { ...VM, state: "stopped" });
+    if (k === "POST /v1/vms/vm1/exec" && body.toString().includes("tar xzf")) {
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      return res.end(`{"stream":"stdout","data_b64":"${b64(`/home/dev/${JSON.parse(body).cmd[3]}\n`)}"}\n{"exit":0}\n`);
+    }
+    if (k === "POST /v1/vms/vm1/exec" && JSON.parse(body).timeout_s === 5) {
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      return res.end(`{"exit":143,"signal":"SIGTERM","timed_out":true}\n`);
+    }
     if (k === "POST /v1/vms/vm1/exec" || k === "POST /v1/vms/vm1/prompt") {
       res.writeHead(200, { "Content-Type": "application/x-ndjson" });
       // split a line across writes to exercise buffering
@@ -173,4 +185,85 @@ test("verifyWebhook", () => {
   assert.equal(verifyWebhook("whsec_x", h, body + " ", { now: 1001 }), false);
   assert.equal(verifyWebhook("whsec_x", h, body, { now: 9999 }), false);
   assert.equal(verifyWebhook("whsec_x", "junk", body), false);
+});
+
+function tree() {
+  const root = join(mkdtempSync(join(tmpdir(), "boat-push-")), "proj");
+  mkdirSync(join(root, "a"), { recursive: true });
+  writeFileSync(join(root, "run.sh"), "x", { mode: 0o755 });
+  writeFileSync(join(root, "a", "b.txt"), "x");
+  writeFileSync(join(root, "gone.txt"), "x");
+  writeFileSync(join(root, "ignored.log"), "x");
+  writeFileSync(join(root, ".gitignore"), "*.log\n");
+  symlinkSync("run.sh", join(root, "link"));
+  return root;
+}
+const git = (root, ...args) => execFileSync("git", ["-C", root, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args]);
+function listTar(bytes) {
+  const dir = mkdtempSync(join(tmpdir(), "boat-tar-"));
+  writeFileSync(join(dir, "x.tgz"), bytes);
+  return execFileSync("tar", ["tzvf", join(dir, "x.tgz")]).toString();
+}
+const lastPut = () => [...log].reverse().find((l) => l.method === "PUT" && l.path.includes("boat-push"));
+const lastPutBytes = () => files.get(lastPut().path);
+
+test("push sends git's view of a repository, and everything but .git elsewhere", async () => {
+  const boat = new Boat({ url, key: TOKEN });
+  const root = tree();
+  let got = await boat.push("vm1", root);
+  assert.deepEqual(got, { path: "/home/dev/proj", files: 6 });
+  let listing = listTar(lastPutBytes());
+  assert.match(listing, /gone\.txt/);
+  assert.match(listing, /ignored\.log/);
+
+  git(root, "init", "-q");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "x");
+  writeFileSync(join(root, "new.txt"), "n");
+  execFileSync("rm", [join(root, "gone.txt")]);
+  got = await boat.push("vm1", root, { to: "/srv/api" });
+  assert.equal(got.path, "/home/dev//srv/api");
+  listing = listTar(lastPutBytes());
+  for (const want of ["run.sh", "a/b.txt", "new.txt", ".gitignore"]) assert.ok(listing.includes(want), want);
+  for (const bad of ["gone.txt", "ignored.log", ".git/"]) assert.ok(!listing.includes(bad), bad);
+  assert.match(listing, /-rwxr-xr-x.*run\.sh/);
+  assert.match(listing, /link -> run\.sh/);
+  await assert.rejects(boat.push("vm1", "/no/such/dir"), /not a directory|ENOENT/);
+});
+
+test("runJob deletes, returns the exit code, gives 124 on a timeout, runs in the pushed dir", async () => {
+  const boat = new Boat({ url, key: TOKEN });
+  const deletes = () => log.filter((l) => l.method === "DELETE" && l.path === "/v1/vms/vm1").length;
+  let before = deletes();
+  let res = await boat.runJob(["true"], { size: "large" });
+  assert.equal(res.exitCode, 2);
+  assert.equal(res.deleted, true);
+  assert.equal(res.vmId, "vm1");
+  assert.equal(deletes(), before + 1);
+  const created = [...log].reverse().find((l) => l.method === "POST" && l.path === "/v1/vms");
+  assert.deepEqual(JSON.parse(created.body), { idle_stop_s: 900, size: "large" });
+
+  before = deletes();
+  res = await boat.runJob(["sleep", "9"], { timeoutS: 5, keep: true });
+  assert.equal(res.exitCode, 124);
+  assert.equal(res.deleted, false);
+  assert.equal(deletes(), before);
+
+  await boat.runJob(["make"], { push: tree() });
+  const execs = () => log.filter((l) => l.path === "/v1/vms/vm1/exec").map((l) => JSON.parse(l.body));
+  assert.equal(execs().at(-1).cwd, "/home/dev/proj");
+  await boat.runJob(["make"], { cwd: "sub" });
+  assert.deepEqual(execs().at(-1).cmd.slice(3), ["sub", "make"]);
+
+  const creates = log.filter((l) => l.path === "/v1/vms").length;
+  await assert.rejects(boat.runJob(["make"], { push: "/no/such/dir" }));
+  assert.equal(log.filter((l) => l.path === "/v1/vms").length, creates);
+});
+
+test("hostPort exposes then returns the URL", async () => {
+  const boat = new Boat({ url, key: TOKEN });
+  const got = await boat.hostPort("vm1", 8080, { public: true, ttlS: 600 });
+  assert.match(got.url, /8080-vm1/);
+  const posted = [...log].reverse().find((l) => l.method === "POST" && l.path === "/v1/vms/vm1/ports");
+  assert.equal(JSON.parse(posted.body).auth, "public");
 });

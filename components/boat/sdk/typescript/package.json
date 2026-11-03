@@ -6,7 +6,7 @@
   "main": "./index.js",
   "types": "./index.d.ts",
   "exports": { ".": { "types": "./index.d.ts", "default": "./index.js" } },
-  "files": ["index.js", "index.d.ts"],
+  "files": ["index.js", "push.js", "index.d.ts"],
   "engines": { "node": ">=18" },
   "scripts": { "test": "node --test test/*.test.js" },
   "license": "MIT"

@@ -70,6 +70,7 @@ export interface PromptOptions {
 }
 
 export interface RunResult { stdout: string; stderr: string; exitCode: number; }
+export interface JobResult extends RunResult { elapsedS: number; size: string; vmId: string; deleted: boolean; }
 export interface SSHInfo { host: string; port: number; user: string; jump?: string; }
 export interface DesktopURL { url: string; expires_at: string; }
 export interface Team { id: string; name: string; role: string; members?: { user_id: string; role: string }[]; created: string; }
@@ -125,6 +126,12 @@ export declare class Boat {
   delete(id: string): Promise<void>;
   exec(id: string, cmd: string[], opts?: ExecOptions): AsyncGenerator<ExecEvent>;
   run(id: string, cmd: string[], opts?: ExecOptions): Promise<RunResult>;
+  /** Copy a local directory (Node only; needs git and tar). `to` defaults to ~/<dir name>. */
+  push(id: string, directory: string, opts?: { to?: string }): Promise<{ path: string; files: number }>;
+  /** `boat run`: new VM, optional push, run cmd, delete. A timeout gives exitCode 124. */
+  runJob(cmd: string[], opts?: CreateVMOptions & { push?: string; cwd?: string; timeoutS?: number; keep?: boolean }): Promise<JobResult>;
+  /** `boat host`: expose a port (private unless public) and return its URL. */
+  hostPort(id: string, port: number, opts?: { public?: boolean; ttlS?: number }): Promise<PortURL>;
   prompt(id: string, prompt: string, opts?: PromptOptions): AsyncGenerator<ExecEvent>;
   readFile(id: string, path: string): Promise<Uint8Array>;
   writeFile(id: string, path: string, data: Uint8Array | string): Promise<void>;

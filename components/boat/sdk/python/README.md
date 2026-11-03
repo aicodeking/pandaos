@@ -33,6 +33,7 @@ boat.stop(vm.id)
 - **AI proxy:** `ai_credentials`, `set_ai_credential`, `delete_ai_credential`, `ai_proxy`, `set_ai_proxy`, `ai_usage`, `set_ai_access`
 - **Telemetry:** `telemetry`, `set_telemetry`, `delete_telemetry`
 - **Rotation:** `rotate_key`, `key_usage`, `rotate_webhook`, `get_webhook`, `update_webhook`
+- **One-shot jobs:** `push(vm, dir, to=)` (same files as `boat push`), `run_job(cmd, push=, cwd=, timeout_s=, keep=, **create_vm_args)` (`boat run`: new VM, push, run, delete; a timeout gives exit code 124), `host_port(vm, port, public=)` (`boat host`)
 - **Teams:** `teams`, `create_team(name, owner=)` and `delete_team` (operator only), `add_member`
 - **Keys:** `keys`, `create_key`, `delete_key`
 - **Secrets:** `secrets`, `set_secret`, `delete_secret`

@@ -37,6 +37,7 @@ await boat.stop(vm.id);
 - **Rotation:** `rotateKey`, `keyUsage`, `rotateWebhook`, `getWebhook`, `updateWebhook`
 - **Teams:** `teams`, `createTeam(name, {owner})` and `deleteTeam` (operator only), `addMember`
 - **Keys:** `keys`, `createKey`, `deleteKey`
+- **One-shot jobs:** `push(vm, dir, { to })` (same files as `boat push`; Node only), `runJob(cmd, { push, cwd, timeoutS, keep, ...createVMOptions })` (`boat run`: new VM, push, run, delete; a timeout gives exit code 124), `hostPort(vm, port, { public })` (`boat host`)
 - **Secrets:** `secrets`, `setSecret`, `deleteSecret`
 - **Webhooks:** `webhooks`, `createWebhook`, `deleteWebhook`, `deliveries`, `testWebhook`
 

@@ -6,12 +6,14 @@ from .client import (
     DesktopURL,
     ExecEvent,
     ExecResult,
+    JobResult,
     PromptRun,
     SSHInfo,
     VM,
     verify_webhook,
 )
 
-__all__ = ["Boat", "BoatError", "Command", "DesktopURL", "ExecEvent", "ExecResult", "PromptRun", "SSHInfo", "VM",
+__all__ = ["Boat", "BoatError", "Command", "DesktopURL", "ExecEvent", "ExecResult",
+    "JobResult", "PromptRun", "SSHInfo", "VM",
            "verify_webhook"]
 __version__ = "0.1.0"
