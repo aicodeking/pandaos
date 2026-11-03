@@ -168,9 +168,19 @@ func TestUnsyncedSnapshotRestoresCold(t *testing.T) {
 	if err := writeJSONAtomic(filepath.Join(m.snapDir(s.ID), "snap.json"), disk, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	torn := filepath.Join(m.cfg.StateDir, "snapshots", "snap-torn")
+	if err := os.MkdirAll(torn, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torn, "snap.json"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	m2, err := newManager(m.cfg, h.run, h)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("a torn snap.json must not stop boatd: %v", err)
+	}
+	if exists(torn) {
+		t.Fatal("torn snapshot kept")
 	}
 	got := m2.snaps[s.ID]
 	if got.HasMem || got.Unsynced || exists(filepath.Join(m.snapDir(s.ID), memFile)) {

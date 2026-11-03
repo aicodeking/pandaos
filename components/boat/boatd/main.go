@@ -147,10 +147,6 @@ func setupCgroups(c *Config) {
 	}
 	c.cgroupLimits = true
 	c.stateDisk = stateDisk(c.StateDir)
-	// The parent has the file iff swap accounting exists; the jailer fails on a missing one.
-	if _, err := os.Stat(filepath.Join(dir, "memory.swap.max")); err == nil && c.SnapshotTracking == "mincore" {
-		c.swapControl = true
-	}
 }
 
 // enableControllers: io is optional (only io.max needs it), the others are not.

@@ -73,11 +73,10 @@ func (c *fcClient) resume(ctx context.Context) error {
 
 // snapshot writes a "Full" or "Diff" (pages dirtied since the last snapshot,
 // restore or boot; a sparse file) snapshot of a paused VM.
-func (c *fcClient) snapshot(ctx context.Context, typ, statePath, memPath string) error {
-	// The diff is a temp file and reflinking the result flushes it anyway. Firecracker's
-	// fsync of it was most of 10 s with the VM paused (run 41573512017).
+// fsync false leaves the data to writeback: the guest is paused for this call.
+func (c *fcClient) snapshot(ctx context.Context, typ, statePath, memPath string, fsync bool) error {
 	return c.call(ctx, "PUT", "/snapshot/create", map[string]any{
-		"snapshot_type": typ, "snapshot_path": statePath, "mem_file_path": memPath, "sync_snapshot_files": false,
+		"snapshot_type": typ, "snapshot_path": statePath, "mem_file_path": memPath, "sync_snapshot_files": fsync,
 	})
 }
 
@@ -279,9 +278,6 @@ func jailerArgs(c Config, v VM, uid, gid int, vmDir string) []string {
 			"--cgroup", fmt.Sprintf("memory.max=%d", hard),
 			"--cgroup", fmt.Sprintf("cpu.max=%d 100000", (v.VCPU+1)*100000), // vCPUs + 1 for the VMM threads
 			"--cgroup", "pids.max=256")
-		if c.swapControl {
-			args = append(args, "--cgroup", "memory.swap.max=0") // mincore must see every guest page
-		}
 	}
 	args = append(args, c.JailerArgs...)
 	return append(args, "--", "--api-sock", "/"+apiSock)

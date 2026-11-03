@@ -202,6 +202,8 @@ func (m *Manager) bootNew(ctx context.Context, v VM, restore bool, env map[strin
 	return m.initGuest(ctx, v, env, true, restore)
 }
 
+const guestInitFactor = 2 // whole guest init, in units of bootTimeoutS
+
 func (m *Manager) fail(id string, err error) (VM, error) {
 	log.Printf("%s: %v", id, err)
 	v, _ := m.get(id)
@@ -256,7 +258,7 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 			os.Remove(filepath.Join(root, vmstate))
 		}
 	} else if err == nil {
-		err = fc.boot(ctx, v, m.bootArgs(v), m.cfg.DiffSnapshots && !m.cfg.mincoreTracking(), m.cfg)
+		err = fc.boot(ctx, v, m.bootArgs(v), m.cfg.DiffSnapshots, m.cfg)
 	}
 	if err != nil {
 		m.killWait(v.ID, pid)
@@ -276,6 +278,9 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 // fixes the clock, and pushes env. An image without an agent still runs:
 // agent_ready stays false.
 func (m *Manager) initGuest(ctx context.Context, v VM, env map[string]string, identity, restored bool) (VM, error) {
+	// The guest is untrusted and may answer health, then hang on the next op.
+	ctx, cancel := context.WithTimeout(ctx, guestInitFactor*time.Duration(m.cfg.BootTimeoutS)*time.Second)
+	defer cancel()
 	sock := filepath.Join(m.root(v.ID), vsockUDS)
 	t0 := time.Now()
 	err := waitAgent(ctx, sock, time.Duration(m.cfg.BootTimeoutS)*time.Second)
@@ -366,7 +371,7 @@ func (m *Manager) Stop(ctx context.Context, id, reason string) (VM, error) {
 	root := m.root(id)
 	err = m.checkFloor(uint64(v.MemMiB) << 20) // a diff is usually far smaller; plan for a full one
 	if err == nil {
-		v, err = m.takeSnapshot(ctx, v)
+		v, err = m.takeSnapshot(ctx, v, true) // a stop's file is the next start's base: flushed now
 	}
 	snap := err == nil
 	if !snap {

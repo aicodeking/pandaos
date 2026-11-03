@@ -23,9 +23,6 @@ import (
 // renamed over it. root/mem is only ever replaced, never modified in place, so
 // a running VM's backing file and its forks' copies stay intact.
 
-// reportDelay: the guest kernel reports freed pages after about 2 s.
-const reportDelay = 2500 * time.Millisecond
-
 const (
 	snapState = "snap." + vmstate
 	snapDiff  = "snap.diff"
@@ -35,8 +32,8 @@ const (
 // takeSnapshot syncs the guest, pauses the VM and leaves root/snap.vmstate +
 // an updated root/mem. The VM stays paused: callers resume (fork, snapshot)
 // or kill (stop) it.
-func (m *Manager) takeSnapshot(ctx context.Context, v VM) (VM, error) {
-	diff, err := m.dumpSnapshot(ctx, v)
+func (m *Manager) takeSnapshot(ctx context.Context, v VM, fsync bool) (VM, error) {
+	diff, err := m.dumpSnapshot(ctx, v, fsync)
 	if err != nil {
 		return v, err
 	}
@@ -45,7 +42,7 @@ func (m *Manager) takeSnapshot(ctx context.Context, v VM) (VM, error) {
 
 // dumpSnapshot leaves the VM paused and root/snap.vmstate + its memory (a sparse
 // diff if the return is true) written, not yet installed as root/mem.
-func (m *Manager) dumpSnapshot(ctx context.Context, v VM) (bool, error) {
+func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, error) {
 	root := m.root(v.ID)
 	t0 := time.Now()
 	m.guestSync(ctx, v)
@@ -60,9 +57,9 @@ func (m *Manager) dumpSnapshot(ctx context.Context, v VM) (bool, error) {
 	m.liftMemLimits(v)
 	var err error
 	if diff {
-		err = fc.snapshot(ctx, "Diff", snapState, snapDiff)
+		err = fc.snapshot(ctx, "Diff", snapState, snapDiff, fsync)
 	} else {
-		err = fc.snapshot(ctx, "Full", snapState, memNew)
+		err = fc.snapshot(ctx, "Full", snapState, memNew, fsync)
 	}
 	if err != nil {
 		m.setMemLimits(v)
@@ -106,10 +103,11 @@ func (m *Manager) installSnapshot(v VM, diff bool) (VM, error) {
 	if err != nil {
 		return m.failSnapshot(v), err
 	}
-	t1 := time.Now()
-	nv, err := m.update(v.ID, "", func(x *VM) { x.DiffOK = m.cfg.DiffSnapshots })
-	log.Printf("%s: snapshot install merge=%dms state=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
-	return nv, err
+	log.Printf("%s: snapshot install merge=%dms", v.ID, time.Since(t0).Milliseconds())
+	if v.DiffOK == m.cfg.DiffSnapshots {
+		return v, nil // vm.json's fsync took 4.3 s with the dump in writeback, under the global lock
+	}
+	return m.update(v.ID, "", func(x *VM) { x.DiffOK = m.cfg.DiffSnapshots })
 }
 
 // mergeDiff makes dst the VM's full memory: the data extents of the sparse
@@ -253,17 +251,16 @@ func (m *Manager) syncSaved(s Snapshot) {
 			return // deleted meanwhile
 		}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.snaps[s.ID]; !ok {
-		return
-	}
 	s.Unsynced = false
 	if err := writeJSONAtomic(filepath.Join(dir, "snap.json"), s, 0o600); err != nil {
 		log.Printf("%s: %v", s.ID, err)
 		return
 	}
-	m.snaps[s.ID] = s
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.snaps[s.ID]; ok {
+		m.snaps[s.ID] = s
+	}
 }
 
 // guestSync flushes the guest's page cache to its disk before a pause, so the
@@ -276,10 +273,7 @@ func (m *Manager) guestSync(ctx context.Context, v VM) {
 	defer cancel()
 	sock := filepath.Join(m.root(v.ID), vsockUDS)
 	var ae *agentErr
-	if _, err := agentCall(c, sock, map[string]any{"op": "sync", "drop_caches": m.cfg.SnapshotDropCaches}); err == nil || !errors.As(err, &ae) {
-		if err == nil && m.cfg.SnapshotDropCaches && m.cfg.mincoreTracking() {
-			time.Sleep(reportDelay) // mincore skips a free page only once it is reported
-		}
+	if _, err := agentCall(c, sock, map[string]string{"op": "sync"}); err == nil || !errors.As(err, &ae) {
 		return
 	}
 	a, err := dialAgent(c, sock) // older agents: no "sync" op
@@ -322,7 +316,7 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 		}
 		return v.HasSnapshot, nil
 	}
-	diff, err := m.dumpSnapshot(ctx, v)
+	diff, err := m.dumpSnapshot(ctx, v, false)
 	t0 := time.Now()
 	if err == nil {
 		err = m.cp(filepath.Join(root, diskFile), filepath.Join(dst, diskFile))
@@ -395,7 +389,8 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 	s.HasMem, err = m.freeze(ctx, v, dir)
 	s.Unsynced = s.HasMem
 	if err == nil {
-		err = writeJSONAtomic(filepath.Join(dir, "snap.json"), s, 0o600)
+		// No fsync here: 3-4 s behind a dump in writeback. syncSaved persists it.
+		err = writeJSONNoSync(filepath.Join(dir, "snap.json"), s, 0o600)
 	}
 	if err != nil {
 		os.RemoveAll(dir)

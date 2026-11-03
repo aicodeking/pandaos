@@ -104,6 +104,20 @@ func newID(prefix string) string {
 }
 
 // writeJSONAtomic writes tmp, fsyncs, renames: readers see old or new, never half.
+// writeJSONNoSync is writeJSONAtomic without the durability: a crash may lose the
+// file, never tear it.
+func writeJSONNoSync(path string, v any, mode os.FileMode) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func writeJSONAtomic(path string, v any, mode os.FileMode) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

@@ -340,6 +340,7 @@ func (m *Manager) sock(id string) (string, error) {
 // reconcile loads state after a boatd (re)start: re-adopts live firecracker
 // processes, and marks VMs whose process is gone as stopped.
 func (m *Manager) reconcile() error {
+	m.dropTornSnapshots()
 	snaps, err := loadAll[Snapshot](filepath.Join(m.cfg.StateDir, "snapshots"), "snap.json")
 	if err != nil {
 		return err
@@ -414,6 +415,19 @@ func (m *Manager) reconcile() error {
 		delVMNet(m.run, v)
 	}
 	return nil
+}
+
+// dropTornSnapshots: snap.json is first written without an fsync (CreateSnapshot),
+// so a host crash can leave it empty. Such a snapshot was never durable.
+func (m *Manager) dropTornSnapshots() {
+	paths, _ := filepath.Glob(filepath.Join(m.cfg.StateDir, "snapshots", "*", "snap.json"))
+	for _, p := range paths {
+		var s Snapshot
+		if err := readJSON(p, &s); err != nil {
+			log.Printf("%s: dropping a snapshot torn by a crash: %v", p, err)
+			os.RemoveAll(filepath.Dir(p))
+		}
+	}
 }
 
 func (m *Manager) deadState(v VM) VM {

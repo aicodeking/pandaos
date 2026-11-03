@@ -6,8 +6,7 @@
 #
 #   ceiling   fio on the host's state dir: what the guest cannot beat on this runner
 #   disk      fio in a VM; extents of its disk; guest scheduler and discard
-#   snapshot  named snapshot, new-from-snapshot, fork of a VM with 2 GiB of dirty RAM
-#             and a fragmented disk (fio randwrite)
+#   snapshot  named snapshot, new-from-snapshot, fork of a VM after fio and 3 GiB of writes
 #   density   idle RSS per default VM with and without the balloon, KSM saving
 #   warm      10 concurrent creates, cold and from a warm template
 
@@ -54,13 +53,12 @@ disk=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p')
 echo "disk: $disk"
 echo "extents after boatbench's fio: $(vm_extents "$pv")"
 
-log "perf e2e: snapshot, new-from-snapshot, fork (4/8, 2 GiB dirty, fragmented disk)"
-perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s forkN_s
+log "perf e2e: snapshot, new-from-snapshot, fork (4/8, 2 GiB dirty + 1 GiB cache)"
+perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s fork_s fork2_s
   local v sn f; v=$(perf_vm "s$1")
   put_disk "$v"
   bx "$v" 'bash /tmp/disk.sh' 300 >/dev/null
   perf_dirty "$v"
-  echo "$1: dirtying 4 GiB of tmpfs took $(bx "$v" 's=$(date +%s.%N); head -c 4G /dev/zero >/dev/shm/d/w; e=$(date +%s.%N); rm /dev/shm/d/w; awk -v a="$s" -v b="$e" "BEGIN {print b-a}"')s"
   echo "$1: extents $(vm_extents "$v"), guest $(bx "$v" 'free -m | awk "/Mem:/ {print \"used=\"\$3,\"cache=\"\$6}"')"
   local t; t=$(now); sn=$(bd POST "/v1/vms/$v/snapshots" '{"name":"x"}' | jq -r .id); snap_s=$(secs "$t" "$(now)")
   echo "$1: snapshot ${snap_s}s: $(last_snap_log)"
@@ -73,17 +71,15 @@ perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s
   [ "$(bx "$f" 'ls -l /dev/shm/d/dirty | wc -l')" = 1 ] || fail "fork lost tmpfs"
   echo "$1: fork ${fork_s}s: $(last_snap_log)"
   perf_del "$f"
+  sudo sync # the same fork with the first dump on disk: what a fork costs without a flush to wait for
+  t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"g$1\"}" | jq -r .id); fork2_s=$(secs "$t" "$(now)")
+  echo "$1: fork, base clean ${fork2_s}s: $(last_snap_log)"
+  perf_del "$f"
   bd DELETE "/v1/vms/$v/snapshots/$sn" >/dev/null
   perf_del "$v"
 }
-perf_snap kvm
-kvm_snap=$snap_s kvm_from=$fromsnap_s kvm_fork=$fork_s
-perf_cfg '.snapshotTracking = "mincore"' mincore
-perf_snap mincore
-min_snap=$snap_s min_from=$fromsnap_s min_fork=$fork_s
-perf_cfg '.snapshotTracking = "mincore" | .snapshotDropCaches = true' mincoredrop
-perf_snap mincoredrop
-mind_snap=$snap_s mind_from=$fromsnap_s mind_fork=$fork_s
+perf_snap p
+kvm_snap=$snap_s kvm_from=$fromsnap_s kvm_fork=$fork_s kvm_fork2=$fork2_s
 perf_del "$pv"
 
 log "perf e2e: density (idle default VMs)"
@@ -161,13 +157,11 @@ restart_boatd "$WORK/boatd.json"
 
 echo "METRIC $(jq -nc --argjson disk "$disk" --arg blk "$guest_blk" \
   --argjson csw "$c_sw" --argjson crw "$c_rw" --argjson crr "$c_rr" \
-  --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" \
-  --argjson ms "$min_snap" --argjson mf "$min_from" --argjson mk "$min_fork" \
-  --argjson ds "$mind_snap" --argjson df "$mind_from" --argjson dk "$mind_fork" \
+  --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" --argjson kk2 "$kvm_fork2" \
   --argjson nbr "$nb_rss" --argjson nbc "$nb_cg" --argjson br "$b_rss" --argjson bc "$b_cg" \
   --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fb "$fit_before" --argjson fa "$fit_after" \
   --argjson ct "$cold_ten" --argjson wt "$warm_ten" \
   '{test: "boat-perf", disk: $disk, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
-    kvm: {snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk}, mincore: {snapshotS: $ms, fromSnapshotS: $mf, forkS: $mk}, mincoreDrop: {snapshotS: $ds, fromSnapshotS: $df, forkS: $dk},
+    snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2,
     idleRssMiB: {noBalloon: $nbr, balloon: $br, ksm: $kr}, idleCgroupMiB: {noBalloon: $nbc, balloon: $bc},
     ksmDedupMiB: $ksm, fitsIn8GiB: {before: $fb, after: $fa}, tenCreatesS: {cold: $ct, warm: $wt}}')"
