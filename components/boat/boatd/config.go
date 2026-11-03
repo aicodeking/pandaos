@@ -79,11 +79,12 @@ type Config struct {
 	DiffSnapshots  bool    `json:"diffSnapshots"`  // dirty-page snapshots merged onto a reflinked base
 
 	// Performance and density. See PROTOCOL.md "Performance and density".
-	DiskEngine string `json:"diskEngine"` // auto (Async, else Sync), Async or Sync
-	DiskNoCow  bool   `json:"diskNoCow"`  // btrfs: images and the VM disks reflinked from them are NOCOW
-	Balloon    bool   `json:"balloon"`    // virtio-balloon: free page reporting, deflate on OOM
-	WarmPool   bool   `json:"warmPool"`   // create restores a booted template of the image + size
-	KSMTeam    string `json:"ksmTeam"`    // "" off; one team's VMs may merge; "*" all (one trust domain only)
+	DiskEngine     string `json:"diskEngine"`     // auto (Async, else Sync), Async or Sync
+	DiskNoCow      bool   `json:"diskNoCow"`      // btrfs: images and the VM disks reflinked from them are NOCOW
+	Balloon        bool   `json:"balloon"`        // virtio-balloon: free page reporting, deflate on OOM
+	HostDirtyRatio int    `json:"hostDirtyRatio"` // vm.dirty_ratio set at startup, 0 = leave the host's: a dump must not be throttled to the disk
+	WarmPool       bool   `json:"warmPool"`       // create restores a booted template of the image + size
+	KSMTeam        string `json:"ksmTeam"`        // "" off; one team's VMs may merge; "*" all (one trust domain only)
 
 	// Egress policy.
 	AllowSMTP   bool `json:"allowSMTP"`   // else tcp 25/465/587 out is dropped
@@ -146,6 +147,7 @@ func defaultConfig() Config {
 		DiskEngine:     "auto",
 		DiskNoCow:      true,
 		Balloon:        true,
+		HostDirtyRatio: 50,
 		CtPerVM:        32768,
 		MaxPortsPerVM:  32,
 		ResumeCrashed:  true,
@@ -216,6 +218,9 @@ func (c Config) validate() error {
 	}
 	if c.MemOvercommit <= 0 || c.CPUOvercommit <= 0 || c.MinFreePct < 0 || c.MinFreePct > 90 || c.MinFreeGiB < 0 || c.ReapS < 1 {
 		return fmt.Errorf("memOvercommit/cpuOvercommit must be > 0, minFreePct 0-90, minFreeGiB >= 0, reapIntervalS >= 1")
+	}
+	if c.HostDirtyRatio < 0 || c.HostDirtyRatio > 90 {
+		return fmt.Errorf("hostDirtyRatio must be 0-90")
 	}
 	for _, n := range []int{c.AIProxyPort, c.EgressMbit, c.IngressMbit, c.DiskMBps, c.DiskIOPS, c.IOMaxMBps, c.IOMaxIOPS, c.CtPerVM, c.MaxPortsPerVM, c.VMOverheadMiB, c.VMPageCacheMiB} {
 		if n < 0 {

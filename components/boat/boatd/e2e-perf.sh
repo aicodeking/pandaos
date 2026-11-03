@@ -30,6 +30,38 @@ last_snap_log() { sudo grep -E "snapshot |freeze " "$WORK/boatd.log" | tail -n 3
 sudo apt-get install -y -qq fio >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq fio >/dev/null; }
 (cd "$HERE/../../bench/boatbench" && python3 -c 'import workloads; print(workloads.DISK)') >"$WORK/tmp/disk.sh"
 
+sudo grep -E "snapshot |freeze " "$WORK/boatd.log" | head -n 24 | sed -E 's/^[0-9/]+ [0-9:]+ //' # e2e-host's timings
+
+# Can a restored guest still read its disk? Each case: VM, snapshot, new VM from it, read past a dropped cache.
+# Prints PASS/HANG per case. MEASUREMENT for now: a hang here would wedge every warm create.
+restore_case() { # LABEL DROP_BEFORE_SNAPSHOT
+  local v sn f r
+  v=$(newvm "{\"name\":\"rc\",\"team\":\"rc\"}")
+  if [ "$2" = 1 ]; then bx "$v" 'sync; echo 1 >/proc/sys/vm/drop_caches; sleep 3'; fi
+  sn=$(bd POST "/v1/vms/$v/snapshots" '{}' | jq -r .id)
+  f=$(curl -m 40 -fsS --unix-socket "$SOCK" -X POST http://boatd/v1/vms -H 'content-type: application/json' -d "{\"team\":\"rc\",\"snapshot\":\"$sn\"}" | jq -r .id || true)
+  r=created
+  if [ -z "$f" ] || [ "$f" = null ]; then r=HANG-create; else
+    if curl -m 25 -fsS --unix-socket "$SOCK" -X POST "http://boatd/v1/vms/$f/exec" -H 'content-type: application/json' \
+      -d '{"argv":["bash","-c","echo 1 >/proc/sys/vm/drop_caches; md5sum /usr/bin/python3 /usr/bin/ssh-keygen >/dev/null && echo READ-OK"],"user":"root","timeout_s":20}' >"$WORK/tmp/rc.out"; then
+      r=$(jq -rs 'map(select(.stream=="stdout").data_b64 | @base64d) | join("")' "$WORK/tmp/rc.out")
+    else r=HANG-read; fi
+    perf_del "$f" || true
+  fi
+  echo "restore case $1: $r"
+  bd DELETE "/v1/vms/$v/snapshots/$sn" >/dev/null || true
+  perf_del "$v" || true
+}
+perf_cfg '.' rc1
+restore_case async-balloon 0
+restore_case async-balloon-drop 1
+perf_cfg '.balloon = false' rc2
+restore_case async-noballoon-drop 1
+perf_cfg '.diskEngine = "Sync"' rc3
+restore_case sync-balloon-drop 1
+perf_cfg '.diskEngine = "Sync" | .balloon = false' rc4
+restore_case sync-noballoon-drop 1
+
 log "perf e2e: ceiling (fio on the host, NOCOW file in the state dir)"
 hostfio() {
   sudo touch "$STATE/fio.tmp" && sudo chattr +C "$STATE/fio.tmp" 2>/dev/null || true
@@ -142,6 +174,10 @@ for _ in $(seq 120); do sudo test -f "$STATE/warm/slim@default/warm.json" && bre
 sudo test -f "$STATE/warm/slim@default/warm.json" || fail "template not built: $(sudo tail -n 5 "$WORK/boatd.log")"
 perf_ten warm
 warm_ten=$ten_s
+sleep 20
+wr=0; for f in "$WORK/tmp/ten-warm"/*; do r=$(rss_mib "$(cat "$f")"); wr=$((wr + ${r% *})); done
+warm_rss=$((wr / 10))
+echo "warm: idle RSS $warm_rss MiB per VM"
 for f in "$WORK/tmp/ten-warm"/*; do fingerprint "$(cat "$f")"; echo; done >"$WORK/tmp/warm.fp"
 [ "$(tr ' ' '\n' <"$WORK/tmp/warm.fp" | grep -c .)" = 20 ] || fail "warm VM without identity: $(cat "$WORK/tmp/warm.fp")"
 [ "$(tr ' ' '\n' <"$WORK/tmp/warm.fp" | grep . | sort -u | wc -l)" = 20 ] || fail "warm VMs share an identity: $(cat "$WORK/tmp/warm.fp")"
@@ -160,8 +196,8 @@ echo "METRIC $(jq -nc --argjson disk "$disk" --arg blk "$guest_blk" \
   --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" --argjson kk2 "$kvm_fork2" \
   --argjson nbr "$nb_rss" --argjson nbc "$nb_cg" --argjson br "$b_rss" --argjson bc "$b_cg" \
   --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fb "$fit_before" --argjson fa "$fit_after" \
-  --argjson ct "$cold_ten" --argjson wt "$warm_ten" \
+  --argjson ct "$cold_ten" --argjson wt "$warm_ten" --argjson wr "$warm_rss" \
   '{test: "boat-perf", disk: $disk, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
     snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2,
-    idleRssMiB: {noBalloon: $nbr, balloon: $br, ksm: $kr}, idleCgroupMiB: {noBalloon: $nbc, balloon: $bc},
+    idleRssMiB: {noBalloon: $nbr, balloon: $br, ksm: $kr, warm: $wr}, idleCgroupMiB: {noBalloon: $nbc, balloon: $bc},
     ksmDedupMiB: $ksm, fitsIn8GiB: {before: $fb, after: $fa}, tenCreatesS: {cold: $ct, warm: $wt}}')"

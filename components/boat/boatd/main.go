@@ -49,6 +49,11 @@ func serve(cfgPath string) error {
 		return fmt.Errorf("bridge: %w", err)
 	}
 	setupCgroups(&cfg)
+	if cfg.HostDirtyRatio > 0 {
+		if err := os.WriteFile("/proc/sys/vm/dirty_ratio", []byte(strconv.Itoa(cfg.HostDirtyRatio)), 0); err != nil {
+			log.Printf("vm.dirty_ratio: %v", err)
+		}
+	}
 	log.Printf("cgroups: parent %q, limits %v", cfg.CgroupParent, cfg.cgroupLimits)
 	m, err := newManager(cfg, execRunner, realProcs{cfg})
 	if err != nil {
