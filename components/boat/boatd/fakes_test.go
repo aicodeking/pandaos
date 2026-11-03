@@ -35,6 +35,7 @@ type fakeHost struct {
 	ctErr      error
 	nftAtStart map[string]string // ruleset in force when each VM's process started
 	idleS      float64
+	hangOps    map[string]bool // agent ops the guest never answers
 }
 
 func newFakeHost() *fakeHost { return &fakeHost{next: 1000, vms: map[int]*fakeFC{}} }
@@ -306,6 +307,13 @@ func (f *fakeFC) agentConn(c net.Conn) {
 		var q map[string]any
 		json.Unmarshal(line, &q)
 		f.record("agent " + fmt.Sprint(q["op"]))
+		f.h.mu.Lock()
+		hang := f.h.hangOps[fmt.Sprint(q["op"])]
+		f.h.mu.Unlock()
+		if hang {
+			io.Copy(io.Discard, r)
+			return
+		}
 		switch q["op"] {
 		case "health":
 			f.h.mu.Lock()

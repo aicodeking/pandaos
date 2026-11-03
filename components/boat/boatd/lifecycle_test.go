@@ -244,9 +244,10 @@ func TestReap(t *testing.T) {
 	ttl, _ := m.Create(ctx, CreateReq{Name: "ttl", TTLS: 30})
 	busy, _ := m.Create(ctx, CreateReq{Name: "busy"})
 	never, _ := m.Create(ctx, CreateReq{Name: "never", IdleStopS: -1})
-	m.reap(ctx) // nothing due yet
+	reap := func() { m.reap(ctx); m.reapWG.Wait() }
+	reap() // nothing due yet
 	skew.Store(int64(45 * time.Second))
-	m.reap(ctx) // agent reports idle_s=0: only the TTL fires
+	reap() // agent reports idle_s=0: only the TTL fires
 	if v, _ := m.get(ttl.ID); v.State != Stopped {
 		t.Fatalf("ttl: %s", v.State)
 	}
@@ -257,7 +258,7 @@ func TestReap(t *testing.T) {
 	h.idleS = 3600
 	h.mu.Unlock()
 	skew.Store(int64(2 * time.Hour))
-	m.reap(ctx)
+	reap()
 	if v, _ := m.get(busy.ID); v.State != Stopped {
 		t.Fatalf("idle: %s", v.State)
 	}
@@ -376,18 +377,55 @@ func TestDiskFloor(t *testing.T) {
 }
 
 func TestBtrfsQgroups(t *testing.T) {
-	m, h := newTestManager(t, func(c *Config) { c.BtrfsQgroups, c.IPv6Prefix = true, "fd42::/64" })
-	v, err := m.Create(context.Background(), CreateReq{})
+	m, h := newTestManager(t, func(c *Config) {
+		c.BtrfsQgroups, c.IPv6Prefix = true, "fd42::/64"
+		c.DefaultTeam.MaxDiskGiB = 100
+	})
+	ctx := context.Background()
+	v, err := m.Create(ctx, CreateReq{Team: "t1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !h.ran("btrfs quota enable") || !h.ran("btrfs subvolume create "+m.vmDir(v.ID)) ||
-		!h.ran(fmt.Sprintf("btrfs qgroup limit -e %d %s", int64(1)<<30+2*512<<20+1<<30, m.vmDir(v.ID))) {
+	vol := filepath.Join(m.cfg.StateDir, "teams", "t_t1")
+	if !h.ran("btrfs quota enable") || !h.ran("btrfs subvolume create "+vol) ||
+		!h.ran(fmt.Sprintf("btrfs qgroup limit -e %d %s", int64(100)<<30/100*125, vol)) {
 		t.Fatal(h.cmds)
 	}
-	m.Delete(context.Background(), v.ID)
-	if !h.ran("btrfs subvolume delete "+m.vmDir(v.ID)) || exists(m.vmDir(v.ID)) || !h.ran("conntrack -D -f ipv4 -s "+v.IP) {
-		t.Fatal("subvolume/conntrack not cleaned up")
+	if real, _ := filepath.EvalSymlinks(m.vmDir(v.ID)); !strings.HasSuffix(real, "/teams/t_t1/vms/"+v.ID) {
+		t.Fatalf("VM dir at %s", real)
+	}
+	// A team name reTeam allows must stay one path component.
+	if _, err := m.Create(ctx, CreateReq{Team: ".."}); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(filepath.Join(m.cfg.StateDir, "teams", "t_..")) {
+		t.Fatal("team .. escaped teams/")
+	}
+	s1, err := m.CreateSnapshot(ctx, v.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A memory file stays one inode across the team's VM, snapshot and fork.
+	f, err := m.Fork(ctx, v.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st1, _ := os.Stat(filepath.Join(m.snapDir(s1.ID), memFile))
+	st2, _ := os.Stat(filepath.Join(m.root(v.ID), memFile))
+	st3, _ := os.Stat(filepath.Join(m.root(f.ID), memFile))
+	if st1 == nil || st3 == nil || st2 == nil || !os.SameFile(st2, st3) {
+		t.Fatal("fork did not link the memory file within the team's subvolume")
+	}
+	if _, st := m.storage(); st.Total == 0 {
+		t.Fatal("no disk totals")
+	}
+	if rep, _ := m.storage(); rep["t1"].VMApparentBytes == 0 {
+		t.Fatal("usage does not walk through the VM dir's symlink")
+	}
+	m.Delete(ctx, f.ID)
+	m.Delete(ctx, v.ID)
+	if exists(m.vmDir(v.ID)) || exists(filepath.Join(vol, "vms", v.ID)) || exists(filepath.Join(vol, "snapshots", s1.ID)) || !h.ran("conntrack -D -f ipv4 -s "+v.IP) {
+		t.Fatal("VM dir, its data or conntrack not cleaned up")
 	}
 	if !h.ran("conntrack -D -f ipv6 -d " + v.IPv6) {
 		t.Fatal("ipv6 conntrack not flushed")

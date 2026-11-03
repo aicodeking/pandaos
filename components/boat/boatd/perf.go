@@ -40,7 +40,7 @@ func fsFlags(f *os.File) (int32, error) {
 }
 
 func isNoCow(path string) bool {
-	f, err := os.Open(path)
+	f, err := openJail(path, os.O_RDONLY)
 	if err != nil {
 		return false
 	}
@@ -52,7 +52,7 @@ func isNoCow(path string) bool {
 // createNoCow makes an empty NOCOW file at path. False where the filesystem has
 // no such flag (ext4, tmpfs, APFS): the caller then keeps plain copies.
 func createNoCow(path string) bool {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return false
 	}
@@ -111,7 +111,7 @@ func (c Config) memLimits(v VM) (high, hard int64) {
 }
 
 func (m *Manager) writeCgroup(v VM, file, val string) {
-	err := os.WriteFile(filepath.Join("/sys/fs/cgroup", m.cfg.CgroupParent, v.ID, file), []byte(val), 0)
+	err := os.WriteFile(filepath.Join(cgroupRoot, m.cfg.CgroupParent, v.ID, file), []byte(val), 0)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) { // deleted meanwhile
 		log.Printf("%s: %s: %v", v.ID, file, err)
 	}
@@ -119,12 +119,15 @@ func (m *Manager) writeCgroup(v VM, file, val string) {
 
 // liftMemLimits for a memory dump. Its page cache is charged to the paused VM, which
 // sits near memory.high: dumping 3.8 GiB took 22 s of reclaim, throttled to the
-// disk's speed (run 41584046201). A paused guest allocates nothing, and the guest
-// cannot pass its RAM once resumed; the limits come back when the dump is on disk.
+// disk's speed (run 41584046201). A dump is at most the VM's RAM, so the limit moves up
+// by that and no further: a resumed guest may write to its disk during the window, and
+// a tenant can keep the window open by snapshotting in a loop.
 func (m *Manager) liftMemLimits(v VM) {
 	if m.cfg.cgroupLimits {
-		m.writeCgroup(v, "memory.max", "max")
-		m.writeCgroup(v, "memory.high", "max")
+		_, hard := m.cfg.memLimits(v)
+		limit := strconv.FormatInt(hard+int64(v.MemMiB)<<20, 10)
+		m.writeCgroup(v, "memory.max", limit)
+		m.writeCgroup(v, "memory.high", limit)
 	}
 }
 
@@ -169,7 +172,7 @@ func (m *Manager) realMemCheck(s Size) error {
 	if avail == 0 {
 		return nil // unknown (non-Linux)
 	}
-	need := m.cfg.HostReserveMiB + int(float64(s.MemMiB)/m.cfg.MemOvercommit)
+	need := m.cfg.HostReserveMiB + int(float64(s.MemMiB+m.cfg.VMOverheadMiB)/m.cfg.MemOvercommit)
 	if avail < need {
 		return errf(http.StatusServiceUnavailable, "host capacity: %d MiB really free, %d MiB needed", avail, need)
 	}
@@ -204,6 +207,9 @@ func (m *Manager) memoryPressure(ctx context.Context) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				// This ticker also rotates the logs: a hung VMM must not stop that.
+				ctx, cancel := context.WithTimeout(ctx, balloonCallTimeout)
+				defer cancel()
 				err := newFC(filepath.Join(m.root(v.ID), apiSock)).call(ctx, "PATCH", "/balloon",
 					map[string]int{"amount_mib": v.MemMiB * m.balloonPct / 100})
 				if err != nil {
@@ -219,6 +225,8 @@ const (
 	balloonStepPct = 10
 	balloonMaxPct  = 50
 	pressureEvery  = 5 // log-rotation ticks (seconds) between memoryPressure checks
+
+	balloonCallTimeout = 3 * time.Second
 )
 
 // ksmExecArg re-executes boatd as the launcher of a VM whose memory may merge:

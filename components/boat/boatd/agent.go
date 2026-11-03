@@ -18,6 +18,10 @@ const (
 	maxAgentLine = 8 << 20 // the guest is untrusted: cap what one line may cost us
 )
 
+// agentCallTimeout bounds one request/reply op. A guest may answer health and hang
+// on the next op, and boatd often waits for it holding the VM's lock.
+var agentCallTimeout = 30 * time.Second
+
 type reply struct {
 	Stream string   `json:"stream,omitempty"`
 	Data   string   `json:"data_b64,omitempty"`
@@ -37,8 +41,7 @@ type agentConn struct {
 }
 
 func dialAgent(ctx context.Context, sock string) (*agentConn, error) {
-	var d net.Dialer
-	c, err := d.DialContext(ctx, "unix", sock)
+	c, err := dialJail(ctx, sock)
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +121,8 @@ func (e *agentErr) notFound() bool {
 
 // agentRaw sends one request and returns its single final reply line.
 func agentRaw(ctx context.Context, sock string, req any) (json.RawMessage, reply, error) {
+	ctx, cancel := context.WithTimeout(ctx, agentCallTimeout)
+	defer cancel()
 	a, err := dialAgent(ctx, sock)
 	if err != nil {
 		return nil, reply{}, err

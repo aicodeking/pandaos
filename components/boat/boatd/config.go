@@ -65,18 +65,21 @@ type Config struct {
 	ReapS        int             `json:"reapIntervalS"` // TTL/idle check period
 
 	// Host protection.
-	MinFreePct     int     `json:"minFreePct"`     // refuse create/fork/snapshot below this free % of stateDir
-	MinFreeGiB     int     `json:"minFreeGiB"`     // ... or below this many GiB (the larger floor wins)
-	MemOvercommit  float64 `json:"memOvercommit"`  // active VM RAM <= (host RAM - reserve) * this
-	CPUOvercommit  float64 `json:"cpuOvercommit"`  // active vCPUs <= host CPUs * this
-	HostReserveMiB int     `json:"hostReserveMiB"` // RAM kept for the host itself
-	HostMemMiB     int     `json:"hostMemMiB"`     // 0 = /proc/meminfo
-	HostCPUs       int     `json:"hostCPUs"`       // 0 = runtime.NumCPU
-	VMOverheadMiB  int     `json:"vmOverheadMiB"`  // cgroup memory.high = VM RAM + this
-	VMPageCacheMiB int     `json:"vmPageCacheMiB"` // memory.max = memory.high + this: host page cache of the VM's disk I/O
-	CgroupParent   string  `json:"cgroupParent"`   // jailer --parent-cgroup, outside boatd's unit so VMs survive a crash
-	BtrfsQgroups   bool    `json:"btrfsQgroups"`   // each VM dir is a subvolume with an exclusive-bytes limit
-	DiffSnapshots  bool    `json:"diffSnapshots"`  // dirty-page snapshots merged onto a reflinked base
+	MinFreePct        int     `json:"minFreePct"`        // refuse create/fork/snapshot below this free % of stateDir
+	MinFreeGiB        int     `json:"minFreeGiB"`        // ... or below this many GiB (the larger floor wins)
+	MemOvercommit     float64 `json:"memOvercommit"`     // active VM RAM <= (host RAM - reserve) * this
+	CPUOvercommit     float64 `json:"cpuOvercommit"`     // active vCPUs <= host CPUs * this
+	HostReserveMiB    int     `json:"hostReserveMiB"`    // RAM kept for the host itself
+	HostMemMiB        int     `json:"hostMemMiB"`        // 0 = /proc/meminfo
+	HostCPUs          int     `json:"hostCPUs"`          // 0 = runtime.NumCPU
+	VMOverheadMiB     int     `json:"vmOverheadMiB"`     // cgroup memory.high = VM RAM + this
+	VMPageCacheMiB    int     `json:"vmPageCacheMiB"`    // memory.max = memory.high + this: host page cache of the VM's disk I/O
+	CgroupParent      string  `json:"cgroupParent"`      // jailer --parent-cgroup, outside boatd's unit so VMs survive a crash
+	CgroupsOptional   bool    `json:"cgroupsOptional"`   // start even if VMs would run without cgroup limits
+	BtrfsQgroups      bool    `json:"btrfsQgroups"`      // each team's data is a subvolume with an exclusive-bytes limit
+	StorageOvercommit float64 `json:"storageOvercommit"` // committed storage of all teams <= stateDir's size * this; 0 = no limit
+	UntrustedTenants  bool    `json:"untrustedTenants"`  // refuse to run without the limits and host settings hostile tenants call for
+	DiffSnapshots     bool    `json:"diffSnapshots"`     // dirty-page snapshots merged onto a reflinked base
 
 	// Performance and density. See PROTOCOL.md "Performance and density".
 	DiskEngine     string `json:"diskEngine"`     // auto (Async, else Sync), Async or Sync
@@ -118,40 +121,42 @@ var (
 
 func defaultConfig() Config {
 	return Config{
-		StateDir:       "/var/lib/boat",
-		RunDir:         "/run/boat",
-		Socket:         "/run/boat/boatd.sock",
-		Firecracker:    "firecracker",
-		JailUIDBase:    900000,
-		Reflink:        "always",
-		Bridge:         "boatbr0",
-		Subnet:         "10.200.0.0/16",
-		DNS:            []string{"1.1.1.1", "9.9.9.9"},
-		PortMin:        20000,
-		PortMax:        40000,
-		DesktopPort:    6080,
-		DefaultSize:    "default",
-		DefaultImage:   "ubuntu-24.04",
-		BootArgs:       "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
-		BootTimeoutS:   60,
-		ReapS:          30,
-		MinFreePct:     10,
-		MinFreeGiB:     5,
-		MemOvercommit:  1.5,
-		CPUOvercommit:  4.0,
-		HostReserveMiB: 1024,
-		VMOverheadMiB:  256,
-		VMPageCacheMiB: 512,
-		DiffSnapshots:  true,
-		CgroupParent:   "boat-vms",
-		DiskEngine:     "auto",
-		DiskNoCow:      true,
-		Balloon:        true,
-		HostDirtyRatio: 50,
-		CtPerVM:        32768,
-		MaxPortsPerVM:  32,
-		ResumeCrashed:  true,
-		DefaultTeam:    TeamPolicy{MaxTotalVMs: 100, MaxSnapshots: 200, MaxDiskGiB: 4096, MaxPorts: 512},
+		StateDir:          "/var/lib/boat",
+		RunDir:            "/run/boat",
+		Socket:            "/run/boat/boatd.sock",
+		Firecracker:       "firecracker",
+		JailUIDBase:       900000,
+		Reflink:           "always",
+		Bridge:            "boatbr0",
+		Subnet:            "10.200.0.0/16",
+		DNS:               []string{"1.1.1.1", "9.9.9.9"},
+		PortMin:           20000,
+		PortMax:           40000,
+		DesktopPort:       6080,
+		DefaultSize:       "default",
+		DefaultImage:      "ubuntu-24.04",
+		BootArgs:          "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
+		BootTimeoutS:      60,
+		BtrfsQgroups:      true,
+		StorageOvercommit: 10, // disks are sparse: real space is what the floor guards
+		ReapS:             30,
+		MinFreePct:        10,
+		MinFreeGiB:        5,
+		MemOvercommit:     1.5,
+		CPUOvercommit:     4.0,
+		HostReserveMiB:    1024,
+		VMOverheadMiB:     256,
+		VMPageCacheMiB:    512,
+		DiffSnapshots:     true,
+		CgroupParent:      "boat-vms",
+		DiskEngine:        "auto",
+		DiskNoCow:         true,
+		Balloon:           true,
+		HostDirtyRatio:    50,
+		CtPerVM:           4096, // nf_conntrack_max is about 260k on 16 GiB, or the module's 1M
+		MaxPortsPerVM:     32,
+		ResumeCrashed:     true,
+		DefaultTeam:       TeamPolicy{MaxTotalVMs: 100, MaxSnapshots: 200, MaxDiskGiB: 4096, MaxPorts: 512},
 		Sizes: map[string]Size{
 			"small":   {2, 4096, 51},
 			"default": {4, 8192, 51},
@@ -219,6 +224,12 @@ func (c Config) validate() error {
 	if c.MemOvercommit <= 0 || c.CPUOvercommit <= 0 || c.MinFreePct < 0 || c.MinFreePct > 90 || c.MinFreeGiB < 0 || c.ReapS < 1 {
 		return fmt.Errorf("memOvercommit/cpuOvercommit must be > 0, minFreePct 0-90, minFreeGiB >= 0, reapIntervalS >= 1")
 	}
+	if c.StorageOvercommit < 0 {
+		return fmt.Errorf("storageOvercommit must be >= 0")
+	}
+	if err := c.validateUntrusted(); err != nil {
+		return err
+	}
 	if c.HostDirtyRatio < 0 || c.HostDirtyRatio > 90 {
 		return fmt.Errorf("hostDirtyRatio must be 0-90")
 	}
@@ -232,6 +243,31 @@ func (c Config) validate() error {
 	}
 	if !filepath.IsAbs(c.StateDir) || !filepath.IsAbs(c.RunDir) {
 		return fmt.Errorf("stateDir and runDir must be absolute")
+	}
+	return nil
+}
+
+// validateUntrusted: untrustedTenants is a promise that these hold. The NixOS option
+// sets them all; a config that overrides one is refused rather than quietly weaker.
+func (c Config) validateUntrusted() error {
+	if !c.UntrustedTenants {
+		return nil
+	}
+	switch {
+	case c.KSMTeam != "":
+		return fmt.Errorf("untrustedTenants: ksmTeam is a side channel between guests")
+	case c.WarmPool:
+		return fmt.Errorf("untrustedTenants: warmPool gives tenants one template's ASLR")
+	case c.Jailer == "":
+		return fmt.Errorf("untrustedTenants: needs the jailer")
+	case c.CgroupParent == "" || c.CgroupsOptional:
+		return fmt.Errorf("untrustedTenants: needs cgroup limits")
+	case !c.BtrfsQgroups:
+		return fmt.Errorf("untrustedTenants: needs btrfsQgroups")
+	case c.StorageOvercommit <= 0 || c.StorageOvercommit > 1:
+		return fmt.Errorf("untrustedTenants: storageOvercommit must be in (0, 1]")
+	case c.EgressMbit == 0 || c.IngressMbit == 0 || c.IOMaxMBps == 0 || c.IOMaxIOPS == 0 || c.CtPerVM == 0:
+		return fmt.Errorf("untrustedTenants: egressMbit, ingressMbit, ioMaxMBps, ioMaxIOPS and ctPerVM must be set")
 	}
 	return nil
 }

@@ -17,13 +17,17 @@
 #   floor     free-space floor: create/snapshot refused (507), stop falls back cold
 #   docker    docker run hello-world in the full image
 #   perf 4/8  disk, snapshot, fork, density, warm creates (boatd/e2e-perf.sh)
-#   qgroups   btrfsQgroups: VM dirs are limited subvolumes, fork across them works
-#             (last: quota accounting stays on for the whole filesystem and
-#             makes reflinks slower, so the timings above are without it)
+#   spoofing  real ARP and NA frames from a guest, against rules and permanent entries
+#   qgroups   the default: a limited subvolume per team, enforced on a guest
 
 # shellcheck disable=SC2154 # host_ip, PIDS come from e2e.sh
-FORK_MAX=${E2E_FORK_MAX:-2}
-STOP_MAX=${E2E_STOP_MAX:-3}
+# From 12 runs of this job, 41379327901 to 41625739091 (shared runner, 4 vCPU):
+#   fork_cli 0.77-1.42 s, fork 0.90-2.63 s; a first stop (stop_cli) 0.65-5.90 s, it writes
+#   and fsyncs all the guest touched since boot and is bound by the runner's disk at
+#   that moment; a diff stop (stop_diff) 0.61-4.15 s. Gates: the worst seen plus a third.
+FORK_MAX=${E2E_FORK_MAX:-4}
+STOP_MAX=${E2E_STOP_MAX:-6}
+STOP_CLI_MAX=${E2E_STOP_CLI_MAX:-8}
 RESUME_MAX=${E2E_RESUME_MAX:-5}
 
 bd() { curl -fsS --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json' ${3:+-d "$3"}; }
@@ -96,7 +100,7 @@ echo "$fps"
 [ "$(tr ' ' '\n' <<<"$fps" | grep . | sort -u | wc -l)" = 8 ] || fail "machine-ids/host keys not all distinct: $fps"
 echo "stop ${stop2_s}s (first, diff since boot) ${stop3_s}s (diff since restore), resume ${resume2_s}s, fork ${fork2_s}s"
 check_max fork_cli "$fork_s" "$FORK_MAX"
-check_max stop_cli "$stop_s" "$STOP_MAX"
+check_max stop_cli "$stop_s" "$STOP_CLI_MAX"
 check_max fork "$fork2_s" "$FORK_MAX"
 check_max stop_diff "$stop3_s" "$STOP_MAX"
 
@@ -167,6 +171,9 @@ bd POST "/v1/vms/$p1/ports" '{"port":8081,"public":true}' >/dev/null
 [ "$(sudo ip netns exec e2e-ext curl -fsS -g --max-time 5 "http://[$v6]:8081/")" = "$tok" ] || fail "published port 8081 not reachable over ipv6"
 if sudo ip netns exec e2e-ext timeout 4 bash -c "</dev/tcp/$v6/22" 2>/dev/null; then fail "unpublished port 22 reachable over ipv6"; fi
 
+# shellcheck source=boatd/e2e-spoof.sh
+. "$HERE/boatd/e2e-spoof.sh"
+
 log "host e2e: idle auto-stop"
 for v in "$f1" "$f2" "$x1"; do bd DELETE "/v1/vms/$v" >/dev/null; done
 i1=$(newvm '{"name":"i1","team":"iso2","idle_stop_s":15}')
@@ -208,21 +215,36 @@ bd DELETE "/v1/vms/$p1" >/dev/null
 # shellcheck source=boatd/e2e-limits.sh
 . "$HERE/boatd/e2e-limits.sh"
 
-log "host e2e: btrfs qgroups"
-jq '.btrfsQgroups = true' "$WORK/boatd.json" >"$WORK/boatd-q.json"
-restart_boatd "$WORK/boatd-q.json"
+log "host e2e: btrfs qgroups: the default, one limited subvolume per team"
 q1=$(newvm '{"name":"q1","team":"iso2"}')
 [ "$(vmf "$q1" agent_ready)" = true ] || fail "q1 not ready: $(vmf "$q1" error)"
-qid=$(sudo btrfs subvolume show "$STATE/vms/$q1" | awk '/Subvolume ID:/ {print $3}')
-[ -n "$qid" ] || fail "q1's VM dir is not a subvolume"
-want=$(((8 << 30) + 2 * (2048 << 20) + (1 << 30))) # disk + 2 x RAM + 1 GiB
+vol=$STATE/teams/t_iso2
+qid=$(sudo btrfs subvolume show "$vol" | awk '/Subvolume ID:/ {print $3}')
+[ -n "$qid" ] || fail "team iso2 has no subvolume"
+want=$(((4096 << 30) / 100 * 125)) # defaultTeam.maxDiskGiB, 125%
 sudo btrfs qgroup show -e --raw "$STATE" | grep "^0/$qid " | grep -qw "$want" || fail "qgroup limit: $(sudo btrfs qgroup show -e --raw "$STATE")"
-t=$(now); q2=$(bd POST "/v1/vms/$q1/fork" '{"name":"q2"}' | jq -r .id); forkq_s=$(secs "$t" "$(now)") # a reflink across subvolumes
-[ "$(bx "$q2" hostname)" = q2 ] || fail "fork across subvolumes"
+sudo test -L "$STATE/vms/$q1" && sudo test -d "$vol/vms/$q1" || fail "q1's dir is not in the team's subvolume"
+t=$(now); q2=$(bd POST "/v1/vms/$q1/fork" '{"name":"q2"}' | jq -r .id); forkq_s=$(secs "$t" "$(now)")
+[ "$(bx "$q2" hostname)" = q2 ] || fail "fork inside a team's subvolume"
+# A hard link, not a reflink that waits for writeback: the reason for one subvolume per team.
+[ "$(sudo stat -c %i "$STATE/vms/$q1/firecracker/$q1/root/mem")" = "$(sudo stat -c %i "$STATE/vms/$q2/firecracker/$q2/root/mem")" ] || fail "fork did not hard-link the memory file"
 echo "fork with qgroups ${forkq_s}s"
 bd DELETE "/v1/vms/$q2" >/dev/null
+# The kernel holds a guest to the limit: a low one, a guest writing past it, and another team unharmed.
+q3=$(newvm '{"name":"q3","team":"iso3"}')
+sudo btrfs qgroup limit -e 300M "$vol"
+sudo btrfs filesystem sync "$STATE"
+bx "$q1" 'head -c 1G /dev/urandom >/home/dev/q; sync' 300 >/dev/null 2>&1 || true
+sudo btrfs filesystem sync "$STATE"
+excl=$(sudo btrfs qgroup show --raw "$STATE" | awk -v q="0/$qid" '$1 == q {print $3}')
+echo "team past a 300 MiB limit: $((excl >> 20)) MiB exclusive"
+[ "$excl" -lt $((700 << 20)) ] || fail "a guest wrote $((excl >> 20)) MiB past a 300 MiB team limit"
+bx "$q3" 'head -c 500M /dev/urandom >/home/dev/q; sync' 300 >/dev/null || fail "another team's guest lost its disk to this team's limit"
+st=$(bd POST "/v1/vms/$q1/stop" | jq -r .state)
+[ "$st" = stopped ] || fail "a team at its limit cannot stop a VM: $st"
 bd DELETE "/v1/vms/$q1" >/dev/null
-[ -z "$(sudo ls "$STATE/vms")" ] || fail "subvolumes left: $(sudo ls "$STATE/vms")"
+bd DELETE "/v1/vms/$q3" >/dev/null
+[ -z "$(sudo ls "$STATE/vms")" ] || fail "VM dirs left: $(sudo ls "$STATE/vms")"
 sudo pkill -f 'http.server 8000' || true
 sudo ip netns del e2e-ext
 sudo ip link del e2eh 2>/dev/null || true

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -45,6 +46,13 @@ type Manager struct {
 	dones  map[string]<-chan struct{}
 	active map[string]time.Time // last exec/file/desktop seen by boatd
 	netMu  sync.Mutex
+
+	reservedSnaps map[string]int // by team: storage being written, see reservation
+	reservedBytes map[string]int64
+	reaping       map[string]bool // VMs a reap goroutine is on
+	reapSlots     chan struct{}   // stops running at once: each writes a memory dump
+	reapWG        sync.WaitGroup
+	teamVolMu     sync.Mutex
 
 	ctFlushErrs atomic.Int64 // conntrack flushes that failed: stale flows may survive
 
@@ -89,7 +97,8 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 		dones: map[string]<-chan struct{}{}, active: map[string]time.Time{}, statfs: statfs,
 		memAvail: func() int { return meminfoMiB("MemAvailable") }, warming: map[string]bool{}, warmSettle: 3 * time.Second,
 		exportArgv: tarZstdArgv, unpackArgv: []string{"zstd", "-dcq"}, dirty: map[string]bool{},
-		saveState: saveVMState}
+		saveState: saveVMState, reservedSnaps: map[string]int{}, reservedBytes: map[string]int64{},
+		reaping: map[string]bool{}, reapSlots: make(chan struct{}, reapParallel)}
 	m.hostMem, m.hostCPU = cfg.HostMemMiB, cfg.HostCPUs
 	if m.hostMem == 0 {
 		m.hostMem = hostMemMiB()
@@ -98,10 +107,8 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 		m.hostCPU = runtime.NumCPU()
 	}
 	m.hostMem -= cfg.HostReserveMiB
-	if cfg.BtrfsQgroups {
-		if err := run("", "btrfs", "quota", "enable", cfg.StateDir); err != nil {
-			return nil, err
-		}
+	if err := m.enableQuota(); err != nil {
+		return nil, err
 	}
 	if cfg.DiskNoCow {
 		m.convertImages()
@@ -186,9 +193,9 @@ func (m *Manager) commitLocked(old, nv VM, reason string) error {
 	if nv.State == Running && old.State != Running {
 		nv.StartedAt = &now
 	}
-	if err := m.saveState(m.vmDir(nv.ID), nv); errors.Is(err, syscall.ENOSPC) {
-		// A full disk (a tenant can cause one) must not lock anyone out of stopping
-		// or deleting a VM: memory stays right, flushDirty retries the file.
+	if err := m.saveState(m.vmDir(nv.ID), nv); errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
+		// A full disk or team quota (a tenant can cause either) must not lock anyone out
+		// of stopping or deleting a VM: memory stays right, flushDirty retries the file.
 		log.Printf("%s: state not persisted, disk full", nv.ID)
 		m.dirty[nv.ID] = true
 	} else if err != nil {
@@ -217,17 +224,18 @@ func (m *Manager) quotaLocked(team string, s Size, exclude string) error {
 			n, cpu, mem = n+1, cpu+v.VCPU, mem+v.MemMiB
 		}
 	}
-	var hostMem, hostCPU int // whole host, all teams
+	// Whole host, all teams. A VM's cgroup allows it its RAM plus the VMM's overhead.
+	var hostMem, hostCPU int
 	for _, v := range m.vms {
 		if v.ID != exclude && v.State.active() {
-			hostMem, hostCPU = hostMem+v.MemMiB, hostCPU+v.VCPU
+			hostMem, hostCPU = hostMem+v.MemMiB+m.cfg.VMOverheadMiB, hostCPU+v.VCPU
 		}
 	}
 	if err := m.realMemCheck(s); err != nil {
 		return err
 	}
 	switch {
-	case m.hostMem > 0 && float64(hostMem+s.MemMiB) > float64(m.hostMem)*m.cfg.MemOvercommit:
+	case m.hostMem > 0 && float64(hostMem+s.MemMiB+m.cfg.VMOverheadMiB) > float64(m.hostMem)*m.cfg.MemOvercommit:
 		return errf(http.StatusServiceUnavailable, "host capacity: %d MiB of VM RAM already active (limit %.0f)", hostMem, float64(m.hostMem)*m.cfg.MemOvercommit)
 	case m.hostCPU > 0 && float64(hostCPU+s.VCPU) > float64(m.hostCPU)*m.cfg.CPUOvercommit:
 		return errf(http.StatusServiceUnavailable, "host capacity: %d vCPUs already active (limit %.0f)", hostCPU, float64(m.hostCPU)*m.cfg.CPUOvercommit)
@@ -287,29 +295,118 @@ func (m *Manager) alloc(v VM, st State) (VM, error) {
 	return v, nil
 }
 
-// makeVMDir: with btrfsQgroups the VM dir is a subvolume whose exclusive
-// bytes (data not shared with the image or parent by reflink) are capped at
-// disk + 2x mem + 1 GiB, so one guest cannot fill the host disk.
+// makeVMDir: see makeStoreDir.
 func (m *Manager) makeVMDir(v VM) error {
-	dir := m.vmDir(v.ID)
-	if m.cfg.BtrfsQgroups {
-		if err := m.run("", "btrfs", "subvolume", "create", dir); err != nil {
-			return err
-		}
-		limit := int64(v.DiskGiB)<<30 + 2*int64(v.MemMiB)<<20 + 1<<30
-		if err := m.run("", "btrfs", "qgroup", "limit", "-e", strconv.FormatInt(limit, 10), dir); err != nil {
-			m.removeVMDir(v.ID)
-			return err
-		}
+	if err := m.makeStoreDir("vms", v.Team, v.ID); err != nil {
+		return err
 	}
 	return os.MkdirAll(m.root(v.ID), 0o700)
 }
 
-func (m *Manager) removeVMDir(id string) error {
-	if m.cfg.BtrfsQgroups && m.run("", "btrfs", "subvolume", "delete", m.vmDir(id)) == nil {
+func (m *Manager) removeVMDir(id string) error { return m.removeStoreDir(m.vmDir(id)) }
+
+// ---- btrfsQgroups: one limited subvolume per team ----
+//
+// A team's VMs and snapshots live in teams/t_<team>, whose exclusive bytes are capped,
+// with vms/<id> and snapshots/<id> symlinks to them: the kernel's limit is on the
+// tenant, and one subvolume keeps hard-linked memory files working within the team (a
+// subvolume per VM made each of those a reflink, which waits for the file's writeback).
+// Data shared with the image by reflink does not count. Past the limit the team's own
+// guests get write errors and nobody else notices.
+
+// teamVolSlackPct: above maxDiskGiB, which committed storage already stays within. A
+// stop's memory dump exists twice for a moment, and the limit must not fail those first.
+const teamVolSlackPct = 125
+
+func (m *Manager) teamVol(team string) string {
+	return filepath.Join(m.cfg.StateDir, "teams", "t_"+team) // the prefix keeps reTeam's "." and ".." one plain name
+}
+
+func (m *Manager) limitTeamVol(team string) error {
+	limit := "none"
+	if g := m.cfg.team(team).MaxDiskGiB; g > 0 {
+		limit = strconv.FormatInt(int64(g)<<30/100*teamVolSlackPct, 10)
+	}
+	return m.run("", "btrfs", "qgroup", "limit", "-e", limit, m.teamVol(team))
+}
+
+// enableQuota at startup. Quotas are the default, also on a stateDir that is not btrfs,
+// where they cannot be had: only there may boatd go on without them.
+func (m *Manager) enableQuota() error {
+	if !m.cfg.BtrfsQgroups {
 		return nil
 	}
-	return os.RemoveAll(m.vmDir(id))
+	if err := m.run("", "btrfs", "quota", "enable", m.cfg.StateDir); err != nil {
+		if isBtrfs(m.cfg.StateDir) || m.cfg.UntrustedTenants {
+			return err
+		}
+		log.Printf("btrfsQgroups: %s has no btrfs quotas: %v", m.cfg.StateDir, err)
+		m.cfg.BtrfsQgroups = false
+		return nil
+	}
+	vols, _ := filepath.Glob(filepath.Join(m.cfg.StateDir, "teams", "t_*"))
+	for _, d := range vols { // a limit from a config that changed
+		if err := m.limitTeamVol(strings.TrimPrefix(filepath.Base(d), "t_")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// makeStoreDir creates vms/<id> or snapshots/<id> for a team's data.
+func (m *Manager) makeStoreDir(kind, team, id string) error {
+	link := filepath.Join(m.cfg.StateDir, kind, id)
+	if !m.cfg.BtrfsQgroups {
+		return os.MkdirAll(link, 0o700)
+	}
+	if err := m.ensureTeamVol(team); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(m.teamVol(team), kind, id), 0o700); err != nil {
+		return err
+	}
+	return os.Symlink(filepath.Join("..", "teams", "t_"+team, kind, id), link)
+}
+
+func (m *Manager) ensureTeamVol(team string) error {
+	m.teamVolMu.Lock()
+	defer m.teamVolMu.Unlock()
+	d := m.teamVol(team)
+	if exists(d) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(d), 0o711); err != nil {
+		return err
+	}
+	if err := m.run("", "btrfs", "subvolume", "create", d); err != nil {
+		return err
+	}
+	if err := os.Chmod(d, 0o711); err != nil {
+		return err
+	}
+	if err := m.limitTeamVol(team); err != nil {
+		m.run("", "btrfs", "subvolume", "delete", d)
+		return err
+	}
+	return nil
+}
+
+// removeStoreDir: a dir made by makeStoreDir, or one from before team subvolumes.
+func (m *Manager) removeStoreDir(link string) error {
+	if st, err := os.Lstat(link); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(link)
+		if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(filepath.Join(filepath.Dir(link), target)); err != nil {
+			return err
+		}
+		return os.Remove(link)
+	}
+	if m.cfg.BtrfsQgroups && m.run("", "btrfs", "subvolume", "delete", link) == nil {
+		return nil // a VM dir that was its own subvolume
+	}
+	return os.RemoveAll(link)
 }
 
 // syncNet reloads nftables and routes.json from the current VM set. An nft
@@ -398,7 +495,12 @@ func (m *Manager) reconcile() error {
 		}
 		alive := v.PID > 0 && m.procs.Alive(v.PID, v.ID)
 		if alive && v.State == Running {
-			go m.setMemLimits(v) // a crash may have left them lifted for a dump
+			go m.setMemLimits(v)                 // a crash may have left them lifted for a dump
+			for _, p := range l2Pins(m.cfg, v) { // a VM started by a boatd without them
+				if err := m.run("", p[0], p[1:]...); err != nil {
+					log.Printf("%s: %v", v.ID, err)
+				}
+			}
 			done := m.procs.Adopt(v.PID, v.ID)
 			m.dones[v.ID] = done
 			go m.watch(v.ID, v.PID, done)
@@ -414,6 +516,7 @@ func (m *Manager) reconcile() error {
 		for _, f := range []string{snapState, snapDiff, memNew} {
 			os.Remove(filepath.Join(root, f))
 		}
+		os.Remove(filepath.Join(m.vmDir(v.ID), memStage))
 		nv := m.deadState(v)
 		// It was running and nobody stopped it: boatd or the host died. Its memory
 		// is gone; bring it back cold from its disk (see resumeAll).
@@ -438,11 +541,7 @@ func (m *Manager) dropTorn(sub, file string) {
 		var v map[string]any
 		if err := readJSON(p, &v); err != nil {
 			log.Printf("%s: dropping what a crash left torn: %v", p, err)
-			if sub == "vms" && m.cfg.BtrfsQgroups {
-				m.removeVMDir(filepath.Base(filepath.Dir(p)))
-				continue
-			}
-			os.RemoveAll(filepath.Dir(p))
+			m.removeStoreDir(filepath.Dir(p))
 		}
 	}
 }
@@ -592,25 +691,54 @@ func (m *Manager) resumeAll(ctx context.Context) {
 	}
 }
 
-// reap stops VMs past their TTL or idle limit. Called every 30 s.
+const reapParallel = 8
+
+// reap stops VMs past their TTL or idle limit. Called every 30 s. It never waits: one
+// goroutine per VM, because any guest can hold its own up (a health probe that times
+// out, a start waiting for the guest with the VM's lock held), and that must not delay
+// anybody else's stop. A VM still being handled from the last tick is skipped.
 func (m *Manager) reap(ctx context.Context) {
 	now := m.now()
 	for _, v := range m.list("") {
 		if v.State != Running {
 			continue
 		}
-		reason := ""
-		if v.ExpiresAt != nil && now.After(*v.ExpiresAt) {
-			reason = "ttl"
-		} else if limit := m.idleLimit(v); limit > 0 && now.Sub(m.lastActive(ctx, v)) > limit {
-			reason = "idle"
-		}
-		if reason == "" {
+		m.mu.Lock()
+		busy := m.reaping[v.ID]
+		m.reaping[v.ID] = true
+		m.mu.Unlock()
+		if busy {
 			continue
 		}
-		if _, err := m.Stop(ctx, v.ID, reason); err != nil && !errors.Is(err, errNotFound) {
-			log.Printf("%s: auto-stop (%s): %v", v.ID, reason, err)
-		}
+		m.reapWG.Add(1)
+		go func() {
+			defer m.reapWG.Done()
+			m.reapVM(ctx, v, now)
+			m.mu.Lock()
+			delete(m.reaping, v.ID)
+			m.mu.Unlock()
+		}()
+	}
+}
+
+func (m *Manager) reapVM(ctx context.Context, v VM, now time.Time) {
+	reason := ""
+	if v.ExpiresAt != nil && now.After(*v.ExpiresAt) {
+		reason = "ttl"
+	} else if limit := m.idleLimit(v); limit > 0 && now.Sub(m.lastActive(ctx, v)) > limit {
+		reason = "idle"
+	}
+	if reason == "" {
+		return
+	}
+	select {
+	case m.reapSlots <- struct{}{}:
+		defer func() { <-m.reapSlots }()
+	case <-ctx.Done():
+		return
+	}
+	if _, err := m.Stop(ctx, v.ID, reason); err != nil && !errors.Is(err, errNotFound) {
+		log.Printf("%s: auto-stop (%s): %v", v.ID, reason, err)
 	}
 }
 

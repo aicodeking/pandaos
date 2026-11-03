@@ -26,7 +26,7 @@
 # is bound by the disk (2 GiB+ of pages to write).
 DEFAULT_CREATE_MAX=${E2E_DEFAULT_CREATE_MAX:-8}
 DEFAULT_STOP_MAX=${E2E_DEFAULT_STOP_MAX:-25}
-DEFAULT_STOP2_MAX=${E2E_DEFAULT_STOP2_MAX:-5}
+DEFAULT_STOP2_MAX=${E2E_DEFAULT_STOP2_MAX:-6} # 1.79-3.97 s in 12 runs
 
 cfg_with() { jq "$1" "$WORK/boatd.json" >"$WORK/boatd-$2.json"; echo "$WORK/boatd-$2.json"; }
 put_file() { curl -fsS --unix-socket "$SOCK" -X PUT --data-binary "@$3" "http://boatd/v1/vms/$1/files?path=$2&mode=755" >/dev/null; }
@@ -118,6 +118,14 @@ echo "export ${export_s}s, $(($(stat -c %s "$WORK/tmp/exp.tar.zst") >> 20)) MiB"
 imported() { curl -fsS --unix-socket "$SOCK" -X POST -T "$1" "http://boatd/v1/snapshots/import?team=lim&name=$2"; }
 in1=$(imported "$WORK/tmp/exp.tar.zst" signed)
 [ "$(jq -r .has_mem <<<"$in1")" = true ] || fail "signed import lost its memory: $in1"
+# zstd parses a tenant's bytes: not as root. A slow upload keeps it alive to look at.
+curl -fsS --limit-rate 64k --unix-socket "$SOCK" -o /dev/null -X POST -T "$WORK/tmp/exp.tar.zst" "http://boatd/v1/snapshots/import?team=lim&name=slow" &
+slow=$!
+zuid=""
+for _ in $(seq 50); do zuid=$(ps -o uid= -C zstd | head -n 1 | tr -d ' '); [ -n "$zuid" ] && break; sleep 0.1; done
+kill "$slow" 2>/dev/null || true
+wait "$slow" 2>/dev/null || true
+[ "$zuid" = 65534 ] || fail "import decompressor runs as uid '$zuid'"
 i1=$(newvm "{\"name\":\"i1\",\"team\":\"lim\",\"snapshot\":\"$(jq -r .id <<<"$in1")\"}")
 [ "$(bx "$i1" 'cat /proc/sys/kernel/random/boot_id')" = "$boot_d1" ] || fail "signed import did not restore memory"
 bd DELETE "/v1/vms/$i1" >/dev/null
@@ -217,7 +225,7 @@ echo "egress: cap ${EGRESS_MBIT} Mbit/s, measured ${capped_mbit} Mbit/s; without
 log "limits e2e: per-VM connection limit"
 cat >"$WORK/tmp/conns.py" <<'PY'
 import socket, sys, time
-socks, ok = [], 0
+socks, ok = [], 0  # holds them for argv[2] seconds, closes them on exit
 for _ in range(int(sys.argv[1])):
     s = socket.socket()
     s.settimeout(1.5)
@@ -227,16 +235,26 @@ for _ in range(int(sys.argv[1])):
         ok += 1
     except OSError:
         pass
-print(ok)
+print(ok, flush=True)
+time.sleep(int(sys.argv[2]) if len(sys.argv) > 2 else 0)
 PY
 put_file "$d1" /tmp/conns.py "$WORK/tmp/conns.py"
 free_conns=$(bx "$d1" 'python3 /tmp/conns.py 30')
 [ "$free_conns" -ge 28 ] || fail "control: only $free_conns of 30 connections without the limit"
 restart_boatd "$(cfg_with '.ctPerVM = 10' ct)"
 limited=$(bx "$d1" 'python3 /tmp/conns.py 30')
-restart_boatd "$WORK/boatd.json"
 echo "connections: $free_conns/30 without the limit, $limited/30 with ctPerVM=10"
 [ "$limited" -le 12 ] || fail "ctPerVM=10 let $limited connections through"
+# A rules reload does not hand out a new allowance (it used to: any VM change anywhere).
+sleep 3 # those were closed; nf_conncount drops closed flows when it next counts
+bx "$d1" 'setsid nohup python3 /tmp/conns.py 8 60 >/tmp/held 2>&1 </dev/null & sleep 8; cat /tmp/held' >/dev/null
+reloader=$(newvm '{"name":"ctr","team":"lim2"}') # a whole VM change, by somebody else
+bd DELETE "/v1/vms/$reloader" >/dev/null
+after_reload=$(bx "$d1" 'python3 /tmp/conns.py 30')
+bx "$d1" 'pkill -f conns.py || true' >/dev/null
+restart_boatd "$WORK/boatd.json"
+echo "connections: 8 held, reload, then $after_reload/30 more with ctPerVM=10"
+[ "$after_reload" -le 4 ] || fail "a rules reload reset ctPerVM: $after_reload more connections on top of 8"
 
 log "limits e2e: disk limits"
 restart_boatd "$(cfg_with '.diskMBps = 50 | .diskIOPS = 0' disk)"
@@ -260,6 +278,42 @@ for _ in $(seq 20); do [ "$(sudo stat -c %s "$flog")" -lt $((16 << 20)) ] && bre
 [ "$(sudo stat -c %s "$flog")" -lt $((16 << 20)) ] || fail "firecracker.log not capped: $(sudo stat -c %s "$flog")"
 sudo test -f "$flog.1" || fail "no rotated tail"
 echo "serial: a noisy guest writes $((serial_rate >> 10)) KiB/s; the log rotates at 16 MiB within 1 s"
+
+log "limits e2e: files a compromised VMM plants in its jail dir"
+sudo sh -c "echo host-secret >'$WORK/tmp/victim'; chmod 600 '$WORK/tmp/victim'"
+victim_ok() { [ "$(sudo stat -c '%a %s %U' "$WORK/tmp/victim")" = "600 12 root" ] && [ "$(sudo cat "$WORK/tmp/victim")" = host-secret ] || fail "boatd touched a host file through a planted link: $(sudo stat "$WORK/tmp/victim")"; }
+jroot=$STATE/vms/$d1/firecracker/$d1/root
+sudo mv "$jroot/mem" "$jroot/mem.keep"
+sudo ln -s "$WORK/tmp/victim" "$jroot/mem"
+[ "$(bdcode POST "/v1/vms/$d1/snapshots" '{"name":"planted"}')" != 201 ] || fail "snapshot merged onto a planted base"
+victim_ok
+sudo rm -f "$jroot/mem"
+sudo mv "$jroot/mem.keep" "$jroot/mem"
+sudo mv "$jroot/rootfs.ext4" "$jroot/disk.keep"
+sudo ln -s "$WORK/tmp/victim" "$jroot/rootfs.ext4"
+[ "$(bdcode POST "/v1/vms/$d1/fork" '{"name":"planted"}')" != 201 ] || fail "fork cloned a planted disk"
+[ "$(bdcode POST "/v1/vms/$d1/resize" '{"disk_gib":30}')" != 200 ] || fail "resize truncated a planted disk"
+victim_ok
+sudo rm -f "$jroot/rootfs.ext4"
+sudo mv "$jroot/disk.keep" "$jroot/rootfs.ext4"
+bd GET /v1/vms | jq -r '.vms[] | select(.name == "planted") | .id' | while read -r bad; do bd DELETE "/v1/vms/$bad" >/dev/null; done
+sn=$(bd POST "/v1/vms/$d1/snapshots" '{"name":"after"}' | jq -r .id) # back to normal: next one is Full, nothing lost
+[ "$(vmf "$d1" state)" = running ] && [ "$sn" != null ] || fail "the VM did not survive a refused snapshot"
+bd DELETE "/v1/vms/$d1/snapshots/$sn" >/dev/null
+sudo rm -f "$WORK/tmp/victim"
+
+log "limits e2e: untrustedTenants refuses a weaker config or host"
+ut_filter=".untrustedTenants = true | .storageOvercommit = 1 | .egressMbit = 100 | .ingressMbit = 100 | .ioMaxMBps = 100 | .ioMaxIOPS = 1000 | .socket = \"$WORK/run/ut.sock\""
+if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | .warmPool = true" ut1)" 2>&1); then fail "untrustedTenants accepted warmPool"; fi
+grep -q 'warmPool' <<<"$out" || fail "untrustedTenants + warmPool: $out"
+if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | .ksmTeam = \"*\"" ut2)" 2>&1); then fail "untrustedTenants accepted KSM"; fi
+grep -q 'ksmTeam' <<<"$out" || fail "untrustedTenants + ksmTeam: $out"
+if [ "$(cat /sys/devices/system/cpu/smt/control 2>/dev/null)" = on ]; then
+  if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter" ut3)" 2>&1); then fail "untrustedTenants started with SMT on"; fi
+  grep -q 'SMT is on' <<<"$out" || fail "untrustedTenants with SMT on: $out"
+else
+  echo "this runner has no SMT to refuse: $(cat /sys/devices/system/cpu/smt/control 2>/dev/null)"
+fi
 
 log "limits e2e: public IPv4 pool"
 sudo ip -n e2e-ext addr add 198.51.100.1/32 dev lo
@@ -310,7 +364,7 @@ sd_start "$WORK/boatd.json"
 # and the next boatd brings them back cold, with their disk.
 inside=system.slice/boatd-e2e.service/vms
 sudo systemctl stop boatd-e2e # snapshots d1 and cr; the delete below needs no running VM
-sd_start "$(cfg_with ".cgroupParent = \"$inside\"" inside)"
+sd_start "$(cfg_with ".cgroupParent = \"$inside\" | .cgroupsOptional = true" inside)" # no controllers in a unit with a process in it
 bd DELETE "/v1/vms/$crash_vm" >/dev/null
 crash_vm=$(newvm '{"name":"cr2","team":"lim"}')
 bx "$crash_vm" 'echo crash-marker >/root/marker; sync'

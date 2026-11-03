@@ -121,13 +121,38 @@ func addVMNet(c Config, run runner, v VM, uid int) error {
 		{"ip", "-n", ns, "link", "set", "br0", "up"},
 		{"ip", "link", "set", v.Tap, "master", c.Bridge, "up"},
 	}
-	for _, st := range steps {
+	for _, st := range append(steps, l2Pins(c, v)...) {
 		if err := run("", st[0], st[1:]...); err != nil {
 			delVMNet(run, v)
 			return err
 		}
 	}
 	return nil
+}
+
+// l2Pins fixes the host's view of a VM. Neighbour entries are permanent, so no ARP or
+// NA from any guest can repoint them. With them permanent the host never resolves, and
+// nothing keeps a learned MAC from ageing out of the bridge, which would flood the
+// VM's inbound traffic to every port: so its MAC is static and the port neither learns
+// nor takes unknown unicast.
+func l2Pins(c Config, v VM) [][]string {
+	pins := [][]string{
+		{"bridge", "fdb", "replace", v.MAC, "dev", v.Tap, "master", "static"},
+		{"bridge", "link", "set", "dev", v.Tap, "learning", "off", "flood", "off"},
+		{"ip", "neigh", "replace", v.IP, "lladdr", v.MAC, "dev", c.Bridge, "nud", "permanent"},
+	}
+	if v.IPv6 != "" {
+		pins = append(pins, []string{"ip", "-6", "neigh", "replace", v.IPv6, "lladdr", v.MAC, "dev", c.Bridge, "nud", "permanent"})
+	}
+	return pins
+}
+
+// delNeighbours: the VM's address may be free for a long time. Errors = absent.
+func delNeighbours(c Config, run runner, v VM) {
+	run("", "ip", "neigh", "del", v.IP, "dev", c.Bridge)
+	if v.IPv6 != "" {
+		run("", "ip", "-6", "neigh", "del", v.IPv6, "dev", c.Bridge)
+	}
 }
 
 // delVMNet removes the netns (with tap0, br0, the veth pair). Errors = absent.
@@ -188,6 +213,7 @@ func ruleset(c Config, vms []VM) string {
 	w := func(f string, a ...any) { fmt.Fprintf(&b, f+"\n", a...) }
 
 	w("table inet boat\ndelete table inet boat\ntable bridge boat\ndelete table bridge boat")
+	ctLimit(w, c)
 	w("table inet boat {")
 	w("  chain input {\n    type filter hook input priority 0; policy accept;")
 	w("    iifname %q ct state established,related accept", br)
@@ -202,14 +228,6 @@ func ruleset(c Config, vms []VM) string {
 
 	w("  chain forward {\n    type filter hook forward priority 0; policy accept;")
 	w("    ct state established,related accept")
-	if c.CtPerVM > 0 { // ponytail: counts restart on each reload; share a dynamic set if bursts matter
-		for _, v := range vms {
-			w("    iifname %q ip saddr %s ct count over %d drop", br, v.IP, c.CtPerVM)
-			if v.IPv6 != "" {
-				w("    iifname %q ip6 saddr %s ct count over %d drop", br, v.IPv6, c.CtPerVM)
-			}
-		}
-	}
 	w("    oifname %q ct status dnat accept", br)
 	for _, v := range vms { // IPv6 inbound: published ports only
 		for _, p := range v.Ports {
@@ -294,21 +312,53 @@ func ruleset(c Config, vms []VM) string {
 		}
 		w("    iifname %q ether saddr != %s drop", v.Tap, v.MAC)
 		w("    iifname %q ether type arp arp saddr ip != %s drop", v.Tap, v.IP)
+		w("    iifname %q ether type arp arp saddr ether != %s counter drop", v.Tap, v.MAC)
 		w("    iifname %q ether type ip ip saddr != %s drop", v.Tap, v.IP)
 		v6 := "fe80::/10, ::"
 		if v.IPv6 != "" {
 			v6 = v.IPv6 + ", " + v6
 		}
 		w("    iifname %q ether type ip6 ip6 saddr != { %s } drop", v.Tap, v6)
+		// A neighbour advertisement names any address as its target: only its own, or
+		// another VM's traffic is redirected to the sender. Link-local has no pinned MAC.
+		target := "fe80::/10"
+		if v.IPv6 != "" {
+			target = v.IPv6 + ", " + target
+		}
+		w("    iifname %q icmpv6 type nd-neighbor-advert icmpv6 taddr != { %s } counter drop", v.Tap, target)
 	}
 	w("  }")
 	w("  chain forward {\n    type filter hook forward priority 0; policy accept;")
-	w("    ether type arp accept")
 	for i := range names {
 		w("    iifname @team%d oifname @team%d accept", i, i)
 	}
 	w("    iifname \"bt*\" oifname \"bt*\" drop\n  }\n}")
 	return b.String()
+}
+
+// ctLimit: new connections per VM, tracked in a table of its own that no reload
+// deletes, so a count survives every VM change on the host (the rule used to live in
+// inet boat and restart at each one). The sets carry the limit in their name: an
+// element keeps the limit it was created with, so a new limit needs a new set.
+func ctLimit(w func(string, ...any), c Config) {
+	n, br := c.CtPerVM, c.Bridge
+	hooks := []string{"forward", "input"} // input: each DNS query to the gateway is tracked too
+	w("table inet boat_ct {")
+	if n > 0 {
+		w("  set v4_%d { type ipv4_addr; size 65535; flags dynamic; }", n)
+		w("  set v6_%d { type ipv6_addr; size 65535; flags dynamic; }", n)
+	}
+	for _, hook := range hooks {
+		w("  chain %s { type filter hook %s priority -1; policy accept; }", hook, hook)
+	}
+	w("}")
+	for _, hook := range hooks {
+		w("flush chain inet boat_ct %s", hook)
+		if n > 0 {
+			w("add rule inet boat_ct %s iifname %q ct state new add @v4_%d { ip saddr ct count over %d } drop", hook, br, n, n)
+			w("add rule inet boat_ct %s iifname %q ct state new add @v6_%d { ip6 saddr ct count over %d } drop", hook, br, n, n)
+		}
+	}
 }
 
 // routeFile is /run/boat/routes.json, read by boat-gateway:
@@ -346,5 +396,7 @@ func writeRoutes(c Config, vms []VM) error {
 	if err := os.MkdirAll(c.RunDir, 0o755); err != nil {
 		return err
 	}
-	return writeJSONAtomic(filepath.Join(c.RunDir, "routes.json"), rf, 0o644)
+	// No fsync: it is rewritten from the VM list at every start, and an fsync here took
+	// up to 5.3 s behind a memory dump, under netMu, on a create (boatbench 41628497611).
+	return writeJSONNoSync(filepath.Join(c.RunDir, "routes.json"), rf, 0o644)
 }

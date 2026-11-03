@@ -137,6 +137,19 @@ perf_snap p
 kvm_snap=$snap_s kvm_from=$fromsnap_s kvm_fork=$fork_s kvm_fork2=$fork2_s
 perf_del "$pv"
 
+log "perf e2e: the same with btrfs quotas off: what the default costs"
+perf_cfg '.btrfsQgroups = false' noq
+sudo btrfs quota disable "$STATE"
+pv=$(perf_vm pv)
+put_disk "$pv"
+disk_noq=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p')
+echo "disk (quotas off): $disk_noq"
+perf_del "$pv"
+perf_snap q
+noq_snap=$snap_s noq_from=$fromsnap_s noq_fork=$fork_s
+perf_cfg '.' reQ
+echo "quotas on / off: snapshot ${kvm_snap}/${noq_snap}s, new-from-snapshot ${kvm_from}/${noq_from}s, fork ${kvm_fork}/${noq_fork}s"
+
 log "perf e2e: density (idle default VMs)"
 perf_idle() { # LABEL COUNT: sum of idle memory after 60 s; sets idle_rss idle_cg (MiB per VM)
   local vs=() v r rss=0 cg=0
@@ -236,9 +249,10 @@ echo "METRIC $(jq -nc --argjson disk "$disk" --argjson disks "$disk_sync" --arg 
   --argjson csw "$c_sw" --argjson crw "$c_rw" --argjson crr "$c_rr" \
   --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" --argjson kk2 "$kvm_fork2" \
   --argjson nbr "$nb_rss" --argjson nbc "$nb_cg" --argjson br "$b_rss" --argjson bc "$b_cg" \
+  --argjson dnq "$disk_noq" --argjson nqs "$noq_snap" --argjson nqf "$noq_from" --argjson nqk "$noq_fork" \
   --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fc "$fit_cold" --argjson fw "$fit_warm" --argjson fk "$fit_ksm" --argjson ca "${cold_async:-0}" --argjson cs "${cold_sync:-0}" \
   --argjson ct "$cold_ten" --argjson wt "$warm_ten" --argjson wr "$warm_rss" \
   '{test: "boat-perf", disk: $disk, diskSync: $disks, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
-    snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2,
+    snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2, noQuotas: {disk: $dnq, snapshotS: $nqs, fromSnapshotS: $nqf, forkS: $nqk},
     idleRssMiB: {noBalloon: $nbr, balloon: $br, ksm: $kr, warm: $wr}, idleCgroupMiB: {noBalloon: $nbc, balloon: $bc},
     ksmDedupMiB: $ksm, fitsIn8GiB: {cold: $fc, warm: $fw, coldKsm: $fk}, coldRandReadIops: {async: $ca, sync: $cs}, tenCreatesS: {cold: $ct, warm: $wt}}')"

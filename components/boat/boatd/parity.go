@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -80,15 +81,14 @@ func (m *Manager) Resize(ctx context.Context, id string, r ResizeReq) (VM, error
 	case shape && v.HasSnapshot && !r.DiscardMemory:
 		return v, errf(http.StatusConflict, "the stop snapshot cannot change shape: pass discard_memory:true to cold-boot next start")
 	}
-	m.mu.Lock()
-	err = m.storageQuotaLocked(v.Team, 0, 0, int64(disk-v.DiskGiB)<<30+int64(s.MemMiB-v.MemMiB)<<20)
-	m.mu.Unlock()
+	res, err := m.reserve(v.Team, 0, int64(disk-v.DiskGiB)<<30+int64(s.MemMiB-v.MemMiB)<<20)
 	if err != nil {
 		return v, err
 	}
+	defer res.release()
 	root := m.root(id)
 	if disk > v.DiskGiB {
-		if err := os.Truncate(filepath.Join(root, diskFile), int64(disk)<<30); err != nil {
+		if err := truncateJail(filepath.Join(root, diskFile), int64(disk)<<30); err != nil {
 			return v, err
 		}
 	}
@@ -175,7 +175,14 @@ type exportManifest struct {
 
 const manifestFile = "export.json"
 
+// exportKey comes from the sealed systemd credential on a NixOS host, so a backup of
+// stateDir holds no usable key. The plain file is for a boatd outside that module.
 func (m *Manager) exportKey() ([]byte, error) {
+	if d := os.Getenv("CREDENTIALS_DIRECTORY"); d != "" {
+		if b, err := os.ReadFile(filepath.Join(d, "boat-export-key")); err == nil && len(b) == 32 {
+			return b, nil
+		}
+	}
 	p := filepath.Join(m.cfg.StateDir, "export.key")
 	if b, err := os.ReadFile(p); err == nil && len(b) == 32 {
 		return b, nil
@@ -283,28 +290,45 @@ func (m *Manager) ImportSnapshot(ctx context.Context, body io.Reader, team, name
 	if err := m.checkFloor(0); err != nil {
 		return Snapshot{}, err
 	}
+	res, err := m.reserve(team, 1, 0)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer res.release()
 	s := Snapshot{ID: newID("snap-"), Name: name, Team: team, CreatedAt: m.now()}
-	dir := m.snapDir(s.ID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := m.makeStoreDir("snapshots", team, s.ID); err != nil {
 		return s, err
 	}
-	s, err := m.importInto(ctx, body, dir, s, image, size)
+	dir := m.snapDir(s.ID)
+	s, err = m.importInto(ctx, body, dir, s, image, size, res)
 	if err != nil {
-		os.RemoveAll(dir)
+		m.removeStoreDir(dir)
 		return s, err
 	}
 	m.mu.Lock()
+	res.releaseLocked()
 	m.snaps[s.ID] = s
 	m.mu.Unlock()
 	m.ev.publish(Event{Type: "snapshot.created", SnapID: s.ID, Team: team, Reason: "import"})
 	return s, nil
 }
 
-func (m *Manager) importInto(ctx context.Context, body io.Reader, dir string, s Snapshot, image, size string) (Snapshot, error) {
+// unprivileged: the decompressor parses a tenant's bytes, so it gets no root.
+func unprivileged() *syscall.SysProcAttr {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	return &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: nobodyID, Gid: nobodyID, NoSetGroups: false, Groups: []uint32{}}}
+}
+
+const nobodyID = 65534
+
+func (m *Manager) importInto(ctx context.Context, body io.Reader, dir string, s Snapshot, image, size string, res *reservation) (Snapshot, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, m.unpackArgv[0], m.unpackArgv[1:]...)
 	cmd.Stdin = body
+	cmd.Dir, cmd.Env, cmd.SysProcAttr = "/", []string{}, unprivileged()
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return s, err
@@ -312,7 +336,7 @@ func (m *Manager) importInto(ctx context.Context, body io.Reader, dir string, s 
 	if err := cmd.Start(); err != nil {
 		return s, err
 	}
-	err = m.extract(tar.NewReader(out), dir, s.Team)
+	err = m.extract(tar.NewReader(out), dir, s.Team, res)
 	cancel()
 	cmd.Wait() // a corrupt stream already surfaced as a tar error
 	if err != nil {
@@ -327,7 +351,7 @@ func (m *Manager) importInto(ctx context.Context, body io.Reader, dir string, s 
 		}
 	}
 	os.Remove(filepath.Join(dir, manifestFile))
-	return m.finishImport(s, mf, trusted, dir, image, size)
+	return m.finishImport(s, mf, trusted, dir, image, size, res)
 }
 
 // verifyManifest: signed by this host's key, with matching hashes.
@@ -352,7 +376,7 @@ func (m *Manager) verifyManifest(mf exportManifest, dir string) (bool, error) {
 	return true, nil
 }
 
-func (m *Manager) finishImport(s Snapshot, mf exportManifest, trusted bool, dir, image, size string) (Snapshot, error) {
+func (m *Manager) finishImport(s Snapshot, mf exportManifest, trusted bool, dir, image, size string, res *reservation) (Snapshot, error) {
 	st, err := os.Stat(filepath.Join(dir, diskFile))
 	if err != nil {
 		return s, errf(400, "archive has no %s", diskFile)
@@ -384,10 +408,7 @@ func (m *Manager) finishImport(s Snapshot, mf exportManifest, trusted bool, dir,
 		s.Image, s.Size, s.VCPU, s.MemMiB = image, size, sz.VCPU, sz.MemMiB
 		s.DiskGiB = max(sz.DiskGiB, int((st.Size()+1<<30-1)>>30))
 	}
-	m.mu.Lock()
-	err = m.storageQuotaLocked(s.Team, 0, 1, snapCommit(s))
-	m.mu.Unlock()
-	if err != nil {
+	if err := res.set(snapCommit(s)); err != nil { // what it commits now, not what the upload declared
 		return s, err
 	}
 	return s, writeJSONAtomic(filepath.Join(dir, "snap.json"), s, 0o600)
@@ -395,8 +416,9 @@ func (m *Manager) finishImport(s Snapshot, mf exportManifest, trusted bool, dir,
 
 // extract writes only the expected regular files, each once and within its cap:
 // no paths from the archive reach the filesystem, so traversal, symlinks and
-// device nodes are refused rather than sanitized.
-func (m *Manager) extract(tr *tar.Reader, dir, team string) error {
+// device nodes are refused rather than sanitized. Each member's declared size is
+// charged to the team before a byte of it is written (writeSparse holds it to that size).
+func (m *Manager) extract(tr *tar.Reader, dir, team string, res *reservation) error {
 	caps, seen := m.importCaps(team), map[string]bool{}
 	for {
 		h, err := tr.Next()
@@ -416,6 +438,9 @@ func (m *Manager) extract(tr *tar.Reader, dir, team string) error {
 		}
 		if h.Size > lim {
 			return errf(400, "%s exceeds %d bytes", name, lim)
+		}
+		if err := res.grow(h.Size); err != nil {
+			return err
 		}
 		seen[name] = true
 		if err := m.writeSparse(filepath.Join(dir, name), tr, h.Size); err != nil {
@@ -441,7 +466,7 @@ func (m *Manager) writeSparse(p string, r io.Reader, size int64) error {
 				if _, err := f.WriteAt(buf[:n], off); err != nil {
 					return err
 				}
-				if sinceCheck += int64(n); sinceCheck >= 1<<30 {
+				if sinceCheck += int64(n); sinceCheck >= importFloorEvery {
 					sinceCheck = 0
 					if err := m.checkFloor(0); err != nil {
 						return err
@@ -465,6 +490,8 @@ func (m *Manager) writeSparse(p string, r io.Reader, size int64) error {
 	}
 	return f.Sync()
 }
+
+const importFloorEvery = 256 << 20 // bytes really written between free-space checks
 
 func allZero(b []byte) bool {
 	for _, c := range b {

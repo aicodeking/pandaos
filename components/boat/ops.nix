@@ -13,9 +13,9 @@ let
   mcfg = boat.maintenance;
 
   # Read-only snapshots for the backup: dataDir itself as .backup/top, and
-  # every nested subvolume (each VM dir is one with btrfsQgroups) as
+  # every nested subvolume (each team's teams/t_<team> with btrfsQgroups) as
   # .backup/sub/<path>, since a btrfs snapshot does not include nested
-  # subvolumes. Each VM is crash-consistent to its own instant.
+  # subvolumes. Each team is crash-consistent to its own instant.
   snapScript = pkgs.writeShellScript "boat-backup-snap" ''
     set -euo pipefail
     export PATH=${lib.makeBinPath [ pkgs.btrfs-progs pkgs.coreutils pkgs.findutils ]}
@@ -126,7 +126,10 @@ in
       };
       pruneOpts = mkOption {
         type = types.listOf types.str;
-        default = [ "--keep-daily 7" "--keep-weekly 4" "--keep-monthly 6" ];
+        # Backups cannot forget one tenant: what a tenant deletes stays until the snapshots
+        # holding it are pruned, so this is how long deleted tenant data can live on.
+        default = [ "--keep-daily 7" "--keep-weekly 4" ];
+        description = "restic retention. Longer retention also keeps deleted tenants' data that much longer; state it in your terms.";
       };
     };
   };
@@ -180,7 +183,10 @@ in
         inherit (bcfg) repository passwordFile environmentFile pruneOpts;
         initialize = true;
         paths = [ "${boat.dataDir}/.backup" ];
-        exclude = [ "${boat.dataDir}/.backup/top/images" ];
+        exclude = [
+          "${boat.dataDir}/.backup/top/images"
+          "${boat.dataDir}/.backup/top/export.key" # moved into secrets/ on the first start, but not out of a snapshot being taken
+        ];
         timerConfig = {
           OnCalendar = bcfg.onCalendar;
           Persistent = true;

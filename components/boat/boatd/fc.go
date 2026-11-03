@@ -35,8 +35,7 @@ type fcClient struct{ hc *http.Client }
 
 func newFC(sock string) *fcClient {
 	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "unix", sock)
+		return dialJail(ctx, sock)
 	}}
 	return &fcClient{hc: &http.Client{Transport: tr, Timeout: 10 * time.Minute}} // mem dumps of big VMs take a while
 }
@@ -63,7 +62,10 @@ func (c *fcClient) call(ctx context.Context, method, path string, body any) erro
 	return nil
 }
 
+// pause is quick unless the VMM is hanging on purpose, with the VM's lock held here.
 func (c *fcClient) pause(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	return c.call(ctx, "PATCH", "/vm", map[string]string{"state": "Paused"})
 }
 
@@ -253,7 +255,7 @@ func (p realProcs) setIOMax(id string) {
 	if c.IOMaxIOPS > 0 {
 		val += fmt.Sprintf(" riops=%d wiops=%d", c.IOMaxIOPS, c.IOMaxIOPS)
 	}
-	if err := os.WriteFile(filepath.Join("/sys/fs/cgroup", c.CgroupParent, id, "io.max"), []byte(val), 0); err != nil {
+	if err := os.WriteFile(filepath.Join(cgroupRoot, c.CgroupParent, id, "io.max"), []byte(val), 0); err != nil {
 		log.Printf("%s: io.max: %v", id, err)
 	}
 }
@@ -362,7 +364,7 @@ func (realProcs) Kill(pid int) { syscall.Kill(pid, syscall.SIGKILL) }
 func waitSock(path string, done <-chan struct{}, d time.Duration) error {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		if c, err := net.Dial("unix", path); err == nil {
+		if c, err := dialJail(context.Background(), path); err == nil {
 			c.Close()
 			return nil
 		}

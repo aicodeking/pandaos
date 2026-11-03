@@ -81,7 +81,8 @@ func (m *Manager) Create(ctx context.Context, r CreateReq) (VM, error) {
 		defer m.ensureWarm(context.WithoutCancel(ctx), r.Image, r.Size)
 	}
 	v, err := m.createFrom(ctx, r, warm)
-	if err != nil && warm != "" {
+	var refused *apiErr
+	if err != nil && warm != "" && !errors.As(err, &refused) { // a quota refusal says nothing about the template
 		os.RemoveAll(warm) // maybe from another Firecracker or kernel: the next create boots cold
 	}
 	return v, err
@@ -156,20 +157,15 @@ func (m *Manager) finishDisk(v VM) error {
 	}
 	// Grow only, and only for cold boots: a snapshot's guest already knows its disk size.
 	if want := int64(v.DiskGiB) << 30; st.Size() < want && !exists(filepath.Join(m.root(v.ID), vmstate)) {
-		if err := os.Truncate(disk, want); err != nil {
+		if err := truncateJail(disk, want); err != nil {
 			return err
 		}
 	}
 	return m.chownRoot(v)
 }
 
-// cp clones src to dst. A clone has to match its source's NOCOW flag.
-func (m *Manager) cp(src, dst string) error {
-	if isNoCow(src) && !createNoCow(dst) {
-		return fmt.Errorf("cp: cannot create NOCOW %s", dst)
-	}
-	return m.run("", "cp", "--reflink="+m.cfg.Reflink, src, dst)
-}
+// cp clones src, which may be in a jail dir, to dst.
+func (m *Manager) cp(src, dst string) error { return cloneFile(src, dst, m.cfg.Reflink) }
 
 func (m *Manager) chownRoot(v VM) error {
 	uid, gid := m.ids(v)
@@ -511,9 +507,10 @@ func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 	}
 	m.killWait(id, v.PID)
 	delVMNet(m.run, v)
+	delNeighbours(m.cfg, m.run, v)
 	m.flushConntrack(v.IP, v.IPv6, v.PublicIP)
 	if m.cfg.CgroupParent != "" {
-		os.Remove(filepath.Join("/sys/fs/cgroup", m.cfg.CgroupParent, id)) // the jailer's (empty) cgroup
+		os.Remove(filepath.Join(cgroupRoot, m.cfg.CgroupParent, id)) // the jailer's (empty) cgroup
 	}
 	m.update(id, "deleted", func(x *VM) { x.State, x.PID = Stopped, 0 }) // closes the billing interval
 	for _, s := range m.Snapshots(id) {

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -27,6 +26,7 @@ const (
 	snapState = "snap." + vmstate
 	snapDiff  = "snap.diff"
 	memNew    = "mem.new"
+	memStage  = "mem.stage" // in the VM dir, beyond the VMM: the memory file being built
 )
 
 // takeSnapshot syncs the guest, pauses the VM and leaves root/snap.vmstate +
@@ -79,6 +79,7 @@ func (m *Manager) failSnapshot(v VM) VM {
 	for _, f := range []string{snapDiff, memNew, snapState} {
 		os.Remove(filepath.Join(root, f))
 	}
+	os.Remove(filepath.Join(m.vmDir(v.ID), memStage))
 	nv, _ := m.update(v.ID, "", func(x *VM) { x.DiffOK = false })
 	return nv
 }
@@ -87,18 +88,21 @@ func (m *Manager) failSnapshot(v VM) VM {
 // root/mem is only replaced, and this is where a dirty base gets flushed (a reflink
 // waits for its source's writeback), which is no reason to keep the guest paused.
 func (m *Manager) installSnapshot(v VM, diff bool) (VM, error) {
-	root := m.root(v.ID)
+	root, stage := m.root(v.ID), filepath.Join(m.vmDir(v.ID), memStage)
 	t0 := time.Now()
+	os.Remove(stage)
 	var err error
 	if diff {
-		err = m.mergeDiff(v, filepath.Join(root, snapDiff), filepath.Join(root, memNew))
+		err = m.mergeDiff(v, filepath.Join(root, snapDiff), stage)
+	} else {
+		err = os.Rename(filepath.Join(root, memNew), stage) // out of the VMM's reach; a planted link fails below
 	}
 	os.Remove(filepath.Join(root, snapDiff))
 	if err == nil {
-		err = sealMem(filepath.Join(root, memNew))
+		err = sealMem(stage)
 	}
 	if err == nil {
-		err = os.Rename(filepath.Join(root, memNew), filepath.Join(root, memFile))
+		err = os.Rename(stage, filepath.Join(root, memFile))
 	}
 	if err != nil {
 		return m.failSnapshot(v), err
@@ -119,7 +123,7 @@ func (m *Manager) mergeDiff(v VM, diff, dst string) error {
 		if err := os.Rename(diff, dst); err != nil {
 			return err
 		}
-		return os.Truncate(dst, int64(v.MemMiB)<<20)
+		return truncateJail(dst, int64(v.MemMiB)<<20)
 	}
 	t0 := time.Now()
 	if err := m.cp(base, dst); err != nil {
@@ -128,7 +132,7 @@ func (m *Manager) mergeDiff(v VM, diff, dst string) error {
 	if err := os.Chmod(dst, 0o600); err != nil { // the sealed base's mode came along
 		return err
 	}
-	if err := os.Truncate(dst, int64(v.MemMiB)<<20); err != nil {
+	if err := truncateJail(dst, int64(v.MemMiB)<<20); err != nil {
 		return err
 	}
 	t1 := time.Now()
@@ -146,12 +150,12 @@ func (m *Manager) mergeDiff(v VM, diff, dst string) error {
 // sealMem: memory files are immutable, owned by root and world-readable, because
 // VMs of one team hard-link them (see copyMem). Only the VM's chroot reaches one.
 func sealMem(path string) error {
-	if os.Geteuid() == 0 {
-		if err := os.Chown(path, 0, 0); err != nil {
-			return err
-		}
+	f, err := openJail(path, os.O_RDONLY)
+	if err != nil {
+		return err
 	}
-	return os.Chmod(path, 0o444)
+	defer f.Close()
+	return sealFile(f)
 }
 
 // copyMem gives dst the memory file src. Within a team that is a hard link: no
@@ -160,53 +164,39 @@ func sealMem(path string) error {
 // host page cache, which is a page-sharing side channel between guests.
 func (m *Manager) copyMem(src, dst string, sameTeam bool) error {
 	if sameTeam {
-		if err := sealMem(src); err != nil {
+		f, err := openJail(src, os.O_RDONLY)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := sealFile(f); err != nil {
 			return err
 		}
 		os.Remove(dst)
-		if os.Link(src, dst) == nil { // EXDEV across btrfsQgroups subvolumes
+		if linkFile(f, dst) == nil { // EXDEV for a warm template: it is outside the team's subvolume
 			return nil
 		}
 	}
 	return m.cp(src, dst)
 }
 
-// copyExtents copies every data region of src (SEEK_DATA/SEEK_HOLE) to the
-// same offsets of dst. Without hole support it copies the whole file.
+// copyExtents overlays the data regions of src on dst.
 func copyExtents(src, dst string) error {
-	in, err := os.Open(src)
+	in, err := openJail(src, os.O_RDONLY)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY, 0)
+	out, err := openJail(dst, os.O_WRONLY)
 	if err != nil {
 		return err
 	}
+	defer out.Close()
 	st, err := in.Stat()
 	if err != nil {
-		out.Close()
 		return err
 	}
-	for off := int64(0); off < st.Size(); {
-		data, err := in.Seek(off, seekData)
-		if errors.Is(err, syscall.ENXIO) {
-			break // no data after off
-		}
-		if err != nil {
-			data = off // no SEEK_DATA: treat the rest as data
-		}
-		hole, err := in.Seek(data, seekHole)
-		if err != nil {
-			hole = st.Size()
-		}
-		if _, err := io.Copy(io.NewOffsetWriter(out, data), io.NewSectionReader(in, data, hole-data)); err != nil {
-			out.Close()
-			return err
-		}
-		off = hole
-	}
-	return out.Close()
+	return copySparse(in, out, st.Size())
 }
 
 // syncSnapshot fsyncs a stop snapshot and records that it is durable. Stop
@@ -237,14 +227,14 @@ func (m *Manager) settleAfterDump(v VM) {
 
 func allocatedBytes(path string) int64 {
 	var st syscall.Stat_t
-	if syscall.Stat(path, &st) != nil {
+	if syscall.Lstat(path, &st) != nil {
 		return 0
 	}
 	return int64(st.Blocks) * 512
 }
 
 func fsyncFile(path string) error {
-	f, err := os.Open(path)
+	f, err := openJail(path, os.O_RDONLY)
 	if err != nil {
 		return err
 	}
@@ -386,13 +376,15 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 	}
 	s := Snapshot{ID: newID("snap-"), Name: name, VMID: v.ID, Team: v.Team, Image: v.Image, Size: v.Size,
 		VCPU: v.VCPU, MemMiB: v.MemMiB, DiskGiB: v.DiskGiB, CreatedAt: m.now(), HasMem: v.State == Running || v.HasSnapshot}
-	m.mu.Lock()
-	err = m.storageQuotaLocked(v.Team, 0, 1, snapCommit(s))
-	m.mu.Unlock()
-	if err == nil {
-		err = m.checkFloor(uint64(v.MemMiB) << 20)
-	}
+	res, err := m.reserve(v.Team, 1, snapCommit(s)) // held while the dump runs, other VMs of the team included
 	if err != nil {
+		return Snapshot{}, err
+	}
+	defer res.release()
+	if err = m.checkFloor(uint64(v.MemMiB) << 20); err != nil {
+		return Snapshot{}, err
+	}
+	if err = m.makeStoreDir("snapshots", v.Team, s.ID); err != nil {
 		return Snapshot{}, err
 	}
 	dir := m.snapDir(s.ID)
@@ -403,10 +395,11 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 		err = writeJSONNoSync(filepath.Join(dir, "snap.json"), s, 0o600)
 	}
 	if err != nil {
-		os.RemoveAll(dir)
+		m.removeStoreDir(dir)
 		return Snapshot{}, err
 	}
 	m.mu.Lock()
+	res.releaseLocked()
 	m.snaps[s.ID] = s
 	m.mu.Unlock()
 	if s.HasMem {
@@ -430,7 +423,7 @@ func (m *Manager) DeleteSnapshot(vmID, sid string) error {
 		log.Printf("usage: %v", err)
 	}
 	m.ev.publish(Event{Type: "snapshot.deleted", VMID: vmID, SnapID: sid, Team: s.Team})
-	return os.RemoveAll(m.snapDir(sid))
+	return m.removeStoreDir(m.snapDir(sid))
 }
 
 // ---- storage: committed bytes, free-space floor, accounting ----
@@ -448,19 +441,78 @@ func snapCommit(s Snapshot) int64 {
 	return b
 }
 
-// storageQuotaLocked: total VMs (any state), snapshot count, committed bytes.
+// reservation holds quota for storage still being written, so that concurrent
+// operations of one team, on different VMs, cannot all pass the same check.
+type reservation struct {
+	m     *Manager
+	team  string
+	snaps int
+	bytes int64
+}
+
+func (m *Manager) reserve(team string, snaps int, bytes int64) (*reservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.storageQuotaLocked(team, 0, snaps, bytes); err != nil {
+		return nil, err
+	}
+	m.reservedSnaps[team] += snaps
+	m.reservedBytes[team] += bytes
+	return &reservation{m, team, snaps, bytes}, nil
+}
+
+// grow charges n more bytes, within quota.
+func (r *reservation) grow(n int64) error { return r.set(r.bytes + n) }
+
+// set replaces the charged bytes with n, within quota.
+func (r *reservation) set(n int64) error {
+	r.m.mu.Lock()
+	defer r.m.mu.Unlock()
+	if err := r.m.storageQuotaLocked(r.team, 0, 0, n-r.bytes); err != nil {
+		return err
+	}
+	r.m.reservedBytes[r.team] += n - r.bytes
+	r.bytes = n
+	return nil
+}
+
+// releaseLocked: in the critical section that adds what was reserved to m.snaps.
+func (r *reservation) releaseLocked() {
+	r.m.reservedSnaps[r.team] -= r.snaps
+	r.m.reservedBytes[r.team] -= r.bytes
+	r.snaps, r.bytes = 0, 0
+}
+
+func (r *reservation) release() {
+	r.m.mu.Lock()
+	defer r.m.mu.Unlock()
+	r.releaseLocked()
+}
+
+// storageQuotaLocked: total VMs (any state), snapshot count, committed bytes, for the
+// team and for the host. Committed bytes are a true upper bound on what a VM or
+// snapshot can occupy, so at storageOvercommit 1 no tenant can fill the disk at all.
 func (m *Manager) storageQuotaLocked(team string, addVMs, addSnaps int, addBytes int64) error {
 	p := m.cfg.team(team)
-	vms, snaps, bytes := addVMs, addSnaps, addBytes
+	vms, snaps, bytes := addVMs, addSnaps+m.reservedSnaps[team], addBytes+m.reservedBytes[team]
+	host := addBytes
 	for _, v := range m.vms {
 		if v.Team == team {
 			vms, bytes = vms+1, bytes+vmCommit(v)
 		}
+		host += vmCommit(v)
 	}
 	for _, s := range m.snaps {
 		if s.Team == team {
 			snaps, bytes = snaps+1, bytes+snapCommit(s)
 		}
+		host += snapCommit(s)
+	}
+	for _, b := range m.reservedBytes {
+		host += b
+	}
+	if err := m.hostStorageCheck(host, addBytes); err != nil {
+		return err
 	}
 	switch {
 	case p.MaxTotalVMs > 0 && addVMs > 0 && vms > p.MaxTotalVMs:
@@ -469,6 +521,22 @@ func (m *Manager) storageQuotaLocked(team string, addVMs, addSnaps int, addBytes
 		return errf(http.StatusTooManyRequests, "quota: team %s may keep %d snapshots", team, p.MaxSnapshots)
 	case p.MaxDiskGiB > 0 && bytes > int64(p.MaxDiskGiB)<<30:
 		return errf(http.StatusTooManyRequests, "quota: team %s may commit %d GiB of storage", team, p.MaxDiskGiB)
+	}
+	return nil
+}
+
+// hostStorageCheck caps what all teams together may commit. Only growth is refused:
+// a host already past the cap (a lowered setting) can still stop, delete and shrink.
+func (m *Manager) hostStorageCheck(committed, adding int64) error {
+	if m.cfg.StorageOvercommit <= 0 || adding <= 0 {
+		return nil
+	}
+	_, total, err := m.statfs(m.cfg.StateDir)
+	if err != nil || total == 0 {
+		return nil // checkFloor reports a statfs failure
+	}
+	if limit := float64(total) * m.cfg.StorageOvercommit; float64(committed) > limit {
+		return errf(http.StatusInsufficientStorage, "host disk: %d GiB committed would pass the limit of %.0f GiB", committed>>30, limit/(1<<30))
 	}
 	return nil
 }
@@ -508,6 +576,9 @@ func (m *Manager) checkFloor(need uint64) error {
 // dirBytes: apparent and allocated bytes of the files under dir. Reflinked
 // extents are counted once per file (an upper bound on real use).
 func dirBytes(dir string) (apparent, allocated int64) {
+	if real, err := filepath.EvalSymlinks(dir); err == nil { // Walk does not follow its root (makeStoreDir)
+		dir = real
+	}
 	filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error {
 		if err != nil || !fi.Mode().IsRegular() {
 			return nil

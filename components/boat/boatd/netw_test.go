@@ -32,8 +32,12 @@ func TestRuleset(t *testing.T) {
 		`iifname "bt*" icmpv6 type { nd-router-advert, nd-redirect } counter drop`,
 		`iifname "boatbr0" icmpv6 type { nd-router-advert, nd-redirect } drop`,
 		`iifname "bt*" iifname != { "bt2", "bt3", "bt300" } drop`,
-		`iifname "boatbr0" ip saddr 10.200.0.2 ct count over 32768 drop`,
-		`iifname "boatbr0" ip6 saddr 2001:db8:1::2 ct count over 32768 drop`,
+		`add rule inet boat_ct forward iifname "boatbr0" ct state new add @v4_4096 { ip saddr ct count over 4096 } drop`,
+		`add rule inet boat_ct forward iifname "boatbr0" ct state new add @v6_4096 { ip6 saddr ct count over 4096 } drop`,
+		`add rule inet boat_ct input iifname "boatbr0" ct state new add @v4_4096 { ip saddr ct count over 4096 } drop`,
+		`iifname "bt300" ether type arp arp saddr ether != 06:00:0a:c8:01:2c counter drop`,
+		`iifname "bt2" icmpv6 type nd-neighbor-advert icmpv6 taddr != { 2001:db8:1::2, fe80::/10 } counter drop`,
+		`iifname "bt3" icmpv6 type nd-neighbor-advert icmpv6 taddr != { fe80::/10 } counter drop`,
 		`iifname "boatbr0" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12,`,
 		`iifname "boatbr0" ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8, 64:ff9b:1::/48 } drop`,
 		`iifname "boatbr0" tcp dport { 25, 465, 587 } drop`,
@@ -76,6 +80,13 @@ func TestRuleset(t *testing.T) {
 	if strings.Count(rs, "{") != strings.Count(rs, "}") {
 		t.Error("unbalanced braces")
 	}
+	if strings.Contains(rs, "delete table inet boat_ct") || strings.Contains(rs, "ether type arp accept") {
+		t.Errorf("connection counts must survive a reload, and ARP must not cross teams\n%s", rs)
+	}
+	c.CtPerVM = 0
+	if strings.Contains(ruleset(c, vms), "ct count") {
+		t.Error("ctPerVM 0 still limits")
+	}
 }
 
 func TestAddressing(t *testing.T) {
@@ -111,6 +122,28 @@ func TestFirewallFailureFailsClosed(t *testing.T) {
 		if h.Alive(v.PID, v.ID) {
 			t.Fatalf("%s process left running", v.Name)
 		}
+	}
+}
+
+func TestL2Pinned(t *testing.T) {
+	m, h := newTestManager(t, func(c *Config) { c.IPv6Prefix = "fd42::/64" })
+	v, err := m.Create(t.Context(), CreateReq{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ip neigh replace " + v.IP + " lladdr " + v.MAC + " dev boatbr0 nud permanent",
+		"ip -6 neigh replace " + v.IPv6 + " lladdr " + v.MAC + " dev boatbr0 nud permanent",
+		"bridge fdb replace " + v.MAC + " dev " + v.Tap + " master static",
+		"bridge link set dev " + v.Tap + " learning off flood off",
+	} {
+		if !h.ran(want) {
+			t.Errorf("not run: %s", want)
+		}
+	}
+	m.Delete(t.Context(), v.ID)
+	if !h.ran("ip neigh del "+v.IP) || !h.ran("ip -6 neigh del "+v.IPv6) {
+		t.Error("neighbour entries left behind")
 	}
 }
 

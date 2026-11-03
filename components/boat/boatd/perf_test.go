@@ -70,9 +70,9 @@ func TestRealMemoryAdmission(t *testing.T) {
 		c.HostMemMiB, c.HostReserveMiB, c.MemOvercommit = 16384, 1024, 2
 	})
 	ctx := context.Background()
-	// test size: see newTestManager. need = reserve + RAM/2.
+	// test size: see newTestManager. need = reserve + (RAM + overhead)/2.
 	s := m.cfg.Sizes[m.cfg.DefaultSize]
-	need := 1024 + s.MemMiB/2
+	need := 1024 + (s.MemMiB+m.cfg.VMOverheadMiB)/2
 	m.memAvail = func() int { return need - 1 }
 	var ae *apiErr
 	if _, err := m.Create(ctx, CreateReq{Team: "t"}); !errors.As(err, &ae) || ae.code != 503 {

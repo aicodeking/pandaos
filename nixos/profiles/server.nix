@@ -7,6 +7,9 @@
 # Until then the domain is boat.localhost, which Caddy serves with its own
 # local CA (no ACME requests for a name nobody owns).
 #
+# Hosting tenants you do not trust? Also set services.boat.untrustedTenants = true,
+# and reboot: SMT off, abuse limits on, KSM and warmPool refused (PROTOCOL.md).
+#
 # Already on via the base modules: nftables firewall, key-only ssh, sshguard,
 # daily unattended updates with rollback (updates.nix).
 { lib, ... }:

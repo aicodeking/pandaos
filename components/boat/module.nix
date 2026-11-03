@@ -42,6 +42,25 @@ let
   masterCred = "boat-master-key:${credFile}";
   desktopCredFile = "${cfg.dataDir}/secrets/boat-desktop-key.cred";
   desktopCred = "boat-desktop-key:${desktopCredFile}";
+  exportCredFile = "${cfg.dataDir}/secrets/boat-export-key.cred";
+
+  # What services.boat.untrustedTenants sets. boatd refuses to start if a key below
+  # is overridden to something weaker (config.go validateUntrusted).
+  untrustedSettings = {
+    untrustedTenants = true;
+    btrfsQgroups = true;
+    storageOvercommit = 1; # committed storage fits the disk: no tenant can fill it
+    memOvercommit = 1;
+    egressMbit = 1000;
+    ingressMbit = 1000;
+    ioMaxMBps = 500;
+    ioMaxIOPS = 20000;
+    ctPerVM = 4096;
+    diskEngine = "Sync"; # with kernel.io_uring_disabled: no io_uring for a broken-out VMM
+    hostDirtyRatio = 20; # a tenant must not be able to dirty half of the host's RAM
+    warmPool = false; # templates share ASLR across tenants
+    ksmTeam = ""; # a cross-VM side channel
+  };
 
   # The Firecracker that boat-e2e tests (e2e.sh FC_VERSION + FC_SHA256), not
   # whatever nixpkgs carries: snapshots are version-sensitive. Static binaries.
@@ -132,6 +151,7 @@ let
     runDir = "/run/boat";
     socket = "/run/boat/boatd.sock";
     socketGroup = "boat";
+    btrfsQgroups = true; # boatd goes on without them only if dataDir is not btrfs
     inherit aiProxyPort;
     firecracker = lib.getExe' cfg.firecrackerPackage "firecracker";
     jailer = lib.getExe' cfg.firecrackerPackage "jailer";
@@ -143,6 +163,7 @@ let
     defaultTeam = cfg.quotas;
   }
   // lib.optionalAttrs (imageIds != [ ]) { defaultImage = lib.head imageIds; }
+  // lib.optionalAttrs cfg.untrustedTenants untrustedSettings
   // cfg.boatdSettings;
 
   apiArgs = [
@@ -313,9 +334,18 @@ in
     boatdSettings = mkOption {
       type = types.attrsOf types.anything;
       default = { };
-      example = { egressMbit = 200; btrfsQgroups = true; idleStopS = 3600; warmPool = true; ksmTeam = "ci"; teams.ci = { maxVMs = 50; }; };
+      example = { egressMbit = 200; storageOvercommit = 2; idleStopS = 3600; warmPool = true; ksmTeam = "ci"; teams.ci = { maxVMs = 50; }; };
       description = "Extra keys merged into /etc/boat/boatd.json (see boatd/config.go and PROTOCOL.md \"Performance and density\"); they win over the module's.";
     };
+    untrustedTenants = lib.mkEnableOption ''
+      hosting tenants you do not trust. Turns on what is off by default because it costs
+      performance or density: SMT off (`nosmt=force`, half the threads of an SMT host),
+      CPU mitigations and flushes on the kernel command line, per-VM egress, ingress, disk and connection
+      limits, committed storage capped at the disk's size, memory overcommit 1.0, the
+      `Sync` disk engine with io_uring off in the kernel, no swap, and refuses KSM and
+      `warmPool`. Needs a reboot to take effect; until then boatd refuses to start.
+      Each limit can be raised in {option}`boatdSettings`, not removed
+    '';
     stopTimeoutSec = mkOption {
       type = types.ints.positive;
       default = 900;
@@ -360,11 +390,40 @@ in
         assertion = lib.hasAttr cfg.defaultSize cfg.sizes;
         message = "services.boat.defaultSize must name one of services.boat.sizes.";
       }
+      {
+        assertion = cfg.untrustedTenants -> !(cfg.boatdSettings.warmPool or false) && (cfg.boatdSettings.ksmTeam or "") == "";
+        message = "services.boat.untrustedTenants refuses warmPool (templates share ASLR across tenants) and ksmTeam (a side channel between guests).";
+      }
     ];
 
-    boot.kernelModules = [ "kvm" "tun" "vhost_net" "bridge" "nf_tables" ];
+    boot.kernelModules = [ "kvm" "tun" "vhost_net" "bridge" "nf_tables" "nf_conntrack" ];
+    # Firecracker's production host recommendations. Unknown parameters are ignored, so
+    # the Intel-only ones are harmless on AMD.
+    boot.kernelParams = lib.optionals cfg.untrustedTenants [
+      "nosmt=force"
+      "mitigations=auto,nosmt"
+      "spec_store_bypass_disable=seccomp"
+      "spectre_v2_user=seccomp"
+      "l1tf=full,force"
+      "kvm-intel.vmentry_l1d_flush=always"
+      "kvm.nx_huge_pages=force"
+    ];
+    zramSwap.enable = lib.mkIf cfg.untrustedTenants (lib.mkForce false); # guest memory stays out of swap
+    swapDevices = lib.mkIf cfg.untrustedTenants (lib.mkForce [ ]);
     boot.kernel.sysctl = {
       "net.ipv4.ip_forward" = 1;
+      # A VM's flows are capped at ctPerVM (default 4096), so about 256 VMs at the cap fit.
+      # The kernel's default, about 260k on 16 GiB, is 64: one team could fill it.
+      "net.netfilter.nf_conntrack_max" = 1048576;
+      "fs.protected_hardlinks" = 1;
+      "fs.protected_symlinks" = 1;
+    }
+    // lib.optionalAttrs cfg.untrustedTenants {
+      "kernel.io_uring_disabled" = 2; # diskEngine Sync; absent before Linux 6.6
+      "kernel.unprivileged_bpf_disabled" = 1;
+      "net.core.bpf_jit_harden" = 2;
+      "kernel.kptr_restrict" = 2;
+      "kernel.dmesg_restrict" = 1;
     }
     // lib.optionalAttrs (cfg.ipv6Prefix != null) {
       "net.ipv6.conf.all.forwarding" = 1;
@@ -449,6 +508,9 @@ in
         }
         seal boat-master-key ${cfg.dataDir}/api/master.key ${credFile}
         seal boat-desktop-key ${cfg.dataDir}/secrets/desktop.key ${desktopCredFile}
+        # boatd's HMAC over snapshot exports: whoever has it can get Firecracker to restore
+        # a crafted vmstate.
+        seal boat-export-key ${cfg.dataDir}/export.key ${exportCredFile}
       '';
     };
 
@@ -473,6 +535,7 @@ in
       description = "boat VM manager (Firecracker)";
       wantedBy = [ "multi-user.target" ];
       wants = [ "boat-images.service" "network-online.target" ];
+      requires = [ "boat-secrets.service" ];
       after = [ "boat-images.service" "boat-secrets.service" "network-online.target" ];
       # Persistent VMs: never restart on `nixos-rebuild switch` or the daily
       # auto-upgrade; a new boatd takes effect on reboot or a manual restart.
@@ -487,6 +550,8 @@ in
       serviceConfig = {
         ExecStartPre = [ dataCheck ] ++ lib.optional cfg.requireKvm kvmCheck;
         ExecStart = lib.getExe' cfg.boatdPackage "boatd";
+        # Read from $CREDENTIALS_DIRECTORY/boat-export-key.
+        LoadCredentialEncrypted = [ "boat-export-key:${exportCredFile}" ];
         Restart = "on-failure";
         RestartSec = 5;
         RestartPreventExitStatus = exConfig;
