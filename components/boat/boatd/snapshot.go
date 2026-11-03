@@ -125,14 +125,22 @@ func (m *Manager) mergeDiff(v VM, diff, dst string) error {
 	if err := m.cp(base, dst); err != nil {
 		return err
 	}
-	log.Printf("%s: merge reflink=%dms", v.ID, time.Since(t0).Milliseconds())
 	if err := os.Chmod(dst, 0o600); err != nil { // the sealed base's mode came along
 		return err
 	}
 	if err := os.Truncate(dst, int64(v.MemMiB)<<20); err != nil {
 		return err
 	}
-	return copyExtents(diff, dst)
+	t1 := time.Now()
+	// SEEK_DATA walks a dirty file's delalloc: 1-2.5 s for a 17 MiB diff. Firecracker did not
+	// fsync it (the guest was paused then), and it is only ever a few MiB when a base exists.
+	if err := fsyncFile(diff); err != nil {
+		return err
+	}
+	t2 := time.Now()
+	err := copyExtents(diff, dst)
+	log.Printf("%s: merge reflink=%dms flush=%dms copy=%dms", v.ID, t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), time.Since(t2).Milliseconds())
+	return err
 }
 
 // sealMem: memory files are immutable, owned by root and world-readable, because

@@ -86,7 +86,7 @@ echo "guest: $guest_blk"
 cold_read() {
   bx "$1" 'fio --name=c --filename=/root/c --size=2G --direct=1 --ioengine=libaio --iodepth=32 --rw=write --bs=1M --output-format=json >/dev/null; sync' 200
   sudo sh -c 'sync; echo 1 >/proc/sys/vm/drop_caches'
-  bx "$1" 'fio --name=c --filename=/root/c --size=2G --direct=1 --ioengine=libaio --iodepth=32 --rw=randread --bs=4k --runtime=15 --time_based --output-format=json | python3 -c "import json,sys; print(round(json.load(sys.stdin)[\"jobs\"][0][\"read\"][\"iops\"]))"; rm /root/c' 200
+  bx "$1" 'fio --name=c --filename=/root/c --size=2G --direct=1 --ioengine=libaio --iodepth=32 --rw=randread --bs=4k --runtime=15 --time_based --output-format=json --output=/tmp/c.json; rm /root/c; grep -m1 "\"iops\" " /tmp/c.json | tr -dc "0-9."' 200
 }
 put_disk() { curl -fsS --unix-socket "$SOCK" -X PUT --data-binary "@$WORK/tmp/disk.sh" "http://boatd/v1/vms/$1/files?path=/tmp/disk.sh&mode=755" >/dev/null; }
 put_disk "$pv"
@@ -232,7 +232,7 @@ echo "METRIC $(jq -nc --argjson disk "$disk" --argjson disks "$disk_sync" --arg 
   --argjson csw "$c_sw" --argjson crw "$c_rw" --argjson crr "$c_rr" \
   --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" --argjson kk2 "$kvm_fork2" \
   --argjson nbr "$nb_rss" --argjson nbc "$nb_cg" --argjson br "$b_rss" --argjson bc "$b_cg" \
-  --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fc "$fit_cold" --argjson fw "$fit_warm" --argjson fk "$fit_ksm" --argjson ca "$cold_async" --argjson cs "$cold_sync" \
+  --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fc "$fit_cold" --argjson fw "$fit_warm" --argjson fk "$fit_ksm" --argjson ca "${cold_async:-0}" --argjson cs "${cold_sync:-0}" \
   --argjson ct "$cold_ten" --argjson wt "$warm_ten" --argjson wr "$warm_rss" \
   '{test: "boat-perf", disk: $disk, diskSync: $disks, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
     snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2,
