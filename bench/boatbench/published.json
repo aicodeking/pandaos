@@ -1,0 +1,21 @@
+{
+  "source": "https://boat.dev (benchmark section) -> github.com/AnicetNgrt/hpc-sandbox-benchmarks branch provider/ascii-box, docs/results/2026-08-24-cpu/{README,leaderboard}.md",
+  "measured_on": "2026-08-24",
+  "note": "Vendor-published (boat.dev was formerly Ascii Box; its row is 'Ascii Box (bare metal)'). boat.dev's '1,000 runs in 36 s' is 1000 / 27.67 runs/s. Their run: PTS pts/node-web-tooling-1.0.1 with DynamicRunCount, median of 21 trials on fresh 4 vCPU / 8 GiB machines; the Node version is not stated.",
+  "metrics": {
+    "node_runs_s": {"value": 27.67, "note": "p50 of 21 trials, 95% CI 26.01-28.34; p95 28.72"},
+    "rand_read_iops": {"value": 433500, "note": "PTS fio 4KB rand read, O_DIRECT, libaio, 1 job (their fio params, not ours)"},
+    "rand_write_iops": {"value": 412500, "note": "PTS fio 4KB rand write, O_DIRECT (their fio params)"},
+    "seq_write_mbps": {"value": 5839, "note": "PTS fio 1MB seq write, O_DIRECT (their fio params)"}
+  },
+  "others": {
+    "Blaxel": 19.8,
+    "Daytona (VM)": 18.6,
+    "Modal (VM)": 15.07,
+    "Novita": 13.52,
+    "E2B": 11.24,
+    "Freestyle": 9.64,
+    "Modal (gVisor)": 9.56,
+    "Ascii Box on Hetzner CX33": 8.88
+  }
+}

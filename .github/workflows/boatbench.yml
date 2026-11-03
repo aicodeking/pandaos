@@ -1,0 +1,188 @@
+name: boatbench
+
+# Head-to-head: PandaOS boat (Firecracker on this KVM runner) vs boat.dev, the
+# same workloads through each side's HTTP API (bench/boatbench). Manual only.
+# The runner is NOT a dedicated server (shared 4 vCPU, US region); boat.dev is
+# EU. Numbers are indicative until bench/boatbench/run-on-server.sh runs on the
+# owner's server. The boatdev job runs only when the BOATDEV_API_KEY secret
+# exists; otherwise it prints SKIPPED.
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: "Fresh VMs per side"
+        type: number
+        default: 5
+      only:
+        description: "Workloads: a node loop, b lifecycle, c 10x create, d disk, e network, f npm cold"
+        type: string
+        default: "abcdef"
+      sides:
+        description: "pandaos, boatdev or both"
+        type: choice
+        options: [both, pandaos, boatdev]
+        default: both
+
+permissions: {}
+
+concurrency:
+  group: boatbench
+  cancel-in-progress: false
+
+jobs:
+  unit:
+    name: boatbench unit tests
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: |
+          python3 -m py_compile bench/boatbench/*.py
+          python3 bench/boatbench/test_boatbench.py
+          bash -n bench/boatbench/stack.sh bench/boatbench/run-on-server.sh
+
+  pandaos:
+    name: pandaos (Firecracker on GitHub KVM runner)
+    needs: unit
+    if: inputs.sides != 'boatdev'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      OUT: /mnt/guest-out
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Free disk space, docker on /mnt
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo systemctl stop docker docker.socket
+          echo '{"data-root": "/mnt/docker"}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
+          sudo mkdir -p "$OUT" && sudo chown "$(id -u):$(id -g)" "$OUT"
+          df -h / /mnt
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      # Same cache key as boat-e2e.yml: a guest built there is reused here.
+      - name: Restore guest image
+        id: guest
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            /mnt/guest-out/vmlinux
+            /mnt/guest-out/rootfs-slim.ext4.zst
+            /mnt/guest-out/rootfs-full.ext4.zst
+            /mnt/guest-out/size-*.txt
+            /mnt/guest-out/manifest-*.txt
+          key: boat-guest-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py') }}
+      - name: Build the slim guest image (no cache for this source yet)
+        if: steps.guest.outputs.cache-hit != 'true'
+        run: |
+          components/boat/guest/build.sh kernel
+          components/boat/guest/build.sh rootfs slim
+      - name: Unpack guest image
+        run: |
+          [ -f "$OUT/rootfs-slim.ext4" ] || zstd -q -d -f "$OUT/rootfs-slim.ext4.zst"
+          ls -l "$OUT"
+          docker system prune -af >/dev/null || true
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: components/boat/boatd/go.mod
+          cache: false
+      - name: Runner hardware
+        run: |
+          lscpu | grep -E 'Model name|^CPU\(s\)|Hypervisor|Virtualization' | tee hw.txt
+          free -m | tee -a hw.txt
+          curl -fsS https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(colo|loc)=' | tee -a hw.txt
+      - name: Stack up (boatd + boat-api from source)
+        run: bench/boatbench/stack.sh up "$OUT"
+      - name: Run boatbench (pandaos)
+        env:
+          REPEATS: ${{ inputs.repeats }}
+          ONLY: ${{ inputs.only }}
+          BOATBENCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -a; . /mnt/boatbench/env; set +a
+          BOATBENCH_HOST_DESC="GitHub ubuntu-latest runner: $(lscpu | sed -n 's/^Model name: *//p' | head -1), $(nproc) shared vCPU, $(free -g | awk '/Mem:/{print $2}') GiB, KVM in a cloud VM, region $(curl -fsS https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^colo=//p') (US)"
+          export BOATBENCH_HOST_DESC
+          python3 bench/boatbench/boatbench.py run --driver pandaos --repeats "$REPEATS" --only "$ONLY" --out results
+      - name: Stack logs
+        if: always()
+        run: |
+          for f in boatd api; do echo "--- $f.log (tail)"; tail -n 80 "/mnt/boatbench/$f.log" 2>/dev/null; done
+          bench/boatbench/stack.sh down
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: boatbench-pandaos
+          path: |
+            results/
+            hw.txt
+          if-no-files-found: warn
+
+  boatdev:
+    name: boatdev (boat.dev public API)
+    needs: unit
+    if: inputs.sides != 'pandaos'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Run boatbench (boatdev), or SKIPPED without the secret
+        env:
+          BOATDEV_API_KEY: ${{ secrets.BOATDEV_API_KEY }}
+          REPEATS: ${{ inputs.repeats }}
+          ONLY: ${{ inputs.only }}
+          BOATBENCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BOATBENCH_HOST_DESC: "boat.dev managed fleet, EU (Germany/Finland/France per boat.dev); harness on a US GitHub runner"
+        run: |
+          mkdir -p results
+          if [ -z "$BOATDEV_API_KEY" ]; then
+            echo "SKIPPED: secret BOATDEV_API_KEY is not set; boat.dev was not measured." | tee results/SKIPPED.txt
+            echo "### boatdev: SKIPPED (no BOATDEV_API_KEY secret)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 bench/boatbench/boatbench.py run --driver boatdev --repeats "$REPEATS" --only "$ONLY" --out results
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: boatbench-boatdev
+          path: results/
+          if-no-files-found: warn
+
+  report:
+    name: report
+    needs: [unit, pandaos, boatdev]
+    if: ${{ always() && needs.unit.result == 'success' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: boatbench-*
+          path: art
+      - name: Report
+        run: |
+          find art -type f | sort
+          files=$(find art -name 'results-*.json' | sort)
+          [ -n "$files" ] || { echo "no results to report" | tee -a "$GITHUB_STEP_SUMMARY"; exit 1; }
+          # shellcheck disable=SC2086 # word splitting is the file list
+          python3 bench/boatbench/boatbench.py report $files --out report.md >/dev/null
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          cat art/*/SKIPPED.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: boatbench-report
+          path: report.md
