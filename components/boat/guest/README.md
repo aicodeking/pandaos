@@ -113,8 +113,10 @@ Sizes (MiB, CI build):
 |---|---|---|---|
 | slim, before trimming | 3027 | 4144 | 907 |
 | full, before trimming | 4548 | 5823 | 1353 |
-| slim, now | 2821 | 3065 | 842 |
-| full, now (with Ghostty, Mesa and H.264 libraries added) | 4508 | 4803 | 1348 |
+| slim, before the boat CLI | 2821 | 3065 | 842 |
+| full, before the four extra harnesses | 4508 | 4803 | 1348 |
+| slim, now (boat CLI) | 2828 | 3072 | 844 |
+| full, now (boat CLI, pi, Kimi Code, Prime Agent, Mistral Vibe) | 5189 | 5504 | 1486 |
 
 Trimming: tight ext4 packing (above); dpkg excludes for docs/man/info/locales;
 opencode's unused `x64-baseline` and musl binaries (npm installs both CPU variants,
@@ -124,6 +126,14 @@ Node toolchain (code-server's bundled Node excepted). The codex binary is alread
 stripped. The build log prints the 40 largest directories for the next round.
 
 Choices:
+- **Harnesses:** `full` has all seven that boat.dev lists. `slim` has claude, codex
+  and opencode, and stays small. pi and Kimi Code install with `npm ci` from the
+  lockfiles in `rootfs-full/opt/boat-harness`, and Mistral Vibe with
+  `pip --require-hashes` from its lock there, so every dependency is pinned by checksum.
+  Prime Agent is its sha256-pinned release tarball; it may fetch uv and Python on
+  first use. `test-in-vm.sh` checks `--version` only, because CI has no model keys:
+  none of the four has run a real prompt here. `boat prompt` takes only claude, codex
+  and opencode until the API adds the others; `boat exec` runs them now.
 - **Ghostty** has no official build for Ubuntu 24.04: Ubuntu packages it from
   26.04, and the snap needs snapd. The full image installs the community noble
   .deb that the Ghostty docs list (mkasberg/ghostty-ubuntu 1.3.1, sha256-pinned).
