@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -58,6 +57,12 @@ type Manager struct {
 	unpackArgv []string // stdin tar.zst -> stdout tar
 	hostMem    int      // MiB available to VMs before overcommit (RAM - reserve)
 	hostCPU    int
+
+	memAvail   func() int      // MemAvailable in MiB; 0 = unknown
+	warming    map[string]bool // template builds in flight
+	warmSettle time.Duration   // wait for free page reporting before saving a template
+	ballooned  bool            // only memoryPressure (one ticker goroutine) uses these two
+	balloonPct int
 }
 
 func newManager(cfg Config, run runner, p procs) (*Manager, error) {
@@ -71,6 +76,7 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 		now:   func() time.Time { return time.Now().UTC() },
 		vms:   map[string]VM{}, snaps: map[string]Snapshot{}, locks: map[string]*sync.Mutex{},
 		dones: map[string]<-chan struct{}{}, active: map[string]time.Time{}, statfs: statfs,
+		memAvail: func() int { return meminfoMiB("MemAvailable") }, warming: map[string]bool{}, warmSettle: 3 * time.Second,
 		exportArgv: tarZstdArgv, unpackArgv: []string{"zstd", "-dcq"}, dirty: map[string]bool{},
 		saveState: func(dir string, v VM) error { return writeJSONAtomic(filepath.Join(dir, "vm.json"), v, 0o600) }}
 	m.hostMem, m.hostCPU = cfg.HostMemMiB, cfg.HostCPUs
@@ -86,22 +92,11 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 			return nil, err
 		}
 	}
+	if cfg.DiskNoCow {
+		m.convertImages()
+	}
+	cfg.enableKSM()
 	return m, m.reconcile()
-}
-
-// hostMemMiB reads MemTotal; 0 (= no RAM admission check) where unavailable.
-func hostMemMiB() int {
-	b, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0
-	}
-	for _, l := range strings.Split(string(b), "\n") {
-		if f := strings.Fields(l); len(f) >= 2 && f[0] == "MemTotal:" {
-			kb, _ := strconv.Atoi(f[1])
-			return kb / 1024
-		}
-	}
-	return 0
 }
 
 func (m *Manager) vmDir(id string) string   { return filepath.Join(m.cfg.StateDir, "vms", id) }
@@ -216,6 +211,9 @@ func (m *Manager) quotaLocked(team string, s Size, exclude string) error {
 		if v.ID != exclude && v.State.active() {
 			hostMem, hostCPU = hostMem+v.MemMiB, hostCPU+v.VCPU
 		}
+	}
+	if err := m.realMemCheck(s); err != nil {
+		return err
 	}
 	switch {
 	case m.hostMem > 0 && float64(hostMem+s.MemMiB) > float64(m.hostMem)*m.cfg.MemOvercommit:
@@ -355,6 +353,19 @@ func (m *Manager) reconcile() error {
 	}
 	for _, v := range vms {
 		m.vms[v.ID] = v
+	}
+	for _, s := range snaps {
+		if s.Unsynced {
+			// Maybe a host crash before the fsync: keep the disk, drop the memory.
+			log.Printf("%s: snapshot memory was not synced; it restores cold", s.ID)
+			os.Remove(filepath.Join(m.snapDir(s.ID), vmstate))
+			os.Remove(filepath.Join(m.snapDir(s.ID), memFile))
+			s.HasMem, s.Unsynced = false, false
+			if err := writeJSONAtomic(filepath.Join(m.snapDir(s.ID), "snap.json"), s, 0o600); err != nil {
+				return err
+			}
+			m.snaps[s.ID] = s
+		}
 	}
 	for _, v := range vms {
 		if v.State == Stopped && v.HasSnapshot && !v.SnapSynced {
@@ -532,6 +543,11 @@ func (m *Manager) stopAll(ctx context.Context, reason string) {
 
 // resumeAll starts VMs that stopAll stopped (in the background).
 func (m *Manager) resumeAll(ctx context.Context) {
+	for _, v := range m.list(warmTeam) { // a template build cut short by a restart
+		if _, err := m.Delete(ctx, v.ID); err != nil {
+			log.Printf("%s: %v", v.ID, err)
+		}
+	}
 	for _, v := range m.list("") {
 		if v.ResumeOnBoot && v.State == Stopped {
 			m.update(v.ID, "", func(x *VM) { x.ResumeOnBoot = false })

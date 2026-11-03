@@ -24,6 +24,9 @@ import (
 const version = "0.1.0"
 
 func main() {
+	if len(os.Args) > 3 && os.Args[1] == ksmExecArg { // before flag parsing: argv belongs to the jailer
+		log.Fatal(ksmExec(os.Args[3:]))
+	}
 	cfgPath := flag.String("config", "/etc/boat/boatd.json", "config file")
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
@@ -74,6 +77,7 @@ func serve(cfgPath string) error {
 		}
 	}()
 	go func() {
+		pressureTick := 0
 		t := time.NewTicker(logRotateEvery)
 		defer t.Stop()
 		for {
@@ -83,9 +87,13 @@ func serve(cfgPath string) error {
 			case <-t.C:
 				m.rotateLogs()
 				m.flushDirty()
+				if pressureTick++; pressureTick%pressureEvery == 0 {
+					m.memoryPressure(ctx)
+				}
 			}
 		}
 	}()
+	m.ensureWarm(ctx, cfg.DefaultImage, cfg.DefaultSize)
 	srv := &http.Server{Handler: m.routes(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -139,6 +147,10 @@ func setupCgroups(c *Config) {
 	}
 	c.cgroupLimits = true
 	c.stateDisk = stateDisk(c.StateDir)
+	// The parent has the file iff swap accounting exists; the jailer fails on a missing one.
+	if _, err := os.Stat(filepath.Join(dir, "memory.swap.max")); err == nil && c.SnapshotTracking == "mincore" {
+		c.swapControl = true
+	}
 }
 
 // enableControllers: io is optional (only io.max needs it), the others are not.

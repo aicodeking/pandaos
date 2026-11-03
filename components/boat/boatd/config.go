@@ -78,6 +78,15 @@ type Config struct {
 	BtrfsQgroups   bool    `json:"btrfsQgroups"`   // each VM dir is a subvolume with an exclusive-bytes limit
 	DiffSnapshots  bool    `json:"diffSnapshots"`  // dirty-page snapshots merged onto a reflinked base
 
+	// Performance and density. See PROTOCOL.md "Performance and density".
+	DiskEngine         string `json:"diskEngine"`         // auto (Async, else Sync), Async or Sync
+	DiskNoCow          bool   `json:"diskNoCow"`          // btrfs: images and the VM disks reflinked from them are NOCOW
+	Balloon            bool   `json:"balloon"`            // virtio-balloon: free page reporting, deflate on OOM
+	SnapshotTracking   string `json:"snapshotTracking"`   // cold-booted VMs: kvm (dirty log) or mincore (no log, needs no swap)
+	SnapshotDropCaches bool   `json:"snapshotDropCaches"` // the guest drops its page cache before a snapshot
+	WarmPool           bool   `json:"warmPool"`           // create restores a booted template of the image + size
+	KSMTeam            string `json:"ksmTeam"`            // "" off; one team's VMs may merge; "*" all (one trust domain only)
+
 	// Egress policy.
 	AllowSMTP   bool `json:"allowSMTP"`   // else tcp 25/465/587 out is dropped
 	AIProxyPort int  `json:"aiProxyPort"` // gateway port VMs may reach (boat-api's AI proxy); 0 = closed
@@ -95,6 +104,7 @@ type Config struct {
 	ResumeCrashed bool `json:"resumeCrashed"` // cold-boot VMs that were running when boatd/the host died
 
 	cgroupLimits bool                  // set at startup when the cgroup controllers could be delegated
+	swapControl  bool                  // set at startup: VM cgroups get memory.swap.max=0 (mincore tracking)
 	stateDisk    string                // "major:minor" of stateDir's disk, for io.max
 	Teams        map[string]TeamPolicy `json:"teams"`
 	DefaultTeam  TeamPolicy            `json:"defaultTeam"`
@@ -110,38 +120,40 @@ var (
 
 func defaultConfig() Config {
 	return Config{
-		StateDir:       "/var/lib/boat",
-		RunDir:         "/run/boat",
-		Socket:         "/run/boat/boatd.sock",
-		Firecracker:    "firecracker",
-		JailUIDBase:    900000,
-		Reflink:        "always",
-		Bridge:         "boatbr0",
-		Subnet:         "10.200.0.0/16",
-		DNS:            []string{"1.1.1.1", "9.9.9.9"},
-		PortMin:        20000,
-		PortMax:        40000,
-		DesktopPort:    6080,
-		DefaultSize:    "default",
-		DefaultImage:   "ubuntu-24.04",
-		BootArgs:       "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
-		BootTimeoutS:   60,
-		ReapS:          30,
-		MinFreePct:     10,
-		MinFreeGiB:     5,
-		MemOvercommit:  1.0,
-		CPUOvercommit:  4.0,
-		HostReserveMiB: 1024,
-		VMOverheadMiB:  256,
-		VMPageCacheMiB: 512,
-		DiffSnapshots:  true,
-		CgroupParent:   "boat-vms",
-		DiskMBps:       1000,
-		DiskIOPS:       50000,
-		CtPerVM:        32768,
-		MaxPortsPerVM:  32,
-		ResumeCrashed:  true,
-		DefaultTeam:    TeamPolicy{MaxTotalVMs: 100, MaxSnapshots: 200, MaxDiskGiB: 4096, MaxPorts: 512},
+		StateDir:         "/var/lib/boat",
+		RunDir:           "/run/boat",
+		Socket:           "/run/boat/boatd.sock",
+		Firecracker:      "firecracker",
+		JailUIDBase:      900000,
+		Reflink:          "always",
+		Bridge:           "boatbr0",
+		Subnet:           "10.200.0.0/16",
+		DNS:              []string{"1.1.1.1", "9.9.9.9"},
+		PortMin:          20000,
+		PortMax:          40000,
+		DesktopPort:      6080,
+		DefaultSize:      "default",
+		DefaultImage:     "ubuntu-24.04",
+		BootArgs:         "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
+		BootTimeoutS:     60,
+		ReapS:            30,
+		MinFreePct:       10,
+		MinFreeGiB:       5,
+		MemOvercommit:    1.5,
+		CPUOvercommit:    4.0,
+		HostReserveMiB:   1024,
+		VMOverheadMiB:    256,
+		VMPageCacheMiB:   512,
+		DiffSnapshots:    true,
+		CgroupParent:     "boat-vms",
+		DiskEngine:       "auto",
+		DiskNoCow:        true,
+		Balloon:          true,
+		SnapshotTracking: "kvm",
+		CtPerVM:          32768,
+		MaxPortsPerVM:    32,
+		ResumeCrashed:    true,
+		DefaultTeam:      TeamPolicy{MaxTotalVMs: 100, MaxSnapshots: 200, MaxDiskGiB: 4096, MaxPorts: 512},
 		Sizes: map[string]Size{
 			"small":   {2, 4096, 51},
 			"default": {4, 8192, 51},
@@ -192,6 +204,15 @@ func (c Config) validate() error {
 	if c.Reflink != "always" && c.Reflink != "auto" {
 		return fmt.Errorf("reflink must be always or auto")
 	}
+	if c.DiskEngine != "auto" && c.DiskEngine != "Async" && c.DiskEngine != "Sync" {
+		return fmt.Errorf("diskEngine must be auto, Async or Sync")
+	}
+	if c.SnapshotTracking != "kvm" && c.SnapshotTracking != "mincore" {
+		return fmt.Errorf("snapshotTracking must be kvm or mincore")
+	}
+	if c.KSMTeam != "" && c.KSMTeam != "*" && !reTeam.MatchString(c.KSMTeam) {
+		return fmt.Errorf("ksmTeam must be a team name or *")
+	}
 	if _, ok := c.Sizes[c.DefaultSize]; !ok {
 		return fmt.Errorf("defaultSize %q not in sizes", c.DefaultSize)
 	}
@@ -215,6 +236,13 @@ func (c Config) validate() error {
 		return fmt.Errorf("stateDir and runDir must be absolute")
 	}
 	return nil
+}
+
+// mincoreTracking: cold boots run without KVM's dirty log (no write faults, huge
+// pages stay) and a Diff is what mincore sees resident. A swapped-out page is
+// invisible to mincore, so this needs VMs that cannot swap.
+func (c Config) mincoreTracking() bool {
+	return c.SnapshotTracking == "mincore" && (c.swapControl || meminfoMiB("SwapTotal") == 0)
 }
 
 func (c Config) team(name string) TeamPolicy {

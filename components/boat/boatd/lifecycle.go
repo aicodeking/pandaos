@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -73,6 +74,24 @@ func (m *Manager) Create(ctx context.Context, r CreateReq) (VM, error) {
 	if err := r.validate(m.cfg); err != nil {
 		return VM{}, err
 	}
+	warm := ""
+	if r.Snapshot == "" {
+		warm = m.warmTemplate(r.Image, r.Size)
+		// A background build must outlive this request.
+		defer m.ensureWarm(context.WithoutCancel(ctx), r.Image, r.Size)
+	}
+	v, err := m.createFrom(ctx, r, warm)
+	if err != nil && warm != "" {
+		os.RemoveAll(warm) // maybe from another Firecracker or kernel: the next create boots cold
+	}
+	return v, err
+}
+
+// createFrom creates r, restoring the warm template dir if not "". r is validated.
+func (m *Manager) createFrom(ctx context.Context, r CreateReq, warm string) (VM, error) {
+	if err := r.validate(m.cfg); err != nil {
+		return VM{}, err
+	}
 	s := m.cfg.Sizes[r.Size]
 	base := VM{Name: r.Name, Team: r.Team, Image: r.Image, Size: r.Size, VCPU: s.VCPU, MemMiB: s.MemMiB,
 		DiskGiB: s.DiskGiB, Labels: r.Labels, TTLS: r.TTLS, IdleStopS: r.IdleStopS}
@@ -86,6 +105,8 @@ func (m *Manager) Create(ctx context.Context, r CreateReq) (VM, error) {
 		}
 		base.Image, base.Size, base.VCPU, base.MemMiB, base.DiskGiB = sn.Image, sn.Size, sn.VCPU, sn.MemMiB, sn.DiskGiB
 		base.FromSnapshot, src, restore = sn.ID, m.snapDir(sn.ID), sn.HasMem
+	} else if warm != "" {
+		src, restore = warm, true
 	} else if !exists(filepath.Join(src, diskFile)) || !exists(filepath.Join(src, kernFile)) {
 		return VM{}, errf(400, "image %q is not installed", r.Image)
 	}
@@ -135,7 +156,11 @@ func (m *Manager) finishDisk(v VM) error {
 	return m.chownRoot(v)
 }
 
+// cp clones src to dst. A clone has to match its source's NOCOW flag.
 func (m *Manager) cp(src, dst string) error {
+	if isNoCow(src) && !createNoCow(dst) {
+		return fmt.Errorf("cp: cannot create NOCOW %s", dst)
+	}
 	return m.run("", "cp", "--reflink="+m.cfg.Reflink, src, dst)
 }
 
@@ -224,7 +249,7 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 			os.Remove(filepath.Join(root, vmstate))
 		}
 	} else if err == nil {
-		err = fc.boot(ctx, v, m.bootArgs(v), m.cfg.DiffSnapshots, m.cfg)
+		err = fc.boot(ctx, v, m.bootArgs(v), m.cfg.DiffSnapshots && !m.cfg.mincoreTracking(), m.cfg)
 	}
 	if err != nil {
 		m.killWait(v.ID, pid)
@@ -296,7 +321,13 @@ func (m *Manager) reseed(ctx context.Context, v VM, sock string) {
 
 // syncClock: a restored guest's wall clock is as old as its snapshot.
 func (m *Manager) syncClock(ctx context.Context, sock string) {
-	a, err := dialAgent(ctx, sock)
+	var ae *agentErr
+	// In-process in the agent: `exec date` was 150 ms of cold pages per restore.
+	_, err := agentCall(ctx, sock, map[string]any{"op": "set_clock", "unix_ns": m.now().UnixNano()})
+	if !errors.As(err, &ae) {
+		return
+	}
+	a, err := dialAgent(ctx, sock) // older agents: no "set_clock" op
 	if err != nil {
 		return
 	}

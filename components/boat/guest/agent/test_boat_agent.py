@@ -238,6 +238,18 @@ class AgentTest(unittest.TestCase):
     def test_sync(self):
         self.assertEqual(self.c.call({"op": "sync"}), {"ok": True})
 
+    def test_set_clock_validates(self):
+        self.assertIn("error", self.c.call({"op": "set_clock", "unix_ns": "soon"}))
+        self.assertIn("error", self.c.call({"op": "set_clock", "unix_ns": True}))
+        saved = agent.time.clock_settime_ns
+        seen = []
+        agent.time.clock_settime_ns = lambda clk, ns: seen.append(ns)
+        try:
+            self.assertEqual(self.c.call({"op": "set_clock", "unix_ns": 5}), {"ok": True})
+        finally:
+            agent.time.clock_settime_ns = saved
+        self.assertEqual(seen, [5])
+
     def test_desktop_start_failure_explains_itself(self):
         saved = agent.run, agent.wait_port, agent.os.path.exists
         logs = types_ns(stdout="Xvnc did not start\n")

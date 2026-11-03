@@ -16,6 +16,7 @@
 #   restart   boatd SIGKILLed mid-run: running VMs re-adopted
 #   floor     free-space floor: create/snapshot refused (507), stop falls back cold
 #   docker    docker run hello-world in the full image
+#   perf 4/8  disk, snapshot, fork, density, warm creates (boatd/e2e-perf.sh)
 #   qgroups   btrfsQgroups: VM dirs are limited subvolumes, fork across them works
 #             (last: quota accounting stays on for the whole filesystem and
 #             makes reflinks slower, so the timings above are without it)
@@ -200,6 +201,9 @@ bx "$dk" 'for i in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; 
   fail "docker hello-world"
 bd DELETE "/v1/vms/$dk" >/dev/null
 bd DELETE "/v1/vms/$p1" >/dev/null
+
+# shellcheck source=boatd/e2e-perf.sh
+. "$HERE/boatd/e2e-perf.sh"
 
 # shellcheck source=boatd/e2e-limits.sh
 . "$HERE/boatd/e2e-limits.sh"

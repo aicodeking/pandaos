@@ -29,6 +29,8 @@ type fakeHost struct {
 	vms        map[int]*fakeFC // by pid
 	cmds       []string
 	nft        string
+	noSetClock bool // old agent
+	noAsync    bool // Firecracker refuses the Async engine
 	nftErr     error
 	ctErr      error
 	nftAtStart map[string]string // ruleset in force when each VM's process started
@@ -208,6 +210,11 @@ func (f *fakeFC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fault(w, "no disk")
 			return
 		}
+		f.record("engine " + str("io_engine"))
+		if f.h.noAsync && str("io_engine") == "Async" {
+			fault(w, "no io_uring")
+			return
+		}
 	case "PUT /network-interfaces/eth0":
 		f.mu.Lock()
 		f.tap = str("host_dev_name")
@@ -356,6 +363,15 @@ func (f *fakeFC) agentConn(c net.Conn) {
 			send(map[string]any{"error": "No such command: 'nope'"})
 		case "file_list":
 			send(map[string]any{"error": "open /nope: No such file or directory"})
+		case "set_clock":
+			if f.h.noSetClock {
+				send(map[string]any{"error": "unknown op"})
+			} else {
+				f.mu.Lock()
+				f.clockSet = true
+				f.mu.Unlock()
+				send(map[string]bool{"ok": true})
+			}
 		case "sync":
 			send(map[string]bool{"ok": true})
 		case "reseed":

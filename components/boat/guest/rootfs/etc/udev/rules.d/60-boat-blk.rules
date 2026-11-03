@@ -1,0 +1,2 @@
+# virtio-blk on a host that schedules its own I/O: a guest scheduler only adds latency.
+ACTION=="add|change", KERNEL=="vda", ATTR{queue/scheduler}="none", ATTR{queue/add_random}="0"

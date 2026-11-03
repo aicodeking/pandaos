@@ -74,8 +74,10 @@ func (c *fcClient) resume(ctx context.Context) error {
 // snapshot writes a "Full" or "Diff" (pages dirtied since the last snapshot,
 // restore or boot; a sparse file) snapshot of a paused VM.
 func (c *fcClient) snapshot(ctx context.Context, typ, statePath, memPath string) error {
-	return c.call(ctx, "PUT", "/snapshot/create", map[string]string{
-		"snapshot_type": typ, "snapshot_path": statePath, "mem_file_path": memPath,
+	// The diff is a temp file and reflinking the result flushes it anyway. Firecracker's
+	// fsync of it was most of 10 s with the VM paused (run 41573512017).
+	return c.call(ctx, "PUT", "/snapshot/create", map[string]any{
+		"snapshot_type": typ, "snapshot_path": statePath, "mem_file_path": memPath, "sync_snapshot_files": false,
 	})
 }
 
@@ -109,10 +111,30 @@ func rateLimiter(bytesPerS, opsPerS int64) map[string]any {
 	return rl
 }
 
-func (c *fcClient) boot(ctx context.Context, v VM, bootArgs string, trackDirty bool, cfg Config) error {
+// putDrive configures the root disk. "auto" asks for io_uring and takes the Sync
+// engine when Firecracker refuses it (host kernel < 5.10.51, io_uring disabled).
+func (c *fcClient) putDrive(ctx context.Context, v VM, cfg Config) error {
 	drive := map[string]any{"drive_id": "rootfs", "path_on_host": diskFile, "is_root_device": true, "is_read_only": false}
 	if rl := rateLimiter(int64(cfg.DiskMBps)<<20, int64(cfg.DiskIOPS)); rl != nil {
 		drive["rate_limiter"] = rl
+	}
+	if cfg.DiskEngine == "Sync" {
+		drive["io_engine"] = "Sync"
+		return c.call(ctx, "PUT", "/drives/rootfs", drive)
+	}
+	drive["io_engine"] = "Async"
+	err := c.call(ctx, "PUT", "/drives/rootfs", drive)
+	if err != nil && cfg.DiskEngine == "auto" {
+		log.Printf("%s: Async disk engine refused, using Sync: %v", v.ID, err)
+		drive["io_engine"] = "Sync"
+		return c.call(ctx, "PUT", "/drives/rootfs", drive)
+	}
+	return err
+}
+
+func (c *fcClient) boot(ctx context.Context, v VM, bootArgs string, trackDirty bool, cfg Config) error {
+	if err := c.putDrive(ctx, v, cfg); err != nil {
+		return err
 	}
 	nic := map[string]any{"iface_id": "eth0", "guest_mac": v.MAC, "host_dev_name": guestTap}
 	if rl := rateLimiter(int64(cfg.IngressMbit)*125000, 0); rl != nil {
@@ -123,12 +145,20 @@ func (c *fcClient) boot(ctx context.Context, v VM, bootArgs string, trackDirty b
 		body any
 	}{
 		{"/boot-source", map[string]string{"kernel_image_path": kernFile, "boot_args": bootArgs}},
-		{"/drives/rootfs", drive},
 		{"/machine-config", map[string]any{"vcpu_count": v.VCPU, "mem_size_mib": v.MemMiB, "smt": false, "track_dirty_pages": trackDirty}},
 		{"/network-interfaces/eth0", nic},
 		{"/vsock", map[string]any{"guest_cid": 3, "uds_path": vsockUDS}},
-		{"/actions", map[string]string{"action_type": "InstanceStart"}},
 	}
+	if cfg.Balloon {
+		steps = append(steps, struct {
+			path string
+			body any
+		}{"/balloon", map[string]any{"amount_mib": 0, "deflate_on_oom": true, "free_page_reporting": true}})
+	}
+	steps = append(steps, struct {
+		path string
+		body any
+	}{"/actions", map[string]string{"action_type": "InstanceStart"}})
 	for _, s := range steps {
 		if err := c.call(ctx, "PUT", s.path, s.body); err != nil {
 			return err
@@ -167,7 +197,15 @@ func (p realProcs) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 		for _, n := range []string{"dev", "run", exe, exe + ".pid"} {
 			os.RemoveAll(filepath.Join(root, n))
 		}
-		cmd = exec.Command(p.cfg.Jailer, jailerArgs(p.cfg, v, uid, gid, vmDir)...)
+		argv := append([]string{p.cfg.Jailer}, jailerArgs(p.cfg, v, uid, gid, vmDir)...)
+		if p.cfg.ksmFor(v.Team) {
+			self, err := os.Executable()
+			if err != nil {
+				return 0, nil, err
+			}
+			argv = ksmArgv(self, argv)
+		}
+		cmd = exec.Command(argv[0], argv[1:]...)
 	} else {
 		// Dev/test mode: one shared uid, no chroot/cgroup; still in the VM's netns.
 		args := []string{"--net=" + netnsPath(v.Index)}
@@ -241,6 +279,9 @@ func jailerArgs(c Config, v VM, uid, gid int, vmDir string) []string {
 			"--cgroup", fmt.Sprintf("memory.max=%d", high+int64(c.VMPageCacheMiB)<<20),
 			"--cgroup", fmt.Sprintf("cpu.max=%d 100000", (v.VCPU+1)*100000), // vCPUs + 1 for the VMM threads
 			"--cgroup", "pids.max=256")
+		if c.swapControl {
+			args = append(args, "--cgroup", "memory.swap.max=0") // mincore must see every guest page
+		}
 	}
 	args = append(args, c.JailerArgs...)
 	return append(args, "--", "--api-sock", "/"+apiSock)

@@ -411,6 +411,23 @@ def take_reseed(req):
 
 def op_sync(req, send):
     os.sync()  # flushes every mounted filesystem; boatd calls this before pause
+    if req.get("drop_caches") is True:  # clean page cache: free pages stay out of a snapshot
+        try:
+            with open("/proc/sys/vm/drop_caches", "w") as f:
+                f.write("1")
+        except OSError as e:
+            log("drop_caches: %s" % e)
+    send({"ok": True})
+
+
+def op_set_clock(req, send):
+    ns = req.get("unix_ns")
+    if type(ns) is not int or ns <= 0:
+        raise OpError("unix_ns must be a positive integer")
+    try:
+        time.clock_settime_ns(time.CLOCK_REALTIME, ns)
+    except OSError as e:
+        raise OpError("set_clock: %s" % e)
     send({"ok": True})
 
 
@@ -674,7 +691,8 @@ OPS = {"cmd_start": op_cmd_start, "cmd_list": boat_ops.op_cmd_list,
        "file_delete": boat_ops.op_file_delete, "file_move": boat_ops.op_file_move,
        "file_search": boat_ops.op_file_search, "health": op_health, "exec": op_exec, "put_file": op_put_file,
        "get_file": boat_ops.op_get_file, "set_identity": op_set_identity, "set_env": op_set_env,
-       "desktop": op_desktop, "shutdown": op_shutdown, "reseed": op_reseed, "sync": op_sync}
+       "desktop": op_desktop, "shutdown": op_shutdown, "reseed": op_reseed, "sync": op_sync,
+       "set_clock": op_set_clock}
 
 
 def handle_conn(conn):

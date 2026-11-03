@@ -93,6 +93,7 @@ type Snapshot struct {
 	MemMiB    int       `json:"mem_mib"`
 	DiskGiB   int       `json:"disk_gib"`
 	HasMem    bool      `json:"has_mem"`
+	Unsynced  bool      `json:"unsynced,omitempty"` // memory not fsynced yet: lost in a host crash
 	CreatedAt time.Time `json:"created_at"`
 }
 

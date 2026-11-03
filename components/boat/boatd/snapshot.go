@@ -51,6 +51,7 @@ func (m *Manager) takeSnapshot(ctx context.Context, v VM) (VM, error) {
 		err = fc.snapshot(ctx, "Full", snapState, memNew)
 	}
 	t3 := time.Now()
+	written := allocatedBytes(filepath.Join(root, snapDiff)) + allocatedBytes(filepath.Join(root, memNew))
 	if err == nil && diff {
 		err = m.mergeDiff(v, filepath.Join(root, snapDiff), filepath.Join(root, memNew))
 	}
@@ -65,8 +66,8 @@ func (m *Manager) takeSnapshot(ctx context.Context, v VM) (VM, error) {
 		v, _ = m.update(v.ID, "", func(x *VM) { x.DiffOK = false })
 		return v, err
 	}
-	log.Printf("%s: snapshot (%s) sync=%dms pause=%dms write=%dms merge=%dms", v.ID, map[bool]string{true: "diff", false: "full"}[diff],
-		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), time.Since(t3).Milliseconds())
+	log.Printf("%s: snapshot (%s) sync=%dms pause=%dms write=%dms merge=%dms written=%dMiB", v.ID, map[bool]string{true: "diff", false: "full"}[diff],
+		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), time.Since(t3).Milliseconds(), written>>20)
 	return m.update(v.ID, "", func(x *VM) { x.DiffOK = m.cfg.DiffSnapshots })
 }
 
@@ -152,6 +153,14 @@ func (m *Manager) syncSnapshot(id string) {
 	m.update(id, "", func(x *VM) { x.SnapSynced = x.HasSnapshot })
 }
 
+func allocatedBytes(path string) int64 {
+	var st syscall.Stat_t
+	if syscall.Stat(path, &st) != nil {
+		return 0
+	}
+	return int64(st.Blocks) * 512
+}
+
 func fsyncFile(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -159,6 +168,28 @@ func fsyncFile(path string) error {
 	}
 	defer f.Close()
 	return f.Sync()
+}
+
+// syncSaved makes a saved snapshot's memory durable behind the API call: until
+// snap.json says so, reconcile treats it as disk-only after a host crash.
+func (m *Manager) syncSaved(s Snapshot) {
+	dir := m.snapDir(s.ID)
+	for _, f := range []string{memFile, vmstate} {
+		if err := fsyncFile(filepath.Join(dir, f)); err != nil {
+			return // deleted meanwhile
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.snaps[s.ID]; !ok {
+		return
+	}
+	s.Unsynced = false
+	if err := writeJSONAtomic(filepath.Join(dir, "snap.json"), s, 0o600); err != nil {
+		log.Printf("%s: %v", s.ID, err)
+		return
+	}
+	m.snaps[s.ID] = s
 }
 
 // guestSync flushes the guest's page cache to its disk before a pause, so the
@@ -171,7 +202,7 @@ func (m *Manager) guestSync(ctx context.Context, v VM) {
 	defer cancel()
 	sock := filepath.Join(m.root(v.ID), vsockUDS)
 	var ae *agentErr
-	if _, err := agentCall(c, sock, map[string]string{"op": "sync"}); err == nil || !errors.As(err, &ae) {
+	if _, err := agentCall(c, sock, map[string]any{"op": "sync", "drop_caches": m.cfg.SnapshotDropCaches}); err == nil || !errors.As(err, &ae) {
 		return
 	}
 	a, err := dialAgent(c, sock) // older agents: no "sync" op
@@ -269,12 +300,8 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 		return Snapshot{}, err
 	}
 	dir := m.snapDir(s.ID)
-	if s.HasMem, err = m.freeze(ctx, v, dir); err == nil && s.HasMem {
-		// A saved snapshot must survive a host crash (the VM is already resumed).
-		if err = fsyncFile(filepath.Join(dir, memFile)); err == nil {
-			err = fsyncFile(filepath.Join(dir, vmstate))
-		}
-	}
+	s.HasMem, err = m.freeze(ctx, v, dir)
+	s.Unsynced = s.HasMem
 	if err == nil {
 		err = writeJSONAtomic(filepath.Join(dir, "snap.json"), s, 0o600)
 	}
@@ -285,6 +312,9 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 	m.mu.Lock()
 	m.snaps[s.ID] = s
 	m.mu.Unlock()
+	if s.HasMem {
+		go m.syncSaved(s)
+	}
 	m.ev.publish(Event{Type: "snapshot.created", VMID: v.ID, SnapID: s.ID, Team: v.Team})
 	return s, nil
 }

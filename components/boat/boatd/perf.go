@@ -1,0 +1,343 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+	"unsafe"
+)
+
+// ---- btrfs NOCOW VM disks ----
+//
+// CoW turns random guest writes into one extent each (about 450k after fio's
+// 15 s randwrite), and `cp --reflink` is O(extents): 4.5 s with the source VM
+// paused (run 41573512017). NOCOW overwrites in place, so extents stay large.
+// A reflink needs both files to agree on the flag, and it only sticks on an
+// empty file, so the image is converted once and cp() carries the flag along.
+
+const (
+	fsIocGetFlags = 0x80086601
+	fsIocSetFlags = 0x40086602
+	fsNoCowFlag   = 0x00800000
+)
+
+func fsFlags(f *os.File) (int32, error) {
+	var v int32
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), fsIocGetFlags, uintptr(unsafe.Pointer(&v))); e != 0 {
+		return 0, e
+	}
+	return v, nil
+}
+
+func isNoCow(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	v, err := fsFlags(f)
+	return err == nil && v&fsNoCowFlag != 0
+}
+
+// createNoCow makes an empty NOCOW file at path. False where the filesystem has
+// no such flag (ext4, tmpfs, APFS): the caller then keeps plain copies.
+func createNoCow(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	v, err := fsFlags(f)
+	if err != nil {
+		return false
+	}
+	v |= fsNoCowFlag
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), fsIocSetFlags, uintptr(unsafe.Pointer(&v))); e != 0 {
+		return false
+	}
+	v, err = fsFlags(f)
+	return err == nil && v&fsNoCowFlag != 0
+}
+
+// convertImages rewrites each image's rootfs as a NOCOW file, once per image.
+// Failure keeps the CoW image: copies of it stay CoW and still work.
+func (m *Manager) convertImages() {
+	dirs, _ := filepath.Glob(filepath.Join(m.cfg.StateDir, "images", "*", diskFile))
+	for _, disk := range dirs {
+		if isNoCow(disk) {
+			continue
+		}
+		tmp := disk + ".nocow"
+		if !createNoCow(tmp) {
+			os.Remove(tmp)
+			log.Printf("images: %s stays CoW: no NOCOW on this filesystem", disk)
+			return
+		}
+		t0 := time.Now()
+		st, err := os.Stat(disk)
+		if err == nil {
+			err = m.run("", "cp", "--reflink=never", "--sparse=always", disk, tmp)
+		}
+		if err == nil {
+			err = os.Chmod(tmp, st.Mode().Perm())
+		}
+		if err == nil {
+			err = os.Rename(tmp, disk)
+		}
+		if err != nil {
+			os.Remove(tmp)
+			log.Printf("images: %s stays CoW: %v", disk, err)
+			continue
+		}
+		log.Printf("images: %s converted to NOCOW in %dms", disk, time.Since(t0).Milliseconds())
+	}
+}
+
+// ---- memory density ----
+
+// meminfoMiB reads one /proc/meminfo field; 0 where unavailable.
+func meminfoMiB(key string) int {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(l); len(f) >= 2 && f[0] == key+":" {
+			kb, _ := strconv.Atoi(f[1])
+			return kb / 1024
+		}
+	}
+	return 0
+}
+
+func hostMemMiB() int { return meminfoMiB("MemTotal") }
+
+// realMemCheck is the overcommit half of host admission: committed RAM is capped
+// by memOvercommit, and a new VM also needs real free memory for its share of a
+// fully used host (RAM / overcommit), on top of the reserve. At 1.0 RAM is fully
+// reserved already, so there is nothing to add.
+// ponytail: VMs still booting are not yet in MemAvailable; the committed cap bounds
+// that burst. Count "creating" VMs here if bursts ever trip the host OOM killer.
+func (m *Manager) realMemCheck(s Size) error {
+	if m.cfg.MemOvercommit <= 1 || m.memAvail == nil {
+		return nil
+	}
+	avail := m.memAvail()
+	if avail == 0 {
+		return nil // unknown (non-Linux)
+	}
+	need := m.cfg.HostReserveMiB + int(float64(s.MemMiB)/m.cfg.MemOvercommit)
+	if avail < need {
+		return errf(http.StatusServiceUnavailable, "host capacity: %d MiB really free, %d MiB needed", avail, need)
+	}
+	return nil
+}
+
+// memoryPressure inflates balloons when the host runs short, so guests give back
+// page cache before the host OOM killer has to pick a VM. Each tick asks for a
+// further balloonStepPct of RAM, and lets them deflate once memory is back.
+// deflate_on_oom keeps an inflated balloon from killing guest processes.
+func (m *Manager) memoryPressure(ctx context.Context) {
+	if !m.cfg.Balloon || m.memAvail == nil {
+		return
+	}
+	avail := m.memAvail()
+	if avail == 0 {
+		return
+	}
+	low := avail < m.cfg.HostReserveMiB
+	if !low && (!m.ballooned || avail < 2*m.cfg.HostReserveMiB) {
+		return // hysteresis: hold the balloons until there is twice the reserve
+	}
+	m.ballooned = low
+	m.balloonPct = min(balloonMaxPct, m.balloonPct+balloonStepPct)
+	if !low {
+		m.balloonPct = 0
+	}
+	log.Printf("memory: %d MiB available, reserve %d MiB: balloons at %d%%", avail, m.cfg.HostReserveMiB, m.balloonPct)
+	var wg sync.WaitGroup
+	for _, v := range m.list("") {
+		if v.State == Running {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				err := newFC(filepath.Join(m.root(v.ID), apiSock)).call(ctx, "PATCH", "/balloon",
+					map[string]int{"amount_mib": v.MemMiB * m.balloonPct / 100})
+				if err != nil {
+					log.Printf("%s: balloon: %v", v.ID, err) // VM restored from a snapshot without one
+				}
+			}()
+		}
+	}
+	wg.Wait()
+}
+
+const (
+	balloonStepPct = 10
+	balloonMaxPct  = 50
+	pressureEvery  = 5 // log-rotation ticks (seconds) between memoryPressure checks
+)
+
+// ksmExecArg re-executes boatd as the launcher of a VM whose memory may merge:
+// PR_SET_MEMORY_MERGE survives fork and exec, and Firecracker has no such option.
+const ksmExecArg = "-ksm-exec"
+
+// ksmExec never returns on success. Without kernel support (< 6.4) the VM runs unmerged.
+func ksmExec(argv []string) error {
+	if e := setMemoryMerge(); e != nil {
+		log.Printf("ksm: prctl: %v (host kernel < 6.4?)", e)
+	}
+	return syscall.Exec(argv[0], argv, os.Environ())
+}
+
+// ksmFor: is this team's memory mergeable? Merging leaks across its scope, so
+// the scope is one team, or "*" on a host with a single trust domain.
+func (c Config) ksmFor(team string) bool {
+	return c.KSMTeam != "" && (c.KSMTeam == "*" || c.KSMTeam == team)
+}
+
+func (c Config) enableKSM() {
+	if c.KSMTeam == "" {
+		return
+	}
+	for f, v := range map[string]string{"pages_to_scan": "1000", "run": "1"} {
+		if err := os.WriteFile("/sys/kernel/mm/ksm/"+f, []byte(v), 0); err != nil {
+			log.Printf("ksm: %s: %v", f, err)
+		}
+	}
+}
+
+// ---- warm templates (warmPool) ----
+//
+// A template is one booted, settled VM of an image + size, saved as a memory
+// snapshot. A create is then a restore: reflinks, ~1 s of guest init, and no CPU
+// for a boot (10 cold boots on 4 host CPUs took 28 s). It holds no RAM while
+// nobody creates, unlike a pool of running VMs, which is what density needs.
+// It never saw a tenant, and every create gets fresh identity entropy and VMGenID.
+
+const warmTeam = "_warm"
+
+// warmStamp identifies what a template was built from.
+func (m *Manager) warmStamp(image string) string {
+	s := ""
+	for _, f := range []string{filepath.Join(m.imageDir(image), diskFile), filepath.Join(m.imageDir(image), kernFile), m.cfg.Firecracker} {
+		if st, err := os.Stat(f); err == nil {
+			s += fmt.Sprintf("%d-%d;", st.Size(), st.ModTime().UnixNano())
+		}
+	}
+	return s
+}
+
+func (m *Manager) warmDir(image, size string) string {
+	return filepath.Join(m.cfg.StateDir, "warm", image+"@"+size)
+}
+
+// warmTemplate returns the usable template dir for a create, or "".
+func (m *Manager) warmTemplate(image, size string) string {
+	if !m.cfg.WarmPool {
+		return ""
+	}
+	d := m.warmDir(image, size)
+	var meta struct {
+		Stamp string `json:"stamp"`
+	}
+	if readJSON(filepath.Join(d, "warm.json"), &meta) != nil || meta.Stamp != m.warmStamp(image) {
+		return ""
+	}
+	return d
+}
+
+// ensureWarm builds a missing template in the background, one per key at a time.
+func (m *Manager) ensureWarm(ctx context.Context, image, size string) {
+	if !m.cfg.WarmPool || m.warmTemplate(image, size) != "" {
+		return
+	}
+	key := image + "@" + size
+	m.mu.Lock()
+	busy := m.warming[key]
+	m.warming[key] = true
+	m.mu.Unlock()
+	if busy {
+		return
+	}
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			delete(m.warming, key)
+			m.mu.Unlock()
+		}()
+		t0 := time.Now()
+		if err := m.buildWarm(ctx, image, size); err != nil {
+			log.Printf("warm %s: %v", key, err)
+			return
+		}
+		log.Printf("warm %s: built in %dms", key, time.Since(t0).Milliseconds())
+	}()
+}
+
+func (m *Manager) buildWarm(ctx context.Context, image, size string) error {
+	v, err := m.createFrom(ctx, CreateReq{Team: warmTeam, Image: image, Size: size}, "")
+	if err != nil {
+		return err
+	}
+	defer m.Delete(context.WithoutCancel(ctx), v.ID)
+	sock := filepath.Join(m.root(v.ID), vsockUDS)
+	// Settled guest, no page cache, and its free pages reported: a small memory file.
+	a, err := dialAgent(ctx, sock)
+	if err != nil {
+		return err
+	}
+	if err := a.send(map[string]any{"op": "exec", "argv": []string{"systemctl", "is-system-running", "--wait"}, "user": "root", "timeout_s": 30}); err == nil {
+		for {
+			if _, r, err := a.recv(); err != nil || r.final() {
+				break
+			}
+		}
+	}
+	a.Close()
+	if _, err := agentCall(ctx, sock, map[string]any{"op": "sync", "drop_caches": true}); err != nil {
+		log.Printf("warm: sync: %v", err)
+	}
+	select { // the kernel reports free pages about 2 s after they are freed
+	case <-time.After(m.warmSettle):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	unlock := m.lock(v.ID)
+	defer unlock()
+	v, err = m.get(v.ID)
+	if err != nil {
+		return err
+	}
+	dst := m.warmDir(image, size)
+	tmp := dst + ".tmp"
+	os.RemoveAll(tmp)
+	withMem, err := m.freeze(ctx, v, tmp)
+	if err == nil && !withMem {
+		err = fmt.Errorf("no memory snapshot")
+	}
+	if err == nil {
+		err = writeJSONAtomic(filepath.Join(tmp, "warm.json"), map[string]string{"stamp": m.warmStamp(image)}, 0o600)
+	}
+	if err == nil {
+		os.RemoveAll(dst)
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		os.RemoveAll(tmp)
+	}
+	return err
+}
+
+// ksmArgv wraps a launch in the prctl re-exec.
+func ksmArgv(self string, argv []string) []string {
+	return append([]string{self, ksmExecArg, "--"}, argv...)
+}
