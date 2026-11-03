@@ -9,6 +9,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import boatbench  # noqa: E402
+import drivers  # noqa: E402
 import report  # noqa: E402
 import workloads as W  # noqa: E402
 
@@ -97,6 +98,71 @@ class Render(unittest.TestCase):
         md = report.render([result("pandaos", [[20]], [1])], {"pandaos": {"usd_per_hour": 0.036, "source": "s"}})
         self.assertIn("USD per 1000 Node loop runs", md)
         self.assertIn("0.000500", md)
+
+
+class Normalization(unittest.TestCase):
+    def run_render(self, cpu="AMD EPYC 7763 64-Core Processor x4"):
+        host = result("host", [[12.0]], [0.0])
+        host["client"]["cpu_model"] = cpu
+        host["repeats"][0]["metrics"]["rand_read_iops"] = 100000
+        vm = result("pandaos", [[10.8]], [3.0])
+        vm["repeats"][0]["metrics"]["rand_read_iops"] = 40000
+        return report.render([host, vm], None, report.load_published())
+
+    def test_host_vs_vm_ratio_and_projection_stay_labelled(self):
+        md = self.run_render()
+        self.assertIn("Runner host vs PandaOS VM (MEASURED", md)
+        self.assertIn("| 0.900 |", md)  # node 10.8 / 12
+        self.assertIn("| 0.400 |", md)  # rand read 40k / 100k
+        self.assertIn("(NOT A MEASUREMENT)", md)
+        self.assertIn("| 24.9 |", md)  # 27.67 x 0.9
+        self.assertIn("| 25.9 |", md)  # 28.8 x 0.9
+        self.assertIn("| 30.2 |", md)  # 12 x 28.8/10.3 x 0.9
+        self.assertIn("| 20.3 |", md)  # 12 x 4727/2518 x 0.9
+        self.assertIn("**20.3-30.2 runs/s**", md)
+        measured = md.split("## Measured results")[1].split("## Published")[0]
+        self.assertNotIn("host", measured.lower().replace("harness", ""))  # host is not a side
+
+    def test_cpu_ratios_need_the_runner_cpu(self):
+        md = self.run_render(cpu="Intel Xeon x4")
+        self.assertNotIn("x CPU ratio (", md)
+        self.assertIn("**24.9-25.9 runs/s**", md)
+
+    def test_no_host_result_no_projection(self):
+        md = report.render([result("pandaos", [[10]], [1])], None, report.load_published())
+        self.assertNotIn("PROJECTION", md)
+        self.assertIn("Ryzen 9 9950X", md)
+
+    def test_published_says_the_vendor_score_is_a_vm(self):
+        pub = report.load_published()
+        self.assertIn("KVM guest", pub["note"])
+        self.assertEqual(pub["rows"][0]["runs_s"], pub["metrics"]["node_runs_s"]["value"])
+
+
+class HostDriver(unittest.TestCase):
+    def test_runs_scripts_locally_with_chosen_home(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["BOATBENCH_HOST_DIR"] = d
+            try:
+                h = drivers.Host()
+            finally:
+                del os.environ["BOATBENCH_HOST_DIR"]
+            rc, out, _ = h.exec(h.create("x"), 'echo "$HOME"; exit 3')
+            self.assertEqual((rc, out.strip()), (3, d))
+            self.assertEqual(h.run_true("host"), 0)
+
+    def test_repeat_on_host_measures_a_and_d(self):
+        class Fake(drivers.Host):
+            def exec(self, vm, cmd, timeout=600):
+                return FakeDriver().exec(vm, cmd, timeout)
+        rec = boatbench.Repeat(Fake(), "abc", 0, set("ad")).run()
+        self.assertEqual(rec["errors"], {})
+        self.assertEqual(rec["metrics"]["node_runs_s"], [21.5] * W.PTS_PASSES)
+        self.assertEqual(rec["metrics"]["rand_read_iops"], 50000)
+
+    def test_host_driver_rejects_vm_only_workloads(self):
+        with self.assertRaises(SystemExit):
+            boatbench.main(["run", "--driver", "host", "--only", "ab"])
 
 
 class Parsing(unittest.TestCase):

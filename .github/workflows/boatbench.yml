@@ -22,6 +22,11 @@ on:
         type: choice
         options: [both, pandaos, boatdev]
         default: both
+      disk_limits:
+        description: "boatd's per-VM disk limits (1000 MB/s, 50k IOPS). off: the VM/host disk ratio then shows overhead, not the cap"
+        type: choice
+        options: [production, "off"]
+        default: production
 
 permissions: {}
 
@@ -101,18 +106,41 @@ jobs:
           lscpu | grep -E 'Model name|^CPU\(s\)|Hypervisor|Virtualization' | tee hw.txt
           free -m | tee -a hw.txt
           curl -fsS https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(colo|loc)=' | tee -a hw.txt
+          echo "BOATBENCH_HOST_DESC=GitHub ubuntu-latest runner: $(lscpu | sed -n 's/^Model name: *//p' | head -1), $(nproc) shared vCPU, $(free -g | awk '/Mem:/{print $2}') GiB, KVM in a cloud VM, region $(curl -fsS https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^colo=//p') (US), boatd disk limits: $DISK_LIMITS" >>"$GITHUB_ENV"
+        env:
+          DISK_LIMITS: ${{ inputs.disk_limits }}
       - name: Stack up (boatd + boat-api from source)
+        env:
+          BENCH_BOATD_JSON: ${{ inputs.disk_limits == 'off' && '"diskMBps":0,"diskIOPS":0,' || '' }}
         run: bench/boatbench/stack.sh up "$OUT"
-      - name: Run boatbench (pandaos)
+      # Workloads a and d alternate between this runner and a fresh VM on it, so slow
+      # phases of a shared runner hit both. fio's host directory is on the btrfs
+      # store that holds the VM disks (stack.sh's STATE).
+      - name: Host vs VM (workloads a, d)
+        env:
+          REPEATS: ${{ inputs.repeats }}
+          ONLY: ${{ inputs.only }}
+          BOATBENCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BOATBENCH_HOST_DIR: /var/lib/boatbench/host-home
+        run: |
+          parts=${ONLY//[!ad]/}
+          [ -n "$parts" ] || { echo "no a or d requested"; exit 0; }
+          set -a; . /mnt/boatbench/env; set +a
+          sudo mkdir -p "$BOATBENCH_HOST_DIR" && sudo chown "$(id -u):$(id -g)" "$BOATBENCH_HOST_DIR"
+          for _ in $(seq "$REPEATS"); do
+            python3 bench/boatbench/boatbench.py run --driver host --repeats 1 --only "$parts" --out results
+            python3 bench/boatbench/boatbench.py run --driver pandaos --repeats 1 --only "$parts" --out results
+          done
+      - name: Run boatbench (pandaos, other workloads)
         env:
           REPEATS: ${{ inputs.repeats }}
           ONLY: ${{ inputs.only }}
           BOATBENCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          rest=${ONLY//[ad]/}
+          [ -n "$rest" ] || { echo "only a and d requested"; exit 0; }
           set -a; . /mnt/boatbench/env; set +a
-          BOATBENCH_HOST_DESC="GitHub ubuntu-latest runner: $(lscpu | sed -n 's/^Model name: *//p' | head -1), $(nproc) shared vCPU, $(free -g | awk '/Mem:/{print $2}') GiB, KVM in a cloud VM, region $(curl -fsS https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^colo=//p') (US)"
-          export BOATBENCH_HOST_DESC
-          python3 bench/boatbench/boatbench.py run --driver pandaos --repeats "$REPEATS" --only "$ONLY" --out results
+          python3 bench/boatbench/boatbench.py run --driver pandaos --repeats "$REPEATS" --only "$rest" --out results
       - name: Stack logs
         if: always()
         run: |

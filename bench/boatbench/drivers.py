@@ -13,6 +13,7 @@ exec-readiness and all workloads live in boatbench.py so they are shared.
 import base64
 import json
 import os
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -196,8 +197,33 @@ class BoatDev:
         self._j("DELETE", f"/saved-snapshots/{ref}")
 
 
+class Host:
+    """No VM: the same scripts on the machine running the harness, to measure
+    VM / host overhead. Only workloads a and d apply: there is no lifecycle.
+    BOATBENCH_HOST_DIR is $HOME for the scripts, so fio can hit the store the VMs use."""
+
+    name, size = "host", "host"
+    PARTS = frozenset("ad")
+
+    def __init__(self):
+        self.env = dict(os.environ, HOME=os.environ.get("BOATBENCH_HOST_DIR", os.path.expanduser("~")))
+
+    def create(self, name):
+        return "host"
+
+    def exec(self, vm, cmd, timeout=600):
+        r = subprocess.run(["bash", "-lc", cmd], env=self.env, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout, r.stderr
+
+    def run_true(self, vm):
+        return 0
+
+    def delete(self, vm):
+        pass
+
+
 def _sh_quote(s):
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
-DRIVERS = {"pandaos": PandaOS, "boatdev": BoatDev}
+DRIVERS = {"pandaos": PandaOS, "boatdev": BoatDev, "host": Host}

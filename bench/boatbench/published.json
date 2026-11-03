@@ -1,21 +1,29 @@
 {
-  "source": "https://boat.dev (benchmark section) -> github.com/AnicetNgrt/hpc-sandbox-benchmarks branch provider/ascii-box, docs/results/2026-08-24-cpu/{README,leaderboard}.md",
-  "measured_on": "2026-08-24",
-  "note": "Vendor-published (boat.dev was formerly Ascii Box; its row is 'Ascii Box (bare metal)'). boat.dev's '1,000 runs in 36 s' is 1000 / 27.67 runs/s. Their run: PTS pts/node-web-tooling-1.0.1 with DynamicRunCount, median of 21 trials on fresh 4 vCPU / 8 GiB machines; the Node version is not stated.",
+  "source": "https://github.com/AnicetNgrt/hpc-sandbox-benchmarks/tree/ed8ec45a1ee0f5058ca99944d9c569d49b2f8e67/docs/results/2026-08-24-cpu (leaderboard.md, README.md, run.json), linked from boat.dev's benchmark section",
+  "measured_on": "2026-08-24 (Ascii Box, Freestyle); the other rows are from the vendor's July CI run",
+  "note": "Vendor-published (boat.dev was formerly Ascii Box; its row is 'Ascii Box (bare metal)'). Despite that label, 27.67 is NOT a bare-metal host score: run.json's observedSpecs for that row report a 4 vCPU / 7.76 GiB KVM guest (virtualization kvm, manufacturer QEMU, Q35, SeaBIOS, detectedIsolation vm) with cpuModel AMD Ryzen 9 9950X, egress OVH Lille. It is a sandbox VM on a dedicated host. The host itself was not measured. boat.dev's '1,000 runs in 36 s' is 1000 / 27.67 runs/s. Their run: PTS pts/node-web-tooling-1.0.1 with DynamicRunCount, median of 21 trials on fresh machines; the Node version is not stated.",
   "metrics": {
     "node_runs_s": {"value": 27.67, "note": "p50 of 21 trials, 95% CI 26.01-28.34; p95 28.72"},
     "rand_read_iops": {"value": 433500, "note": "PTS fio 4KB rand read, O_DIRECT, libaio, 1 job (their fio params, not ours)"},
     "rand_write_iops": {"value": 412500, "note": "PTS fio 4KB rand write, O_DIRECT (their fio params)"},
     "seq_write_mbps": {"value": 5839, "note": "PTS fio 1MB seq write, O_DIRECT (their fio params)"}
   },
-  "others": {
-    "Blaxel": 19.8,
-    "Daytona (VM)": 18.6,
-    "Modal (VM)": 15.07,
-    "Novita": 13.52,
-    "E2B": 11.24,
-    "Freestyle": 9.64,
-    "Modal (gVisor)": 9.56,
-    "Ascii Box on Hetzner CX33": 8.88
+  "rows": [
+    {"provider": "Ascii Box (bare metal), now boat.dev", "runs_s": 27.67, "cpu": "AMD Ryzen 9 9950X 16-Core Processor"},
+    {"provider": "Blaxel", "runs_s": 19.8, "cpu": "AMD EPYC"},
+    {"provider": "Daytona (VM)", "runs_s": 18.6, "cpu": "AMD EPYC"},
+    {"provider": "Modal (VM)", "runs_s": 15.07, "cpu": "AMD EPYC 9654 96-Core Processor"},
+    {"provider": "Novita", "runs_s": 13.52, "cpu": "AMD EPYC"},
+    {"provider": "E2B", "runs_s": 11.24, "cpu": "Intel(R) Xeon(R) Processor @ 2.60GHz"},
+    {"provider": "Freestyle", "runs_s": 9.64, "cpu": "19/01 (no model name reported)"},
+    {"provider": "Modal (gVisor)", "runs_s": 9.56, "cpu": "unknown"},
+    {"provider": "Ascii Box (Hetzner CX33)", "runs_s": 8.88, "cpu": "AMD EPYC-Rome Processor"}
+  ],
+  "cpu_scaling": {
+    "runner_cpu": "EPYC 7763",
+    "reference_cpu": "AMD Ryzen 9 9950X",
+    "same_benchmark": {"runner": 10.3, "reference": 28.8, "source": "https://openbenchmarking.org/test/pts/node-web-tooling, per-CPU runs/s averages, retrieved 2026-11-03: 'AMD EPYC 7763 64-Core' 10.3 +/- 0.4 (4 public results), 'AMD Ryzen 9 9950X 16-Core' 28.8 +/- 2.6 (30 public results)"},
+    "passmark_single_thread": {"runner": 2518, "reference": 4727, "source": "https://www.cpubenchmark.net/compare/4207vs6211/AMD-EPYC-7763-vs-AMD-Ryzen-9-9950X, retrieved 2026-11-03"},
+    "limits": "the vendor's repo has no EPYC 7763 row, so the CPU ratios come from public data with mixed Node versions, setups and sample sizes (the 7763 row has 4 results). The VM/host ratio was measured on a shared, nested Azure VM and may not transfer to a dedicated host. It says nothing about memory, disk or network hardware."
   }
 }

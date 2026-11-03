@@ -32,8 +32,11 @@ Ascii Box, and its 27.67 is the "Ascii Box (bare metal)" row there. What that re
 - **runs/s** is the benchmark's own "Geometric mean: N runs/s" line. "1,000 runs in 36 s"
   is just 1000 / 27.67. No repository is cloned and no project test suite runs.
 - They ran 21 trials on fresh machines (PTS DynamicRunCount inside each), and the
-  published number is the median. They did not say which Node version they used, or
-  where the bare-metal host is (boat.dev only says its regions are EU).
+  published number is the median. They did not say which Node version they used.
+- **"Bare metal" is the host, not what was measured.** `run.json` reports that row as a
+  4 vCPU / 7.76 GiB KVM guest (QEMU Q35, SeaBIOS, `detectedIsolation: vm`) on an
+  **AMD Ryzen 9 9950X**, egress OVH Lille. So 27.67 is a sandbox VM on a dedicated
+  desktop-class CPU. boat.dev's own Hetzner row, on a shared EPYC-Rome, scores 8.88.
 - The Vercel Sandbox row is on boat.dev's page but not in the linked leaderboard.
 
 ### Workload (a), the closest reproducible version
@@ -67,6 +70,20 @@ either side. Guest scripts (`workloads.py`) are the same bytes, run with `bash -
 each provider's default user. Lifecycle times include the API round trip from the
 harness host, so run `run-on-server.sh` on the server, or close to it, for a fair
 WAN picture.
+
+## Host vs VM, and the projection
+
+CI's `pandaos` job alternates workloads a and d between the runner itself
+(`--driver host`, same scripts, no VM) and a fresh VM on it. The report prints the VM /
+host ratio as a measurement. fio's host directory is on the same btrfs store as the VM
+disks. Dispatch with `disk_limits: off` to see disk overhead without boatd's production
+caps (1000 MB/s, 50k IOPS per VM).
+
+The report then prints a **projection** of PandaOS on the vendor's CPU, in its own section
+marked NOT A MEASUREMENT. It scales the measured VM / host ratio by the vendor's score, by
+OpenBenchmarking's public averages for this benchmark, and by the CPU ratio from those
+averages or from PassMark single-thread (`published.json`, `cpu_scaling`). The vendor's
+repo has no EPYC 7763 row. Only a run on comparable hardware can replace this estimate.
 
 ## Cost
 

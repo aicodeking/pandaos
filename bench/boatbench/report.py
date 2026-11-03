@@ -48,6 +48,9 @@ CAVEATS = [
     "no clear winner.",
 ]
 
+# Measured both on the runner itself and in a VM on it.
+HOST_VM_METRICS = ("node_runs_s", "seq_write_mbps", "seq_read_mbps", "rand_write_iops", "rand_read_iops")
+
 
 def percentile(values, p):
     """Linear-interpolated percentile (p in 0..100), like numpy's default."""
@@ -197,7 +200,64 @@ def side_table(res):
     return lines
 
 
+def host_vs_vm(host, vm):
+    """Markdown table and the node VM / host ratio (None if not measured on both)."""
+    labels = {k: (label, unit) for k, label, unit, _ in METRICS}
+    lines = ["| Metric | Unit | Runner host, no VM (measured) | PandaOS VM (measured) | VM / host |", "|---|---|---|---|---|"]
+    node = None
+    for key in HOST_VM_METRICS:
+        h, v = summarize(samples(host, key)), summarize(samples(vm, key))
+        if not h or not v:
+            continue
+        r = v["median"] / h["median"] if h["median"] else None
+        node = r if key == "node_runs_s" else node
+        lines.append(f"| {labels[key][0]} | {labels[key][1]} | {cell(h)} | {cell(v)} | {fmt(r)} |")
+    return lines, node
+
+
+def projections(host_node, overhead, runner_cpu, published):
+    """(method, runs/s) estimates of PandaOS on the vendor's CPU. Each one is an ESTIMATE."""
+    sc = published["cpu_scaling"]
+    ob, pm = sc["same_benchmark"], sc["passmark_single_thread"]
+    vendor = published["metrics"]["node_runs_s"]["value"]
+    rows = [(f"vendor's VM score x our VM/host: {vendor} x {overhead:.3f}. A floor if the vendor's VM also "
+             "has overhead, because its host then scores above 27.67", vendor * overhead),
+            (f"public host average x our VM/host: {ob['reference']} x {overhead:.3f}", ob["reference"] * overhead)]
+    if sc["runner_cpu"] in (runner_cpu or ""):  # the CPU ratios only hold for this runner CPU
+        for name, s in (("same benchmark, public averages", ob), ("PassMark single-thread", pm)):
+            ratio_ = s["reference"] / s["runner"]
+            rows.append((f"our host x CPU ratio ({name}) x our VM/host: {host_node:.2f} x {ratio_:.2f} x {overhead:.3f}",
+                         host_node * ratio_ * overhead))
+    return rows
+
+
+def normalization(host_results, vm, published):
+    host = merged(host_results)
+    desc = host.get("host", {}).get("desc", "-")
+    table, overhead = host_vs_vm(host, vm)
+    out = ["", "## Runner host vs PandaOS VM (MEASURED, same runner)", "",
+           f"Identical scripts. Host: {desc}. Disk: both sides use the same btrfs loop store, and the VM adds "
+           "its guest ext4, virtio and any boatd drive limit named above.", ""] + table
+    host_node = summarize(samples(host, "node_runs_s"))
+    if not published or not overhead or not host_node:
+        return out
+    sc = published["cpu_scaling"]
+    rows = projections(host_node["median"], overhead, host.get("client", {}).get("cpu_model"), published)
+    vals = [v for _, v in rows]
+    out += ["", f"## PROJECTION of PandaOS on {sc['reference_cpu']} (NOT A MEASUREMENT)", "",
+            "**Nobody ran PandaOS on this CPU. These numbers are arithmetic, not benchmark results.** "
+            f"Estimated Node loop range: **{min(vals):.1f}-{max(vals):.1f} runs/s**.", "",
+            "| Method | Projected runs/s (not measured) |", "|---|---|"]
+    out += [f"| {m} | {v:.1f} |" for m, v in rows]
+    out += ["", "Limits: " + sc["limits"], "",
+            f"Same-benchmark source: {sc['same_benchmark']['source']}. "
+            f"PassMark source: {sc['passmark_single_thread']['source']}."]
+    return out
+
+
 def render(results, prices=None, published=None):
+    host_results = [r for r in results if r["driver"] == "host"]
+    results = [r for r in results if r["driver"] != "host"]
     res = {s: merged(rs) for s, rs in by_side(results).items()}
     summ = {s: {k: summarize(samples(r, k)) for k, *_ in METRICS} for s, r in res.items()}
     out = ["# boatbench: PandaOS boat vs boat.dev", "",
@@ -226,9 +286,13 @@ def render(results, prices=None, published=None):
             pan, bd = summ.get("pandaos", {}).get(key), summ.get("boatdev", {}).get(key)
             out.append(f"| {key} ({units.get(key, '')}) | {fmt(p['value'])} | {cell(pan)} | {cell(bd)} | "
                        f"{p.get('note', '')} |")
-        if published.get("others"):
-            out += ["", "Other providers on the same published leaderboard (runs/s, vendor-measured): " +
-                    ", ".join(f"{k} {v}" for k, v in published["others"].items()) + "."]
+        if published.get("rows"):
+            out += ["", "The vendor's whole table (VENDOR-MEASURED, not by this harness). The CPU is what each "
+                    "guest reported in the vendor's run.json, so these rows differ in hardware as well as software.", "",
+                    "| Provider | runs/s | CPU the guest reported |", "|---|---|---|"]
+            out += [f"| {r['provider']} | {r['runs_s']} | {r['cpu']} |" for r in published["rows"]]
+    if host_results and "pandaos" in res:
+        out += normalization(host_results, res["pandaos"], published)
     out += ["", "## Cost", ""]
     rows = cost_rows(summ, prices)
     if not rows:

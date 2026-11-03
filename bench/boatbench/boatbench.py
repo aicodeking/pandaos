@@ -2,6 +2,7 @@
 """boatbench: the same workloads on PandaOS boat and on boat.dev.
 
   boatbench.py run --driver pandaos|boatdev [--repeats 5] [--only a,b,c,d,e,f] [--out DIR]
+  boatbench.py run --driver host --only ad [--repeats 5] [--out DIR]   # same scripts, no VM
   boatbench.py report RESULTS.json... [--prices prices.json] [--out report.md]
 
 pandaos needs BOAT_URL + BOAT_KEY; boatdev needs BOATDEV_API_KEY. Each repeat is a
@@ -291,6 +292,8 @@ def main(argv=None):
     a = p.parse_args(argv)
     if a.cmd == "run" and (a.repeats < 1 or not set(a.only.replace(",", "")) <= set(ALL_PARTS)):
         p.error("--repeats must be >= 1 and --only a subset of abcdef")
+    if a.cmd == "run" and a.driver == "host" and not set(a.only.replace(",", "")) <= drivers.Host.PARTS:
+        p.error("--driver host only runs workloads a and d")
     return cmd_run(a) if a.cmd == "run" else cmd_report(a)
 
 

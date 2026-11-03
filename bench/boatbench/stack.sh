@@ -6,6 +6,7 @@
 # a 16 GiB runner.
 #
 #   stack.sh up GUEST_DIR   # GUEST_DIR has vmlinux, rootfs-slim.ext4; writes $WORK/env (BOAT_URL, BOAT_KEY)
+#   BENCH_BOATD_JSON='"diskMBps":0,"diskIOPS":0,' stack.sh up ...   # extra boatd.json keys, trailing comma
 #   stack.sh down
 #
 # ponytail: components/boat/e2e.sh has no "stack only" mode and is outside this
@@ -87,7 +88,7 @@ up() {
   cat >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":"$WORK/dl/jailer","cgroupParent":"boat-bench","reflink":"always",
- "bootTimeoutS":120,"defaultImage":"slim","memOvercommit":${BENCH_MEM_OVERCOMMIT:-8},"cpuOvercommit":${BENCH_CPU_OVERCOMMIT:-12},
+ "bootTimeoutS":120,"defaultImage":"slim",${BENCH_BOATD_JSON:-}"memOvercommit":${BENCH_MEM_OVERCOMMIT:-8},"cpuOvercommit":${BENCH_CPU_OVERCOMMIT:-12},
  "defaultTeam":{"maxVMs":16}}
 JSON
   sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
