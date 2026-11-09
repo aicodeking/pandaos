@@ -5,16 +5,20 @@ Python 3 stdlib only.
 
 ```sh
 python3 bench/boatbench/test_boatbench.py                        # unit tests
+python3 bench/boatbench/test_boatdev.py                          # BoatDev driver vs boat.dev's OpenAPI, offline
 BOAT_URL=... BOAT_KEY=... python3 bench/boatbench/boatbench.py run --driver pandaos
 BOATDEV_API_KEY=boat_... python3 bench/boatbench/boatbench.py run --driver boatdev
 python3 bench/boatbench/boatbench.py report boatbench-results/results-*.json --out report.md
+python3 bench/boatbench/boatbench.py presets results-pandaos-*.json   # PandaOS per boatd preset
 bench/boatbench/run-on-server.sh                                 # owner's server, both sides + report
 ```
 
 CI: `.github/workflows/boatbench.yml` (workflow_dispatch). The `pandaos` job builds
 boatd + boat-api from source on a GitHub KVM runner (`stack.sh`). The `boatdev` job
 runs only if the `BOATDEV_API_KEY` secret exists, and prints SKIPPED otherwise.
-The `report` job writes `report.md` into the job summary and an artifact.
+It runs one `pandaos` job per boatd preset (`presets` input, default all three). The
+`report` job writes `report-<preset>.md` per preset and `presets.md` (the presets side
+by side) into the job summary and an artifact.
 
 ## What boat.dev published, and what we reproduce
 
@@ -71,10 +75,25 @@ each provider's default user. Lifecycle times include the API round trip from th
 harness host, so run `run-on-server.sh` on the server, or close to it, for a fair
 WAN picture.
 
-## boatd options and the warm pool
+## boatd presets, options and the warm pool
+
+`presets.json` holds three presets, and `BOATBENCH_PRESET` (the workflow's `presets`
+input) picks one per job:
+
+- `trusted`: boatd's defaults.
+- `trusted-warm`: `warmPool` on.
+- `untrusted`: `components/boat/module.nix` `untrustedSettings`, key by key (the unit test
+  compares them): `Sync` disk engine, `io.max` 500 MB/s and 20,000 IOPS, 1 Gbit/s
+  egress and ingress, `storageOvercommit` 1, `hostDirtyRatio` 20, no `warmPool` or KSM.
+  `stack.sh` also turns SMT off if the runner allows it, sets `kernel.io_uring_disabled=2`
+  and stops KSM, as the module's kernel parameters do, and makes the store a sparse 1 TiB
+  file so `storageOvercommit` 1 admits the bench's VMs. **`memOvercommit` 1 is not
+  applied**: on a 16 GiB runner it admits one 8 GiB VM. It sets density, which
+  `docs/cost.md` models; it does not change one VM's speed while the host has free RAM.
 
 The `boatd_options` input (or `BOATBENCH_BOATD_OPTIONS` for `stack.sh`) is JSON merged over
-the bench `boatd.json`, and the report prints it. With `{"warmPool":true}`, `stack.sh`
+the bench `boatd.json` and the preset, and the report prints the effective `boatd.json`
+and the Firecracker drive `cache_type`. With `{"warmPool":true}`, `stack.sh`
 waits for the template before measuring, so a create cannot boot cold and pass as warm.
 `warmPool` is off by default. VMs from one template share boot-time randomness, including
 the ASLR offsets of running processes, across tenants, and every warm report says so.
@@ -93,15 +112,59 @@ OpenBenchmarking's public averages for this benchmark, and by the CPU ratio from
 averages or from PassMark single-thread (`published.json`, `cpu_scaling`). The vendor's
 repo has no EPYC 7763 row. Only a run on comparable hardware can replace this estimate.
 
+## Latest measured run
+
+[42677142859](https://github.com/aicodeking/pandaos/actions/runs/42677142859) (commit
+`7358286`, 2026-11-09): workloads a–f, 5 repeats, presets `trusted`, `trusted-warm`
+and `untrusted`. `boatdev` was SKIPPED (no key). The tables, caveats and verdict are in
+[`docs/cost.md`](../../docs/cost.md#measured-boatbench-on-a-github-runner). Known gaps
+in that run:
+
+- Node loop VM / host: 0.896 (trusted), 0.847 (trusted-warm), 0.868 (untrusted).
+- GitHub gave `trusted-warm` an Intel Xeon 8370C runner and the other two an EPYC 9V74.
+  Compare `trusted-warm`'s CPU-bound rows only through its VM / host ratio.
+- `untrusted` ran with SMT off (2 CPUs online). Workload (c) failed in every repeat with
+  `503 host_capacity` (24 vCPUs = 2 CPUs × the bench's `cpuOvercommit` 12).
+  `stack.sh` needs a higher `cpuOvercommit` for that preset. This is not fixed yet.
+- All three ran with `cache_type` `Unsafe`, so the write rows are marked †.
+
 ## Cost
 
 `prices.json` belongs to the cost comparison (`docs/cost.md`):
-`{"pandaos": {"usd_per_hour": X, "source": "..."}, "boatdev": {"usd_per_hour": 0.036, "source": "..."}}`.
+`{"pandaos": {"usd_per_hour": X, "cpu": "...", "source": "..."}, "boatdev": {...}}`.
 Cost per 1000 Node loop runs = usd_per_hour / 3600 × 1000 / runs_s. Cost per cold
 npm ci = usd_per_hour / 3600 × seconds. If the file is missing, the report shows
-runs/s only.
+runs/s only. A row whose price's CPU (`cpu`) is not the CPU the VMs reported is marked
+**MIXED CPUs**: in CI that is an AX102 (Ryzen 9 7950X3D) price times a runner (EPYC)
+speed, which is no machine's cost. The only CPU-consistent figure is boat.dev's price
+with boat.dev's own published speed.
+
+The VM counts behind the prices come from `admission.py`, which reads boatd's admission
+constants (`hostReserveMiB`, `vmOverheadMiB`, overcommits, the `default` size) from
+`components/boat/boatd/config.go`. The unit tests recompute every count in
+`prices.json` from it and fail if `manager.go` stops counting `vmOverheadMiB`.
+
+## The boat.dev driver
+
+`drivers.BoatDev` has not run against the live API (no `BOATDEV_API_KEY` secret yet).
+`test_boatdev.py` checks every request it makes against `boatdev-openapi.json`, the
+operations it uses cut from <https://docs.boat.dev/openapi/boat-v1.yaml> (the file
+records the source's sha256 and fetch date; refresh it with
+`boatdev_openapi_extract.py`, which needs PyYAML). Path and method, required headers,
+body fields known to the spec and valid; the responses are fixtures validated against
+the spec's response schemas. That check found two bugs, now fixed: delete needs
+`X-Ascii-Confirm-Delete: <sandbox id>` (without it boat.dev answers 409 and the sandbox
+keeps billing until its TTL), and fork takes no `name` and answers with the new id in
+`id` (its `sandbox` may be null).
+
+A full 5-repeat run starts 70 machines (4 per repeat in b, 10 in c), more than the $20
+plan's 60 starts an hour (12 a minute): use the $100 plan, or fewer repeats.
 
 ## Caveats (also printed in every report)
+
+Firecracker's drive `cache_type` defaults to `Unsafe`: the guest's flushes are not
+passed to the host, so PandaOS write numbers stop at the host page cache. The report
+marks those rows with † whenever the run's cache mode was `Unsafe`.
 
 The GitHub runner is not a dedicated server. It has 4 shared vCPUs, KVM inside a cloud
 VM, and runs in a US region. boat.dev runs in the EU. On the runner, the 10-VM test
