@@ -18,7 +18,8 @@
 # user namespace refuses), so boat-e2e builds `boat-real.guest.driver` and runs
 # it with sudo, with a btrfs filesystem mounted at /mnt/boat-real-data. What it
 # does not prove: it is not a booted kernel of ours (the runner's Ubuntu kernel,
-# boot.isContainer, no bootloader/initrd/udev), the network is nspawn's private
+# boot.isContainer, no bootloader/initrd/udev:
+# NetworkManager's udev rule for veths is restated in the config), the network is nspawn's private
 # one (no uplink, so no guest egress), /var/lib/boat is a bind mount rather than
 # the PANDADATA disk, zram is off, and there is no `switch` (nspawn containers
 # in NixOS tests refuse specialisations; the VM test covers it).
@@ -184,6 +185,14 @@ let
         # nspawn bind-mounts the host's btrfs there; no PANDADATA device in a container.
         fileSystems."/var/lib/boat".enable = false;
         zramSwap.enable = lib.mkForce false; # no zram device in a container
+        # On a host, NetworkManager's udev rule (85-nm-unmanaged.rules) leaves veth
+        # devices not named eth* alone, so it never touches boatd's bt* ends. No udev
+        # runs in a container: say the same here, or NM starts DHCP on a VM's bt* and
+        # boatd's restore after a restart fails (run 42632541274).
+        networking.networkmanager.unmanaged = [
+          "driver:veth"
+          "except:interface-name:eth*"
+        ];
         services.boat = {
           boatdPackage = boatd;
           apiPackage = api;
@@ -320,14 +329,14 @@ let
               # boatd snapshots the VMs on stop and resumes them on start.
               def all_running(_last) -> bool:
                   try:
-                      return all(vm(n)["state"] == "running" for n in names)
+                      return all(vm(n)["state"] == "running" and vm(n)["agent_ready"] for n in names)
                   except Exception:  # boat-api or boatd not answering yet
                       return False
 
               retry(all_running, timeout_seconds=600)
               for n in names:
-                  assert run(n, "cat /home/dev/restart") == f"before-restart-{n}", n
                   assert run(n, "cat /proc/sys/kernel/random/boot_id") == boots[n], f"{n} cold-booted"
+                  assert run(n, "cat /home/dev/restart") == f"before-restart-{n}", n
               assert len(fc_pids()) == 3
 
           with subtest("rm leaves nothing behind"):
