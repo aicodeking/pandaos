@@ -128,7 +128,13 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 	}
 	mux.HandleFunc("GET /v1/vms/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if vm := get(w, r); vm != nil {
-			writeJSON(w, 200, vm)
+			f.mu.Lock() // a copy: other handlers change the VM under f.mu while this one writes
+			cp := VM{}
+			for k, v := range vm {
+				cp[k] = v
+			}
+			f.mu.Unlock()
+			writeJSON(w, 200, cp)
 		}
 	})
 	// PATCH like boatd's: rename, ttl_s (deadline now+ttl), extend_s (deadline +extend).
