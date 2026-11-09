@@ -34,6 +34,7 @@ type Config struct {
 	PublicURL        string            // public base URL of this API, for signed snapshot links
 	MaxImportBytes   int64
 	VMDomain         string // port routes are <port>-<vmid>.<VMDomain> (scheme optional, default https)
+	VMAPIURL         string // this API as VMs reach it (BOAT_URL in the guest); empty = PublicURL
 	PortURLTTL       time.Duration
 }
 
@@ -87,6 +88,8 @@ type principal struct {
 	// Operator is the instance operator (set by admin init); only operators
 	// create or delete teams. Still limited by the key's admin scope.
 	Operator bool
+	// VMID: a VM's own token (selftoken.go); it reaches only that VM's routes.
+	VMID string
 }
 
 func (p *principal) has(scope string) bool { return slices.Contains(p.Scopes, scope) }
@@ -110,6 +113,9 @@ func (s *server) authenticate(header string) *principal {
 	tok, ok := strings.CutPrefix(header, "Bearer ")
 	if !ok {
 		return nil
+	}
+	if strings.HasPrefix(tok, selfTokenPrefix) {
+		return s.authenticateSelf(strings.TrimSpace(tok))
 	}
 	id, secret, ok := ParseToken(strings.TrimSpace(tok))
 	if !ok {
@@ -406,6 +412,11 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 		info(r).audit = audit
 		info(r).pattern = pattern
 		p := s.authenticate(r.Header.Get("Authorization"))
+		if p != nil && p.VMID != "" && !selfAllowed(pattern, r, p.VMID) {
+			// Like another team's VM: nothing to see here.
+			writeErr(w, r, http.StatusNotFound, "not_found", "not found")
+			return
+		}
 		if p == nil {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="boat"`)
 			writeErr(w, r, http.StatusUnauthorized, "unauthorized", "missing or invalid API key")

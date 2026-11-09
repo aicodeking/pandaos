@@ -27,6 +27,7 @@ type Keyring struct {
 	aead   cipher.AEAD
 	pepper []byte
 	aiKey  []byte // signs per-VM AI proxy tokens
+	vmKey  []byte // signs per-VM API tokens (selftoken.go)
 }
 
 func derive(master []byte, label string) []byte {
@@ -47,7 +48,8 @@ func NewKeyring(master []byte) (*Keyring, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Keyring{aead: aead, pepper: derive(master, "boat-api key pepper v1"), aiKey: derive(master, "boat-api ai proxy v1")}, nil
+	return &Keyring{aead: aead, pepper: derive(master, "boat-api key pepper v1"), aiKey: derive(master, "boat-api ai proxy v1"),
+		vmKey: derive(master, "boat-api vm token v1")}, nil
 }
 
 // LoadMasterKey reads 32 raw bytes or 64 hex chars. With create, a missing

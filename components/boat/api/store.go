@@ -130,6 +130,8 @@ type State struct {
 	ForeignVMs map[string]bool `json:"foreign_vms"`
 	// RouteGens: per VM, bumped to revoke its port tokens (see SignRoute).
 	RouteGens map[string]int `json:"route_gens"`
+	// VMTokens: per VM, the generation of its own API token (selftoken.go).
+	VMTokens map[string]*VMToken `json:"vm_tokens"`
 
 	seq uint64 // in memory: bumped per change, so the flusher never writes an older state over a newer one
 }
@@ -262,6 +264,9 @@ type SSHGrant struct {
 func secretKey(team, name string) string { return team + "/" + name }
 
 func (st *State) init() {
+	if st.VMTokens == nil {
+		st.VMTokens = map[string]*VMToken{}
+	}
 	if st.Users == nil {
 		st.Users = map[string]*User{}
 	}
@@ -337,6 +342,7 @@ type Store struct {
 
 	wmu     sync.Mutex // disk writes
 	written uint64     // seq of the state on disk; under wmu
+	closed  bool       // under wmu: Close ran, nothing is written any more
 	kick    chan struct{}
 }
 
@@ -397,10 +403,19 @@ func (s *Store) decode(b []byte) ([]byte, error) {
 	return s.kr.Open(sealed, stateAAD)
 }
 
+var errStoreClosed = errors.New("store is closed")
+
 // persist writes st unless a newer state is on disk already.
 func (s *Store) persist(st *State) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
+	if s.closed {
+		return errStoreClosed
+	}
+	return s.persistLocked(st)
+}
+
+func (s *Store) persistLocked(st *State) error {
 	if st.seq != 0 && st.seq <= s.written {
 		return nil
 	}
@@ -506,6 +521,9 @@ func (s *Store) flusher() {
 			if err == nil {
 				break
 			}
+			if errors.Is(err, errStoreClosed) {
+				break
+			}
 			if _, serr := os.Stat(filepath.Dir(s.path)); errors.Is(serr, os.ErrNotExist) {
 				log.Printf("boat-api: write %s: %v; the state directory is gone, not retrying", s.path, err)
 				break
@@ -519,8 +537,26 @@ func (s *Store) flusher() {
 // Flush writes the current state if it is newer than the one on disk.
 func (s *Store) Flush() error { return s.persist(s.cur.Load()) }
 
-// syncFile is f.Sync; the latency test makes it slow.
-var syncFile = func(f *os.File) error { return f.Sync() }
+// Close writes what Apply left in memory; after it nothing is written (shutdown, tests).
+func (s *Store) Close() error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.persistLocked(s.cur.Load())
+}
+
+// syncDelay makes every fsync slower (the latency test).
+var syncDelay atomic.Int64
+
+func syncFile(f *os.File) error {
+	if d := syncDelay.Load(); d > 0 {
+		time.Sleep(time.Duration(d))
+	}
+	return f.Sync()
+}
 
 func writeAtomic(path string, data []byte) error { return writeAtomicMode(path, data, 0o600) }
 

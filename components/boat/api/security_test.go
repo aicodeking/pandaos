@@ -205,7 +205,7 @@ func TestForeignDiskNoAICredit(t *testing.T) {
 	// Proxy off: raw keys never reach a blocked VM.
 	e.do(e.owner, "PUT", "/v1/ai/proxy", map[string]any{"enabled": false})
 	n := len(e.boatd.envOps)
-	if st, vm2 := e.do(e.owner, "POST", "/v1/vms", map[string]any{"snapshot": imported}); st != 201 || len(e.boatd.envOps) != n || vmEnv(e, vm2["id"].(string))["ANTHROPIC_API_KEY"] != nil {
+	if st, vm2 := e.do(e.owner, "POST", "/v1/vms", map[string]any{"snapshot": imported}); st != 201 || envOpsHave(e.boatd.envOps[n:], "ANTHROPIC_API_KEY") || vmEnv(e, vm2["id"].(string))["ANTHROPIC_API_KEY"] != nil {
 		t.Errorf("raw key on a foreign VM: %d %v", st, e.boatd.envOps[n:])
 	}
 }

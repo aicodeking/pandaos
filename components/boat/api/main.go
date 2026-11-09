@@ -159,6 +159,7 @@ func serve(args []string) int {
 	aiURL := fs.String("ai-proxy-url", "", "proxy URL as VMs see it (default http://<ai-proxy-listen>)")
 	aiRate := fs.Float64("ai-rate", 20, "AI proxy requests/second per VM (0 = unlimited)")
 	publicURL := fs.String("public-url", "", "this API's public base URL, for signed snapshot links")
+	vmAPIURL := fs.String("vm-api-url", "", "this API as VMs reach it, injected as BOAT_URL with a per-VM token (default -public-url; empty = no token)")
 	maxImport := fs.Int64("max-import-bytes", 200<<30, "max snapshot archive size for import")
 	otlp := fs.String("otlp-endpoint", "", "OTLP/HTTP base URL for request traces + VM lifecycle logs")
 	var otlpHeaders headerFlag
@@ -178,7 +179,7 @@ func serve(args []string) int {
 	}
 	cfg := Config{SSHUser: *sshUser, SSHJump: *sshJump, DesktopURL: *desktopURL, DesktopTTL: *desktopTTL,
 		AllowPrivateHook: *allowPrivate, MaxFileBytes: *maxFile, JumpKeysFile: *jumpKeys,
-		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, VMDomain: *vmDomain, PortURLTTL: *portTTL, AIProxyURL: *aiURL, PublicURL: *publicURL, MaxImportBytes: *maxImport}
+		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, VMDomain: *vmDomain, PortURLTTL: *portTTL, AIProxyURL: *aiURL, PublicURL: *publicURL, VMAPIURL: *vmAPIURL, MaxImportBytes: *maxImport}
 	if cfg.AIProxyURL == "" && *aiListen != "" {
 		cfg.AIProxyURL = "http://" + *aiListen
 	}
@@ -235,7 +236,7 @@ func serve(args []string) int {
 	}()
 	log.Printf("boat-api listening on %s (boatd %s)", *listen, *boatd)
 	err = srv.ListenAndServe()
-	if ferr := store.Flush(); ferr != nil { // what Apply left in memory
+	if ferr := store.Close(); ferr != nil { // what Apply left in memory
 		log.Printf("boat-api: write state: %v", ferr)
 	}
 	if err != nil && err != http.ErrServerClosed {

@@ -447,13 +447,18 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 		return
 	}
 	t.mark("record")
-	// The AI proxy token depends on the VM id, so it goes in after create.
+	// The AI proxy token and the VM's own token depend on the VM id, so they
+	// go in after create.
+	extra := s.guestEnv(id, p.Team.ID, vars)
 	if ai, err := s.aiEnvNewVM(id, p.Team.ID); err != nil {
 		log.Printf("%s: AI env for %s: %v", info(r).id, id, err)
-	} else if len(ai) > 0 {
-		s.pushEnv(r, id, vars, ai)
+	} else {
+		for k, v := range ai {
+			extra[k] = v
+		}
 	}
-	t.mark("ai")
+	s.pushEnv(r, id, vars, extra)
+	t.mark("env")
 	out := publicVM(vm)
 	if env != nil {
 		s.applyEnvToVM(r, p, id, env, built, vars, out)
@@ -538,6 +543,9 @@ func (s *server) startVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	for k, v := range ai {
 		env[k] = v
 	}
+	for k, v := range s.guestEnv(id, p.Team.ID, env) {
+		env[k] = v
+	}
 	t.mark("env")
 	s.vmAction(w, r, "start", map[string]any{"env": env})
 	t.mark("boatd")
@@ -606,14 +614,22 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	t.mark("record")
 	// The child's disk holds the parent's token; give it its own. Its native
 	// agent sessions came along too, so its conversations do as well.
-	if ai, err := s.aiEnvNewVM(childID, p.Team.ID); err != nil {
-		log.Printf("%s: AI env for fork %s: %v", info(r).id, childID, err)
-	} else if len(ai) > 0 {
-		if vars, err := s.teamEnv(p.Team.ID, s.vmSecrets(childID)); err == nil {
-			s.pushEnv(r, childID, vars, ai)
+	// Its own VM token too, and the parent's token on the copied disk dies.
+	s.rotateSelf(parent)
+	if vars, err := s.teamEnv(p.Team.ID, s.vmSecrets(childID)); err != nil {
+		log.Printf("%s: env for fork %s: %v", info(r).id, childID, err)
+	} else {
+		extra := s.guestEnv(childID, p.Team.ID, vars)
+		if ai, err := s.aiEnvNewVM(childID, p.Team.ID); err != nil {
+			log.Printf("%s: AI env for fork %s: %v", info(r).id, childID, err)
+		} else {
+			for k, v := range ai {
+				extra[k] = v
+			}
 		}
+		s.pushEnv(r, childID, vars, extra)
 	}
-	t.mark("ai")
+	t.mark("env")
 	s.copyConversations(parent, childID)
 	t.mark("conversations")
 	writeJSON(w, 201, publicVM(child))
@@ -648,6 +664,7 @@ func (s *server) forgetVM(id string) {
 		delete(st.VMEnvs, id)
 		delete(st.ForeignVMs, id)
 		delete(st.RouteGens, id)
+		delete(st.VMTokens, id)
 		for k, sh := range st.SnapShares {
 			if sh.VMID == id {
 				delete(st.SnapShares, k)
@@ -993,6 +1010,7 @@ func (s *server) proxySnapshots(w http.ResponseWriter, r *http.Request, p *princ
 	status := 200
 	if r.Method == "POST" {
 		status = 201
+		s.rotateSelf(r.PathValue("id")) // the snapshot holds the VM's token
 	}
 	if out == nil {
 		out = map[string]any{"ok": true}

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"testing"
 	"time"
 )
@@ -9,9 +8,8 @@ import (
 // slowFsync makes every fsync take d, like a disk busy flushing a snapshot.
 func slowFsync(t *testing.T, d time.Duration) {
 	t.Helper()
-	orig := syncFile
-	syncFile = func(f *os.File) error { time.Sleep(d); return orig(f) }
-	t.Cleanup(func() { syncFile = orig })
+	syncDelay.Store(int64(d))
+	t.Cleanup(func() { syncDelay.Store(0) })
 }
 
 // apiOverheadBudget: boat-api's own share of create, fork, stop and start.
@@ -93,6 +91,7 @@ func TestApplyFlushes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { s.Close() })
 	s.Apply(func(st *State) error { st.VMEnvs["vm1"] = "env1"; return nil })
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)

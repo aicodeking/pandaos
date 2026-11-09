@@ -163,6 +163,8 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			f.agentOp(w, vm, in)
 			return
 		case "env":
+			in["vm"] = vm["id"]
+			vm["env"] = in["vars"]
 			f.envOps = append(f.envOps, in)
 			writeJSON(w, 200, map[string]any{"ok": true})
 			return

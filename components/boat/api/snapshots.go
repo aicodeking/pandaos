@@ -238,6 +238,7 @@ func (s *server) createShare(w http.ResponseWriter, r *http.Request, p *principa
 		}
 	}
 	// Before the share exists: if this fails, no live token has left the team.
+	s.rotateSelf(sh.VMID)
 	if err := s.rotateAIToken(r, sh.VMID, p.Team.ID); err != nil {
 		log.Printf("%s: rotate AI token of %s: %v", info(r).id, sh.VMID, err)
 		writeErr(w, r, 500, "secrets_unavailable", "cannot rotate the VM's AI token")

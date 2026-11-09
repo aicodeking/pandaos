@@ -240,11 +240,11 @@ func TestPerVMSecretSelection(t *testing.T) {
 		t.Errorf("fork must keep the parent's selection: %v", env)
 	}
 	_, none := e.do(e.owner, "POST", "/v1/vms", map[string]any{"secrets": []string{}})
-	if env := envOf(e.boatd.vms[none["id"].(string)]); len(env) != 0 {
+	if env := withoutGuestIdentity(envOf(e.boatd.vms[none["id"].(string)])); len(env) != 0 {
 		t.Errorf("secrets: [] must inject nothing: %v", env)
 	}
 	e.do(e.owner, "POST", "/v1/vms/"+none["id"].(string)+"/start", nil)
-	if env := envOf(e.boatd.starts[len(e.boatd.starts)-1]); len(env) != 0 {
+	if env := withoutGuestIdentity(envOf(e.boatd.starts[len(e.boatd.starts)-1])); len(env) != 0 {
 		t.Errorf("start of a no-secrets VM: %v", env)
 	}
 	_, all := e.do(e.owner, "POST", "/v1/vms", map[string]any{})

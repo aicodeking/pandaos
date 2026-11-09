@@ -97,6 +97,25 @@ Errors use the shape `{"error":{"code","message","request_id"}}`. Every response
 
 ## Auth design
 
+### The VM's own key (`BOAT_ID`, `BOAT_URL`, `BOAT_API_KEY`)
+
+Every VM gets `BOAT_ID` in its env at create, fork and start. With `-vm-api-url`
+(default `-public-url`; the URL VMs use to reach this API) it also gets `BOAT_URL` and
+`BOAT_API_KEY`, a token for that VM alone, so `boat self …` and `host …` work in the guest
+without a team key. A team that stores its own `BOAT_API_KEY` secret keeps it.
+
+- **Token:** `boatself_<gen>_<hex(HMAC-SHA256(vmKey, "self|<vmid>|<gen>"))>_<vmid>`, `vmKey`
+  derived from the master key. Valid while the VM exists and its generation is `<gen>`.
+- **Reach:** only routes under `/v1/vms/<that id>/` with `vms:read`, `vms:write`, `exec`
+  (read, exec, files, ports, stop/start, fork, snapshots, delete). Every other route, and
+  every other VM, answers 404. No admin scope.
+- **Revocation:** the generation moves on at create, fork and start, and on the source VM
+  whenever its disk is copied (fork, snapshot, share), because the copy holds the token.
+  A running source VM gets the new token pushed to `/etc/boat/env`; a process that read
+  the old one holds a dead token. Delete ends it.
+- **Crash:** the generation is written without waiting for the disk (see Store), so a crash
+  can make an older token of the same VM valid again, never one of another VM.
+
 - **Token:** `boat_<16 hex id>_<64 hex secret>`, i.e. 256 random bits.
 - **Hash:** `hex(HMAC-SHA256(pepper, salt ‖ 0x00 ‖ secret))` with a 16-byte salt per key.
   A slow KDF (PBKDF2/scrypt) only helps against low-entropy passwords. Brute-forcing
@@ -307,6 +326,15 @@ All state lives in a single `state.json`, sealed under the master key:
 
 - Each write takes one mutex, deep-copies the state, applies the change, writes it
   atomically (temp file + fsync + rename + dir fsync), and then swaps it in.
+- The VM lifecycle paths (create, fork, start) do not wait for that fsync: they use
+  `Store.Apply`, which swaps the change in and leaves the write to a background flusher.
+  An fsync can take seconds when the disk is busy writing a snapshot (boatbench
+  41652606509: 1.9 s of a 2.73 s new-from-snapshot). What must survive a crash goes
+  somewhere durable instead: the secret selection is the VM's `boat.secrets` label in
+  boatd. Losing the rest (environment name, AI and VM token generations, copied
+  conversations) is harmless. `latency_test.go` fails if a lifecycle call waits for an
+  fsync again. Each create, fork, stop and start logs one
+  `<vm>: api <op> step=…ms … total=…ms` line.
 - Readers, authentication included, get immutable snapshots and never wait for a write.
 - Per team: 200 secrets and 2 MiB of sealed values, 100 live shares, 4 MiB of environment
   scripts and vars, 200 ssh keys. See `limits.go`.

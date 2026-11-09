@@ -165,7 +165,7 @@ func (a *app) dispatch(cmd string, args []string) error {
 	}
 	if cfg.URL == "" || cfg.Key == "" {
 		if a.inGuest() {
-			return errors.New("this VM has no API key: on your computer, store a key as team secrets (boat keys create --scopes vms:read,vms:write,exec; boat secrets set BOAT_API_KEY; boat secrets set BOAT_URL) and restart the VM")
+			return errors.New("this VM has no API key: boat-api injects BOAT_URL and a key for this VM only when the operator sets -vm-api-url (or -public-url); otherwise, on your computer, store a key as team secrets (boat keys create --scopes vms:read,vms:write,exec; boat secrets set BOAT_API_KEY; boat secrets set BOAT_URL) and restart the VM")
 		}
 		return errors.New("not logged in: run boat login --url URL --key KEY")
 	}

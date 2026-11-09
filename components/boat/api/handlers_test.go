@@ -32,6 +32,7 @@ func setup(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { store.Close() }) // before TempDir's removal: no late background write
 	kr, err := NewKeyring(bytes.Repeat([]byte{7}, 32))
 	if err != nil {
 		t.Fatal(err)
