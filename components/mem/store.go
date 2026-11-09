@@ -64,6 +64,10 @@ var gitHarden = []string{
 	"-c", "core.attributesFile=/dev/null",
 	"-c", "diff.external=",
 	"-c", "protocol.allow=never",
+	// A commit starts `git maintenance run --auto`, detached by default: it then works in
+	// .git after the commit returned, outside our flock (and outlives a test's TempDir).
+	"-c", "maintenance.autoDetach=false",
+	"-c", "gc.autoDetach=false",
 }
 
 func gitEnv() []string {

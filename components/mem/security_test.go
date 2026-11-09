@@ -163,6 +163,18 @@ func TestConcurrentWriters(t *testing.T) {
 	}
 }
 
+// Auto maintenance after a commit must not detach: a background git would still be
+// writing .git after Write returned (TempDir cleanup failed with "directory not empty").
+func TestMaintenanceNotDetached(t *testing.T) {
+	s := newStore(t)
+	for _, k := range []string{"maintenance.autoDetach", "gc.autoDetach"} {
+		out, err := s.git("config", "--get", k)
+		if err != nil || strings.TrimSpace(out) != "false" {
+			t.Fatalf("%s = %q (%v), want false", k, out, err)
+		}
+	}
+}
+
 func TestMultiTermSearch(t *testing.T) {
 	s := newStore(t)
 	s.Write("semantic", "both", "nix flakes are nice", nil, false)
