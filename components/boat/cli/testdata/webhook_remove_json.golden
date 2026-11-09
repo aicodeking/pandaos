@@ -1,0 +1,7 @@
+$ boat webhook remove wh_0123456789abcdef01234567 --json
+exit 0
+--- stdout
+{"deleted":true,"id":"wh_0123456789abcdef01234567"}
+--- stderr
+--- requests
+DELETE /api/v1/webhooks/wh_0123456789abcdef01234567 

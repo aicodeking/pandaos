@@ -1,0 +1,8 @@
+$ boat snapshot vm1 web-stack --json
+exit 0
+--- stdout
+{"createdAt":"2026-01-01T00:00:00Z","name":"web-stack","snapshotId":"snap9","sourceSandboxId":"vm1","status":"ready"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+POST /api/v1/saved-snapshots {"name":"web-stack","sandboxId":"vm1"}

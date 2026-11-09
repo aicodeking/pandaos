@@ -1,0 +1,7 @@
+$ boat limits --json
+exit 0
+--- stdout
+{"activeSandboxes":2,"canStart":true,"maxActiveSandboxes":-1}
+--- stderr
+--- requests
+GET /api/v1/limits 

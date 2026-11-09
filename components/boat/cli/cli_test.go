@@ -135,6 +135,16 @@ func fakeAPI(t *testing.T, log *bytes.Buffer) *httptest.Server {
 	mux.HandleFunc("PUT /v1/telemetry", j(200, obj{"configured": true, "endpoint": "https://o.example", "header_names": []string{"X"}}))
 	mux.HandleFunc("DELETE /v1/telemetry", j(200, obj{"ok": true}))
 	mux.HandleFunc("GET /v1/usage", j(200, obj{"team": "team_1", "vm_seconds": obj{"default": 42}, "starts": 2}))
+	mux.HandleFunc("PATCH /v1/vms/vm1", j(200, obj{"id": "vm1", "name": "dev", "ttl_s": 7200, "expires_at": "2099-01-01T00:00:00Z"}))
+	mux.HandleFunc("GET /api/v1/limits", j(200, obj{"ok": true, "type": "limits.info", "activeSandboxes": 2, "maxActiveSandboxes": -1, "canStart": true}))
+	mux.HandleFunc("POST /api/v1/saved-snapshots", j(202, obj{"ok": true, "type": "snapshot.saved.saving", "status": "saving",
+		"snapshot": obj{"name": "web-stack", "snapshotId": "snap9", "status": "ready", "sourceSandboxId": "vm1", "createdAt": "2026-01-01T00:00:00Z"}}))
+	mux.HandleFunc("DELETE /api/v1/saved-snapshots/web-stack", j(200, obj{"ok": true, "type": "snapshot.saved.deleted", "name": "web-stack", "status": "deleted"}))
+	bdHook := obj{"id": "wh_0123456789abcdef01234567", "name": "prod", "url": "https://h.example", "events": []string{"sandbox.ready", "sandbox.error"}}
+	mux.HandleFunc("POST /api/v1/webhooks", j(201, obj{"ok": true, "type": "webhook.created", "webhook": bdHook, "secret": "whsec_s"}))
+	mux.HandleFunc("GET /api/v1/webhooks", j(200, obj{"ok": true, "type": "webhook.list", "webhooks": []obj{bdHook}}))
+	mux.HandleFunc("POST /api/v1/webhooks/wh_0123456789abcdef01234567/rotate", j(200, obj{"ok": true, "webhook": bdHook, "secret": "whsec_t"}))
+	mux.HandleFunc("DELETE /api/v1/webhooks/wh_0123456789abcdef01234567", j(200, obj{"ok": true, "id": "wh_0123456789abcdef01234567"}))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		r.Body = io.NopCloser(bytes.NewReader(b))
@@ -255,6 +265,21 @@ func TestGolden(t *testing.T) {
 		{"telemetry_json", []string{"telemetry", "--json"}},
 		{"telemetry_set_json", []string{"telemetry", "set", "https://o.example", "-H", "X=y", "--json"}},
 		{"telemetry_unset_json", []string{"telemetry", "unset", "--json"}},
+		{"extend_hours_json", []string{"extend", "vm1", "--hours", "2", "--json"}},
+		{"extend_by_json", []string{"extend", "vm1", "--by", "90m", "--json"}},
+		{"extend_never_json", []string{"extend", "vm1", "--no-auto-stop", "--json"}},
+		{"extend_none", []string{"extend", "vm1"}},
+		{"limits_json", []string{"limits", "--json"}},
+		{"limits_text", []string{"limits"}},
+		{"snapshot_save_json", []string{"snapshot", "vm1", "web-stack", "--json"}},
+		{"snapshot_rm_json", []string{"snapshot", "rm", "web-stack", "--json"}},
+		{"snapshot_team_json", []string{"snapshot", "team", "--json"}},
+		{"history_json", []string{"history", "vm1", "--json"}},
+		{"history_logs_json", []string{"history", "vm1", "c_1", "--json"}},
+		{"webhook_create_json", []string{"webhook", "create", "https://h.example", "--name", "prod", "--event", "ready", "--event", "sandbox.error", "--json"}},
+		{"webhook_list_json", []string{"webhook", "list", "--json"}},
+		{"webhook_rotate_json", []string{"webhook", "rotate", "wh_0123456789abcdef01234567", "--json"}},
+		{"webhook_remove_json", []string{"webhook", "remove", "wh_0123456789abcdef01234567", "--json"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -1,0 +1,7 @@
+$ boat limits
+exit 0
+--- stdout
+2 sandboxes active (the team quota is boatd's); can start: true
+--- stderr
+--- requests
+GET /api/v1/limits 

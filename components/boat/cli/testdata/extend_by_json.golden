@@ -1,0 +1,8 @@
+$ boat extend vm1 --by 90m --json
+exit 0
+--- stdout
+{"expires_at":"2099-01-01T00:00:00Z","id":"vm1","name":"dev","ttl_s":7200}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+PATCH /v1/vms/vm1 {"extend_s":5400}

@@ -1,0 +1,7 @@
+$ boat webhook create https://h.example --name prod --event ready --event sandbox.error --json
+exit 0
+--- stdout
+{"events":["sandbox.ready","sandbox.error"],"id":"wh_0123456789abcdef01234567","name":"prod","secret":"whsec_s","url":"https://h.example"}
+--- stderr
+--- requests
+POST /api/v1/webhooks {"events":["sandbox.ready","sandbox.error"],"name":"prod","url":"https://h.example"}

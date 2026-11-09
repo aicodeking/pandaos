@@ -1,0 +1,8 @@
+$ boat history vm1 --json
+exit 0
+--- stdout
+{"cmd":["ls"],"exit":0,"id":"c_1","kind":"command","state":"exited"}
+--- stderr
+--- requests
+GET /v1/vms/vm1 
+GET /v1/vms/vm1/command-history 

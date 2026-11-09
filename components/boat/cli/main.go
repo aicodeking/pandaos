@@ -41,6 +41,11 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat steer <vm> "text" [--prompt-id ID]       boat interrupt <vm> [--prompt-id ID]
   boat env ls | new NAME | show E | set E | default E | build E | rm E   [--image I] [--size S] [--setup TEXT|--setup-file F] [--var K=V] [--secrets A,B]
   boat fork <vm> [--name N] [--fail-fast]   boat stop <vm> [--force]   boat rm|delete <vm>
+  boat extend <vm> --hours N | --ttl SECS | --no-auto-stop | --by 2h   auto-stop: set the time left, or push it out
+  boat limits                          sandboxes active and whether one can start
+  boat history <vm> [command-id] [-f] [--limit N]    commands of a VM, newest first, or one's output
+  boat snapshot <vm> NAME | snapshot rm NAME          save (replaces NAME) or remove a named snapshot
+  boat webhook create URL [--name N] [--event ready|error|archived|...] | list | rotate ID | remove ID   (boat.dev events)
   boat start|resume <vm> [--type S] [--fail-fast]
   boat resize <vm> [SIZE] [--disk GIB] [--discard-memory]
   boat desktop <vm> [--no-open]

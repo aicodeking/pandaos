@@ -1,0 +1,7 @@
+$ boat webhook rotate wh_0123456789abcdef01234567 --json
+exit 0
+--- stdout
+{"id":"wh_0123456789abcdef01234567","secret":"whsec_t"}
+--- stderr
+--- requests
+POST /api/v1/webhooks/wh_0123456789abcdef01234567/rotate 

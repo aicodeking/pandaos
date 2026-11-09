@@ -1,0 +1,7 @@
+$ boat snapshot rm web-stack --json
+exit 0
+--- stdout
+{"name":"web-stack","status":"deleted"}
+--- stderr
+--- requests
+DELETE /api/v1/saved-snapshots/web-stack 

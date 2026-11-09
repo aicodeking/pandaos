@@ -1,0 +1,6 @@
+$ boat extend vm1
+exit 2
+--- stdout
+--- stderr
+<usage>
+--- requests
