@@ -321,7 +321,7 @@ class Boat:
 
     def prompt(self, vm_id: str, prompt: str, agent: str = "claude", model: Optional[str] = None,
                cwd: Optional[str] = None, timeout_s: Optional[int] = None) -> Iterator[ExecEvent]:
-        """Run claude/codex/opencode headless in the VM with team secrets as env."""
+        """Run an agent CLI headless in the VM with team secrets as env: claude, codex, opencode, pi, prime, kimi or mistral (aliases claude-code, prime-agent)."""
         body = self._clean({"prompt": prompt, "agent": agent, "model": model, "cwd": cwd, "timeout_s": timeout_s})
         return self._stream(f"/v1/vms/{_q(vm_id)}/prompt", body)
 

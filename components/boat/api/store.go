@@ -506,6 +506,10 @@ func (s *Store) flusher() {
 			if err == nil {
 				break
 			}
+			if _, serr := os.Stat(filepath.Dir(s.path)); errors.Is(serr, os.ErrNotExist) {
+				log.Printf("boat-api: write %s: %v; the state directory is gone, not retrying", s.path, err)
+				break
+			}
 			log.Printf("boat-api: write %s: %v; retrying", s.path, err)
 			time.Sleep(time.Second)
 		}

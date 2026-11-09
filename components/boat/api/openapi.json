@@ -4953,7 +4953,13 @@
       "enum": [
        "claude",
        "codex",
-       "opencode"
+       "opencode",
+       "pi",
+       "prime",
+       "kimi",
+       "mistral",
+       "claude-code",
+       "prime-agent"
       ],
       "default": "claude"
      },
@@ -4981,7 +4987,13 @@
       "enum": [
        "claude",
        "codex",
-       "opencode"
+       "opencode",
+       "pi",
+       "prime",
+       "kimi",
+       "mistral",
+       "claude-code",
+       "prime-agent"
       ],
       "default": "claude"
      },

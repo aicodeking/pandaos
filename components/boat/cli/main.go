@@ -36,7 +36,7 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat exec <vm> [--detach] -- cmd [args]
   boat cmd start|ls|status|logs [-f]|signal [--signal S]|stop|history <vm> [id] [-- cmd]
   boat files ls|rm [-r]|mv [--overwrite]|search [--content] [--regex]|info|mkdir|chmod <vm> ...
-  boat prompt <vm> "text" [--agent|--provider claude|codex|opencode] [--model M] [--async] [--new] [--resume CONV]
+  boat prompt <vm> "text" [--agent|--provider claude|codex|opencode|pi|prime|kimi|mistral] [--model M] [--async] [--new] [--resume CONV]
   boat prompts ls|status|logs [-f] <vm> [id]    boat conversations <vm>
   boat steer <vm> "text" [--prompt-id ID]       boat interrupt <vm> [--prompt-id ID]
   boat env ls | new NAME | show E | set E | default E | build E | rm E   [--image I] [--size S] [--setup TEXT|--setup-file F] [--var K=V] [--secrets A,B]

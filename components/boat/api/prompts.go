@@ -18,6 +18,14 @@ import (
 //   claude    we choose the session id: --session-id U, then --resume U.
 //   codex     the CLI chooses it; read from its first --json event (thread_id).
 //   opencode  the CLI chooses it; read from its --format json events (sessionID).
+//   pi        we choose it: --session-id U on every turn.
+//   kimi      the CLI chooses it; read from its stream-json events, then -S.
+//   mistral   (vibe) the CLI chooses it; read from its streaming events, then --resume.
+//   prime     no session flag: every turn starts fresh, steer is refused.
+//
+// pi, prime, kimi and mistral were written from their --help and never run
+// here: their output format is not known, so the session is looked for with
+// the same loose patterns as the others and a turn without one still works.
 //
 // Steer is interrupt + resume: these CLIs have no way to take input during a
 // headless turn. The running turn gets SIGINT, then a new turn in the same
@@ -71,6 +79,22 @@ func agentArgv(agent, prompt, model, session string, first bool) []string {
 		if model != "" {
 			c = append(c, "-m", model)
 		}
+	case "pi":
+		c = withModel([]string{"pi", "-p", "--mode", "json", "--session-id", session}, "--model", model)
+	case "prime":
+		return append(withModel([]string{"prime-agent", "-p", "--mode", "json"}, "--model", model), positional(prompt))
+	case "kimi":
+		c = withModel([]string{"kimi", "-p", prompt, "--yolo", "--output-format", "stream-json"}, "-m", model)
+		if session != "" {
+			c = append(c, "-S", session)
+		}
+		return c
+	case "mistral":
+		c = withModel([]string{"vibe", "-p", prompt, "--auto-approve", "--output", "streaming"}, "--model", model)
+		if session != "" {
+			c = append(c, "--resume", session)
+		}
+		return c
 	default: // opencode
 		c = []string{"opencode", "run", "--format", "json"}
 		if session != "" {
@@ -83,10 +107,17 @@ func agentArgv(agent, prompt, model, session string, first bool) []string {
 	return append(c, "--", prompt)
 }
 
+// chosenSession: agents whose session id boat-api picks before the first turn.
+func chosenSession(agent string) bool { return agent == "claude" || agent == "pi" }
+
+// sessionless: agents with no way to resume a session.
+func sessionless(agent string) bool { return agent == "prime" }
+
 var reNativeSession = []*regexp.Regexp{
 	regexp.MustCompile(`"thread_id"\s*:\s*"([A-Za-z0-9_-]{1,128})"`),
 	regexp.MustCompile(`"sessionID"\s*:\s*"([A-Za-z0-9_-]{1,128})"`),
 	regexp.MustCompile(`"session_id"\s*:\s*"([A-Za-z0-9_-]{1,128})"`),
+	regexp.MustCompile(`"sessionId"\s*:\s*"([A-Za-z0-9_-]{1,128})"`),
 }
 
 // nativeSession finds the session id in a turn's first log output.
@@ -152,12 +183,13 @@ func (s *server) startPrompt(w http.ResponseWriter, r *http.Request, p *principa
 	if !decode(w, r, &body) {
 		return
 	}
+	body.Agent = canonicalAgent(body.Agent)
 	msg := ""
 	switch {
 	case strings.TrimSpace(body.Prompt) == "":
 		msg = "prompt is required"
 	case body.Agent != "" && agents[body.Agent] == nil:
-		msg = "agent must be claude, codex or opencode"
+		msg = "agent must be " + agentNames
 	case body.Model != "" && !reModel.MatchString(body.Model):
 		msg = "invalid model"
 	case !validCwd(body.Cwd):
@@ -213,14 +245,14 @@ func (s *server) runTurn(r *http.Request, p *principal, vmID string, body prompt
 		if model == "" {
 			model = conv.Model
 		}
-		if session == "" && agent != "claude" {
+		if session == "" && !chosenSession(agent) {
 			first = true // the first turn ended before it reported a session
 		}
 	}
 	if agent == "" {
 		agent = "claude"
 	}
-	if agent == "claude" && session == "" {
+	if chosenSession(agent) && session == "" {
 		session, first = newUUID(), true
 	}
 	env, err := s.teamEnv(p.Team.ID, s.selectionFor(r, vmID))
@@ -445,7 +477,11 @@ func (s *server) steerPrompt(w http.ResponseWriter, r *http.Request, p *principa
 		return
 	}
 	vmID := r.PathValue("id")
-	if run.Agent != "claude" {
+	if sessionless(run.Agent) {
+		writeErr(w, r, 409, "session_unknown", run.Agent+" cannot resume a session, so it cannot be steered; interrupt it and send a new prompt")
+		return
+	}
+	if !chosenSession(run.Agent) {
 		// These learn their session from the turn's output; give it a moment.
 		for i := 0; i < 10 && findConv(s.store.Snapshot(), vmID, run.ConversationID).Session == ""; i++ {
 			s.refreshPrompts(r, vmID)

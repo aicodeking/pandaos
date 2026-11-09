@@ -376,6 +376,10 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 			c.exit, c.log = 0, `{"type":"thread.started","thread_id":"th_abc"}`+"\n"
 		case first == "opencode":
 			c.exit, c.log = 0, `{"type":"step","sessionID":"ses_abc"}`+"\n"
+		case first == "kimi":
+			c.exit, c.log = 0, `{"role":"assistant","session_id":"kimi_s1"}`+"\n"
+		case first == "vibe":
+			c.exit, c.log = 0, `{"type":"init","sessionId":"vibe_s1"}`+"\n"
 		case first == "false":
 			c.exit, c.log = 1, "boom\n"
 		default:

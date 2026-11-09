@@ -1,7 +1,7 @@
 export type Size = "small" | "default" | "large" | "xlarge";
 export type VMState = "creating" | "running" | "stopping" | "stopped" | "starting" | "forking" | "error";
 export type Scope = "vms:read" | "vms:write" | "exec" | "admin";
-export type Agent = "claude" | "codex" | "opencode";
+export type Agent = "claude" | "codex" | "opencode" | "pi" | "prime" | "kimi" | "mistral" | "claude-code" | "prime-agent";
 
 export interface VM {
   id: string;

@@ -727,6 +727,50 @@ var agents = map[string]func(prompt, model string) []string{
 		}
 		return append(c, "--", prompt)
 	},
+	// The four below follow each CLI's --help; none has been run by CI. Their
+	// output is passed through as is.
+	"pi": func(prompt, model string) []string {
+		return append(withModel([]string{"pi", "-p", "--mode", "json"}, "--model", model), "--", prompt)
+	},
+	"prime": func(prompt, model string) []string {
+		return append(withModel([]string{"prime-agent", "-p", "--mode", "json"}, "--model", model), positional(prompt))
+	},
+	"kimi": func(prompt, model string) []string {
+		return withModel([]string{"kimi", "-p", prompt, "--yolo", "--output-format", "stream-json"}, "-m", model)
+	},
+	"mistral": func(prompt, model string) []string {
+		return withModel([]string{"vibe", "-p", prompt, "--auto-approve", "--output", "streaming"}, "--model", model)
+	},
+}
+
+// agentAliases: other names callers use for an agent.
+var agentAliases = map[string]string{"claude-code": "claude", "prime-agent": "prime"}
+
+// agentNames is the list for error messages.
+const agentNames = "claude, codex, opencode, pi, prime, kimi or mistral"
+
+// canonicalAgent resolves an alias; "" stays "" (the default applies later).
+func canonicalAgent(name string) string {
+	if a, ok := agentAliases[name]; ok {
+		return a
+	}
+	return name
+}
+
+func withModel(c []string, flag, model string) []string {
+	if model != "" {
+		return append(c, flag, model)
+	}
+	return c
+}
+
+// positional keeps a prompt that starts with "-" from being read as a flag by
+// a CLI whose prompt is positional with no "--" separator documented.
+func positional(prompt string) string {
+	if strings.HasPrefix(prompt, "-") {
+		return " " + prompt
+	}
+	return prompt
 }
 
 var reModel = regexp.MustCompile(`^[A-Za-z0-9_./:@-]{1,128}$`)
@@ -742,13 +786,14 @@ func (s *server) promptVM(w http.ResponseWriter, r *http.Request, p *principal) 
 	if !decode(w, r, &body) {
 		return
 	}
+	body.Agent = canonicalAgent(body.Agent)
 	if body.Agent == "" {
 		body.Agent = "claude"
 	}
 	build, ok := agents[body.Agent]
 	switch {
 	case !ok:
-		writeErr(w, r, 400, "invalid_request", "agent must be claude, codex or opencode")
+		writeErr(w, r, 400, "invalid_request", "agent must be "+agentNames)
 		return
 	case strings.TrimSpace(body.Prompt) == "":
 		writeErr(w, r, 400, "invalid_request", "prompt is required")
