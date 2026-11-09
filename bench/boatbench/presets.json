@@ -1,0 +1,20 @@
+{
+  "_doc": "boatd option presets for boatbench (stack.sh merges one over the bench boatd.json, then BOATBENCH_BOATD_OPTIONS over that). 'untrusted' is components/boat/module.nix untrustedSettings (test_boatbench.py checks it key by key) except memOvercommit: 1.0 admits ONE 8 GiB VM on a 16 GiB runner, so the bench keeps its raised overcommit and docs/cost.md models the density of 1.0. stack.sh also turns SMT off (if the host allows it), sets kernel.io_uring_disabled=2 and stops KSM for it, as the module's kernel parameters do, and makes the btrfs loop store a sparse 1 TiB file so storageOvercommit 1 admits the bench's VMs (storage admission does not change speed).",
+  "trusted": {},
+  "trusted-warm": {"warmPool": true},
+  "untrusted": {
+    "untrustedTenants": true,
+    "btrfsQgroups": true,
+    "storageOvercommit": 1,
+    "egressMbit": 1000,
+    "ingressMbit": 1000,
+    "ioMaxMBps": 500,
+    "ioMaxIOPS": 20000,
+    "ctPerVM": 4096,
+    "diskEngine": "Sync",
+    "hostDirtyRatio": 20,
+    "warmPool": false,
+    "ksmTeam": ""
+  },
+  "_untrusted_not_applied": {"memOvercommit": "density only: modelled in docs/cost.md, not applied on the 16 GiB runner"}
+}

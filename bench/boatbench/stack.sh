@@ -6,7 +6,8 @@
 # a 16 GiB runner.
 #
 #   stack.sh up GUEST_DIR   # GUEST_DIR has vmlinux, rootfs-slim.ext4; writes $WORK/env (BOAT_URL, BOAT_KEY)
-#   BOATBENCH_BOATD_OPTIONS='{"warmPool":true}' stack.sh up ...   # JSON merged over boatd.json
+#   BOATBENCH_PRESET=untrusted stack.sh up ...   # presets.json: trusted (default), trusted-warm, untrusted
+#   BOATBENCH_BOATD_OPTIONS='{"warmPool":true}' stack.sh up ...   # JSON merged over boatd.json and the preset
 #   stack.sh down
 #
 # ponytail: components/boat/e2e.sh has no "stack only" mode and is outside this
@@ -74,8 +75,28 @@ up() {
   (cd "$BOAT/boatd" && CGO_ENABLED=0 go build -o "$WORK/bin/boatd" .)
   (cd "$BOAT/api" && CGO_ENABLED=0 go build -o "$WORK/bin/boat-api" .)
 
-  log "state: btrfs loop (reflinks like production) + slim image"
-  [ -f "$WORK/state.img" ] || { truncate -s 100G "$WORK/state.img"; mkfs.btrfs -q "$WORK/state.img"; }
+  log "boatd options: preset ${BOATBENCH_PRESET:-trusted}, then BOATBENCH_BOATD_OPTIONS"
+  local preset=${BOATBENCH_PRESET:-trusted} options=${BOATBENCH_BOATD_OPTIONS:-'{}'} merged
+  jq -e --arg p "$preset" 'has($p) and ($p | startswith("_") | not)' "$HERE/presets.json" >/dev/null ||
+    { echo "stack: unknown BOATBENCH_PRESET $preset (see presets.json)" >&2; exit 2; }
+  jq -e 'type == "object"' <<<"$options" >/dev/null || { echo "stack: BOATBENCH_BOATD_OPTIONS must be a JSON object: $options" >&2; exit 2; }
+  merged=$(jq -c --arg p "$preset" --argjson o "$options" '.[$p] * $o' "$HERE/presets.json")
+  local untrusted state_size=100G
+  untrusted=$(jq -r '.untrustedTenants // false' <<<"$merged")
+  if [ "$untrusted" = true ]; then
+    log "untrustedTenants host settings (module.nix kernel params, as far as a runner allows)"
+    # module.nix boots with nosmt=force; boatd refuses to start while SMT control reads "on".
+    local smt=/sys/devices/system/cpu/smt/control
+    if [ "$(cat "$smt" 2>/dev/null)" = on ]; then echo off | sudo tee "$smt" >/dev/null || true; fi
+    echo "SMT control: $(cat "$smt" 2>/dev/null || echo absent), CPUs online: $(nproc)" | tee "$WORK/smt.txt" >&2
+    sudo sysctl -qw kernel.io_uring_disabled=2 || echo "stack: kernel.io_uring_disabled not settable" >&2
+    [ ! -w /sys/kernel/mm/ksm/run ] || echo 0 | sudo tee /sys/kernel/mm/ksm/run >/dev/null
+    # storageOvercommit 1: committed storage (51 GiB disk + 8 GiB per VM) must fit the store.
+    state_size=1T
+  fi
+
+  log "state: btrfs loop (reflinks like production, $state_size sparse) + slim image"
+  [ -f "$WORK/state.img" ] || { truncate -s "$state_size" "$WORK/state.img"; mkfs.btrfs -q "$WORK/state.img"; }
   sudo mkdir -p "$STATE"
   mountpoint -q "$STATE" || sudo mount -o loop "$WORK/state.img" "$STATE"
   sudo mkdir -p "$STATE/images/slim"
@@ -84,10 +105,8 @@ up() {
   sudo sync
   sudo mkdir -p /sys/fs/cgroup/boat-bench
 
-  log "boatd (production defaults; overcommit raised for 10 x 8 GiB on the runner)"
-  local options=${BOATBENCH_BOATD_OPTIONS:-'{}'}
-  jq -e 'type == "object"' <<<"$options" >/dev/null || { echo "stack: BOATBENCH_BOATD_OPTIONS must be a JSON object: $options" >&2; exit 2; }
-  jq --argjson options "$options" '. * $options' >"$WORK/boatd.json" <<JSON
+  log "boatd (production defaults; overcommit raised for 10 x 8 GiB on the runner): $merged"
+  jq --argjson options "$merged" '. * $options' >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":"$WORK/dl/jailer","cgroupParent":"boat-bench","reflink":"always",
  "bootTimeoutS":120,"defaultImage":"slim","memOvercommit":${BENCH_MEM_OVERCOMMIT:-8},"cpuOvercommit":${BENCH_CPU_OVERCOMMIT:-12},
@@ -112,7 +131,7 @@ JSON
   echo $! >"$WORK/api.pid"
   for _ in $(seq 100); do curl -fs "$API/healthz" >/dev/null && break; sleep 0.1; done
   curl -fs "$API/healthz" >/dev/null || { tail -50 "$WORK/api.log"; exit 1; }
-  printf 'BOAT_URL=%s\nBOAT_KEY=%s\n' "$API" "$key" >"$WORK/env"
+  printf 'BOAT_URL=%s\nBOAT_KEY=%s\nBOATBENCH_BOATD_OPTIONS=%q\n' "$API" "$key" "$(jq -c 'del(.stateDir, .runDir, .socket, .socketGroup, .firecracker, .jailer)' "$WORK/boatd.json")" >"$WORK/env"
   chmod 600 "$WORK/env"
   log "stack up: $WORK/env"
 }

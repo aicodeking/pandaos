@@ -29,10 +29,12 @@ class ApiError(RuntimeError):
         self.status = status
 
 
-def _http(method, url, key, body=None, raw=None, timeout=660, ctype="application/json"):
+def _http(method, url, key, body=None, raw=None, timeout=660, ctype="application/json", headers=None):
     data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {key}")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
     if data is not None:
         req.add_header("Content-Type", ctype)
     try:
@@ -118,11 +120,20 @@ class PandaOS:
 
 
 class BoatDev:
-    """https://docs.boat.dev/api/v1.md (base https://boat.dev/api/v1).
+    """boat.dev Public API v1 (base https://boat.dev/api/v1), as its OpenAPI
+    (https://docs.boat.dev/openapi/boat-v1.yaml) describes it. test_boatdev.py
+    checks every request below against the parts of that spec in
+    boatdev-openapi.json, and parses the spec's own response examples.
 
     Create, fork and resume answer 202 and the machine comes up after; the
     shared exec-ready loop in boatbench.py measures until `true` succeeds.
     Stop and saved snapshots are async operations polled to completion.
+    Delete needs X-Ascii-Confirm-Delete = the sandbox id, or it is a 409 and
+    the sandbox keeps billing until its TTL.
+
+    Plan limits: the $20 plan allows 12 starts a minute and 60 an hour. One
+    repeat of workload b starts 4 machines (create, from-snapshot, fork, resume)
+    and c starts 10, so a full 5-repeat run needs the $100 plan (30/min, 210/h).
     """
 
     name = "boatdev"
@@ -166,11 +177,20 @@ class BoatDev:
                 {"path": path, "content": base64.b64encode(data).decode(), "encoding": "base64"})
 
     def fork(self, sid, name):
-        return self._j("POST", f"/sandboxes/{sid}/fork", {"name": name, "ttlSeconds": 7200})["sandbox"]["id"]
+        # The fork body has no name (labels instead); the 202's `id` is the fork's id and
+        # its `sandbox` may be null.
+        return self._j("POST", f"/sandboxes/{sid}/fork",
+                       {"labels": {"boatbench": name}, "ttlSeconds": 7200, "noEnv": True})["id"]
 
     def stop(self, sid):
         self._j("POST", f"/sandboxes/{sid}/stop", {})
-        _wait(lambda: self._state(sid).get("state") == "archived", f"stop {sid}")
+
+        def stopped():
+            sb = self._state(sid)
+            if (sb.get("stop") or {}).get("status") == "superseded":
+                raise RuntimeError(f"stop {sid} superseded: {sb.get('stop')}")
+            return sb.get("state") == "archived" or (sb.get("stop") or {}).get("status") == "completed"
+        _wait(stopped, f"stop {sid}")
 
     def resume(self, sid):
         self._j("POST", f"/sandboxes/{sid}/resume", {"ttlSeconds": 7200})
@@ -180,7 +200,7 @@ class BoatDev:
 
         def ready():
             r = self._j("GET", f"/saved-snapshots/{name}")
-            st = (r.get("savedSnapshot") or r.get("snapshot") or r).get("status")
+            st = (r.get("snapshot") or {}).get("status")
             if st == "failed":
                 raise RuntimeError(f"saved snapshot {name} failed: {r}")
             return st == "ready"
@@ -191,7 +211,7 @@ class BoatDev:
         return self.create(name, frm=ref)
 
     def delete(self, sid):
-        self._j("DELETE", f"/sandboxes/{sid}")
+        _http("DELETE", f"{self.url}/sandboxes/{sid}", self.key, headers={"X-Ascii-Confirm-Delete": sid})
 
     def delete_snapshot(self, ref):
         self._j("DELETE", f"/saved-snapshots/{ref}")

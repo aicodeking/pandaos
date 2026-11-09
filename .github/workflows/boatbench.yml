@@ -5,7 +5,8 @@ name: boatbench
 # The runner is NOT a dedicated server (shared 4 vCPU, US region); boat.dev is
 # EU. Numbers are indicative until bench/boatbench/run-on-server.sh runs on the
 # owner's server. The boatdev job runs only when the BOATDEV_API_KEY secret
-# exists; otherwise it prints SKIPPED.
+# exists; otherwise it prints SKIPPED. One pandaos job per boatd preset
+# (bench/boatbench/presets.json: trusted, trusted-warm, untrusted).
 on:
   workflow_dispatch:
     inputs:
@@ -22,8 +23,12 @@ on:
         type: choice
         options: [both, pandaos, boatdev]
         default: both
+      presets:
+        description: "boatd presets (bench/boatbench/presets.json), comma-separated: one pandaos job each"
+        type: string
+        default: "trusted,trusted-warm,untrusted"
       boatd_options:
-        description: 'JSON merged over the bench boatd.json, e.g. {"warmPool":true}. Printed in the report'
+        description: 'JSON merged over the bench boatd.json and the preset, e.g. {"diskCache":"Writeback"}. Printed in the report'
         type: string
         default: "{}"
 
@@ -45,18 +50,35 @@ jobs:
       - run: |
           python3 -m py_compile bench/boatbench/*.py
           python3 bench/boatbench/test_boatbench.py
+          python3 bench/boatbench/test_boatdev.py
           bash -n bench/boatbench/stack.sh bench/boatbench/run-on-server.sh
+      - id: plan
+        name: Preset matrix
+        env:
+          PRESETS: ${{ inputs.presets }}
+        run: |
+          json=$(jq -cn --arg p "$PRESETS" '$p | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+          jq -e --argjson want "$json" '[$want[] as $k | has($k) and ($k | startswith("_") | not)] | all and ($want | length > 0)' \
+            bench/boatbench/presets.json >/dev/null || { echo "unknown preset in: $PRESETS" >&2; exit 1; }
+          echo "presets=$json" >>"$GITHUB_OUTPUT"
+    outputs:
+      presets: ${{ steps.plan.outputs.presets }}
 
   pandaos:
-    name: pandaos (Firecracker on GitHub KVM runner)
+    name: pandaos ${{ matrix.preset }} (Firecracker on GitHub KVM runner)
     needs: unit
     if: inputs.sides != 'boatdev'
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: ${{ fromJSON(needs.unit.outputs.presets) }}
     env:
       OUT: /mnt/guest-out
+      BOATBENCH_PRESET: ${{ matrix.preset }}
       BOATBENCH_BOATD_OPTIONS: ${{ inputs.boatd_options }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -142,11 +164,12 @@ jobs:
         if: always()
         run: |
           for f in boatd api; do echo "--- $f.log (tail)"; tail -n 80 "/mnt/boatbench/$f.log" 2>/dev/null; done
+          cat /mnt/boatbench/smt.txt >>hw.txt 2>/dev/null || true
           bench/boatbench/stack.sh down
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: boatbench-pandaos
+          name: boatbench-pandaos-${{ matrix.preset }}
           path: |
             results/
             hw.txt
@@ -201,13 +224,33 @@ jobs:
       - name: Report
         run: |
           find art -type f | sort
-          files=$(find art -name 'results-*.json' | sort)
-          [ -n "$files" ] || { echo "no results to report" | tee -a "$GITHUB_STEP_SUMMARY"; exit 1; }
-          # shellcheck disable=SC2086 # word splitting is the file list
-          python3 bench/boatbench/boatbench.py report $files --out report.md >/dev/null
-          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          bd=$(find art -path '*boatbench-boatdev*' -name 'results-*.json' | sort)
+          any=
+          for dir in art/boatbench-pandaos-*; do
+            [ -d "$dir" ] || continue
+            preset=${dir#art/boatbench-pandaos-}
+            files=$(find "$dir" -name 'results-*.json' | sort)
+            [ -n "$files" ] || continue
+            any=1
+            # shellcheck disable=SC2086 # word splitting is the file list
+            python3 bench/boatbench/boatbench.py report $files $bd --out "report-$preset.md" >/dev/null
+            { echo "<details><summary>preset: $preset</summary>"; echo; cat "report-$preset.md"; echo "</details>"; } >>"$GITHUB_STEP_SUMMARY"
+          done
+          if [ -z "$any" ] && [ -n "$bd" ]; then
+            # shellcheck disable=SC2086
+            python3 bench/boatbench/boatbench.py report $bd --out report-boatdev.md >/dev/null && cat report-boatdev.md >>"$GITHUB_STEP_SUMMARY" && any=1
+          fi
+          [ -n "$any" ] || { echo "no results to report" | tee -a "$GITHUB_STEP_SUMMARY"; exit 1; }
+          pan=$(find art -path '*boatbench-pandaos-*' -name 'results-pandaos-*.json' | sort)
+          if [ -n "$pan" ]; then
+            # shellcheck disable=SC2086
+            python3 bench/boatbench/boatbench.py presets $pan --out presets.md >/dev/null
+            { echo; cat presets.md; } >>"$GITHUB_STEP_SUMMARY"
+          fi
           cat art/*/SKIPPED.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: boatbench-report
-          path: report.md
+          path: |
+            report-*.md
+            presets.md

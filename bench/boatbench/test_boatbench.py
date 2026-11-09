@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import admission  # noqa: E402
 import boatbench  # noqa: E402
 import drivers  # noqa: E402
 import report  # noqa: E402
@@ -100,6 +101,43 @@ class Render(unittest.TestCase):
         self.assertIn("0.000500", md)
 
 
+class CacheCpuPresets(unittest.TestCase):
+    def test_unsafe_cache_marks_write_rows(self):
+        r = result("pandaos", [[10]], [1])
+        r["fc_cache_type"] = "Unsafe (boatd default diskCache)"
+        r["repeats"][0]["metrics"].update(seq_write_mbps=900, seq_read_mbps=1000)
+        md = report.render([r])
+        self.assertIn("(d) disk seq write 1M †", md)
+        self.assertNotIn("seq read 1M †", md)
+        self.assertIn("not durable-write numbers", md)
+        r["fc_cache_type"] = "Writeback (boatd.json diskCache)"
+        self.assertNotIn("†", report.render([r]))
+
+    def test_cost_labels_mixed_cpus_and_gives_the_consistent_figure(self):
+        prices = {"pandaos": {"usd_per_hour": 0.0279, "cpu": "AMD Ryzen 9 7950X3D (Zen 4), Hetzner AX102"},
+                  "boatdev": {"usd_per_hour": 0.036, "cpu": "AMD Ryzen 9 9950X (Zen 5)"}}
+        r = result("pandaos", [[10]], [1])
+        r["repeats"][0]["probe"]["cpu_model"] = "AMD EPYC 7763 64-Core Processor"
+        md = report.render([r], prices, report.load_published())
+        self.assertIn("(MIXED CPUs)", md)
+        self.assertIn("**0.000361 USD per 1000 runs**", md)  # 0.036 / 3600 * 1000 / 27.67
+        r["repeats"][0]["probe"]["cpu_model"] = "AMD Ryzen 9 7950X3D 16-Core Processor"
+        cost = report.render([r], prices).split("## Cost")[1].split("## Caveats")[0]
+        self.assertIn("| pandaos |", cost)
+        self.assertNotIn("| pandaos | 0.0279 | AMD Ryzen 9 7950X3D (Zen 4), Hetzner AX102 | AMD Ryzen 9 7950X3D "
+                         "16-Core Processor | 0.000776 (MIXED", cost)
+
+    def test_presets_table_groups_pandaos_by_preset(self):
+        a, b = result("pandaos", [[10]], [1.0]), result("pandaos", [[8]], [2.0])
+        a["preset"], b["preset"] = "trusted", "untrusted"
+        b["repeats"][0]["errors"] = {"concurrent": "boom"}
+        md = report.render_presets([a, b, result("boatdev", [[20]], [5])])
+        self.assertIn("| trusted | untrusted |", md)
+        self.assertIn("| 10.00 [10.00-10.00] n=1 | 8.00 [8.00-8.00] n=1 |", md)
+        self.assertIn("r0:concurrent", md)
+        self.assertNotIn("20.00", md)
+
+
 class Normalization(unittest.TestCase):
     def run_render(self, cpu="AMD EPYC 7763 64-Core Processor x4"):
         host = result("host", [[12.0]], [0.0])
@@ -159,18 +197,78 @@ class Options(unittest.TestCase):
 
 
 class Prices(unittest.TestCase):
-    def test_vm_counts_follow_manager_admission_and_prices_recompute(self):
+    """VM counts come from boatd's admission with its constants read from the Go source."""
+
+    def setUp(self):
         with open(os.path.join(report.HERE, "prices.json")) as f:
-            p = json.load(f)
-        a = p["assumptions"]
-        for s in p["servers"]:
-            for key, oc in (("vms_overcommit_1_0", 1.0), ("vms_overcommit_1_5", 1.5)):
-                n = int((s["ram_gb"] * 1024 - a["host_reserve_mib"]) * oc // a["vm_mem_mib"])
-                self.assertEqual(s[key], min(n, int(s["vcpu_threads"] * a["cpu_overcommit_default"] // 4)), s["name"])
-        ax = next(s for s in p["servers"] if s["name"] == "Hetzner AX102")
+            self.p = json.load(f)
+        self.d = admission.boatd_defaults()
+
+    def test_admission_constants_are_read_from_boatd(self):
+        self.assertTrue(admission.admission_counts_overhead(), "manager.go no longer counts VMOverheadMiB: recheck")
+        self.assertEqual(self.d["vm_mem_mib"], 8192)
+        self.assertGreater(self.d["vm_overhead_mib"], 0)
+        recorded = self.p["assumptions"]["boatd_defaults_read_from_source"]
+        self.assertEqual(recorded, {k: self.d[k] for k in recorded}, "boatd defaults changed: rerun the cost model")
+
+    def test_vm_counts_follow_boatd_admission(self):
+        for s in self.p["servers"]:
+            mt, sold = admission.est_memtotal_mib(s["ram_gb"]), s["ram_gb"] * 1024
+            self.assertEqual(s["est_memtotal_mib"], mt, s["name"])
+            for oc, key in ((1.0, "1_0"), (1.5, "1_5")):
+                per_vm = self.d["vm_mem_mib"] + self.d["vm_overhead_mib"]
+                cpu = int(s["vcpu_threads"] * self.d["cpu_overcommit"] // self.d["vm_vcpu"])
+                self.assertEqual(s[f"vms_overcommit_{key}"],
+                                 min(int((mt - self.d["host_reserve_mib"]) * oc // per_vm), cpu), s["name"])
+                self.assertEqual(s[f"vms_as_sold_overcommit_{key}"],
+                                 min(int((sold - self.d["host_reserve_mib"]) * oc // per_vm), cpu), s["name"])
+            self.assertEqual(s["vms_untrusted"], admission.vms(s, 1.0, self.d, smt_off=True), s["name"])
+
+    def test_ax102_threshold_rows(self):
+        ax = next(s for s in self.p["servers"] if s["name"] == "Hetzner AX102")
+        self.assertEqual((ax["vms_overcommit_1_0"], ax["vms_overcommit_1_5"], ax["vms_as_sold_overcommit_1_5"]), (15, 22, 23))
+        # boatd admits n VMs only if MemTotal reaches this (manager.go's > is strict, so <= fits).
+        self.assertEqual(admission.memtotal_needed(15, 1.0, self.d), 127744)
+        self.assertEqual(admission.memtotal_needed(23, 1.5, self.d), 130560)
+        self.assertEqual(admission.vms_by_ram(127744, 1.0, self.d), 15)
+        self.assertEqual(admission.vms_by_ram(127743, 1.0, self.d), 14)
+
+    def test_prices_recompute(self):
+        ax = next(s for s in self.p["servers"] if s["name"] == "Hetzner AX102")
         month = ax["usd_per_month"] + ax["setup_usd"] / 12 + ax["backup_usd_per_month"]
-        self.assertAlmostEqual(p["pandaos"]["usd_per_hour"], month / (15 * 730), places=4)
-        self.assertAlmostEqual(p["pandaos"]["usd_per_hour_overcommit_1_5"], month / (23 * 730), places=4)
+        pan = self.p["pandaos"]
+        self.assertAlmostEqual(pan["usd_per_hour"], month / (ax["vms_overcommit_1_0"] * 730), places=4)
+        self.assertAlmostEqual(pan["usd_per_hour_overcommit_1_5"], month / (ax["vms_overcommit_1_5"] * 730), places=4)
+        self.assertAlmostEqual(pan["usd_per_hour_untrusted"], month / (ax["vms_untrusted"] * 730), places=4)
+        self.assertIn("7950X3D", pan["cpu"])
+        self.assertIn("9950X", self.p["boatdev"]["cpu"])
+
+
+class Presets(unittest.TestCase):
+    def test_untrusted_preset_is_module_nix_untrusted_settings(self):
+        with open(os.path.join(report.HERE, "presets.json")) as f:
+            presets = json.load(f)
+        nix = admission.untrusted_settings()
+        skipped = set(presets["_untrusted_not_applied"])
+        self.assertEqual(skipped, {"memOvercommit"})
+        self.assertEqual(presets["untrusted"], {k: v for k, v in nix.items() if k not in skipped})
+        self.assertEqual(nix["memOvercommit"], 1)
+        self.assertEqual(presets["trusted"], {})
+        self.assertEqual(presets["trusted-warm"], {"warmPool": True})
+
+    def test_cache_type_from_options_then_boatd(self):
+        self.assertTrue(boatbench.fc_cache_type('{"diskCache": "Writeback"}').startswith("Writeback"))
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "fc.go"), "w") as f:
+                f.write('drive := map[string]any{"drive_id": "rootfs"}')
+            with open(os.path.join(d, "config.go"), "w") as f:
+                f.write("")
+            self.assertTrue(boatbench.fc_cache_type("{}", d).startswith("Unsafe (Firecracker's default"))
+            with open(os.path.join(d, "fc.go"), "w") as f:
+                f.write('"cache_type": cfg.DiskCache')
+            with open(os.path.join(d, "config.go"), "w") as f:
+                f.write('\t\tDiskCache:         "Writeback",\n')
+            self.assertEqual(boatbench.fc_cache_type("-", d), "Writeback (boatd default diskCache)")
 
 
 class HostDriver(unittest.TestCase):

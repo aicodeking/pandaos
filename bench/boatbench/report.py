@@ -1,6 +1,7 @@
 """Stats, cost and the markdown report for boatbench result files."""
 import json
 import os
+import re
 import statistics
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -53,12 +54,31 @@ CAVEATS = [
     "no clear winner.",
 ]
 
+WRITE_METRICS = ("seq_write_mbps", "rand_write_iops", "pts_rand_write_iops", "pts_seq_write_mibps")
+
 # Measured both on the runner itself and in a VM on it.
 HOST_VM_METRICS = ("node_runs_s", "seq_write_mbps", "seq_read_mbps", "rand_write_iops", "rand_read_iops",
                    "pts_rand_read_iops", "pts_rand_write_iops", "pts_seq_write_mibps")
 WARM_POOL_CAVEAT = ("`warmPool` is ON in this run, and it is off by default. VMs from one template share boot-time "
                     "randomness, including the ASLR offsets of already-running processes, across tenants "
                     "(components/boat/PROTOCOL.md). Do not read warm numbers as the default configuration.")
+
+
+def unsafe_cache(res):
+    """The PandaOS side's Firecracker cache_type, if it ignores guest flushes."""
+    c = str((res.get("pandaos") or {}).get("fc_cache_type", ""))
+    return c if c.startswith("Unsafe") else None
+
+
+def unsafe_note(cache):
+    return (f"† PandaOS write numbers: Firecracker's drive `cache_type` was **{cache}**. In `Unsafe` mode the "
+            "guest's flushes are not passed to the host, so fsync and O_DIRECT writes complete once they reach the "
+            "host page cache, not the disk. They are not durable-write numbers, and boat.dev's need not be the same "
+            "kind. `diskCache: Writeback` makes boatd honour guest flushes.")
+
+
+def cpu_of(result):
+    return next((rep["probe"].get("cpu_model") for rep in result.get("repeats", []) if rep.get("probe")), None) or "-"
 
 
 def percentile(values, p):
@@ -97,7 +117,8 @@ def load_prices(path):
     for side in SIDES:
         p = raw.get(side)
         if isinstance(p, dict) and isinstance(p.get("usd_per_hour"), (int, float)) and p["usd_per_hour"] >= 0:
-            prices[side] = {"usd_per_hour": float(p["usd_per_hour"]), "source": p.get("source", "")}
+            prices[side] = {"usd_per_hour": float(p["usd_per_hour"]), "source": p.get("source", ""),
+                            "cpu": p.get("cpu", "")}
     return prices or None
 
 
@@ -114,6 +135,39 @@ def cost_rows(summaries, prices):
         per_npm = p["usd_per_hour"] / 3600 * npm["median"] if npm else None
         rows.append((side, p, per_k, per_npm))
     return rows
+
+
+def cost_section(summ, prices, res, published):
+    out = ["", "## Cost", ""]
+    rows = cost_rows(summ, prices)
+    if not rows:
+        return out + ["No `prices.json` with `usd_per_hour` per side: cost not computed, runs/s only."]
+    out += ["Cost = side's price per hour (prices.json) x time. A per-run cost only means something when the "
+            "price and the speed come from the same CPU. **Rows marked MIXED CPUs are arithmetic, not a cost "
+            "of any real machine.**", "",
+            "| Side | USD/hour | The price buys | Speed measured on | USD per 1000 Node loop runs | USD per cold npm ci |",
+            "|---|---|---|---|---|---|"]
+    for side, p, per_k, per_npm in rows:
+        measured = cpu_of(res[side]) if side in res else "-"
+        mixed = not p.get("cpu") or measured == "-" or not _same_cpu(p["cpu"], measured)
+        tag = " (MIXED CPUs)" if mixed else ""
+        out.append(f"| {side} | {p['usd_per_hour']:.4f} | {p.get('cpu') or '-'} | {measured} | "
+                   f"{'-' if per_k is None else f'{per_k:.6f}{tag}'} | {'-' if per_npm is None else f'{per_npm:.6f}{tag}'} |")
+    bd = (prices or {}).get("boatdev")
+    if bd and published:
+        v = published["metrics"]["node_runs_s"]["value"]
+        out += ["", f"CPU-consistent figure: boat.dev's price with boat.dev's own published speed on the CPU it "
+                f"sells ({v} runs/s, vendor-measured, {published['rows'][0]['cpu']}): "
+                f"**{bd['usd_per_hour'] / 3600 * 1000 / v:.6f} USD per 1000 runs**. PandaOS has no CPU-consistent "
+                "figure yet: its price is an AX102 (Ryzen 9 7950X3D, Zen 4), and nobody has run boatbench on one. "
+                "The 9950X projection below is not that CPU either."]
+    return out
+
+
+def _same_cpu(a, b):
+    """Loose model match: the price's CPU string names the measured model."""
+    m = re.search(r"(EPYC \w+|Ryzen \d \w+|Xeon[^,(]*)", b or "")
+    return bool(m) and m.group(1).lower() in (a or "").lower()
 
 
 def fmt(x):
@@ -192,7 +246,9 @@ def side_table(res):
         ("Harness client CPU", lambda r: r.get("client", {}).get("cpu_model", "-")),
         ("Harness client egress (Cloudflare colo)", lambda r: r.get("client", {}).get("egress", "-")),
         ("Requested size", lambda r: r.get("size", "-")),
+        ("Preset (presets.json)", lambda r: r.get("preset", "-")),
         ("boatd options over the defaults", lambda r: r.get("boatd_options", "-")),
+        ("Firecracker drive cache_type", lambda r: r.get("fc_cache_type", "-")),
         ("VM vCPU / RAM / disk (measured)", lambda r: "{} vCPU / {} MiB / {} GiB".format(
             first_probe(r).get("nproc"), first_probe(r).get("mem_mib"), first_probe(r).get("disk_gib"))),
         ("VM CPU model", lambda r: first_probe(r).get("cpu_model", "-")),
@@ -268,6 +324,42 @@ def normalization(host_results, vm, published):
     return out
 
 
+PRESET_METRICS = ("node_runs_s", "create_ready_s", "exec_rtt_p50_ms", "fork_ready_s", "stop_s", "resume_ready_s",
+                  "snapshot_s", "from_snapshot_ready_s", "concurrent10_wall_s", "seq_write_mbps", "seq_read_mbps",
+                  "rand_write_iops", "rand_read_iops", "pts_rand_write_iops", "pts_rand_read_iops",
+                  "dl_go_tarball_googlecdn_mbit", "npm_ci_s")
+
+
+def render_presets(results):
+    """PandaOS medians side by side for each boatd preset (one runner per preset)."""
+    groups = {}
+    for r in results:
+        if r["driver"] == "pandaos":
+            groups.setdefault(r.get("preset", "-"), []).append(r)
+    res = {k: merged(v) for k, v in sorted(groups.items())}
+    labels = {k: (label, unit, hib) for k, label, unit, hib in METRICS}
+    out = ["# boatbench: PandaOS by boatd preset (MEASURED)", "",
+           "Each column ran on its own GitHub runner (shared, nested KVM, not a dedicated server), so runner-to-"
+           "runner variance is in the differences too. median [IQR] n=samples.", "",
+           "| Metric | Unit | Better | " + " | ".join(res) + " |", "|---|---|---|" + "---|" * len(res)]
+    for key in PRESET_METRICS:
+        cells = [cell(summarize(samples(r, key))) for r in res.values()]
+        if all(c == "-" for c in cells):
+            continue
+        label, unit, hib = labels[key]
+        out.append(f"| {label} | {unit} | {'higher' if hib else 'lower'} | " + " | ".join(cells) + " |")
+    out += ["", "| | " + " | ".join(res) + " |", "|---|" + "---|" * len(res)]
+    for name, f in (("boatd options", lambda r: r.get("boatd_options", "-")),
+                    ("Firecracker cache_type", lambda r: r.get("fc_cache_type", "-")),
+                    ("VM vCPU seen", lambda r: next((str(rep["probe"].get("nproc")) for rep in r.get("repeats", [])
+                                                     if rep.get("probe")), "-")),
+                    ("Failed steps", lambda r: ", ".join(f"r{rep.get('index')}:{k}" for rep in r.get("repeats", [])
+                                                         for k in (rep.get("errors") or {}))[:300] or "none"),
+                    ("Run URL", lambda r: r.get("run_url") or "-")):
+        out.append(f"| {name} | " + " | ".join(str(f(r)).replace("|", "/") for r in res.values()) + " |")
+    return "\n".join(out) + "\n"
+
+
 def render(results, prices=None, published=None):
     host_results = [r for r in results if r["driver"] == "host"]
     results = [r for r in results if r["driver"] != "host"]
@@ -282,12 +374,16 @@ def render(results, prices=None, published=None):
             "median [IQR q1-q3] n=samples; the verdict compares medians and notes overlapping IQRs.", "",
             "| Metric | Unit | Better | PandaOS (measured) | boat.dev (measured) | PandaOS / boat.dev | Verdict |",
             "|---|---|---|---|---|---|---|"]
+    cache = unsafe_cache(res)
     for key, label, unit, hib in METRICS:
         pan, bd = summ.get("pandaos", {}).get(key), summ.get("boatdev", {}).get(key)
         if not pan and not bd:
             continue
+        label = label + (" †" if cache and key in WRITE_METRICS and pan else "")
         out.append(f"| {label} | {unit} | {'higher' if hib else 'lower'} | {cell(pan)} | {cell(bd)} | "
                    f"{ratio(pan, bd)} | {verdict(pan, bd, hib)} |")
+    if cache:
+        out += ["", unsafe_note(cache)]
     if published:
         out += ["", "## Published (boat.dev's claims) vs measured (this harness)", "",
                 f"Source: {published['source']} (measured by the vendor on {published['measured_on']}). "
@@ -306,19 +402,7 @@ def render(results, prices=None, published=None):
             out += [f"| {r['provider']} | {r['runs_s']} | {r['cpu']} |" for r in published["rows"]]
     if host_results and "pandaos" in res:
         out += normalization(host_results, res["pandaos"], published)
-    out += ["", "## Cost", ""]
-    rows = cost_rows(summ, prices)
-    if not rows:
-        out.append("No `prices.json` with `usd_per_hour` per side: cost not computed, runs/s only.")
-    else:
-        out += ["Cost = side's price per hour (prices.json) x measured time. Per 1000 Node loop runs uses "
-                "1000 / runs_s seconds of one 4 vCPU / 8 GiB VM. In CI this mixes a dedicated server's price "
-                "with a GitHub runner's speed, so read it as arithmetic, not as a measured cost.", "",
-                "| Side | USD/hour | Price source | USD per 1000 Node loop runs | USD per cold npm ci |",
-                "|---|---|---|---|---|"]
-        for side, p, per_k, per_npm in rows:
-            out.append(f"| {side} | {p['usd_per_hour']:.4f} | {p['source']} | "
-                       f"{'-' if per_k is None else f'{per_k:.6f}'} | {'-' if per_npm is None else f'{per_npm:.6f}'} |")
+    out += cost_section(summ, prices, res, published)
     out += ["", "## Caveats", ""] + [f"- {c}" for c in CAVEATS + auto_caveats(res)]
     return "\n".join(out) + "\n"
 

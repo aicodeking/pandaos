@@ -4,11 +4,13 @@
   boatbench.py run --driver pandaos|boatdev [--repeats 5] [--only a,b,c,d,e,f] [--out DIR]
   boatbench.py run --driver host --only ad [--repeats 5] [--out DIR]   # same scripts, no VM
   boatbench.py report RESULTS.json... [--prices prices.json] [--out report.md]
+  boatbench.py presets RESULTS.json... [--out presets.md]   # PandaOS per boatd preset
 
 pandaos needs BOAT_URL + BOAT_KEY; boatdev needs BOATDEV_API_KEY. Each repeat is a
 fresh 4 vCPU / 8 GiB VM. Raw per-repeat data goes to DIR/results-<driver>-<ts>.json.
 Optional env: BOATBENCH_HOST_DESC (hardware/location of the provider host, printed
-in the report), BOATBENCH_RUN_URL, BOATBENCH_BOATD_OPTIONS (printed in the report).
+in the report), BOATBENCH_RUN_URL, BOATBENCH_BOATD_OPTIONS and BOATBENCH_PRESET
+(printed in the report).
 """
 import argparse
 import concurrent.futures
@@ -16,6 +18,7 @@ import datetime
 import json
 import os
 import platform
+import re
 import secrets
 import subprocess
 import sys
@@ -221,6 +224,28 @@ def concurrent_create(d, run_id, index, n=CONCURRENT_N):
     return wall, sorted(s for _, s in out)
 
 
+def fc_cache_type(options=None, boatd_dir=os.path.join(HERE, "..", "..", "components", "boat", "boatd")):
+    """Firecracker cache_type of the root drive: boatd.json's diskCache, else boatd's
+    default, else Firecracker's own default (Unsafe: guest flushes are not passed on)."""
+    try:
+        opt = json.loads(options or "{}")
+    except ValueError:
+        opt = {}
+    if isinstance(opt, dict) and opt.get("diskCache"):
+        return f"{opt['diskCache']} (boatd.json diskCache)"
+    try:
+        with open(os.path.join(boatd_dir, "fc.go")) as f:
+            fc = f.read()
+        with open(os.path.join(boatd_dir, "config.go")) as f:
+            cfg = f.read()
+    except OSError:
+        return "unknown (boatd source not found)"
+    if "cache_type" not in fc:
+        return "Unsafe (Firecracker's default: boatd sets no cache_type)"
+    m = re.search(r'^\s*DiskCache:\s*"(\w+)"', cfg, re.M)
+    return f"{m.group(1)} (boatd default diskCache)" if m else "unknown"
+
+
 def client_info():
     model = ""
     try:
@@ -244,7 +269,9 @@ def cmd_run(a):
     res = {"driver": a.driver, "run_id": run_id, "size": d.size,
            "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
            "host": {"desc": os.environ.get("BOATBENCH_HOST_DESC", "-")},
-           "boatd_options": os.environ.get("BOATBENCH_BOATD_OPTIONS") or "-", "run_url": os.environ.get("BOATBENCH_RUN_URL"),
+           "boatd_options": os.environ.get("BOATBENCH_BOATD_OPTIONS") or "-",
+           "preset": os.environ.get("BOATBENCH_PRESET") or "-",
+           "fc_cache_type": fc_cache_type(os.environ.get("BOATBENCH_BOATD_OPTIONS")) if a.driver == "pandaos" else "-", "run_url": os.environ.get("BOATBENCH_RUN_URL"),
            "client": client_info(), "parts": "".join(sorted(parts)), "repeats": []}
     os.makedirs(a.out, exist_ok=True)
     path = os.path.join(a.out, f"results-{a.driver}-{res['started'].replace(':', '')}.json")
@@ -278,6 +305,19 @@ def cmd_report(a):
     return 0
 
 
+def cmd_presets(a):
+    results = []
+    for p in a.results:
+        with open(p) as f:
+            results.append(json.load(f))
+    md = report.render_presets(results)
+    if a.out:
+        with open(a.out, "w") as f:
+            f.write(md)
+    print(md)
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -290,12 +330,15 @@ def main(argv=None):
     g.add_argument("results", nargs="+")
     g.add_argument("--prices", default=os.path.join(HERE, "prices.json"))
     g.add_argument("--out")
+    q = sub.add_parser("presets", help="PandaOS medians side by side per boatd preset")
+    q.add_argument("results", nargs="+")
+    q.add_argument("--out")
     a = p.parse_args(argv)
     if a.cmd == "run" and (a.repeats < 1 or not set(a.only.replace(",", "")) <= set(ALL_PARTS)):
         p.error("--repeats must be >= 1 and --only a subset of abcdef")
     if a.cmd == "run" and a.driver == "host" and not set(a.only.replace(",", "")) <= drivers.Host.PARTS:
         p.error("--driver host only runs workloads a and d")
-    return cmd_run(a) if a.cmd == "run" else cmd_report(a)
+    return {"run": cmd_run, "report": cmd_report, "presets": cmd_presets}[a.cmd](a)
 
 
 if __name__ == "__main__":
