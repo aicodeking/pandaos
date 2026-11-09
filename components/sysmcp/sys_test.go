@@ -301,6 +301,21 @@ func TestUpdatesMutationGate(t *testing.T) {
 	if err != nil || m["onHold"] != false || m["status"].(map[string]any)["ActiveState"] != "inactive" {
 		t.Errorf("status: v=%v err=%v", v, err)
 	}
+	if _, ok := m["releaseRefused"]; ok {
+		t.Errorf("no verify record yet, but status has releaseRefused: %v", m)
+	}
+
+	writeFile(t, s.root, verifyFile, "refused 2026-11-09T00:00:00Z ?: updates are disabled: pandaos.updates.allowedSigners is empty\n")
+	v, _ = s.updates(toolArgs{})
+	m = asMap(t, v)
+	if m["releaseRefused"] != true || !strings.Contains(m["lastReleaseCheck"].(string), "allowedSigners is empty") {
+		t.Errorf("refused release not surfaced: %v", m)
+	}
+	writeFile(t, s.root, verifyFile, "verified 2026-11-09T00:00:00Z abc signed by release@pandaos\n")
+	v, _ = s.updates(toolArgs{})
+	if m = asMap(t, v); m["releaseRefused"] != false {
+		t.Errorf("verified release reported as refused: %v", m)
+	}
 }
 
 func TestTop(t *testing.T) {

@@ -25,11 +25,53 @@ PandaOS version:
 cat /etc/pandaos/VERSION
 ```
 
+## Signed releases (required)
+
+The GitHub branch alone is not trusted. Before anything is built, `panda-update-verify` checks
+that the new `release` commit is **SSH-signed by a key in `pandaos.updates.allowedSigners`**,
+descends from the release the box runs (no downgrade, no rewritten history), and is exactly the
+tree Nix fetched. If any check fails, it puts the old `flake.lock` back and the box keeps running
+what it runs.
+
+**With no allowed signers configured, every update is refused.** The build warns about it,
+`panda-update status` says `signed releases: required, but no allowed signers are configured`,
+and every run records `last release check: refused ... updates are disabled` (also reported as
+`releaseRefused: true` by the panda-sys `sys_updates` tool). This is deliberate: a box without a
+trust anchor stops patching visibly instead of trusting whoever can move the branch.
+
+To turn updates on, add the release-signing public key to `/etc/pandaos/local.nix` and rebuild:
+
+```nix
+pandaos.updates.allowedSigners = [
+  # <principal> [options] <keytype> <key>, as in an ssh allowed_signers file
+  ''release@pandaos namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...''
+];
+```
+
+```sh
+sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
+sudo panda-update run && panda-update status
+```
+
+**Release owner:** create the signing key (`ssh-keygen -t ed25519 -f pandaos-release`), publish
+its `.pub` line, and sign every commit the `release` branch points at
+(`git -c gpg.format=ssh -c user.signingkey=pandaos-release.pub commit -S`). A signed tag is not
+enough: the commit itself must carry the signature. `pandaos.updates.requireSignedRelease = false`
+turns the check off, and with it the protection.
+
+### Update modes
+
+`pandaos.updates.mode`: `automatic` (default: the daily timer verifies and switches), `staged`
+(the daily timer verifies and builds the next release, `panda-update status` shows it as
+`staged:`, and `sudo panda-update run` applies it) or `manual` (no timer). Boat servers with
+`services.boat.untrustedTenants` default to `staged`.
+
 ## The daily update
 
 Once a day (`nixos-upgrade.timer`, with up to 1 h of random delay) the box:
 
-1. moves the `pandaos` input of `/etc/pandaos/flake.lock` to the head of the `release` branch,
+1. moves the `pandaos` input of `/etc/pandaos/flake.lock` to the head of the `release` branch and
+   verifies the signature (above), refusing an unsigned or wrongly signed release,
 2. builds the new generation and switches to it,
 3. runs a health check (`panda-health`): within 90 s, the core services must be active and, if the
    box had a default route before the update, it must have one again,

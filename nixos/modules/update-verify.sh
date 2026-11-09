@@ -33,6 +33,12 @@ field() { jq -r --arg i "$input" ".nodes[\$i].$1 // empty" "$lock"; }
 old=""
 if [ -f "$lock" ]; then old=$(field locked.rev); fi
 
+# Checked first, every run: with no trust anchor this box is not being
+# patched, and status (panda-update status, panda-sys sys_updates) must say so
+# daily, not only when a release happens to move.
+grep -Eq '^[^#[:space:]]' "$signers" 2>/dev/null ||
+  refuse "updates are disabled: pandaos.updates.allowedSigners is empty, so no release can be trusted (set the release-signing key; see docs/updates-and-rollback.md)"
+
 nix flake update --refresh "$input" --flake "$flake_dir"
 
 new=$(field locked.rev)
@@ -42,9 +48,6 @@ if [ "$new" = "$old" ]; then
   exit 0
 fi
 echo "panda-update: release moved $old -> $new; verifying its signature"
-
-grep -Eq '^[^#[:space:]]' "$signers" 2>/dev/null ||
-  refuse "pandaos.updates.allowedSigners is empty, so no release can be trusted (the owner must publish the release-signing key)"
 
 type=$(field locked.type)
 case "$type" in

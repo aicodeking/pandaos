@@ -53,6 +53,9 @@ const (
 	updateGroup = "panda-sys-update"
 	upgradeUnit = "nixos-upgrade.service"
 	holdFile    = "/var/lib/pandaos/update-hold"
+	// panda-update-verify's last verdict: "verified|refused <time> <rev>: <why>".
+	verifyFile = "/var/lib/pandaos/update-verify"
+	stagedFile = "/var/lib/pandaos/update-staged"
 )
 
 type Server struct {
@@ -391,7 +394,17 @@ func (s *Server) upgradeStatus() (map[string]any, error) {
 		}
 	}
 	_, herr := os.Stat(filepath.Join(s.root, holdFile))
-	return map[string]any{"unit": upgradeUnit, "status": unit, "onHold": herr == nil}, nil
+	res := map[string]any{"unit": upgradeUnit, "status": unit, "onHold": herr == nil}
+	// A refused release (unsigned, wrong key, or no allowedSigners at all) means
+	// the box is not being patched: surface it, not just the unit's exit code.
+	if v, err := s.readFile(verifyFile); err == nil && v != "" {
+		res["lastReleaseCheck"] = v
+		res["releaseRefused"] = strings.HasPrefix(v, "refused ")
+	}
+	if v, err := s.readFile(stagedFile); err == nil && v != "" {
+		res["staged"] = v
+	}
+	return res, nil
 }
 
 func (s *Server) updates(a toolArgs) (any, error) {
