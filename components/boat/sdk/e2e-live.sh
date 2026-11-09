@@ -38,10 +38,12 @@ off=$(mktemp -d)
 miss() {
   if [ -n "${BOAT_LIVE_FAKE:-}" ]; then echo "SKIP - $*"; else echo "official SDKs: FAIL: $*" >&2; exit 1; fi
 }
+pins=(--disable-pip-version-check --require-hashes --only-binary :all: -r "$here/compat/requirements.txt")
 if python3 -m venv "$off/venv" >/dev/null 2>&1 &&
-  "$off/venv/bin/python" -m pip install -q --disable-pip-version-check --require-hashes --only-binary :all: \
-    -r "$here/compat/requirements.txt" >"$off/pip.log" 2>&1; then
+  "$off/venv/bin/python" -m pip install -q "${pins[@]}" >"$off/pip.log" 2>&1; then
   "$off/venv/bin/python" "$here/compat/official_sdk.py"
+elif python3 -m pip install -q --target "$off/py" --break-system-packages "${pins[@]}" >>"$off/pip.log" 2>&1; then
+  PYTHONPATH="$off/py" python3 "$here/compat/official_sdk.py" # no venv module (Debian's python3-venv missing)
 else
   miss "cannot install boat-sdk: $(tail -3 "$off/pip.log" 2>/dev/null)"
 fi
