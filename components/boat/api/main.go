@@ -234,7 +234,11 @@ func serve(args []string) int {
 		srv.Shutdown(sctx)
 	}()
 	log.Printf("boat-api listening on %s (boatd %s)", *listen, *boatd)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	err = srv.ListenAndServe()
+	if ferr := store.Flush(); ferr != nil { // what Apply left in memory
+		log.Printf("boat-api: write state: %v", ferr)
+	}
+	if err != nil && err != http.ErrServerClosed {
 		log.Printf("boat-api: %v", err)
 		return 1
 	}

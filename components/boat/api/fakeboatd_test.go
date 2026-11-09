@@ -50,7 +50,7 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		f.n++
 		id := fmt.Sprintf("vm%d", f.n)
 		vm := VM{"id": id, "name": in["name"], "size": in["size"], "image": in["image"], "team": in["team"],
-			"state": "running", "env": in["env"], "ip": "10.0.0.5", "ports": []any{}, "from_snapshot": in["snapshot"]}
+			"state": "running", "env": in["env"], "ip": "10.0.0.5", "ports": []any{}, "from_snapshot": in["snapshot"], "labels": in["labels"]}
 		if sid, _ := in["snapshot"].(string); sid != "" {
 			if sn := f.snaps[sid]; sn == nil || sn["team"] != in["team"] {
 				f.mu.Unlock()
@@ -114,7 +114,7 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		case "fork":
 			f.n++
 			id := fmt.Sprintf("vm%d", f.n)
-			f.vms[id] = VM{"id": id, "name": in["name"], "team": in["team"], "state": "running"}
+			f.vms[id] = VM{"id": id, "name": in["name"], "team": in["team"], "state": "running", "labels": vm["labels"]} // like boatd: labels are copied
 			writeJSON(w, 201, f.vms[id])
 			return
 		case "exec":

@@ -53,7 +53,7 @@ The full schema is in `openapi.json` (OpenAPI 3.1), which the server also serves
 | `GET /v1/me` | any | user, team, role, effective scopes |
 | `GET /v1/images` | any | from `-images`; the first one is the default |
 | `GET /v1/usage[?from&to]` | vms:read | boatd `/v1/usage?team=`: VM-seconds by size, snapshot-days, starts |
-| `GET/POST /v1/vms` | vms:read / vms:write | create body `{name,size,image,ttl_s,idle_stop_s,snapshot,labels,env,secrets,environment,no_env,from}`; `secrets:[names]` picks the injected team secrets (absent = all, `[]` = none) |
+| `GET/POST /v1/vms` | vms:read / vms:write | create body `{name,size,image,ttl_s,idle_stop_s,snapshot,labels,env,secrets,environment,no_env,from}`; `secrets:[names]` picks the injected team secrets (absent = all, `[]` = none); label keys starting with `boat.` are reserved (boat-api stores the selection in `boat.secrets`) |
 | `GET/DELETE /v1/vms/{id}` | vms:read / vms:write | |
 | `POST /v1/vms/{id}/start\|stop\|fork` | vms:write | start re-injects secrets `{env}`; fork `{name}` |
 | `POST /v1/vms/{id}/exec` | exec | `{cmd[],env,cwd,stdin_b64,timeout_s}` → NDJSON `{stream,data_b64}` … `{exit}` |

@@ -67,9 +67,13 @@ func (s *server) aiCheckToken(tok string) (string, *AIVM, bool) {
 }
 
 // aiBumpVM registers a VM (or moves it to a new token generation) and returns gen.
-func (s *server) aiBumpVM(vmID, team string) (int, error) {
+func (s *server) aiBumpVM(vmID, team string, wait bool) (int, error) {
 	gen := 0
-	err := s.store.Update(func(st *State) error {
+	write := s.store.Update
+	if !wait {
+		write = s.store.Apply
+	}
+	err := write(func(st *State) error {
 		vm := st.AIVMs[vmID]
 		if vm == nil {
 			vm = &AIVM{TeamID: team}
@@ -86,6 +90,17 @@ func (s *server) aiBumpVM(vmID, team string) (int, error) {
 // or (only when the team switched the proxy off) the raw keys. It starts a new
 // token generation when bump is set.
 func (s *server) aiEnv(vmID, team string, bump bool) (map[string]string, error) {
+	return s.aiEnvGen(vmID, team, bump, true)
+}
+
+// aiEnvNewVM is aiEnv for a VM that was just created or forked: its first
+// generation need not wait for the disk, as losing it in a crash only means
+// the same generation is handed out again to the same VM.
+func (s *server) aiEnvNewVM(vmID, team string) (map[string]string, error) {
+	return s.aiEnvGen(vmID, team, true, false)
+}
+
+func (s *server) aiEnvGen(vmID, team string, bump, wait bool) (map[string]string, error) {
 	st := s.store.Snapshot()
 	var creds []*AICredential
 	for _, c := range st.AICreds {
@@ -120,7 +135,7 @@ func (s *server) aiEnv(vmID, team string, bump bool) (map[string]string, error) 
 	}
 	if bump || gen == 0 {
 		var err error
-		if gen, err = s.aiBumpVM(vmID, team); err != nil {
+		if gen, err = s.aiBumpVM(vmID, team, wait); err != nil {
 			return nil, err
 		}
 	}

@@ -570,7 +570,7 @@ func (d *dispatcher) handleRaw(ctx context.Context, sseType, data string) {
 	}
 	// Every stop kills the run's AI proxy token (TTL and idle stops included).
 	if typ == "vm.state" && str(raw, "state") == "stopped" && vmID != "" && d.s.store.Snapshot().AIVMs[vmID] != nil {
-		if _, err := d.s.aiBumpVM(vmID, team); err != nil {
+		if _, err := d.s.aiBumpVM(vmID, team, true); err != nil {
 			log.Printf("rotate AI token of %s: %v", vmID, err)
 		}
 	}

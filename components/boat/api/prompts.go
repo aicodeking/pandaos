@@ -223,7 +223,7 @@ func (s *server) runTurn(r *http.Request, p *principal, vmID string, body prompt
 	if agent == "claude" && session == "" {
 		session, first = newUUID(), true
 	}
-	env, err := s.teamEnv(p.Team.ID, s.vmSecrets(vmID))
+	env, err := s.teamEnv(p.Team.ID, s.selectionFor(r, vmID))
 	if err != nil {
 		log.Printf("%s: %v", info(r).id, err)
 		return nil, 500, "cannot decrypt team secrets"

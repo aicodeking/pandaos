@@ -107,14 +107,48 @@ func (s *server) snapshotForeign(r *http.Request, team, sid string) (bool, error
 	return true, nil
 }
 
+// secretsLabel carries a VM's secret selection on its boatd record: boatd
+// writes it durably as part of the create and copies it to forks, so the API
+// does not have to wait for its own fsync before answering. Comma-separated
+// names; "" = none. Absent = see the store (VMs from before the label).
+const (
+	secretsLabel   = "boat.secrets"
+	reservedLabels = "boat." // set by boat-api only
+	maxLabelValue  = 256     // boatd's limit
+)
+
+// selectionLabel is the label value for a selection, false if it does not fit.
+func selectionLabel(only []string) (string, bool) {
+	v := strings.Join(only, ",")
+	return v, len(v) <= maxLabelValue
+}
+
+// labeledSelection reads the selection from a VM's labels.
+func labeledSelection(vm VM) ([]string, bool) {
+	labels, _ := vm["labels"].(map[string]any)
+	v, ok := labels[secretsLabel].(string)
+	if !ok {
+		return nil, false
+	}
+	if v == "" {
+		return []string{}, true
+	}
+	return strings.Split(v, ","), true
+}
+
 // recordVM stores a new VM's secret selection (nil = all) and whether its disk
 // is foreign. A foreign VM starts blocked at the AI proxy; PUT .../ai-access
-// opens it.
-func (s *server) recordVM(vmID, team string, only []string, foreign bool) error {
+// opens it. labeled: the selection is on the VM's boatd labels already, so
+// the store is only a cache and need not wait for the disk.
+func (s *server) recordVM(vmID, team string, only []string, foreign, labeled bool) error {
 	if only == nil && !foreign {
 		return nil
 	}
-	return s.store.Update(func(st *State) error {
+	write := s.store.Update
+	if labeled && !foreign {
+		write = s.store.Apply
+	}
+	return write(func(st *State) error {
 		if only != nil {
 			st.VMSecrets[vmID] = append([]string{}, only...)
 		}
@@ -143,8 +177,31 @@ func foreignSecrets(c *createReq, explicit *[]string, p *principal) string {
 
 // vmSecrets is the VM's secret selection (nil = all team secrets).
 func (s *server) vmSecrets(vmID string) []string {
+	return s.vmSecretsOf(vmID, nil)
+}
+
+// selectionFor is vmSecrets for a request that has not fetched the VM: when
+// the store has no record it asks boatd for the VM's selection label.
+func (s *server) selectionFor(r *http.Request, vmID string) []string {
+	if _, ok := s.store.Snapshot().VMSecrets[vmID]; ok {
+		return s.vmSecrets(vmID)
+	}
+	var vm VM
+	if err := s.boatd.call(r.Context(), "GET", vmPath(vmID), nil, &vm); err != nil {
+		log.Printf("%s: selection label of %s: %v; no secrets", info(r).id, vmID, err)
+		return []string{} // fail closed
+	}
+	return s.vmSecretsOf(vmID, vm)
+}
+
+// vmSecretsOf is vmSecrets falling back to vm's label, which outlives a store
+// write lost in a crash (vm nil = store only).
+func (s *server) vmSecretsOf(vmID string, vm VM) []string {
 	sel, ok := s.store.Snapshot().VMSecrets[vmID]
 	if !ok {
+		if l, ok := labeledSelection(vm); ok {
+			return l
+		}
 		return nil
 	}
 	if sel == nil {
@@ -233,8 +290,11 @@ func (s *server) validateCreate(c *createReq) string {
 		return "at most 32 labels"
 	}
 	for k, v := range c.Labels {
-		if !reLabel.MatchString(k) || len(v) > 256 {
+		if !reLabel.MatchString(k) || len(v) > maxLabelValue {
 			return "invalid label " + k
+		}
+		if strings.HasPrefix(k, reservedLabels) {
+			return "labels starting with " + reservedLabels + " are reserved"
 		}
 	}
 	for k := range c.Env {
@@ -302,6 +362,7 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 	if !decode(w, r, &c) {
 		return
 	}
+	t := newPhases()
 	explicit := c.Secrets
 	env, msg := s.resolveEnv(&c, p.Team.ID)
 	if msg == "" {
@@ -366,32 +427,57 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 	if built {
 		c.Snapshot = env.Build.SnapshotID
 	}
+	labels, labeled := withSelection(c.Labels, only)
 	body := map[string]any{"name": c.Name, "size": c.Size, "image": c.Image, "ttl_s": c.TTLS,
-		"idle_stop_s": c.IdleStopS, "snapshot": c.Snapshot, "team": p.Team.ID, "labels": c.Labels, "env": vars}
+		"idle_stop_s": c.IdleStopS, "snapshot": c.Snapshot, "team": p.Team.ID, "labels": labels, "env": vars}
+	t.mark("prepare")
 	var vm VM
 	if err := s.boatd.call(r.Context(), "POST", "/v1/vms", body, &vm); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
+	t.mark("boatd")
 	id := str(vm, "id")
-	if err := s.recordVM(id, p.Team.ID, only, foreign); err != nil {
+	defer t.done("create", id)
+	if err := s.recordVM(id, p.Team.ID, only, foreign, labeled); err != nil {
 		// Fail loudly: without the record a later start would inject all secrets.
 		log.Printf("%s: record secret selection for %s: %v; deleting the VM", info(r).id, id, err)
 		s.boatd.call(r.Context(), "POST", vmPath(id, "delete"), nil, nil)
 		writeErr(w, r, 500, "store_error", "could not record the secret selection")
 		return
 	}
+	t.mark("record")
 	// The AI proxy token depends on the VM id, so it goes in after create.
-	if ai, err := s.aiEnv(id, p.Team.ID, true); err != nil {
+	if ai, err := s.aiEnvNewVM(id, p.Team.ID); err != nil {
 		log.Printf("%s: AI env for %s: %v", info(r).id, id, err)
 	} else if len(ai) > 0 {
 		s.pushEnv(r, id, vars, ai)
 	}
+	t.mark("ai")
 	out := publicVM(vm)
 	if env != nil {
 		s.applyEnvToVM(r, p, id, env, built, vars, out)
+		t.mark("environment")
 	}
 	writeJSON(w, 201, out)
+}
+
+// withSelection adds the secret selection label to the caller's labels; false
+// when there is no selection to carry or it does not fit in a label.
+func withSelection(labels map[string]string, only []string) (map[string]string, bool) {
+	if only == nil {
+		return labels, false
+	}
+	v, ok := selectionLabel(only)
+	if !ok {
+		return labels, false
+	}
+	out := make(map[string]string, len(labels)+1)
+	for k, val := range labels {
+		out[k] = val
+	}
+	out[secretsLabel] = v
+	return out, true
 }
 
 // pushEnv rewrites the VM's /etc/boat/env. boatd's env op replaces the file.
@@ -413,7 +499,8 @@ func (s *server) pushEnv(r *http.Request, vmID string, base, extra map[string]st
 func (s *server) applyEnvToVM(r *http.Request, p *principal, vmID string, env *Environment, built bool, vars map[string]string, out VM) {
 	out["environment"] = env.Name
 	out["from_build"] = built
-	if err := s.store.Update(func(st *State) error { st.VMEnvs[vmID] = env.ID; return nil }); err != nil {
+	// Only for display and fork bookkeeping: harmless to lose in a crash.
+	if err := s.store.Apply(func(st *State) error { st.VMEnvs[vmID] = env.ID; return nil }); err != nil {
 		log.Printf("%s: record env of %s: %v", info(r).id, vmID, err)
 	}
 	if built || strings.TrimSpace(env.SetupScript) == "" {
@@ -429,11 +516,15 @@ func (s *server) applyEnvToVM(r *http.Request, p *principal, vmID string, env *E
 }
 
 func (s *server) startVM(w http.ResponseWriter, r *http.Request, p *principal) {
-	if _, ok := s.ownVM(w, r, p); !ok {
+	t := newPhases()
+	vm, ok := s.ownVM(w, r, p)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
-	env, ok := s.envOrFail(w, r, p, s.vmSecrets(id))
+	t.mark("get")
+	defer t.done("start", id)
+	env, ok := s.envOrFail(w, r, p, s.vmSecretsOf(id, vm))
 	if !ok {
 		return
 	}
@@ -447,12 +538,18 @@ func (s *server) startVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	for k, v := range ai {
 		env[k] = v
 	}
+	t.mark("env")
 	s.vmAction(w, r, "start", map[string]any{"env": env})
+	t.mark("boatd")
 }
 
 func (s *server) stopVM(w http.ResponseWriter, r *http.Request, p *principal) {
+	t := newPhases()
 	if _, ok := s.ownVM(w, r, p); ok {
+		t.mark("get")
 		s.vmAction(w, r, "stop", nil)
+		t.mark("boatd")
+		t.done("stop", r.PathValue("id"))
 	}
 }
 
@@ -476,44 +573,58 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 		writeErr(w, r, 400, "invalid_request", "invalid name")
 		return
 	}
-	if _, ok := s.ownVM(w, r, p); !ok {
+	t := newPhases()
+	pvm, ok := s.ownVM(w, r, p)
+	if !ok {
 		return
 	}
+	t.mark("get")
 	var child VM
 	parent := r.PathValue("id")
 	if err := s.boatd.call(r.Context(), "POST", vmPath(parent, "fork"), map[string]any{"name": body.Name, "team": p.Team.ID}, &child); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
+	t.mark("boatd")
 	childID := str(child, "id")
+	defer t.done("fork", childID)
 	// The child inherits the parent's disk, hence its secrets, so it keeps the
-	// parent's selection for later starts too, and its foreign mark.
+	// parent's selection for later starts too, and its foreign mark. boatd
+	// copies the parent's labels, the selection label included.
 	st := s.store.Snapshot()
-	var sel []string
-	if names, ok := st.VMSecrets[parent]; ok {
-		sel = append([]string{}, names...)
+	sel := s.vmSecretsOf(parent, pvm)
+	if sel != nil {
+		sel = append([]string{}, sel...)
 	}
-	if err := s.recordVM(childID, p.Team.ID, sel, st.ForeignVMs[parent]); err != nil {
+	_, labeled := labeledSelection(child)
+	if err := s.recordVM(childID, p.Team.ID, sel, st.ForeignVMs[parent], labeled); err != nil {
 		log.Printf("%s: record secret selection for fork %s: %v; deleting it", info(r).id, childID, err)
 		s.boatd.call(r.Context(), "POST", vmPath(childID, "delete"), nil, nil)
 		writeErr(w, r, 500, "store_error", "could not record the secret selection")
 		return
 	}
+	t.mark("record")
 	// The child's disk holds the parent's token; give it its own. Its native
 	// agent sessions came along too, so its conversations do as well.
-	if ai, err := s.aiEnv(childID, p.Team.ID, true); err != nil {
+	if ai, err := s.aiEnvNewVM(childID, p.Team.ID); err != nil {
 		log.Printf("%s: AI env for fork %s: %v", info(r).id, childID, err)
 	} else if len(ai) > 0 {
 		if vars, err := s.teamEnv(p.Team.ID, s.vmSecrets(childID)); err == nil {
 			s.pushEnv(r, childID, vars, ai)
 		}
 	}
+	t.mark("ai")
 	s.copyConversations(parent, childID)
+	t.mark("conversations")
 	writeJSON(w, 201, publicVM(child))
 }
 
+// copyConversations is history, so it does not wait for the disk.
 func (s *server) copyConversations(parent, child string) {
-	err := s.store.Update(func(st *State) error {
+	if len(s.store.Snapshot().Conversations[parent]) == 0 {
+		return
+	}
+	err := s.store.Apply(func(st *State) error {
 		for _, c := range st.Conversations[parent] {
 			cp := *c
 			cp.VMID = child
@@ -646,10 +757,11 @@ func (s *server) promptVM(w http.ResponseWriter, r *http.Request, p *principal) 
 		writeErr(w, r, 400, "invalid_request", "invalid model")
 		return
 	}
-	if _, ok := s.ownVM(w, r, p); !ok {
+	vm, ok := s.ownVM(w, r, p)
+	if !ok {
 		return
 	}
-	env, ok := s.envOrFail(w, r, p, s.vmSecrets(r.PathValue("id")))
+	env, ok := s.envOrFail(w, r, p, s.vmSecretsOf(r.PathValue("id"), vm))
 	if !ok {
 		return
 	}

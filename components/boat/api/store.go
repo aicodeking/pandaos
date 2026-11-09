@@ -18,6 +18,12 @@ import (
 // with thousands of keys/webhooks; past ~10 MB of state or ~50 writes/s move
 // to SQLite (deliveries first, they are the hottest writer). Writers queue on
 // one mutex; readers (auth included) never wait for them.
+//
+// Update waits for the fsync; Apply does not (a background flusher writes it).
+// An fsync can take seconds when the disk holds a lot of dirty data (a VM
+// snapshot just written to the same filesystem), so the VM lifecycle paths use
+// Apply and keep whatever must survive a crash somewhere durable already (the
+// secret selection rides on the VM's boatd labels, see secretsLabel).
 
 type User struct {
 	ID       string    `json:"id"`
@@ -124,6 +130,8 @@ type State struct {
 	ForeignVMs map[string]bool `json:"foreign_vms"`
 	// RouteGens: per VM, bumped to revoke its port tokens (see SignRoute).
 	RouteGens map[string]int `json:"route_gens"`
+
+	seq uint64 // in memory: bumped per change, so the flusher never writes an older state over a newer one
 }
 
 // CommandRecord remembers a detached command after its VM stops or forgets it.
@@ -326,6 +334,10 @@ type Store struct {
 	path string
 	cur  atomic.Pointer[State]
 	kr   *Keyring // nil = plaintext state.json (tests)
+
+	wmu     sync.Mutex // disk writes
+	written uint64     // seq of the state on disk; under wmu
+	kick    chan struct{}
 }
 
 // sealedPrefix marks a state.json sealed under the master key.
@@ -345,7 +357,7 @@ func openStore(dir string, kr *Keyring) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	s := &Store{path: filepath.Join(dir, "state.json"), kr: kr}
+	s := &Store{path: filepath.Join(dir, "state.json"), kr: kr, kick: make(chan struct{}, 1)}
 	st := &State{}
 	b, err := os.ReadFile(s.path)
 	plain := false
@@ -370,6 +382,7 @@ func openStore(dir string, kr *Keyring) (*Store, error) {
 			return nil, fmt.Errorf("seal %s: %w", s.path, err)
 		}
 	}
+	go s.flusher()
 	return s, nil
 }
 
@@ -384,7 +397,13 @@ func (s *Store) decode(b []byte) ([]byte, error) {
 	return s.kr.Open(sealed, stateAAD)
 }
 
+// persist writes st unless a newer state is on disk already.
 func (s *Store) persist(st *State) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	if st.seq != 0 && st.seq <= s.written {
+		return nil
+	}
 	out, err := json.MarshalIndent(st, "", " ")
 	if err != nil {
 		return err
@@ -396,7 +415,11 @@ func (s *Store) persist(st *State) error {
 		}
 		out = []byte(sealedPrefix + sealed)
 	}
-	return writeAtomic(s.path, out)
+	if err := writeAtomic(s.path, out); err != nil {
+		return err
+	}
+	s.written = max(s.written, st.seq)
+	return nil
 }
 
 // migrateOperator handles state written before the operator role: the oldest
@@ -421,20 +444,13 @@ func migrateOperator(st *State) {
 // Snapshot returns the current state. Callers must treat it as read-only.
 func (s *Store) Snapshot() *State { return s.cur.Load() }
 
-// Update applies fn to a deep copy; on error or failed write nothing changes.
+// Update applies fn to a deep copy and waits until it is on disk; on error or
+// failed write nothing changes.
 func (s *Store) Update(fn func(*State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b, err := json.Marshal(s.cur.Load())
+	next, err := s.next(fn)
 	if err != nil {
-		return err
-	}
-	next := &State{}
-	if err := json.Unmarshal(b, next); err != nil {
-		return err
-	}
-	next.init()
-	if err := fn(next); err != nil {
 		return err
 	}
 	if err := s.persist(next); err != nil {
@@ -443,6 +459,64 @@ func (s *Store) Update(fn func(*State) error) error {
 	s.cur.Store(next)
 	return nil
 }
+
+// Apply applies fn to a deep copy and returns without waiting for the disk:
+// the flusher writes it shortly after. A crash before that loses the change,
+// so use it only for state that is rebuilt, re-derived or harmless to lose.
+func (s *Store) Apply(fn func(*State) error) error {
+	s.mu.Lock()
+	next, err := s.next(fn)
+	if err == nil {
+		s.cur.Store(next)
+	}
+	s.mu.Unlock()
+	if err == nil {
+		select {
+		case s.kick <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+
+// next clones the current state and applies fn. Caller holds s.mu.
+func (s *Store) next(fn func(*State) error) (*State, error) {
+	cur := s.cur.Load()
+	b, err := json.Marshal(cur)
+	if err != nil {
+		return nil, err
+	}
+	next := &State{}
+	if err := json.Unmarshal(b, next); err != nil {
+		return nil, err
+	}
+	next.init()
+	next.seq = cur.seq + 1
+	if err := fn(next); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+// flusher writes what Apply left in memory, retrying failed writes.
+func (s *Store) flusher() {
+	for range s.kick {
+		for {
+			err := s.Flush()
+			if err == nil {
+				break
+			}
+			log.Printf("boat-api: write %s: %v; retrying", s.path, err)
+			time.Sleep(time.Second)
+		}
+	}
+}
+
+// Flush writes the current state if it is newer than the one on disk.
+func (s *Store) Flush() error { return s.persist(s.cur.Load()) }
+
+// syncFile is f.Sync; the latency test makes it slow.
+var syncFile = func(f *os.File) error { return f.Sync() }
 
 func writeAtomic(path string, data []byte) error { return writeAtomicMode(path, data, 0o600) }
 
@@ -462,7 +536,7 @@ func writeAtomicMode(path string, data []byte, mode os.FileMode) error {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := syncFile(f); err != nil {
 		f.Close()
 		return err
 	}
@@ -473,7 +547,7 @@ func writeAtomicMode(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	if d, err := os.Open(dir); err == nil {
-		d.Sync()
+		syncFile(d)
 		d.Close()
 	}
 	return nil

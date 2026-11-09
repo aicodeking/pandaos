@@ -277,7 +277,7 @@ func (s *server) rotateAIToken(r *http.Request, vmID, team string) error {
 	if s.store.Snapshot().AIVMs[vmID] == nil {
 		return nil // never had a token
 	}
-	if _, err := s.aiBumpVM(vmID, team); err != nil {
+	if _, err := s.aiBumpVM(vmID, team, true); err != nil {
 		return err
 	}
 	ai, err := s.aiEnv(vmID, team, false)
