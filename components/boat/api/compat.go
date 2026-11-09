@@ -89,6 +89,8 @@ func (w *compatWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+func (w *compatWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *compatWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok && w.status == 0 {
 		f.Flush()

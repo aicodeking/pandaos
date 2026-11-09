@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +37,8 @@ type Config struct {
 	VMDomain         string // port routes are <port>-<vmid>.<VMDomain> (scheme optional, default https)
 	VMAPIURL         string // this API as VMs reach it (BOAT_URL in the guest); empty = PublicURL
 	PortURLTTL       time.Duration
+	BodyTimeout      time.Duration  // request body read deadline on non-stream routes (0 = default)
+	HookDeny         []netip.Prefix // more webhook targets to refuse (the VM pool's prefixes)
 }
 
 type server struct {
@@ -46,6 +49,7 @@ type server struct {
 	teamLim    *limiter  // per team (all keys of a team share it)
 	aiLim      *limiter  // AI proxy requests per VM
 	streams    *inflight // long responses per team
+	teamAll    *inflight // every authenticated request per team (bounds buffered bodies)
 	uploads    *inflight // uploads and imports per team
 	aiInflight *inflight // AI proxy requests per VM
 	aiMeter    *aiMeter
@@ -63,6 +67,8 @@ type server struct {
 	observe    func(pattern string, r *http.Request, status int) // OpenAPI drift test
 	idem       idemCache                                         // boat.dev Idempotency-Key (compat_idem.go)
 	deletions  deletions                                         // boat.dev deletion operations (compat.go)
+	// drawCompatID draws a bx_ id candidate (tests force collisions); nil = random.
+	drawCompatID func() string
 }
 
 // ---- scopes and roles ----
@@ -249,6 +255,7 @@ type reqInfo struct {
 	audit   bool   // audit even though it is a GET (sensitive read)
 	pattern string // the matched route, for traces and the OpenAPI drift test
 	vmOK    bool   // ownVM passed, so a later boatd 404 is about something else
+	vm      VM     // what ownVM fetched, reused within the request
 }
 
 // baseCtx outlives requests (env builds).
@@ -287,6 +294,8 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	}
 	return w.ResponseWriter.Write(b)
 }
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w *statusWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
@@ -372,6 +381,7 @@ var auditedReads = map[string]bool{
 var streamRoutes = map[string]bool{
 	"POST /v1/vms/{id}/exec":                    true,
 	"POST /api/v1/sandboxes/{id}/commands":      true,
+	"GET /api/v1/sandboxes/{id}/files":          true,
 	"POST /v1/vms/{id}/prompt":                  true,
 	"GET /v1/events":                            true,
 	"GET /v1/vms/{id}/commands/{cid}/logs":      true,
@@ -381,9 +391,10 @@ var streamRoutes = map[string]bool{
 }
 
 var uploadRoutes = map[string]bool{
-	"PUT /v1/vms/{id}/files":          true,
-	"POST /v1/snapshots/import":       true,
-	"POST /v1/snapshots/import-share": true,
+	"PUT /v1/vms/{id}/files":           true,
+	"PUT /api/v1/sandboxes/{id}/files": true,
+	"POST /v1/snapshots/import":        true,
+	"POST /v1/snapshots/import-share":  true,
 }
 
 // holdSlot takes pattern's per-team slot; false means it already answered 429.
@@ -449,11 +460,19 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 			writeErr(w, r, http.StatusForbidden, "forbidden", "key lacks scope "+scope)
 			return
 		}
+		releaseAll, ok := s.acquireOr429(w, r, s.teamAll, p.Team.ID)
+		if !ok {
+			return
+		}
+		defer releaseAll()
 		release, ok := s.holdSlot(w, r, pattern, p.Team.ID)
 		if !ok {
 			return
 		}
 		defer release()
+		if !s.guardBody(w, r, p, pattern) {
+			return
+		}
 		h(w, r, p)
 	})
 }

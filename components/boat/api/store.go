@@ -132,6 +132,9 @@ type State struct {
 	RouteGens map[string]int `json:"route_gens"`
 	// VMTokens: per VM, the generation of its own API token (selftoken.go).
 	VMTokens map[string]*VMToken `json:"vm_tokens"`
+	// CompatIDs: boat.dev bx_ sandbox ids (compat_ids.go), and the reverse.
+	CompatIDs  map[string]*CompatID `json:"compat_ids"`
+	CompatByVM map[string]string    `json:"compat_by_vm"`
 
 	seq uint64 // in memory: bumped per change, so the flusher never writes an older state over a newer one
 }
@@ -266,6 +269,12 @@ func secretKey(team, name string) string { return team + "/" + name }
 func (st *State) init() {
 	if st.VMTokens == nil {
 		st.VMTokens = map[string]*VMToken{}
+	}
+	if st.CompatIDs == nil {
+		st.CompatIDs = map[string]*CompatID{}
+	}
+	if st.CompatByVM == nil {
+		st.CompatByVM = map[string]string{}
 	}
 	if st.Users == nil {
 		st.Users = map[string]*User{}

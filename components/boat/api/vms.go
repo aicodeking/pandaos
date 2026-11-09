@@ -58,6 +58,9 @@ func (s *server) ownVM(w http.ResponseWriter, r *http.Request, p *principal) (VM
 		writeErr(w, r, 404, "not_found", "vm not found")
 		return nil, false
 	}
+	if ri := info(r); ri.vm != nil && str(ri.vm, "id") == id && str(ri.vm, "team") == p.Team.ID {
+		return ri.vm, true // checked by guardBody before the body was read
+	}
 	var vm VM
 	if err := s.boatd.call(r.Context(), "GET", vmPath(id), nil, &vm); err != nil {
 		writeUpstream(w, r, err)
@@ -67,7 +70,7 @@ func (s *server) ownVM(w http.ResponseWriter, r *http.Request, p *principal) (VM
 		writeErr(w, r, 404, "not_found", "vm not found")
 		return nil, false
 	}
-	info(r).vmOK = true
+	info(r).vmOK, info(r).vm = true, vm
 	return vm, true
 }
 
@@ -745,6 +748,7 @@ func (s *server) forgetVM(id string) {
 		delete(st.ForeignVMs, id)
 		delete(st.RouteGens, id)
 		delete(st.VMTokens, id)
+		forgetCompatID(st, id)
 		for k, sh := range st.SnapShares {
 			if sh.VMID == id {
 				delete(st.SnapShares, k)

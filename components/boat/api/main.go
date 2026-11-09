@@ -169,6 +169,10 @@ func serve(args []string) int {
 	maxFile := fs.Int64("max-file-bytes", 256<<20, "max upload size for PUT files")
 	teamStreams := fs.Int("team-streams", defaultTeamStreams, "exec, SSE, log and download streams open per team (0 = unlimited)")
 	teamUploads := fs.Int("team-uploads", defaultTeamUploads, "file uploads and snapshot imports in flight per team (0 = unlimited)")
+	teamAll := fs.Int("team-inflight", defaultTeamInflight, "requests in flight per team across all routes, streams included (0 = unlimited)")
+	bodyTimeout := fs.Duration("body-timeout", defaultBodyTimeout, "deadline for reading a request body on non-stream, non-upload routes")
+	var hookDeny prefixFlag
+	fs.Var(&hookDeny, "webhook-deny", "CIDR webhooks may never reach, besides private nets and this host's own addresses, e.g. the VM pool's public prefix (repeatable)")
 	aiInflight := fs.Int("ai-vm-inflight", defaultAIVMInflight, "AI proxy requests in flight per VM (0 = unlimited)")
 	fs.Parse(args)
 
@@ -179,7 +183,8 @@ func serve(args []string) int {
 	}
 	cfg := Config{SSHUser: *sshUser, SSHJump: *sshJump, DesktopURL: *desktopURL, DesktopTTL: *desktopTTL,
 		AllowPrivateHook: *allowPrivate, MaxFileBytes: *maxFile, JumpKeysFile: *jumpKeys,
-		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, VMDomain: *vmDomain, PortURLTTL: *portTTL, AIProxyURL: *aiURL, PublicURL: *publicURL, VMAPIURL: *vmAPIURL, MaxImportBytes: *maxImport}
+		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, VMDomain: *vmDomain, PortURLTTL: *portTTL, AIProxyURL: *aiURL, PublicURL: *publicURL, VMAPIURL: *vmAPIURL, MaxImportBytes: *maxImport,
+		BodyTimeout: *bodyTimeout, HookDeny: hookDeny}
 	if cfg.AIProxyURL == "" && *aiListen != "" {
 		cfg.AIProxyURL = "http://" + *aiListen
 	}
@@ -213,6 +218,7 @@ func serve(args []string) int {
 	s.aiLim = newLimiter(*aiRate, *aiRate*5)
 	s.hooks.teamInflight, s.hooks.teamPending = *hookTeam, *hookPending
 	s.streams, s.uploads, s.aiInflight = newInflight(*teamStreams), newInflight(*teamUploads), newInflight(*aiInflight)
+	s.teamAll = newInflight(*teamAll)
 	if *otlp != "" {
 		s.otel = newOTel(*otlp, otlpHeaders)
 	}
@@ -258,7 +264,8 @@ func newServer(store *Store, kr *Keyring, bd *boatdClient, cfg Config, lim *limi
 	}
 	s := &server{store: store, keys: kr, boatd: bd, limiter: lim, audit: audit, cfg: cfg, mux: http.NewServeMux(),
 		aiMeter: newAIMeter(), aiClient: newAIClient(),
-		streams: newInflight(defaultTeamStreams), uploads: newInflight(defaultTeamUploads), aiInflight: newInflight(defaultAIVMInflight)}
+		streams: newInflight(defaultTeamStreams), uploads: newInflight(defaultTeamUploads), aiInflight: newInflight(defaultAIVMInflight),
+		teamAll: newInflight(defaultTeamInflight)}
 	s.hooks = newDispatcher(s, cfg.AllowPrivateHook)
 	s.routes()
 	s.compatRoutes()

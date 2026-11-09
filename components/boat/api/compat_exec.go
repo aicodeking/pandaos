@@ -209,6 +209,9 @@ type compatFileReq struct {
 func validEncoding(e string) bool { return e == "" || e == "utf8" || e == "base64" }
 
 func (s *server) compatWriteFile(w http.ResponseWriter, r *http.Request, p *principal) {
+	if _, ok := s.ownVM(w, r, p); !ok { // before the body: up to 7 MiB of it
+		return
+	}
 	var c compatFileReq
 	// base64 of 5 MiB plus the JSON around it: more than decode's 1 MiB.
 	r.Body = http.MaxBytesReader(w, r.Body, compatMaxFile*4/3+(64<<10))
@@ -240,9 +243,6 @@ func (s *server) compatWriteFile(w http.ResponseWriter, r *http.Request, p *prin
 	}
 	if len(data) > compatMaxFile {
 		writeErrDetails(w, r, 413, "file_too_large", "file is over 5 MiB", map[string]any{"maxBytes": compatMaxFile, "sizeBytes": len(data)})
-		return
-	}
-	if _, ok := s.ownVM(w, r, p); !ok {
 		return
 	}
 	dst := s.compatPath(c.Path)

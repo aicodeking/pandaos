@@ -237,6 +237,8 @@ func (c *capture) Write(b []byte) (int, error) {
 	return c.ResponseWriter.Write(b)
 }
 
+func (c *capture) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
 func (c *capture) Flush() {
 	if f, ok := c.ResponseWriter.(http.Flusher); ok {
 		f.Flush()

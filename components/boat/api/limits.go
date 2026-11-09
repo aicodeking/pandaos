@@ -18,6 +18,7 @@ const (
 const (
 	defaultTeamStreams  = 64
 	defaultTeamUploads  = 8
+	defaultTeamInflight = 128 // all routes: streams (64) and uploads (8) fit under it
 	defaultAIVMInflight = 16
 )
 

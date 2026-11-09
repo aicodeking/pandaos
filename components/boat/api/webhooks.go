@@ -293,7 +293,7 @@ type dispatcher struct {
 func newDispatcher(s *server, allowPrivate bool) *dispatcher {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	if !allowPrivate {
-		dialer.Control = denyPrivate
+		dialer.Control = s.newHookGuard().control
 	}
 	tr := &http.Transport{DialContext: dialer.DialContext, TLSHandshakeTimeout: 10 * time.Second}
 	return &dispatcher{
