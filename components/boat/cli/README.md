@@ -53,7 +53,7 @@ boat ai proxy [on|off];  boat ai usage [vm];  boat ai block|unblock dev
 boat telemetry set https://otlp.example -H x-key=v
 boat run --from ci-base --type large --push . -- npm test   # new VM, copy in, run, delete; exits with its exit code
 boat push dev ./api --to /srv/api      # git-tracked and new files; replaces, never deletes
-boat new --from ci-base --count 50     # all or none; prints every id
+boat new --from ci-base --count 16     # one request, all or none (1-16); prints every id
 boat host dev 3000 [--public]          # expose a port and print its URL
 boat forward dev --remote 5432         # sandbox port -> localhost, until Ctrl+C
 boat forward dev --reverse --local 7777  # your localhost:7777 -> 127.0.0.1:7777 in the VM
@@ -69,22 +69,28 @@ boat exec current -- ls                # the last VM created or forked in this s
   `--personal` does not exist. `--keep` stops the same way.
 - **`boat push` and `run --push`:** go through the files API rather than SSH, so one archive
   is capped by the API's `-max-file-bytes` (256 MiB by default). No ssh key is needed.
-- **`boat new --count`:** a client-side loop with rollback, because the API creates one VM at a
-  time. A CLI killed mid-batch leaves the VMs it made.
+- **`boat new --count`:** one request; the server creates the batch all or none (boatd checks quotas
+  and host room for all of them under one lock, and deletes them all if one fails to boot). At most
+  16 per call; `--name x` gives `x-1` … `x-N`. `--wait-setup` does not combine with it.
+- **`--fail-fast`** on `new`, `fork`, `start`/`resume`: a full host answers 503 `no_ready_machine` at
+  once. Without it the answer is 503 `host_capacity` (also at once: boatd never queues).
+- **`boat stop --force`:** kills the VM without a snapshot; the next start is a cold boot from disk
+  and loses what the guest had not written out.
 - **`boat new --env NAME`** names an environment, as it did before; `-e KEY=VALUE` sets a
   variable. `boat run` follows boat.dev: `-e`/`--env` for variables, `--environment` for the name.
 - **`current`:** needs no shell function. It is keyed by the parent process, so each shell has
   its own, and a script or CI step has none until it creates a VM. It expires after 7 days.
-- **`self` and `host` in a VM:** the CLI and a `host` symlink are in both guest images, but a VM
-  has no API key by default. Store a scoped key as the team secrets `BOAT_API_KEY` and `BOAT_URL`
-  and restart the VM. `self` is `BOAT_ID` if set, else the VM's hostname, which is its name.
+- **`self` and `host` in a VM:** the CLI and a `host` symlink are in both guest images. boat-api
+  puts `BOAT_ID` in every VM, and `BOAT_URL` + `BOAT_API_KEY` (a key for that VM only) when the
+  operator sets `-vm-api-url` or `-public-url`. Without that, store a scoped key as the team secrets
+  `BOAT_API_KEY` and `BOAT_URL` and restart the VM. `self` is `BOAT_ID` if set, else the hostname.
 - **`boat host`:** a private URL is a signed link that lasts 7 days, not a token that never
   expires, so running it again gives a new link. `--title` and `--localhost` do not exist.
 - **`boat ssh-config`:** boat.dev documents a script instead of a command; this writes the same
   file, with `StrictHostKeyChecking accept-new`, because the API does not return the host key.
-- **Not here, because the server has no support yet:** `boat stop --force`, `--status`, `--fail-fast`,
-  `boat prompt --provider pi|prime|kimi|mistral`. Those four harnesses are installed in the `full`
-  image: run them with `boat exec`.
+- **Not here, because the server has no support yet:** `--status`.
+- **`boat prompt --provider pi|prime|kimi|mistral`** (aliases `claude-code`, `prime-agent`): their
+  flags come from each CLI's `--help` and have not been run in CI; see docs/boat.md.
 
 Commands: `login whoami images usage new run push list info ps vm-usage ssh ssh-config forward scp exec cmd files prompt prompts conversations steer interrupt env fork stop start resume rm delete resize desktop ports host snapshots secrets keys teams webhooks ai telemetry upgrade version`. Run `boat help` for the syntax.
 

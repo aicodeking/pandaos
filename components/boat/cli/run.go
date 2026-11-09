@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -34,8 +33,7 @@ const (
 	runIdleStopS = 15 * 60
 	// runNoLimitS stands for "no limit": the agent's default exec timeout is 600 s.
 	runNoLimitS = 30 * 24 * 60 * 60
-	maxBatch    = 1000
-	batchJobs   = 8
+	maxBatch    = 16 // boatd's all-or-none batch (POST /v1/vms count)
 )
 
 // applyFrom sets the create body from --from: a share code or a snapshot id/name.
@@ -67,46 +65,17 @@ func (a *app) applyFrom(body obj, from string) error {
 	return fmt.Errorf("snapshot name %q is ambiguous (%d snapshots); use the id", from, len(hits))
 }
 
-// newBatch is `boat new --count N`: N creates, all or none. A share code is
-// imported once, so the batch shares one snapshot.
-//
-// ponytail: client-side loop with rollback, not atomic if the CLI dies midway;
-// replace with a server batch when POST /v1/vms takes count.
+// newBatch is `boat new --count N`: one request, all or none on the server
+// (boatd creates the batch under one lock and deletes it all if one fails).
 func (a *app) newBatch(body obj, n int) error {
-	if code, ok := body["from"]; ok {
-		var snap obj
-		if err := a.c.call("POST", "/v1/snapshots/import-share", obj{"code": code}, &snap); err != nil {
-			return err
-		}
-		delete(body, "from")
-		body["snapshot"] = s(snap, "id")
+	body["count"] = n
+	var out struct {
+		VMs []obj `json:"vms"`
 	}
-	vms, errs := make([]obj, n), make([]error, n)
-	sem := make(chan struct{}, batchJobs)
-	var wg sync.WaitGroup
-	for i := range vms {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			errs[i] = a.c.call("POST", "/v1/vms", body, &vms[i])
-		}(i)
+	if err := a.c.call("POST", "/v1/vms", body, &out); err != nil {
+		return fmt.Errorf("the batch was not created (all or none): %w", err)
 	}
-	wg.Wait()
-	first := errors.Join(errs...)
-	if first == nil {
-		return a.emitList(vms, vmCols...)
-	}
-	for i, vm := range vms {
-		if errs[i] != nil {
-			continue
-		}
-		if err := a.c.call("DELETE", vmPath(s(vm, "id")), nil, nil); err != nil {
-			fmt.Fprintf(a.errw, "boat: rollback could not delete %s: %v\n", s(vm, "id"), err)
-		}
-	}
-	return fmt.Errorf("the batch did not fit, so it was rolled back: %w", first)
+	return a.emitList(out.VMs, vmCols...)
 }
 
 // quiet runs a command and returns its stdout; output never reaches the user.

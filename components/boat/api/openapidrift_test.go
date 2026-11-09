@@ -127,6 +127,17 @@ func validate(v any, s map[string]any, at string) []string {
 		return []string{at + ": unresolved schema"}
 	}
 	var out []string
+	if one, ok := s["oneOf"].([]any); ok { // valid against at least one (no exclusivity check)
+		var all []string
+		for _, x := range one {
+			p := validate(v, x.(map[string]any), at)
+			if len(p) == 0 {
+				return nil
+			}
+			all = append(all, p...)
+		}
+		return append([]string{at + ": matches no oneOf branch"}, all...)
+	}
 	if all, ok := s["allOf"].([]any); ok {
 		merged := map[string]any{"type": "object", "properties": map[string]any{}}
 		req := []any{}

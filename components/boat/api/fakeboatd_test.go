@@ -27,6 +27,10 @@ type fakeBoatd struct {
 	cmds     map[string]*fakeCmd
 	events   chan string
 	n        int
+	creates []map[string]any // POST /v1/vms bodies
+	stops   []map[string]any
+	forks   []map[string]any
+	refuse  string // non-empty: lifecycle POSTs answer 503 with this code (host full)
 	// discardPuts counts file uploads instead of keeping them (memory tests).
 	discardPuts bool
 	putBytes    int64
@@ -38,6 +42,33 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 	mux.HandleFunc("POST /v1/vms", func(w http.ResponseWriter, r *http.Request) {
 		var in map[string]any
 		json.NewDecoder(r.Body).Decode(&in)
+		f.mu.Lock()
+		f.creates = append(f.creates, in)
+		refuse := f.refuse
+		f.mu.Unlock()
+		if refuse != "" {
+			writeJSON(w, 503, map[string]string{"error": "host is full", "code": refuse})
+			return
+		}
+		if n, _ := in["count"].(float64); n > 1 { // like boatd: all or none, names x-1 … x-N
+			out := []VM{}
+			f.mu.Lock()
+			for i := 1; i <= int(n); i++ {
+				f.n++
+				id := fmt.Sprintf("vm%d", f.n)
+				name := ""
+				if s, _ := in["name"].(string); s != "" {
+					name = fmt.Sprintf("%s-%d", s, i)
+				}
+				vm := VM{"id": id, "name": name, "size": "default", "image": in["image"], "team": in["team"], "state": "running",
+					"env": in["env"], "ip": "10.0.0.5", "ports": []any{}, "labels": in["labels"]}
+				f.vms[id] = vm
+				out = append(out, vm)
+			}
+			f.mu.Unlock()
+			writeJSON(w, 201, map[string]any{"vms": out})
+			return
+		}
 		switch in["size"] {
 		case "", nil:
 			in["size"] = "default" // boatd's defaultSize
@@ -96,13 +127,18 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		json.NewDecoder(r.Body).Decode(&in)
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.refuse != "" && (r.PathValue("action") == "start" || r.PathValue("action") == "fork") {
+			writeJSON(w, 503, map[string]string{"error": "host is full", "code": f.refuse})
+			return
+		}
 		switch r.PathValue("action") {
 		case "start":
 			f.starts = append(f.starts, in)
 			vm["state"] = "running"
 		case "stop":
+			f.stops = append(f.stops, in)
 			vm["state"] = "stopped"
-			vm["has_snapshot"] = true
+			vm["has_snapshot"] = in["force"] != true
 		case "delete":
 			delete(f.vms, vm["id"].(string))
 			for k, sn := range f.snaps { // like boatd: a VM's snapshots go with it
@@ -112,6 +148,7 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			}
 			vm["state"] = "deleted"
 		case "fork":
+			f.forks = append(f.forks, in)
 			f.n++
 			id := fmt.Sprintf("vm%d", f.n)
 			f.vms[id] = VM{"id": id, "name": in["name"], "team": in["team"], "state": "running", "labels": vm["labels"]} // like boatd: labels are copied

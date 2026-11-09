@@ -472,6 +472,10 @@ func writeUpstream(w http.ResponseWriter, r *http.Request, err error) {
 			writeErr(w, r, 429, "quota_exceeded", be.message())
 		case be.Status == http.StatusConflict:
 			writeErr(w, r, 409, "conflict", be.message())
+		case be.Status == http.StatusServiceUnavailable && (be.code() == "no_ready_machine" || be.code() == "host_capacity"):
+			// The host is full (or, with fail_fast, still starting): the caller may retry later.
+			w.Header().Set("Retry-After", "10")
+			writeErr(w, r, 503, be.code(), be.message())
 		case be.Status/100 == 4:
 			writeErr(w, r, be.Status, "bad_request", be.message())
 		default:

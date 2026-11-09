@@ -25,6 +25,10 @@ before(async () => {
     const json = (code, o) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(o)); };
     if (req.headers.authorization !== `Bearer ${TOKEN}`) return json(401, { error: { code: "unauthorized", message: "bad key", request_id: "req_1" } });
     const k = `${req.method} ${req.url}`;
+    if (k === "POST /v1/vms" && JSON.parse(body).count > 1) {
+      const r = JSON.parse(body);
+      return json(201, { vms: Array.from({ length: r.count }, (_, i) => ({ ...VM, id: `vm${i + 1}`, name: `${r.name}-${i + 1}` })) });
+    }
     if (k === "POST /v1/vms") return json(201, { ...VM, ...JSON.parse(body) });
     if (k === "GET /v1/vms") return json(200, { vms: [VM] });
     if (k === "POST /v1/vms/vm1/fork") return json(201, { ...VM, id: "vm2", name: JSON.parse(body).name });
@@ -266,4 +270,19 @@ test("hostPort exposes then returns the URL", async () => {
   assert.match(got.url, /8080-vm1/);
   const posted = [...log].reverse().find((l) => l.method === "POST" && l.path === "/v1/vms/vm1/ports");
   assert.equal(JSON.parse(posted.body).auth, "public");
+});
+
+test("force stop, fail-fast and batch create", async () => {
+  const boat = new Boat({ url, key: TOKEN });
+  await boat.stop("vm1", { force: true });
+  assert.deepEqual(JSON.parse(log.at(-1).body), { force: true });
+  await boat.stop("vm1");
+  assert.equal(log.at(-1).body, "");
+  await boat.fork("vm1", { failFast: true });
+  assert.deepEqual(JSON.parse(log.at(-1).body), { fail_fast: true });
+  await boat.createVM({ failFast: true });
+  assert.deepEqual(JSON.parse(log.at(-1).body), { fail_fast: true });
+  const vms = await boat.createVMs(3, { name: "w", secrets: [] });
+  assert.deepEqual(JSON.parse(log.at(-1).body), { name: "w", secrets: [], count: 3 });
+  assert.deepEqual(vms.map((v) => v.name), ["w-1", "w-2", "w-3"]);
 });

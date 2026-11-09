@@ -34,6 +34,8 @@ export interface CreateVMOptions {
   noEnv?: boolean;
   /** A share code bsh_...; copied into your team first. */
   fromShare?: string;
+  /** A full host fails at once with BoatError 503 code no_ready_machine. */
+  failFast?: boolean;
 }
 
 export interface Port { guest_port: number; host_port?: number; hostname?: string; auth: "private" | "public"; [extra: string]: unknown; }
@@ -120,9 +122,12 @@ export declare class Boat {
   listVMs(): Promise<VM[]>;
   getVM(id: string): Promise<VM>;
   createVM(opts?: CreateVMOptions): Promise<VM>;
-  start(id: string): Promise<VM>;
-  stop(id: string): Promise<VM>;
-  fork(id: string, opts?: { name?: string }): Promise<VM>;
+  /** count (1-16) VMs in one request, all or none; a name x becomes x-1 … x-N. */
+  createVMs(count: number, opts?: CreateVMOptions): Promise<VM[]>;
+  start(id: string, opts?: { failFast?: boolean }): Promise<VM>;
+  /** force: kill without a snapshot; the next start is a cold boot and loses unsynced writes. */
+  stop(id: string, opts?: { force?: boolean }): Promise<VM>;
+  fork(id: string, opts?: { name?: string; failFast?: boolean }): Promise<VM>;
   delete(id: string): Promise<void>;
   exec(id: string, cmd: string[], opts?: ExecOptions): AsyncGenerator<ExecEvent>;
   run(id: string, cmd: string[], opts?: ExecOptions): Promise<RunResult>;

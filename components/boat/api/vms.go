@@ -261,7 +261,13 @@ type createReq struct {
 	NoEnv       bool   `json:"no_env"`
 	// From: a share code bsh_..., imported into this team first.
 	From string `json:"from"`
+	// FailFast: a full host answers 503 no_ready_machine at once (boatd).
+	FailFast bool `json:"fail_fast"`
+	// Count creates that many VMs, all or none (boatd's batch); > 1 answers {"vms":[…]}.
+	Count int `json:"count"`
 }
+
+const maxBatch = 16 // boatd's limit on count
 
 func (s *server) validateCreate(c *createReq) string {
 	if c.Name != "" && !reVMName.MatchString(c.Name) {
@@ -282,6 +288,9 @@ func (s *server) validateCreate(c *createReq) string {
 	}
 	if c.IdleStopS < -1 {
 		return "idle_stop_s must be >= -1"
+	}
+	if c.Count < 0 || c.Count > maxBatch {
+		return fmt.Sprintf("count must be 1-%d", maxBatch)
 	}
 	if c.Snapshot != "" && !reID.MatchString(c.Snapshot) {
 		return "invalid snapshot id"
@@ -430,25 +439,72 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 	labels, labeled := withSelection(c.Labels, only)
 	body := map[string]any{"name": c.Name, "size": c.Size, "image": c.Image, "ttl_s": c.TTLS,
 		"idle_stop_s": c.IdleStopS, "snapshot": c.Snapshot, "team": p.Team.ID, "labels": labels, "env": vars}
+	if c.FailFast {
+		body["fail_fast"] = true
+	}
+	if c.Count > 1 {
+		body["count"] = c.Count
+	}
 	t.mark("prepare")
-	var vm VM
-	if err := s.boatd.call(r.Context(), "POST", "/v1/vms", body, &vm); err != nil {
+	vms, err := s.bootVMs(r, body, c.Count > 1)
+	if err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
 	t.mark("boatd")
-	id := str(vm, "id")
-	defer t.done("create", id)
-	if err := s.recordVM(id, p.Team.ID, only, foreign, labeled); err != nil {
-		// Fail loudly: without the record a later start would inject all secrets.
-		log.Printf("%s: record secret selection for %s: %v; deleting the VM", info(r).id, id, err)
-		s.boatd.call(r.Context(), "POST", vmPath(id, "delete"), nil, nil)
-		writeErr(w, r, 500, "store_error", "could not record the secret selection")
-		return
+	ids := make([]string, len(vms))
+	for i, vm := range vms {
+		ids[i] = str(vm, "id")
+	}
+	defer t.done("create", strings.Join(ids, ","))
+	for _, id := range ids {
+		if err := s.recordVM(id, p.Team.ID, only, foreign, labeled); err != nil {
+			// Fail loudly: without the record a later start would inject all secrets.
+			// All or none, like boatd's batch.
+			log.Printf("%s: record secret selection for %s: %v; deleting %v", info(r).id, id, err, ids)
+			for _, x := range ids {
+				s.boatd.call(r.Context(), "POST", vmPath(x, "delete"), nil, nil)
+			}
+			writeErr(w, r, 500, "store_error", "could not record the secret selection")
+			return
+		}
 	}
 	t.mark("record")
-	// The AI proxy token and the VM's own token depend on the VM id, so they
-	// go in after create.
+	outs := make([]VM, len(vms))
+	for i, vm := range vms {
+		outs[i] = s.finishCreate(r, p, vm, vars, env, built)
+	}
+	t.mark("env")
+	if c.Count > 1 {
+		writeJSON(w, 201, map[string]any{"vms": outs})
+		return
+	}
+	writeJSON(w, 201, outs[0])
+}
+
+// bootVMs asks boatd for one VM, or for a batch ({"vms":[…]}).
+func (s *server) bootVMs(r *http.Request, body map[string]any, batch bool) ([]VM, error) {
+	if !batch {
+		var vm VM
+		err := s.boatd.call(r.Context(), "POST", "/v1/vms", body, &vm)
+		return []VM{vm}, err
+	}
+	var out struct {
+		VMs []VM `json:"vms"`
+	}
+	if err := s.boatd.call(r.Context(), "POST", "/v1/vms", body, &out); err != nil {
+		return nil, err
+	}
+	if len(out.VMs) == 0 {
+		return nil, errors.New("boatd answered a batch create without vms")
+	}
+	return out.VMs, nil
+}
+
+// finishCreate gives a new VM what depends on its id (its own token, the AI
+// proxy token) and its environment's setup.
+func (s *server) finishCreate(r *http.Request, p *principal, vm VM, vars map[string]string, env *Environment, built bool) VM {
+	id := str(vm, "id")
 	extra := s.guestEnv(id, p.Team.ID, vars)
 	if ai, err := s.aiEnvNewVM(id, p.Team.ID); err != nil {
 		log.Printf("%s: AI env for %s: %v", info(r).id, id, err)
@@ -458,13 +514,11 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 		}
 	}
 	s.pushEnv(r, id, vars, extra)
-	t.mark("env")
 	out := publicVM(vm)
 	if env != nil {
 		s.applyEnvToVM(r, p, id, env, built, vars, out)
-		t.mark("environment")
 	}
-	writeJSON(w, 201, out)
+	return out
 }
 
 // withSelection adds the secret selection label to the caller's labels; false
@@ -521,6 +575,12 @@ func (s *server) applyEnvToVM(r *http.Request, p *principal, vmID string, env *E
 }
 
 func (s *server) startVM(w http.ResponseWriter, r *http.Request, p *principal) {
+	var body struct {
+		FailFast bool `json:"fail_fast"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
 	t := newPhases()
 	vm, ok := s.ownVM(w, r, p)
 	if !ok {
@@ -547,15 +607,30 @@ func (s *server) startVM(w http.ResponseWriter, r *http.Request, p *principal) {
 		env[k] = v
 	}
 	t.mark("env")
-	s.vmAction(w, r, "start", map[string]any{"env": env})
+	in := map[string]any{"env": env}
+	if body.FailFast {
+		in["fail_fast"] = true
+	}
+	s.vmAction(w, r, "start", in)
 	t.mark("boatd")
 }
 
 func (s *server) stopVM(w http.ResponseWriter, r *http.Request, p *principal) {
+	var body struct {
+		// Force kills the VM without a snapshot: the next start is a cold boot.
+		Force bool `json:"force"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	var in any
+	if body.Force {
+		in = map[string]any{"force": true}
+	}
 	t := newPhases()
 	if _, ok := s.ownVM(w, r, p); ok {
 		t.mark("get")
-		s.vmAction(w, r, "stop", nil)
+		s.vmAction(w, r, "stop", in)
 		t.mark("boatd")
 		t.done("stop", r.PathValue("id"))
 	}
@@ -572,7 +647,8 @@ func (s *server) deleteVM(w http.ResponseWriter, r *http.Request, p *principal) 
 
 func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	var body struct {
-		Name string `json:"name"`
+		Name     string `json:"name"`
+		FailFast bool   `json:"fail_fast"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -589,7 +665,11 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	t.mark("get")
 	var child VM
 	parent := r.PathValue("id")
-	if err := s.boatd.call(r.Context(), "POST", vmPath(parent, "fork"), map[string]any{"name": body.Name, "team": p.Team.ID}, &child); err != nil {
+	fin := map[string]any{"name": body.Name, "team": p.Team.ID}
+	if body.FailFast {
+		fin["fail_fast"] = true
+	}
+	if err := s.boatd.call(r.Context(), "POST", vmPath(parent, "fork"), fin, &child); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}

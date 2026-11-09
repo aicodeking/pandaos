@@ -1,6 +1,12 @@
 // Boat SDK: fetch-based, zero dependencies. Types live in index.d.ts.
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
+function createBody(opts) {
+  const { name, size, image, ttlS, labels, env: e, secrets, idleStopS, snapshot, environment, noEnv, fromShare, failFast } = opts;
+  return clean({ name, size, image, ttl_s: ttlS, labels, env: e, secrets, idle_stop_s: idleStopS, snapshot, environment,
+    no_env: noEnv, from: fromShare, fail_fast: failFast || undefined });
+}
+
 export class BoatError extends Error {
   constructor(status, code, message, requestId = "") {
     super(`${message} (HTTP ${status}${requestId ? ", " + requestId : ""})`);
@@ -95,13 +101,16 @@ export class Boat {
 
   async listVMs() { return (await this.call("GET", "/v1/vms")).vms; }
   getVM(id) { return this.call("GET", `/v1/vms/${q(id)}`); }
-  createVM(opts = {}) {
-    const { name, size, image, ttlS, labels, env: e, secrets, idleStopS, snapshot, environment, noEnv, fromShare } = opts;
-    return this.call("POST", "/v1/vms", clean({ name, size, image, ttl_s: ttlS, labels, env: e, secrets, idle_stop_s: idleStopS, snapshot, environment, no_env: noEnv, from: fromShare }));
+  createVM(opts = {}) { return this.call("POST", "/v1/vms", createBody(opts)); }
+  /** count (1-16) VMs in one request, all or none; a name x becomes x-1 … x-N. */
+  async createVMs(count, opts = {}) {
+    const out = await this.call("POST", "/v1/vms", { ...createBody(opts), count });
+    return out.vms ?? [out];
   }
-  start(id) { return this.call("POST", `/v1/vms/${q(id)}/start`); }
-  stop(id) { return this.call("POST", `/v1/vms/${q(id)}/stop`); }
-  fork(id, { name } = {}) { return this.call("POST", `/v1/vms/${q(id)}/fork`, clean({ name })); }
+  start(id, { failFast } = {}) { return this.call("POST", `/v1/vms/${q(id)}/start`, failFast ? { fail_fast: true } : undefined); }
+  /** force: kill without a snapshot; the next start is a cold boot and loses unsynced writes. */
+  stop(id, { force } = {}) { return this.call("POST", `/v1/vms/${q(id)}/stop`, force ? { force: true } : undefined); }
+  fork(id, { name, failFast } = {}) { return this.call("POST", `/v1/vms/${q(id)}/fork`, clean({ name, fail_fast: failFast || undefined })); }
   async delete(id) { await this.call("DELETE", `/v1/vms/${q(id)}`); }
 
   exec(id, cmd, { env: e, cwd, timeoutS, signal } = {}) {

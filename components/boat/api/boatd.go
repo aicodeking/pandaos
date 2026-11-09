@@ -81,6 +81,15 @@ func (e *boatdError) Error() string {
 	return fmt.Sprintf("boatd: HTTP %d: %s", e.Status, bytes.TrimSpace(e.Body))
 }
 
+// code is boatd's machine-readable "code" next to "error" (PROTOCOL.md), or "".
+func (e *boatdError) code() string {
+	var v struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(e.Body, &v)
+	return v.Code
+}
+
 // message extracts boatd's {"error": "..."} or {"error":{"message": "..."}}.
 func (e *boatdError) message() string {
 	var v struct {

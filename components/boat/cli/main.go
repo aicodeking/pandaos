@@ -26,7 +26,7 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat login --url URL --key KEY       save credentials (~/.config/boat/config.json)
   boat whoami | images | usage
   boat new [--name N] [--size|--type S] [--image I] [--ttl 2h] [--idle-stop 30m|never] [--snapshot SID] [--label k=v] [-e K=V]
-                [--secrets A,B | --no-secrets] [--env NAME | --no-env] [--from SNAPSHOT|CODE] [--count N] [--wait-setup]
+                [--secrets A,B | --no-secrets] [--env NAME | --no-env] [--from SNAPSHOT|CODE] [--count N] [--fail-fast] [--wait-setup]
   boat run [--from S] [--type T] [--push DIR] [--cwd D] [--timeout SECS] [-e K=V] [--environment E] [--keep] [--no-env] -- cmd [args]
   boat push <vm> <dir> [--to PATH]     copy a directory (git-tracked and new files)
   boat list | info <vm> | ps <vm> | vm-usage <vm>
@@ -40,7 +40,8 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat prompts ls|status|logs [-f] <vm> [id]    boat conversations <vm>
   boat steer <vm> "text" [--prompt-id ID]       boat interrupt <vm> [--prompt-id ID]
   boat env ls | new NAME | show E | set E | default E | build E | rm E   [--image I] [--size S] [--setup TEXT|--setup-file F] [--var K=V] [--secrets A,B]
-  boat fork <vm> [--name N]            boat stop|start|rm|delete <vm>   boat resume <vm> [--type S]
+  boat fork <vm> [--name N] [--fail-fast]   boat stop <vm> [--force]   boat rm|delete <vm>
+  boat start|resume <vm> [--type S] [--fail-fast]
   boat resize <vm> [SIZE] [--disk GIB] [--discard-memory]
   boat desktop <vm> [--no-open]
   boat ports ls|add|rm|url <vm> [port] [--auth private|public] [--public] [--ttl 1h]

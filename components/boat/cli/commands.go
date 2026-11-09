@@ -24,7 +24,7 @@ func init() {
 		"whoami": cmdWhoami, "images": cmdImages, "usage": cmdUsage,
 		"new": cmdNew, "list": cmdList, "ls": cmdList,
 		"ssh": cmdSSH, "scp": cmdSCP, "exec": cmdExec, "prompt": cmdPrompt,
-		"fork": cmdFork, "stop": vmAction("stop"), "start": vmAction("start"), "rm": cmdRm,
+		"fork": cmdFork, "stop": cmdStop, "start": cmdResume, "rm": cmdRm,
 		"desktop": cmdDesktop, "ports": cmdPorts, "snapshots": cmdSnapshots,
 		"secrets": cmdSecrets, "keys": cmdKeys, "teams": cmdTeams, "webhooks": cmdWebhooks,
 	}
@@ -115,7 +115,8 @@ func cmdNew(a *app, args []string) error {
 	noEnv := fs.Bool("no-env", false, "ignore the team's default environment")
 	from := fs.String("from", "", "a saved snapshot (id or name) or a share code bsh_...")
 	waitSetup := fs.Bool("wait-setup", false, "follow the environment's setup script; fail if it fails")
-	count := fs.Int("count", 1, "with --from: create this many VMs, all or none")
+	count := fs.Int("count", 1, fmt.Sprintf("create this many VMs (1-%d) in one request, all or none; --name x gives x-1 … x-N", maxBatch))
+	failFast := fs.Bool("fail-fast", false, "fail at once with no_ready_machine when the host is full")
 	envv := labels{}
 	fs.Var(envv, "e", "KEY=VALUE for the VM (repeatable)")
 	pos, _, err := parse(fs, args)
@@ -163,8 +164,11 @@ func cmdNew(a *app, args []string) error {
 	switch {
 	case *count < 1 || *count > maxBatch:
 		return fmt.Errorf("--count must be 1-%d: %w", maxBatch, errUsage)
-	case *count > 1 && (*from == "" || *name != "" || *waitSetup):
-		return fmt.Errorf("--count needs --from, and does not work with --name or --wait-setup: %w", errUsage)
+	case *count > 1 && *waitSetup:
+		return fmt.Errorf("--count does not work with --wait-setup: %w", errUsage)
+	}
+	if *failFast {
+		body["fail_fast"] = true
 	}
 	if err := a.applyFrom(body, *from); err != nil {
 		return err
@@ -204,18 +208,27 @@ func oneVM(a *app, args []string) (obj, error) {
 	return a.c.resolveVM(args[0])
 }
 
-func vmAction(action string) func(*app, []string) error {
-	return func(a *app, args []string) error {
-		vm, err := oneVM(a, args)
-		if err != nil {
-			return err
-		}
-		var out obj
-		if err := a.c.call("POST", vmPath(s(vm, "id"), action), nil, &out); err != nil {
-			return err
-		}
-		return a.emitVM(out)
+// cmdStop stops (snapshots) a VM; --force kills it without a snapshot.
+func cmdStop(a *app, args []string) error {
+	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	force := fs.Bool("force", false, "kill at once, no snapshot: the next start is a cold boot and loses unsynced writes")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
 	}
+	vm, err := oneVM(a, pos)
+	if err != nil {
+		return err
+	}
+	var body any
+	if *force {
+		body = obj{"force": true}
+	}
+	var out obj
+	if err := a.c.call("POST", vmPath(s(vm, "id"), "stop"), body, &out); err != nil {
+		return err
+	}
+	return a.emitVM(out)
 }
 
 func cmdRm(a *app, args []string) error {
@@ -232,6 +245,7 @@ func cmdRm(a *app, args []string) error {
 func cmdFork(a *app, args []string) error {
 	fs := flag.NewFlagSet("fork", flag.ContinueOnError)
 	name := fs.String("name", "", "")
+	failFast := fs.Bool("fail-fast", false, "fail at once with no_ready_machine when the host is full")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -240,8 +254,12 @@ func cmdFork(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
+	body := obj{"name": *name}
+	if *failFast {
+		body["fail_fast"] = true
+	}
 	var out obj
-	if err := a.c.call("POST", vmPath(s(vm, "id"), "fork"), obj{"name": *name}, &out); err != nil {
+	if err := a.c.call("POST", vmPath(s(vm, "id"), "fork"), body, &out); err != nil {
 		return err
 	}
 	a.setCurrent(s(out, "id"))

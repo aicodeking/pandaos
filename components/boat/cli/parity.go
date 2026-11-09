@@ -605,6 +605,7 @@ func cmdVMUsage(a *app, args []string) error {
 func cmdResume(a *app, args []string) error {
 	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
 	typ := fs.String("type", "", "resize first (drops a stop snapshot's memory)")
+	failFast := fs.Bool("fail-fast", false, "fail at once with no_ready_machine when the host is full")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -618,8 +619,12 @@ func cmdResume(a *app, args []string) error {
 			return err
 		}
 	}
+	var body any
+	if *failFast {
+		body = obj{"fail_fast": true}
+	}
 	var out obj
-	if err := a.c.call("POST", vmPath(s(vm, "id"), "start"), nil, &out); err != nil {
+	if err := a.c.call("POST", vmPath(s(vm, "id"), "start"), body, &out); err != nil {
 		return err
 	}
 	return a.emitVM(out)

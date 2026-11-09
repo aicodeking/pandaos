@@ -41,6 +41,10 @@ class Mock(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != "Bearer " + TOKEN:
             return self._send(401, {"error": {"code": "unauthorized", "message": "bad key", "request_id": "req_1"}})
         p, m = self.path, self.command
+        if (m, p) == ("POST", "/v1/vms") and json.loads(body).get("count", 1) > 1:
+            req = json.loads(body)
+            return self._send(201, {"vms": [dict(VM, id="vm%d" % i, name="%s-%d" % (req["name"], i))
+                                            for i in range(1, req["count"] + 1)]})
         if (m, p) == ("POST", "/v1/vms"):
             return self._send(201, dict(VM, **json.loads(body)))
         if (m, p) == ("GET", "/v1/vms"):
@@ -141,6 +145,19 @@ class ClientTest(unittest.TestCase):
         fork = self.b.fork(vm.id, name="dev-2")
         self.assertEqual((fork.id, fork.name), ("vm2", "dev-2"))
         self.assertEqual(self.b.stop(vm.id).state, "stopped")
+
+    def test_force_stop_fail_fast_and_batch(self):
+        self.b.stop("vm1", force=True)
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"force": True})
+        self.b.stop("vm1")
+        self.assertEqual(Mock.log[-1][2], b"")
+        self.b.fork("vm1", fail_fast=True)
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"fail_fast": True})
+        self.b.create_vm(fail_fast=True)
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"fail_fast": True})
+        vms = self.b.create_vms(3, name="w", secrets=[])
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"name": "w", "secrets": [], "count": 3})
+        self.assertEqual([v.name for v in vms], ["w-1", "w-2", "w-3"])
 
     def test_exec_streaming_and_run(self):
         events = list(self.b.exec("vm1", ["ls", "-la"]))

@@ -32,7 +32,7 @@ type jobAPI struct {
 	upload    []byte
 	execLines func(w http.ResponseWriter, r *http.Request, cmd []string)
 	created   int
-	failFrom  int // creates after this many get 409 (0 = never)
+	failFrom  int // creates after this many get 409 (0 = never, -1 = all)
 }
 
 func newJobAPI(t *testing.T) *jobAPI {
@@ -44,13 +44,23 @@ func newJobAPI(t *testing.T) *jobAPI {
 		json.NewEncoder(w).Encode(v)
 	}
 	mux.HandleFunc("POST /v1/vms", func(w http.ResponseWriter, r *http.Request) {
+		var in obj
+		json.NewDecoder(r.Body).Decode(&in)
 		api.Lock()
 		api.created++
 		n := api.created
-		over := api.failFrom > 0 && n > api.failFrom
+		over := api.failFrom != 0 && n > api.failFrom
 		api.Unlock()
 		if over {
 			j(w, 409, obj{"error": obj{"code": "quota", "message": "over quota"}})
+			return
+		}
+		if c, _ := in["count"].(float64); c > 1 { // the server's batch
+			vms := []obj{}
+			for i := 1; i <= int(c); i++ {
+				vms = append(vms, obj{"id": fmt.Sprintf("vm-%d-%d", n, i), "name": "", "size": "large", "state": "running"})
+			}
+			j(w, 201, obj{"vms": vms})
 			return
 		}
 		j(w, 201, obj{"id": fmt.Sprintf("vm-%d", n), "name": "", "size": "large", "state": "running"})
@@ -91,6 +101,11 @@ func newJobAPI(t *testing.T) *jobAPI {
 		}
 		api.execLines(w, r, body.Cmd)
 	})
+	for _, act := range []string{"stop", "start", "fork"} {
+		mux.HandleFunc("POST /v1/vms/{id}/"+act, func(w http.ResponseWriter, r *http.Request) {
+			j(w, 200, obj{"id": r.PathValue("id"), "name": "dev", "size": "large", "state": "running"})
+		})
+	}
 	mux.HandleFunc("POST /v1/vms/{id}/ports", func(w http.ResponseWriter, r *http.Request) { j(w, 201, obj{"guest_port": 3000}) })
 	mux.HandleFunc("GET /v1/vms/{id}/ports/{port}/url", func(w http.ResponseWriter, r *http.Request) {
 		j(w, 200, obj{"url": "https://3000-vm.example/?boat_sig=ab", "expires_at": "2026-01-01T00:00:00Z"})
@@ -635,51 +650,77 @@ func TestNoKeyInGuestSaysHow(t *testing.T) {
 func TestNewCount(t *testing.T) {
 	api := newJobAPI(t)
 	h := newHarness(t, api)
-	if code := h.a.run([]string{"new", "--from", "ci-base", "--count", "3", "--json"}); code != 0 {
+	if code := h.a.run([]string{"new", "--from", "ci-base", "--count", "3", "--name", "w", "--json"}); code != 0 {
 		t.Fatalf("exit %d: %s", code, h.err)
 	}
-	if n := strings.Count(h.out.String(), "\n"); n != 3 || api.count("POST /v1/vms") != 3 {
+	// One request: the server creates the batch, all or none.
+	if n := strings.Count(h.out.String(), "\n"); n != 3 || api.count("POST /v1/vms") != 1 {
 		t.Errorf("%d lines, %d creates", n, api.count("POST /v1/vms"))
 	}
-	if !strings.Contains(api.lastBody("POST /v1/vms"), `"snapshot":"snap-1"`) {
-		t.Errorf("body %s", api.lastBody("POST /v1/vms"))
+	if b := api.lastBody("POST /v1/vms"); !strings.Contains(b, `"snapshot":"snap-1"`) || !strings.Contains(b, `"count":3`) || !strings.Contains(b, `"name":"w"`) {
+		t.Errorf("body %s", b)
 	}
 
-	// One share import, however many VMs.
+	// A share code goes to the server as is; it imports it once for the batch.
 	api = newJobAPI(t)
 	h = newHarness(t, api)
-	if code := h.a.run([]string{"new", "--from", "bsh_a", "--count", "2"}); code != 0 || api.count("POST /v1/snapshots/import-share") != 1 {
+	if code := h.a.run([]string{"new", "--from", "bsh_a", "--count", "2"}); code != 0 || api.count("POST /v1/snapshots/import-share") != 0 {
 		t.Errorf("share: exit %d, %v", code, api.reqs)
 	}
-	if !strings.Contains(api.lastBody("POST /v1/vms"), `"snapshot":"snap-9"`) {
-		t.Errorf("body %s", api.lastBody("POST /v1/vms"))
+	if b := api.lastBody("POST /v1/vms"); !strings.Contains(b, `"from":"bsh_a"`) || !strings.Contains(b, `"count":2`) {
+		t.Errorf("body %s", b)
 	}
 
-	// All or none.
+	// No --from needed any more.
 	api = newJobAPI(t)
-	api.failFrom = 2
 	h = newHarness(t, api)
-	if code := h.a.run([]string{"new", "--from", "ci-base", "--count", "4"}); code != 1 {
+	if code := h.a.run([]string{"new", "--count", "2"}); code != 0 || api.count("POST /v1/vms") != 1 {
+		t.Errorf("plain batch: exit %d %s", code, h.err)
+	}
+
+	// All or none: a refused batch leaves nothing to roll back here.
+	api = newJobAPI(t)
+	api.failFrom = -1
+	h = newHarness(t, api)
+	if code := h.a.run([]string{"new", "--count", "4"}); code != 1 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(h.err.String(), "rolled back") || h.out.Len() != 0 {
-		t.Errorf("out %q err %q", h.out, h.err)
-	}
-	deletes := 0
-	for _, r := range api.reqs {
-		if strings.HasPrefix(r, "DELETE /v1/vms/") {
-			deletes++
-		}
-	}
-	if deletes != 2 {
-		t.Errorf("%d rollbacks, %v", deletes, api.reqs)
+	if !strings.Contains(h.err.String(), "all or none") || h.out.Len() != 0 || api.count("POST /v1/vms") != 1 {
+		t.Errorf("out %q err %q reqs %v", h.out, h.err, api.reqs)
 	}
 
 	h = newHarness(t, newJobAPI(t))
-	for _, args := range [][]string{{"new", "--count", "2"}, {"new", "--from", "s", "--count", "0"}, {"new", "--from", "ci-base", "--count", "2", "--name", "x"}} {
+	for _, args := range [][]string{{"new", "--count", "0"}, {"new", "--count", "17"}, {"new", "--count", "2", "--wait-setup"}} {
 		if code := h.a.run(args); code != 2 {
 			t.Errorf("%v: exit %d: %s", args, code, h.err)
 		}
+	}
+}
+
+func TestForceStopAndFailFast(t *testing.T) {
+	api := newJobAPI(t)
+	h := newHarness(t, api)
+	for _, c := range []struct {
+		args       []string
+		route, has string
+	}{
+		{[]string{"stop", "vm-1", "--force"}, "POST /v1/vms/vm-1/stop", `"force":true`},
+		{[]string{"new", "--fail-fast"}, "POST /v1/vms", `"fail_fast":true`},
+		{[]string{"fork", "vm-1", "--fail-fast"}, "POST /v1/vms/vm-1/fork", `"fail_fast":true`},
+		{[]string{"resume", "vm-1", "--fail-fast"}, "POST /v1/vms/vm-1/start", `"fail_fast":true`},
+		{[]string{"start", "vm-1", "--fail-fast"}, "POST /v1/vms/vm-1/start", `"fail_fast":true`},
+	} {
+		if code := h.a.run(c.args); code != 0 {
+			t.Errorf("%v: exit %d: %s", c.args, code, h.err)
+			continue
+		}
+		if b := api.lastBody(c.route); !strings.Contains(b, c.has) {
+			t.Errorf("%v: body %q, want %s", c.args, b, c.has)
+		}
+	}
+	h.a.run([]string{"stop", "vm-1"})
+	if b := api.lastBody("POST /v1/vms/vm-1/stop"); strings.Contains(b, "force") {
+		t.Errorf("plain stop sent %q", b)
 	}
 }
 

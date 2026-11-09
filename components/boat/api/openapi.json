@@ -238,7 +238,7 @@
     }
    },
    "post": {
-    "summary": "Create a VM; team secrets and AI proxy tokens go into its env, and an environment's setup runs in it",
+    "summary": "Create a VM; team secrets and AI proxy tokens go into its env, and an environment's setup runs in it; count > 1 creates a batch, all or none",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -259,7 +259,14 @@
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/VM"
+         "oneOf": [
+          {
+           "$ref": "#/components/schemas/VM"
+          },
+          {
+           "$ref": "#/components/schemas/VMBatch"
+          }
+         ]
         }
        }
       }
@@ -370,12 +377,28 @@
      "default": {
       "$ref": "#/components/responses/Error"
      }
+    },
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "fail_fast": {
+          "type": "boolean",
+          "description": "answer 503 no_ready_machine at once when the host is full (or boatd is still converting its images) instead of waiting"
+         }
+        }
+       }
+      }
+     }
     }
    }
   },
   "/v1/vms/{id}/stop": {
    "post": {
-    "summary": "Stop (snapshot) a VM",
+    "summary": "Stop (snapshot) a VM, or with force kill it without one",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -404,6 +427,22 @@
      },
      "default": {
       "$ref": "#/components/responses/Error"
+     }
+    },
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "force": {
+          "type": "boolean",
+          "description": "kill at once: no guest sync, no snapshot; the next start is a cold boot and loses the page cache, as on a power cut"
+         }
+        }
+       }
+      }
      }
     }
    }
@@ -435,6 +474,10 @@
         "properties": {
          "name": {
           "type": "string"
+         },
+         "fail_fast": {
+          "type": "boolean",
+          "description": "answer 503 no_ready_machine at once when the host is full (or boatd is still converting its images) instead of waiting"
          }
         }
        }
@@ -4911,6 +4954,14 @@
      "from": {
       "type": "string",
       "description": "a share code bsh_…; imported first"
+     },
+     "fail_fast": {
+      "type": "boolean",
+      "description": "answer 503 no_ready_machine at once when the host is full (or boatd is still converting its images) instead of waiting"
+     },
+     "count": {
+      "type": "integer",
+      "description": "1-16: create that many VMs, all or none; a name x becomes x-1 … x-N. More than 1 answers {\"vms\":[…]}"
      }
     }
    },
@@ -5994,6 +6045,20 @@
      "status",
      "ok",
      "at"
+    ]
+   },
+   "VMBatch": {
+    "type": "object",
+    "properties": {
+     "vms": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/VM"
+      }
+     }
+    },
+    "required": [
+     "vms"
     ]
    }
   },

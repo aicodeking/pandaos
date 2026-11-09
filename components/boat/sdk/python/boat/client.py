@@ -246,23 +246,44 @@ class Boat:
                   env: Optional[Dict[str, str]] = None, secrets: Optional[List[str]] = None,
                   idle_stop_s: Optional[int] = None, snapshot: Optional[str] = None,
                   environment: Optional[str] = None, no_env: Optional[bool] = None,
-                  from_share: Optional[str] = None) -> VM:
+                  from_share: Optional[str] = None, fail_fast: bool = False) -> VM:
         """secrets: team secret names to inject (None = all, [] = none); forks inherit it.
         environment runs that environment's setup (vm.raw["setup_cmd_id"]) unless it has a current build.
-        from_share: a share code bsh_..., copied into your team first."""
-        body = self._clean({"name": name, "size": size, "image": image, "ttl_s": ttl_s, "labels": labels, "env": env,
-                            "secrets": None if secrets is None else list(secrets), "idle_stop_s": idle_stop_s,
-                            "snapshot": snapshot, "environment": environment, "no_env": no_env, "from": from_share})
+        from_share: a share code bsh_..., copied into your team first.
+        fail_fast: a full host raises BoatError(503, "no_ready_machine") at once."""
+        body = self._create_body(name, size, image, ttl_s, labels, env, secrets, idle_stop_s, snapshot,
+                                 environment, no_env, from_share, fail_fast)
         return VM.from_json(self._call("POST", "/v1/vms", body))
 
-    def start(self, vm_id: str) -> VM:
-        return VM.from_json(self._call("POST", f"/v1/vms/{_q(vm_id)}/start") or {"id": vm_id})
+    def create_vms(self, count: int, **kw: Any) -> List[VM]:
+        """count (1-16) VMs in one request, all or none; a name x becomes x-1 … x-N.
+        Takes create_vm's keyword arguments."""
+        body = self._create_body(kw.get("name"), kw.get("size"), kw.get("image"), kw.get("ttl_s"), kw.get("labels"),
+                                 kw.get("env"), kw.get("secrets"), kw.get("idle_stop_s"), kw.get("snapshot"),
+                                 kw.get("environment"), kw.get("no_env"), kw.get("from_share"), kw.get("fail_fast", False))
+        body["count"] = count
+        out = self._call("POST", "/v1/vms", body)
+        return [VM.from_json(v) for v in out["vms"]] if "vms" in out else [VM.from_json(out)]
 
-    def stop(self, vm_id: str) -> VM:
-        return VM.from_json(self._call("POST", f"/v1/vms/{_q(vm_id)}/stop") or {"id": vm_id})
+    def _create_body(self, name, size, image, ttl_s, labels, env, secrets, idle_stop_s, snapshot,
+                     environment, no_env, from_share, fail_fast) -> Dict[str, Any]:
+        return self._clean({"name": name, "size": size, "image": image, "ttl_s": ttl_s, "labels": labels, "env": env,
+                            "secrets": None if secrets is None else list(secrets), "idle_stop_s": idle_stop_s,
+                            "snapshot": snapshot, "environment": environment, "no_env": no_env, "from": from_share,
+                            "fail_fast": True if fail_fast else None})
 
-    def fork(self, vm_id: str, name: Optional[str] = None) -> VM:
-        return VM.from_json(self._call("POST", f"/v1/vms/{_q(vm_id)}/fork", self._clean({"name": name})))
+    def start(self, vm_id: str, fail_fast: bool = False) -> VM:
+        body = {"fail_fast": True} if fail_fast else None
+        return VM.from_json(self._call("POST", f"/v1/vms/{_q(vm_id)}/start", body) or {"id": vm_id})
+
+    def stop(self, vm_id: str, force: bool = False) -> VM:
+        """force: kill without a snapshot; the next start is a cold boot and loses unsynced writes."""
+        body = {"force": True} if force else None
+        return VM.from_json(self._call("POST", f"/v1/vms/{_q(vm_id)}/stop", body) or {"id": vm_id})
+
+    def fork(self, vm_id: str, name: Optional[str] = None, fail_fast: bool = False) -> VM:
+        body = self._clean({"name": name, "fail_fast": True if fail_fast else None})
+        return VM.from_json(self._call("POST", f"/v1/vms/{_q(vm_id)}/fork", body))
 
     def delete(self, vm_id: str) -> None:
         self._call("DELETE", f"/v1/vms/{_q(vm_id)}")
