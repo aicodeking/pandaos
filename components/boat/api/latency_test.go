@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
@@ -121,5 +122,42 @@ func BenchmarkCreate(b *testing.B) {
 	e.t = t
 	for i := 0; i < b.N; i++ {
 		e.do(e.owner, "POST", "/v1/vms", map[string]any{"secrets": []string{}, "no_env": true})
+	}
+}
+
+// TestCloseKeepsAdminInit is boat-real's 401 (boat-e2e 42628046892): boat-api
+// runs with the state it loaded, admin init adds the operator key behind it,
+// then the service restarts. The old process's Close must not write its
+// unchanged state back over admin init's file.
+func TestCloseKeepsAdminInit(t *testing.T) {
+	dir := t.TempDir()
+	kr, err := NewKeyring(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err := OpenSealedStore(dir, kr) // the server, before admin init
+	if err != nil {
+		t.Fatal(err)
+	}
+	initStore, err := OpenSealedStore(dir, kr) // boat-api admin init, another process
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := bootstrap(initStore, kr, "me", "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	initStore.Close()
+	if err := running.Close(); err != nil { // SIGTERM of the old server
+		t.Fatal(err)
+	}
+	after, err := OpenSealedStore(dir, kr) // the restarted server
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { after.Close() })
+	id, _, _ := ParseToken(k.Token)
+	if after.Snapshot().Keys[id] == nil {
+		t.Fatal("the old server's shutdown wrote its state over admin init's key")
 	}
 }

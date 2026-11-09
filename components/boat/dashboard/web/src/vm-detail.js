@@ -139,7 +139,7 @@ function promptSection(ctx, vm) {
     const pane = outputPane();
     const runner = streamRunner(ctx, pane, () => { el.hidden = true; });
     const prompt = h("textarea", { rows: "3", required: true });
-    const agent = h("select", {}, ["claude", "codex", "opencode"].map((a) => h("option", { value: a }, a)));
+    const agent = h("select", {}, ["claude", "codex", "opencode", "pi", "prime", "kimi", "mistral"].map((a) => h("option", { value: a }, a)));
     const model = h("input", { type: "text", autocomplete: "off" });
     const submit = h("button", { type: "submit", class: "primary" }, "Send");
     const onsubmit = (e) => {

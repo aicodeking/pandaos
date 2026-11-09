@@ -384,7 +384,7 @@ func openStore(dir string, kr *Keyring) (*Store, error) {
 	migrateOperator(st)
 	s.cur.Store(st)
 	if plain && kr != nil {
-		if err := s.persist(st); err != nil {
+		if err := s.writeState(st); err != nil { // seq 0, so persist would skip it
 			return nil, fmt.Errorf("seal %s: %w", s.path, err)
 		}
 	}
@@ -415,10 +415,19 @@ func (s *Store) persist(st *State) error {
 	return s.persistLocked(st)
 }
 
+// A state is written only when it is newer than the one on disk. A state
+// loaded from disk and never changed (seq 0) is never written back: another
+// process (boat-api admin init) may have replaced the file since, and a
+// shutdown Close must not put the old contents back over it.
 func (s *Store) persistLocked(st *State) error {
-	if st.seq != 0 && st.seq <= s.written {
+	if st.seq <= s.written {
 		return nil
 	}
+	return s.writeState(st)
+}
+
+// writeState writes st unconditionally. Caller holds s.wmu, or owns s alone (open).
+func (s *Store) writeState(st *State) error {
 	out, err := json.MarshalIndent(st, "", " ")
 	if err != nil {
 		return err
