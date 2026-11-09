@@ -15,25 +15,26 @@ import (
 
 // fakeBoatd implements the boatd internal contract in memory.
 type fakeBoatd struct {
-	mu       sync.Mutex
-	vms      map[string]VM
-	files    map[string][]byte // vmid + ":" + path
-	execs    []map[string]any
-	starts   []map[string]any
-	desk     []map[string]any
-	portReqs []map[string]any
-	resizes  []map[string]any
-	envOps   []map[string]any
-	snaps    map[string]map[string]any
-	cmds     map[string]*fakeCmd
-	events   chan string
-	n        int
-	creates  []map[string]any // POST /v1/vms bodies
-	patches  []map[string]any // PATCH /v1/vms/{id} bodies
-	noPatch  bool             // answer PATCH 405, like a boatd from before it
-	stops    []map[string]any
-	forks    []map[string]any
-	refuse   string // non-empty: lifecycle POSTs answer 503 with this code (host full)
+	mu            sync.Mutex
+	vms           map[string]VM
+	files         map[string][]byte // vmid + ":" + path
+	execs         []map[string]any
+	starts        []map[string]any
+	desk          []map[string]any
+	portReqs      []map[string]any
+	resizes       []map[string]any
+	envOps        []map[string]any
+	snaps         map[string]map[string]any
+	cmds          map[string]*fakeCmd
+	events        chan string
+	n             int
+	creates       []map[string]any // POST /v1/vms bodies
+	patches       []map[string]any // PATCH /v1/vms/{id} bodies
+	noPatch       bool             // answer PATCH 405, like a boatd from before it
+	noDefaultSize bool             // refuse size "default", like a host with other size names
+	stops         []map[string]any
+	forks         []map[string]any
+	refuse        string // non-empty: lifecycle POSTs answer 503 with this code (host full)
 	// discardPuts counts file uploads instead of keeping them (memory tests).
 	discardPuts bool
 	putBytes    int64
@@ -75,7 +76,12 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		switch in["size"] {
 		case "", nil:
 			in["size"] = "default" // boatd's defaultSize
-		case "small", "default", "large", "xlarge":
+		case "default":
+			if f.noDefaultSize { // a host whose sizes have other names
+				writeJSON(w, 400, map[string]string{"error": `unknown size "default"`})
+				return
+			}
+		case "small", "large", "xlarge":
 		default:
 			writeJSON(w, 400, map[string]string{"error": fmt.Sprintf("unknown size %q", in["size"])})
 			return

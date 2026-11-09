@@ -396,6 +396,12 @@ func (s *server) compatCreate(w http.ResponseWriter, r *http.Request, p *princip
 			return
 		}
 		res := s.callNative(r, p, "POST /v1/vms", s.createVM, "", body)
+		if c.Type == "default" && res.status == 400 && strings.Contains(res.body.String(), "unknown size") {
+			// boat.dev's SDKs always send type "default": on a host with no size of that
+			// name it means this host's default size.
+			body["size"] = ""
+			res = s.callNative(r, p, "POST /v1/vms", s.createVM, "", body)
+		}
 		if !res.ok() {
 			res.relay(w)
 			return

@@ -420,3 +420,13 @@ func TestCompatKeysAndEnvironments(t *testing.T) {
 		t.Errorf("other team deletes my environment: %d", st)
 	}
 }
+
+// boat.dev's SDKs always send type "default"; a host without that size uses its own default.
+func TestCompatTypeDefaultOnOtherSizes(t *testing.T) {
+	e := setup(t)
+	e.boatd.noDefaultSize = true
+	e.newSandbox(map[string]any{"type": "default", "environment": "base"})
+	if st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes", map[string]any{"type": "huge"}, nil); st != 400 {
+		t.Errorf("unknown type: %d %v", st, out)
+	}
+}
