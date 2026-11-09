@@ -4801,6 +4801,1412 @@
      }
     }
    }
+  },
+  "/api/v1/sandboxes": {
+   "post": {
+    "summary": "boat.dev: create sandbox(es) (POST /v1/vms underneath)",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "202": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "sandbox.created"
+           ]
+          },
+          "status": {
+           "type": "string"
+          },
+          "ttlSeconds": {
+           "type": [
+            "integer",
+            "null"
+           ]
+          },
+          "sandbox": {
+           "$ref": "#/components/schemas/CompatSandbox"
+          },
+          "sandboxes": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/CompatSandbox"
+           }
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "sandbox"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "Idempotency-Key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "maxLength": 255
+      },
+      "description": "per team, 24 h, in memory"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "type": {
+          "type": "string"
+         },
+         "ttlSeconds": {
+          "type": [
+           "integer",
+           "string",
+           "null"
+          ],
+          "description": "1-2592000, null or \"infinite\" (none); absent = 3600"
+         },
+         "labels": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         },
+         "env": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         },
+         "environment": {
+          "type": "string",
+          "description": "\"base\" = the team default"
+         },
+         "noEnv": {
+          "type": "boolean"
+         },
+         "failFast": {
+          "type": "boolean"
+         },
+         "count": {
+          "type": "integer",
+          "description": "1-16 here"
+         },
+         "from": {
+          "type": "string",
+          "description": "saved snapshot name or id, or a share code bsh_…"
+         },
+         "snapshots": {
+          "type": "boolean",
+          "description": "ignored"
+         },
+         "monitoring": {
+          "type": "boolean",
+          "description": "ignored"
+         },
+         "visibility": {
+          "type": "string",
+          "description": "ignored"
+         },
+         "org": {
+          "type": "string",
+          "description": "ignored"
+         },
+         "teamId": {
+          "type": "string",
+          "description": "ignored"
+         },
+         "setupScript": {
+          "type": "string",
+          "description": "refused (400)"
+         },
+         "hostedPorts": {
+          "type": "array",
+          "description": "refused (400)"
+         },
+         "files": {
+          "type": "array",
+          "description": "refused (400)"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "get": {
+    "summary": "boat.dev: list sandboxes, cursor pagination",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "sandbox.list"
+           ]
+          },
+          "sandboxes": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/CompatSandbox"
+           }
+          },
+          "pageInfo": {
+           "type": "object",
+           "properties": {
+            "nextCursor": {
+             "type": [
+              "string",
+              "null"
+             ]
+            },
+            "hasMore": {
+             "type": "boolean"
+            },
+            "limit": {
+             "type": "integer"
+            }
+           }
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "sandboxes",
+          "pageInfo"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "cursor",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "sort",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "state",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "name",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "namePrefix",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "label",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "include",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  },
+  "/api/v1/sandboxes/{id}": {
+   "get": {
+    "summary": "boat.dev: get sandbox",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "sandbox.info"
+           ]
+          },
+          "sandbox": {
+           "$ref": "#/components/schemas/CompatSandbox"
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "sandbox"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "sandbox (VM) id"
+     }
+    ]
+   },
+   "delete": {
+    "summary": "boat.dev: delete sandbox (needs X-Ascii-Confirm-Delete: <id>); done when it answers",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "202": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "sandbox.deleting"
+           ]
+          },
+          "operation": {
+           "type": "object",
+           "properties": {
+            "id": {
+             "type": "string"
+            },
+            "kind": {
+             "type": "string"
+            },
+            "targetId": {
+             "type": "string"
+            },
+            "reason": {
+             "type": "string"
+            },
+            "status": {
+             "type": "string"
+            },
+            "stage": {
+             "type": "string"
+            },
+            "expectedBy": {
+             "type": "null"
+            },
+            "attemptCount": {
+             "type": "integer"
+            },
+            "requestedAt": {
+             "type": "string"
+            },
+            "completedAt": {
+             "type": [
+              "string",
+              "null"
+             ]
+            }
+           }
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "operation"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "sandbox (VM) id"
+     },
+     {
+      "name": "X-Ascii-Confirm-Delete",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  },
+  "/api/v1/deletion-operations/{opid}": {
+   "get": {
+    "summary": "boat.dev: a deletion operation (in memory)",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "deletion.operation"
+           ]
+          },
+          "operation": {
+           "type": "object",
+           "properties": {
+            "id": {
+             "type": "string"
+            },
+            "kind": {
+             "type": "string"
+            },
+            "targetId": {
+             "type": "string"
+            },
+            "reason": {
+             "type": "string"
+            },
+            "status": {
+             "type": "string"
+            },
+            "stage": {
+             "type": "string"
+            },
+            "expectedBy": {
+             "type": "null"
+            },
+            "attemptCount": {
+             "type": "integer"
+            },
+            "requestedAt": {
+             "type": "string"
+            },
+            "completedAt": {
+             "type": [
+              "string",
+              "null"
+             ]
+            }
+           }
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "operation"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "opid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  },
+  "/api/v1/sandboxes/{id}/stop": {
+   "post": {
+    "summary": "boat.dev: stop (synchronous here)",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "sandbox.stopped"
+           ]
+          },
+          "id": {
+           "type": "string"
+          },
+          "status": {
+           "type": "string"
+          },
+          "sandbox": {
+           "$ref": "#/components/schemas/CompatSandbox"
+          },
+          "forced": {
+           "type": "boolean"
+          },
+          "operation": {
+           "type": "object",
+           "properties": {
+            "id": {
+             "type": "string"
+            },
+            "status": {
+             "type": "string"
+            },
+            "requestedAt": {
+             "type": "string"
+            },
+            "lastAttemptAt": {
+             "type": "string"
+            },
+            "error": {
+             "type": "null"
+            },
+            "endedAt": {
+             "type": "string"
+            },
+            "forced": {
+             "type": "boolean"
+            }
+           }
+          },
+          "statusUrl": {
+           "type": "null"
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "id",
+          "status"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "sandbox (VM) id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "force": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/resume": {
+   "post": {
+    "summary": "boat.dev: resume (POST /v1/vms/{id}/start)",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "202": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "sandbox.resuming",
+            "sandbox.forking"
+           ]
+          },
+          "id": {
+           "type": "string"
+          },
+          "status": {
+           "type": "string"
+          },
+          "sandbox": {
+           "$ref": "#/components/schemas/CompatSandbox"
+          },
+          "forced": {
+           "type": "boolean"
+          },
+          "operation": {
+           "type": "null"
+          },
+          "statusUrl": {
+           "type": "null"
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "id",
+          "status"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "sandbox (VM) id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "failFast": {
+          "type": "boolean"
+         },
+         "ttlSeconds": {
+          "type": [
+           "integer",
+           "string",
+           "null"
+          ],
+          "description": "accepted, ignored: the VM keeps its TTL"
+         },
+         "type": {
+          "type": "string",
+          "description": "refused (400)"
+         },
+         "env": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          },
+          "description": "refused (400)"
+         },
+         "environment": {
+          "type": "string",
+          "description": "refused (400)"
+         },
+         "noEnv": {
+          "type": "boolean",
+          "description": "refused (400)"
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/fork": {
+   "post": {
+    "summary": "boat.dev: fork",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "202": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "sandbox.resuming",
+            "sandbox.forking"
+           ]
+          },
+          "id": {
+           "type": "string"
+          },
+          "status": {
+           "type": "string"
+          },
+          "sandbox": {
+           "$ref": "#/components/schemas/CompatSandbox"
+          },
+          "forced": {
+           "type": "boolean"
+          },
+          "operation": {
+           "type": "null"
+          },
+          "statusUrl": {
+           "type": "null"
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "id",
+          "status"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "sandbox (VM) id"
+     },
+     {
+      "name": "Idempotency-Key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "maxLength": 255
+      },
+      "description": "per team, 24 h, in memory"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "failFast": {
+          "type": "boolean"
+         },
+         "ttlSeconds": {
+          "type": [
+           "integer",
+           "string",
+           "null"
+          ],
+          "description": "accepted, ignored"
+         },
+         "monitoring": {
+          "type": "boolean",
+          "description": "ignored"
+         },
+         "labels": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          },
+          "description": "refused (400)"
+         },
+         "env": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          },
+          "description": "refused (400)"
+         },
+         "environment": {
+          "type": "string",
+          "description": "refused (400)"
+         },
+         "noEnv": {
+          "type": "boolean",
+          "description": "refused (400)"
+         },
+         "type": {
+          "type": "string",
+          "description": "refused (400)"
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/commands": {
+   "post": {
+    "summary": "boat.dev: run a shell command (bash -lc), synchronous or stream:true",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "command.finished"
+           ]
+          },
+          "success": {
+           "type": "boolean"
+          },
+          "exitCode": {
+           "type": [
+            "integer",
+            "null"
+           ]
+          },
+          "signal": {
+           "type": [
+            "string",
+            "null"
+           ]
+          },
+          "oomKilled": {
+           "type": "boolean"
+          },
+          "stdout": {
+           "type": "string"
+          },
+          "stderr": {
+           "type": "string"
+          },
+          "stdoutTruncated": {
+           "type": "boolean"
+          },
+          "stderrTruncated": {
+           "type": "boolean"
+          },
+          "timedOut": {
+           "type": "boolean"
+          },
+          "cwd": {
+           "type": "string"
+          },
+          "startedAt": {
+           "type": "string"
+          },
+          "finishedAt": {
+           "type": "string"
+          },
+          "commandId": {
+           "type": "string"
+          },
+          "error": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "success",
+          "exitCode",
+          "stdout",
+          "stderr",
+          "timedOut"
+         ]
+        }
+       },
+       "application/x-ndjson": {
+        "schema": {
+         "type": "object",
+         "description": "stream:true, one per line: started, then stdout/stderr, then exactly one exit or error",
+         "properties": {
+          "type": {
+           "enum": [
+            "started",
+            "stdout",
+            "stderr",
+            "exit",
+            "error"
+           ]
+          },
+          "commandId": {
+           "type": "string"
+          },
+          "data": {
+           "type": "string"
+          },
+          "exitCode": {
+           "type": "integer"
+          },
+          "success": {
+           "type": "boolean"
+          },
+          "timedOut": {
+           "type": "boolean"
+          },
+          "error": {
+           "type": "string"
+          },
+          "message": {
+           "type": "string"
+          },
+          "retryable": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "type"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "sandbox (VM) id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string"
+         },
+         "cwd": {
+          "type": "string",
+          "description": "relative to the guest home; /home/user maps to it"
+         },
+         "timeoutSeconds": {
+          "type": "integer",
+          "description": "1-600, default 30"
+         },
+         "detached": {
+          "type": "boolean",
+          "description": "refused (400): use /v1/vms/{id}/commands"
+         },
+         "stream": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files": {
+   "get": {
+    "summary": "boat.dev: read a file (≤ 5 MiB)",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "file.read"
+           ]
+          },
+          "success": {
+           "type": "boolean"
+          },
+          "path": {
+           "type": "string"
+          },
+          "encoding": {
+           "enum": [
+            "utf8",
+            "base64"
+           ]
+          },
+          "size": {
+           "type": "integer"
+          },
+          "content": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "success",
+          "path",
+          "encoding",
+          "size",
+          "content"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "sandbox (VM) id"
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "encoding",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "enum": [
+        "utf8",
+        "base64"
+       ]
+      }
+     }
+    ]
+   },
+   "put": {
+    "summary": "boat.dev: write a file (≤ 5 MiB)",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "file.written"
+           ]
+          },
+          "success": {
+           "type": "boolean"
+          },
+          "path": {
+           "type": "string"
+          },
+          "encoding": {
+           "enum": [
+            "utf8",
+            "base64"
+           ]
+          },
+          "size": {
+           "type": "integer"
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "success",
+          "path",
+          "encoding",
+          "size"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "sandbox (VM) id"
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "content": {
+          "type": "string"
+         },
+         "encoding": {
+          "enum": [
+           "utf8",
+           "base64"
+          ]
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/limits": {
+   "get": {
+    "summary": "boat.dev: limits as this server knows them (maxActiveSandboxes -1 = boatd's quota, unknown here)",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "enum": [
+            true
+           ]
+          },
+          "type": {
+           "enum": [
+            "limits.info"
+           ]
+          },
+          "activeSandboxes": {
+           "type": "integer"
+          },
+          "maxActiveSandboxes": {
+           "type": "integer"
+          },
+          "activeStates": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          "canStart": {
+           "type": "boolean"
+          },
+          "billingStatus": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "ok",
+          "type",
+          "activeSandboxes",
+          "maxActiveSandboxes",
+          "canStart",
+          "billingStatus"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
   }
  },
  "components": {
@@ -6060,6 +7466,142 @@
     "required": [
      "vms"
     ]
+   },
+   "CompatError": {
+    "type": "object",
+    "properties": {
+     "ok": {
+      "type": "boolean"
+     },
+     "type": {
+      "type": "string"
+     },
+     "status": {
+      "type": "integer"
+     },
+     "code": {
+      "type": "string"
+     },
+     "message": {
+      "type": "string"
+     },
+     "requestId": {
+      "type": "string"
+     },
+     "retryAfterSeconds": {
+      "type": "integer"
+     },
+     "error": {
+      "type": "object",
+      "properties": {
+       "code": {
+        "type": "string"
+       },
+       "message": {
+        "type": "string"
+       },
+       "status": {
+        "type": "integer"
+       },
+       "details": {
+        "type": "object",
+        "additionalProperties": true
+       }
+      },
+      "required": [
+       "code",
+       "message",
+       "status"
+      ]
+     }
+    },
+    "required": [
+     "ok",
+     "type",
+     "status",
+     "code",
+     "message",
+     "error",
+     "requestId"
+    ]
+   },
+   "CompatSandbox": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "state": {
+      "enum": [
+       "provisioning",
+       "running",
+       "archiving",
+       "archived",
+       "error"
+      ]
+     },
+     "desktopAvailable": {
+      "type": "boolean"
+     },
+     "snapshotAvailable": {
+      "type": "boolean"
+     },
+     "type": {
+      "type": "string"
+     },
+     "vcpu": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "memoryGB": {
+      "type": "number"
+     },
+     "ip": {
+      "type": "string"
+     },
+     "labels": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string"
+      }
+     },
+     "createdAt": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "updatedAt": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "ttlSeconds": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "error": {
+      "type": "string"
+     },
+     "environment": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "name",
+     "state",
+     "desktopAvailable",
+     "snapshotAvailable"
+    ]
    }
   },
   "responses": {
@@ -6074,5 +7616,11 @@
     }
    }
   }
- }
+ },
+ "tags": [
+  {
+   "name": "boat.dev compatibility",
+   "description": "boat.dev's /api/v1 sandbox API on top of /v1; see docs/boat.md for what is mapped"
+  }
+ ]
 }

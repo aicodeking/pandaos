@@ -61,6 +61,8 @@ type server struct {
 	// routeTable lists every registered "METHOD /path" (OpenAPI drift test).
 	routeTable []string
 	observe    func(pattern string, r *http.Request, status int) // OpenAPI drift test
+	idem       idemCache                                         // boat.dev Idempotency-Key (compat_idem.go)
+	deletions  deletions                                         // boat.dev deletion operations (compat.go)
 }
 
 // ---- scopes and roles ----
@@ -301,9 +303,17 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ri := &reqInfo{id: rid}
 	w.Header().Set("X-Request-Id", rid)
+	var cw *compatWriter
+	if strings.HasPrefix(r.URL.Path, compatPrefix) { // boat.dev's error envelope
+		cw = &compatWriter{ResponseWriter: w, rid: rid}
+		w = cw
+	}
 	sw := &statusWriter{ResponseWriter: w}
 	traceID, parent := traceIDs(r.Header.Get("Traceparent"))
 	s.mux.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), ctxKey{}, ri)))
+	if cw != nil {
+		cw.finish()
+	}
 	if s.otel != nil {
 		attrs := map[string]any{"http.request.method": r.Method, "http.route": ri.pattern, "http.response.status_code": sw.status, "boat.request_id": rid}
 		if ri.p != nil {
@@ -361,6 +371,7 @@ var auditedReads = map[string]bool{
 // streamRoutes hold a connection for as long as the guest or client keeps it open.
 var streamRoutes = map[string]bool{
 	"POST /v1/vms/{id}/exec":                    true,
+	"POST /api/v1/sandboxes/{id}/commands":      true,
 	"POST /v1/vms/{id}/prompt":                  true,
 	"GET /v1/events":                            true,
 	"GET /v1/vms/{id}/commands/{cid}/logs":      true,

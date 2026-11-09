@@ -27,10 +27,10 @@ type fakeBoatd struct {
 	cmds     map[string]*fakeCmd
 	events   chan string
 	n        int
-	creates []map[string]any // POST /v1/vms bodies
-	stops   []map[string]any
-	forks   []map[string]any
-	refuse  string // non-empty: lifecycle POSTs answer 503 with this code (host full)
+	creates  []map[string]any // POST /v1/vms bodies
+	stops    []map[string]any
+	forks    []map[string]any
+	refuse   string // non-empty: lifecycle POSTs answer 503 with this code (host full)
 	// discardPuts counts file uploads instead of keeping them (memory tests).
 	discardPuts bool
 	putBytes    int64

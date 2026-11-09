@@ -70,7 +70,8 @@ func (s *server) authenticateSelf(tok string) *principal {
 // selfAllowed: a VM token reaches only its own /v1/vms/{id} routes.
 func selfAllowed(pattern string, r *http.Request, vmID string) bool {
 	_, path, _ := strings.Cut(pattern, " ")
-	return strings.HasPrefix(path, "/v1/vms/{id}") && r.PathValue("id") == vmID
+	own := strings.HasPrefix(path, "/v1/vms/{id}") || strings.HasPrefix(path, "/api/v1/sandboxes/{id}")
+	return own && r.PathValue("id") == vmID
 }
 
 func (s *server) vmAPIURL() string {

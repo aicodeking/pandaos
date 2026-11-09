@@ -367,6 +367,15 @@ These details go beyond the published boatd contract:
 - `POST /v1/vms/{id}/desktop {action:"start",token}` starts the guest desktop proxy.
 - `GET /v1/vms` without `?team` lists all VMs (used for the jump-host sync).
 
+## boat.dev compatibility (`/api/v1`)
+
+`compat.go`, `compat_exec.go`, `compat_idem.go`: boat.dev's sandbox create/list/get/delete,
+stop/resume/fork, commands, files and `/limits`, with its `{ok, type}` envelope and error
+shape (every error under `/api/v1` is reshaped in `ServeHTTP`), cursor pagination and
+`Idempotency-Key` (in memory, per team, 24 h). The handlers call the native ones in-process
+(`callNative`), so auth, scopes, secrets and tokens are the same code. What is mapped and
+what is not: docs/boat.md, "boat.dev API compatibility".
+
 ## Parity with docs.boat.dev
 
 Checked against docs.boat.dev on 2026-11-01. Our paths are `/v1/vms`, theirs `/sandboxes`.
