@@ -21,11 +21,15 @@
 #   qgroups   the default: a limited subvolume per team, enforced on a guest
 
 # shellcheck disable=SC2154 # host_ip, PIDS come from e2e.sh
+# A command failing under set -e ends the run without a word; say which one, before
+# cleanup's pkill makes it look like something else (boat-e2e 41669516359).
+trap 'echo "e2e: exit $? at ${BASH_SOURCE[0]##*/}:$LINENO: $BASH_COMMAND" >&2' ERR
 # From 12 runs of this job, 41379327901 to 41625739091 (shared runner, 4 vCPU):
 #   fork_cli 0.77-1.42 s, fork 0.90-2.63 s; a first stop (stop_cli) 0.65-5.90 s, it writes
-#   and fsyncs all the guest touched since boot and is bound by the runner's disk at
-#   that moment (6.96 s in 41652556991); a diff stop (stop_diff) 0.61-4.15 s. Gates: the
-#   worst seen plus about a third.
+#   and fsyncs all the guest touched since boot; a diff stop (stop_diff) 0.61-4.15 s. Gates:
+#   the worst seen plus about a third. stop_cli's 6.96 s (41652556991) and 5.87 s
+#   (41669516359) came seconds after boatd's NOCOW image copies, 8.5 GiB left to
+#   writeback: boatd now flushes them before the first create.
 FORK_MAX=${E2E_FORK_MAX:-4}
 STOP_MAX=${E2E_STOP_MAX:-6}
 STOP_CLI_MAX=${E2E_STOP_CLI_MAX:-10}
@@ -101,6 +105,7 @@ echo "$fps"
 [ "$(tr ' ' '\n' <<<"$fps" | grep . | sort -u | wc -l)" = 8 ] || fail "machine-ids/host keys not all distinct: $fps"
 echo "stop ${stop2_s}s (first, diff since boot) ${stop3_s}s (diff since restore), resume ${resume2_s}s, fork ${fork2_s}s"
 check_max fork_cli "$fork_s" "$FORK_MAX"
+grep -E "images: |$id_a: (snapshot|stop)" "$WORK/boatd.log" | head -n 6 || true # stop_cli's phases
 check_max stop_cli "$stop_s" "$STOP_CLI_MAX"
 check_max fork "$fork2_s" "$FORK_MAX"
 check_max stop_diff "$stop3_s" "$STOP_MAX"

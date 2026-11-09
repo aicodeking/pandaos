@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -208,5 +210,60 @@ func TestSummarize(t *testing.T) {
 	}
 	if d := rep.Snapshots[0].Days; d < 0.979 || d > 0.98 {
 		t.Fatalf("snapshot days %v", d)
+	}
+}
+
+// A body that ends before its Content-Length is refused, and the guest file is not
+// renamed into place: neither a client that went away nor a short reader commits it.
+func TestPutFileShortBody(t *testing.T) {
+	m, _ := newTestManager(t, nil)
+	srv := httptest.NewServer(m.routes())
+	defer srv.Close()
+	var v VM
+	if c := call(t, srv, "POST", "/v1/vms", map[string]any{"name": "web", "team": "t1"}, &v); c != 201 {
+		t.Fatalf("create: %d", c)
+	}
+	// 1.5 MiB promised, 1.25 MiB sent (one full chunk goes to the guest), then the client half-closes.
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	sent := fileChunk + fileChunk/4
+	fmt.Fprintf(conn, "PUT /v1/vms/%s/files?path=/tmp/cut HTTP/1.1\r\nHost: boatd\r\nContent-Length: %d\r\n\r\n", v.ID, fileChunk+fileChunk/2)
+	conn.Write(bytes.Repeat([]byte("x"), sent))
+	conn.(*net.TCPConn).CloseWrite()
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 400 || !strings.Contains(string(b), "short body") {
+		t.Fatalf("short upload: %d %s", resp.StatusCode, b)
+	}
+	var got []byte
+	for _, p := range []string{"/tmp/cut", "/tmp/cut.boat-part"} {
+		if c := call(t, srv, "GET", "/v1/vms/"+v.ID+"/files?path="+p, nil, &got); c != 404 {
+			t.Fatalf("%s after a short body: %d (%d bytes)", p, c, len(got))
+		}
+	}
+
+	// A reader that ends early with a clean EOF, against its declared length.
+	req := httptest.NewRequest("PUT", "/v1/vms/"+v.ID+"/files?path=/tmp/cut2", strings.NewReader("abc"))
+	req.ContentLength = 10
+	rec := httptest.NewRecorder()
+	m.routes().ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("short reader: %d %s", rec.Code, rec.Body)
+	}
+	if c := call(t, srv, "GET", "/v1/vms/"+v.ID+"/files?path=/tmp/cut2", nil, &got); c != 404 {
+		t.Fatalf("short reader committed the file: %d", c)
+	}
+	// Control: the exact length still lands.
+	if c := call(t, srv, "PUT", "/v1/vms/"+v.ID+"/files?path=/tmp/ok", "abc", nil); c != 200 {
+		t.Fatalf("full body: %d", c)
+	}
+	if c := call(t, srv, "GET", "/v1/vms/"+v.ID+"/files?path=/tmp/ok", nil, &got); c != 200 || string(got) != "abc" {
+		t.Fatalf("full body: %d %q", c, got)
 	}
 }

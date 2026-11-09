@@ -122,10 +122,16 @@ in1=$(imported "$WORK/tmp/exp.tar.zst" signed)
 curl -fsS --limit-rate 64k --unix-socket "$SOCK" -o /dev/null -X POST -T "$WORK/tmp/exp.tar.zst" "http://boatd/v1/snapshots/import?team=lim&name=slow" &
 slow=$!
 zuid=""
-for _ in $(seq 50); do zuid=$(ps -o uid= -C zstd | head -n 1 | tr -d ' '); [ -n "$zuid" ] && break; sleep 0.1; done
+# ps exits 1 while no zstd runs yet: under pipefail that ended the whole run with no
+# message (boat-e2e 41669516359), and cleanup's pkill then looked like a dead VMM.
+for _ in $(seq 50); do zuid=$(ps -o uid= -C zstd | head -n 1 | tr -d ' ' || true); [ -n "$zuid" ] && break; sleep 0.1; done
 kill "$slow" 2>/dev/null || true
 wait "$slow" 2>/dev/null || true
 [ "$zuid" = 65534 ] || fail "import decompressor runs as uid '$zuid'"
+# The imports ran beside d1: its VMM must still be there.
+d1pid=$(vmf "$d1" pid)
+[ "$(vmf "$d1" state)" = running ] && sudo kill -0 "$d1pid" 2>/dev/null || fail "d1's firecracker ($d1pid) is gone after the imports"
+bx "$d1" true || fail "d1 does not answer after the imports"
 i1=$(newvm "{\"name\":\"i1\",\"team\":\"lim\",\"snapshot\":\"$(jq -r .id <<<"$in1")\"}")
 [ "$(bx "$i1" 'cat /proc/sys/kernel/random/boot_id')" = "$boot_d1" ] || fail "signed import did not restore memory"
 bd DELETE "/v1/vms/$i1" >/dev/null

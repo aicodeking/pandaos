@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -90,10 +92,28 @@ type usageRec struct {
 	End   time.Time `json:"end"`
 }
 
+// ledger is usage.jsonl, append-only. Records are appended when an interval closes,
+// so their End times only grow (but for clock steps and racing appends, which the
+// index tolerates): a sparse index of byte offsets lets a query for [since, now]
+// start at the first record that can still end after since, not at byte 0.
 type ledger struct {
 	mu   sync.Mutex
 	path string
+
+	marks   []ledgerMark // every ledgerMarkEvery records, from offset 0
+	indexed int64        // bytes of the file the index covers
+	count   int          // records in it
+	maxEnd  time.Time    // latest End in it
+	built   bool
 }
+
+// ledgerMark: every record before off ends at or before maxEnd.
+type ledgerMark struct {
+	off    int64
+	maxEnd time.Time
+}
+
+const ledgerMarkEvery = 1024
 
 func (l *ledger) append(r usageRec) error {
 	l.mu.Lock()
@@ -104,33 +124,98 @@ func (l *ledger) append(r usageRec) error {
 	}
 	defer f.Close()
 	b, _ := json.Marshal(r)
+	off, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
 	if _, err := f.Write(append(b, '\n')); err != nil {
 		return err
+	}
+	if l.built && off == l.indexed {
+		l.note(r, off+int64(len(b))+1)
+	} else {
+		l.built = false // written behind our back: rebuild on the next read
 	}
 	return f.Sync()
 }
 
-// ponytail: full scan of usage.jsonl per query; rotate/aggregate if it grows past ~100 MB.
-func (l *ledger) read() ([]usageRec, error) {
+// note adds the record that ends at byte next to the index.
+func (l *ledger) note(r usageRec, next int64) {
+	if r.End.After(l.maxEnd) {
+		l.maxEnd = r.End
+	}
+	l.count++
+	l.indexed = next
+	if l.count%ledgerMarkEvery == 0 {
+		l.marks = append(l.marks, ledgerMark{next, l.maxEnd})
+	}
+}
+
+// read returns the records that may overlap [since, ...): those of the index's last
+// mark that ends before since onwards. The first call (or one after the file changed
+// behind boatd) scans the whole file once to build the index.
+func (l *ledger) read(since time.Time) ([]usageRec, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	f, err := os.Open(l.path)
 	if os.IsNotExist(err) {
+		l.reset()
+		l.built = true
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	var out []usageRec
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		var r usageRec
-		if json.Unmarshal(sc.Bytes(), &r) == nil {
-			out = append(out, r)
-		}
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
 	}
-	return out, sc.Err()
+	if !l.built || st.Size() < l.indexed {
+		l.reset()
+		if err := l.scan(f, st.Size(), 0, time.Time{}, nil); err != nil {
+			return nil, err
+		}
+		l.built = true
+	}
+	// marks[i].maxEnd grows with i: take the last mark wholly before since.
+	i := sort.Search(len(l.marks), func(i int) bool { return !l.marks[i].maxEnd.Before(since) }) - 1
+	from := int64(0)
+	if i >= 0 {
+		from = l.marks[i].off
+	}
+	var out []usageRec
+	return out, l.scan(f, st.Size(), from, since, &out)
+}
+
+func (l *ledger) reset() {
+	l.marks, l.indexed, l.count, l.maxEnd, l.built = nil, 0, 0, time.Time{}, false
+}
+
+// scan reads records from byte from. Without out it builds the index (from 0); with
+// out it collects the records ending after since, and indexes what lies past l.indexed.
+func (l *ledger) scan(f *os.File, size, from int64, since time.Time, out *[]usageRec) error {
+	if _, err := f.Seek(from, io.SeekStart); err != nil {
+		return err
+	}
+	sc := bufio.NewScanner(f)
+	off := from
+	for sc.Scan() {
+		line := sc.Bytes()
+		next := min(off+int64(len(line))+1, size) // a torn last line has no newline
+		var r usageRec
+		ok := json.Unmarshal(line, &r) == nil
+		if ok && out != nil && r.End.After(since) {
+			*out = append(*out, r)
+		}
+		if next > l.indexed && ok {
+			l.note(r, next)
+		} else if next > l.indexed {
+			l.indexed = next // a torn line: skipped, like before
+		}
+		off = next
+	}
+	return sc.Err()
 }
 
 type vmUsage struct {

@@ -20,16 +20,6 @@ import (
 )
 
 // apiErr carries an HTTP status to the API layer.
-type apiErr struct {
-	code int
-	msg  string
-}
-
-func (e *apiErr) Error() string { return e.msg }
-
-func errf(code int, f string, a ...any) error { return &apiErr{code, fmt.Sprintf(f, a...)} }
-
-var errNotFound = &apiErr{http.StatusNotFound, "vm not found"}
 
 type Manager struct {
 	cfg   Config
@@ -255,9 +245,9 @@ func (m *Manager) quotaLocked(team string, s Size, exclude string) error {
 	}
 	switch {
 	case m.hostMem > 0 && float64(hostMem+s.MemMiB+m.cfg.VMOverheadMiB) > float64(m.hostMem)*m.cfg.MemOvercommit:
-		return errf(http.StatusServiceUnavailable, "host capacity: %d MiB of VM RAM already active (limit %.0f)", hostMem, float64(m.hostMem)*m.cfg.MemOvercommit)
+		return errCapacity("host capacity: %d MiB of VM RAM already active (limit %.0f)", hostMem, float64(m.hostMem)*m.cfg.MemOvercommit)
 	case m.hostCPU > 0 && float64(hostCPU+s.VCPU) > float64(m.hostCPU)*m.cfg.CPUOvercommit:
-		return errf(http.StatusServiceUnavailable, "host capacity: %d vCPUs already active (limit %.0f)", hostCPU, float64(m.hostCPU)*m.cfg.CPUOvercommit)
+		return errCapacity("host capacity: %d vCPUs already active (limit %.0f)", hostCPU, float64(m.hostCPU)*m.cfg.CPUOvercommit)
 	case p.MaxVMs > 0 && n > p.MaxVMs:
 		return errf(http.StatusTooManyRequests, "quota: team %s may run %d VMs", team, p.MaxVMs)
 	case p.MaxVCPU > 0 && cpu > p.MaxVCPU:
@@ -272,6 +262,10 @@ func (m *Manager) quotaLocked(team string, s Size, exclude string) error {
 func (m *Manager) alloc(v VM, st State) (VM, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.allocLocked(v, st)
+}
+
+func (m *Manager) allocLocked(v VM, st State) (VM, error) {
 	if err := m.quotaLocked(v.Team, Size{v.VCPU, v.MemMiB, v.DiskGiB}, ""); err != nil {
 		return VM{}, err
 	}
@@ -289,7 +283,7 @@ func (m *Manager) alloc(v VM, st State) (VM, error) {
 		}
 	}
 	if idx == 0 {
-		return VM{}, errf(http.StatusServiceUnavailable, "no free VM addresses")
+		return VM{}, errCapacity("no free VM addresses")
 	}
 	v.ID = newID("vm-")
 	if v.Name == "" {

@@ -48,6 +48,13 @@ func (m *Manager) routes() *http.ServeMux {
 		if err := decode(r, &req); err != nil {
 			return nil, err
 		}
+		if req.Count != 0 && req.Count != 1 {
+			vms, err := m.CreateBatch(r.Context(), req)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"vms": vms}, nil
+		}
 		return m.Create(r.Context(), req)
 	})
 	h("GET /v1/vms", func(r *http.Request) (any, error) {
@@ -57,22 +64,46 @@ func (m *Manager) routes() *http.ServeMux {
 	del := func(r *http.Request) (any, error) { return m.Delete(r.Context(), r.PathValue("id")) }
 	h("DELETE /v1/vms/{id}", del)
 	h("POST /v1/vms/{id}/delete", del)
-	h("POST /v1/vms/{id}/stop", func(r *http.Request) (any, error) { return m.Stop(r.Context(), r.PathValue("id"), "api") })
+	h("POST /v1/vms/{id}/stop", func(r *http.Request) (any, error) {
+		var b struct {
+			Force bool `json:"force"`
+		}
+		if err := decode(r, &b); err != nil {
+			return nil, err
+		}
+		if b.Force {
+			return m.stop(r.Context(), r.PathValue("id"), "force", true)
+		}
+		return m.Stop(r.Context(), r.PathValue("id"), "api")
+	})
 	h("POST /v1/vms/{id}/start", func(r *http.Request) (any, error) {
 		var b struct {
-			Env map[string]string `json:"env"`
+			Env      map[string]string `json:"env"`
+			FailFast bool              `json:"fail_fast"`
 		}
 		if err := decode(r, &b); err != nil {
 			return nil, err
 		}
-		return m.Start(r.Context(), r.PathValue("id"), b.Env)
+		v, err := m.Start(r.Context(), r.PathValue("id"), b.Env)
+		if b.FailFast {
+			err = failFast(err) // admission never waits in boatd; only the label differs
+		}
+		return v, err
 	})
 	h("POST /v1/vms/{id}/fork", func(r *http.Request) (any, error) {
-		var b struct{ Name, Team string }
+		var b struct {
+			Name     string `json:"name"`
+			Team     string `json:"team"`
+			FailFast bool   `json:"fail_fast"`
+		}
 		if err := decode(r, &b); err != nil {
 			return nil, err
 		}
-		return m.Fork(r.Context(), r.PathValue("id"), b.Name, b.Team)
+		v, err := m.Fork(r.Context(), r.PathValue("id"), b.Name, b.Team)
+		if b.FailFast {
+			err = failFast(err)
+		}
+		return v, err
 	})
 	h("POST /v1/vms/{id}/env", func(r *http.Request) (any, error) {
 		var b struct {
@@ -195,7 +226,11 @@ func writeErr(w http.ResponseWriter, err error) {
 	default:
 		log.Printf("api: %v", err)
 	}
-	writeJSON(w, code, map[string]string{"error": err.Error()})
+	body := map[string]string{"error": err.Error()}
+	if ae != nil && ae.kind != "" {
+		body["code"] = ae.kind
+	}
+	writeJSON(w, code, body)
 }
 
 // decode reads an optional JSON body (empty = zero value).
@@ -344,7 +379,10 @@ func (m *Manager) getFileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// putFileHandler streams the body to the guest as put_file chunks.
+// putFileHandler streams the body to the guest as put_file chunks. The agent writes
+// them to <path>.boat-part and renames it into place on the chunk with last:true, so
+// a body that ends early (client gone, Content-Length not met) must never send that
+// chunk: it is refused, and the part file removed.
 func (m *Manager) putFileHandler(w http.ResponseWriter, r *http.Request) {
 	path, mode := r.URL.Query().Get("path"), r.URL.Query().Get("mode")
 	if mode == "" {
@@ -368,14 +406,38 @@ func (m *Manager) putFileHandler(w http.ResponseWriter, r *http.Request) {
 	br := bufio.NewReaderSize(r.Body, fileChunk)
 	buf := make([]byte, fileChunk)
 	var off int64
+	short := func(err error) {
+		if off > 0 { // chunks went out: drop the part file. A client gone has canceled r's context.
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+			defer cancel()
+			if _, err := agentCall(ctx, sock, map[string]any{"op": "file_delete", "path": path + ".boat-part"}); err != nil {
+				log.Printf("%s: put_file: remove %s.boat-part: %v", r.PathValue("id"), path, err)
+			}
+		}
+		writeErr(w, errf(400, "short body: %d of %d bytes: %v", off, r.ContentLength, err))
+	}
 	for {
-		n, rerr := io.ReadFull(br, buf)
-		if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
-			writeErr(w, errf(400, "read body: %v", rerr))
+		n, rerr := readChunk(br, buf)
+		if rerr != nil && rerr != io.EOF {
+			off += int64(n)
+			short(rerr)
 			return
 		}
-		_, perr := br.Peek(1)
-		last := rerr != nil || perr != nil
+		last := rerr == io.EOF
+		if !last {
+			if _, perr := br.Peek(1); perr == io.EOF {
+				last = true
+			} else if perr != nil {
+				off += int64(n)
+				short(perr)
+				return
+			}
+		}
+		if last && r.ContentLength >= 0 && off+int64(n) != r.ContentLength {
+			off += int64(n)
+			short(io.ErrUnexpectedEOF)
+			return
+		}
 		req := map[string]any{"op": "put_file", "path": path, "mode": mode, "offset": off,
 			"data_b64": base64.StdEncoding.EncodeToString(buf[:n]), "last": last}
 		if err := a.send(req); err != nil {
@@ -397,6 +459,20 @@ func (m *Manager) putFileHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// readChunk fills buf like io.ReadFull, but tells a clean end (io.EOF, possibly with
+// n > 0) from a body that broke off (the server's io.ErrUnexpectedEOF, or any error).
+func readChunk(r io.Reader, buf []byte) (int, error) {
+	n := 0
+	for n < len(buf) {
+		k, err := r.Read(buf[n:])
+		n += k
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
 }
 
 // eventsHandler: SSE. Resume with Last-Event-ID (or ?after=); filter ?team=.

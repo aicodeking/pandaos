@@ -13,13 +13,15 @@ boatd also writes `/run/boat/routes.json` for boat-gateway (see the last section
 
 - Transport: HTTP/1.1 on the unix socket `/run/boat/boatd.sock`. The socket is mode 0660, owner `root:<socketGroup>` (`boat`). boatd does no other authentication, so the socket permissions are the access check. boat-api does tenant checks and must send `team`.
 - Success: the status is 200, or 201 for creates, and the body is the object itself (no envelope).
-- Error: the status is 4xx/5xx and the body is `{"error": "message"}`.
+- Error: the status is 4xx/5xx and the body is `{"error": "message"}`, plus `"code"` where a caller has to tell refusals apart:
+  - `host_capacity` (503): host admission refused the VM: committed RAM or vCPUs over the overcommit limit, too little really free memory, or no free VM address. boatd never queues such a request; it refuses at once.
+  - `no_ready_machine` (503): the same refusal for a request with `fail_fast:true`, and a create with `fail_fast` while boatd is still converting its images at startup (a create without it waits for them). boat-api may wait and retry a `host_capacity`; it passes `no_ready_machine` through.
   - 400: bad input.
   - 404: unknown VM, snapshot or file.
   - 409: wrong state, for example exec on a stopped VM.
   - 429: team quota exceeded.
   - 502: guest agent error.
-  - 503: no addresses or ports are free.
+  - 503: no addresses or ports are free, or the host is full (`code`, above).
 - Lifecycle calls are **synchronous**. They return after the operation completes. Create returns when the guest agent answers, or after `bootTimeoutS` (default 60 s).
 
 ### VM object
@@ -45,12 +47,12 @@ boatd also writes `/run/boat/routes.json` for boat-gateway (see the last section
 | Method and path | Body | Result |
 |---|---|---|
 | `GET /v1/health` | | `{"ok":true}` |
-| `POST /v1/vms` | `{name?, size?, image?, ttl_s?, idle_stop_s?, team, labels?, env?, snapshot?}` | 201, VM |
+| `POST /v1/vms` | `{name?, size?, image?, ttl_s?, idle_stop_s?, team, labels?, env?, snapshot?, fail_fast?, count?}` | 201, VM; with `count` > 1: 201, `{"vms":[VM…]}` |
 | `GET /v1/vms[?team=]` | | `{"vms":[VM…]}` |
 | `GET /v1/vms/{id}` | | VM |
-| `POST /v1/vms/{id}/start` | `{env?}` | VM (running) |
-| `POST /v1/vms/{id}/stop` | | VM (stopped) |
-| `POST /v1/vms/{id}/fork` | `{name?, team?}` | 201, child VM |
+| `POST /v1/vms/{id}/start` | `{env?, fail_fast?}` | VM (running) |
+| `POST /v1/vms/{id}/stop` | `{force?}` | VM (stopped) |
+| `POST /v1/vms/{id}/fork` | `{name?, team?, fail_fast?}` | 201, child VM |
 | `POST /v1/vms/{id}/delete` or `DELETE /v1/vms/{id}` | | VM with `"state":"deleted"` |
 | `POST /v1/vms/{id}/exec` | `{argv` (or `cmd`)`, env?, cwd?, stdin_b64?, timeout_s?` (600)`, tty?, user?}` | NDJSON stream (see below) |
 | `PUT /v1/vms/{id}/files?path=/abs&mode=644` | raw bytes | `{"ok":true,"path":…,"bytes":N}` |
@@ -81,10 +83,14 @@ Notes:
   - `image` is a directory `stateDir/images/<image>/{vmlinux,rootfs.ext4,meta.json?}`. An optional `meta.json` `{"boot_args": "..."}` replaces the default kernel cmdline.
   - `snapshot` creates the VM from a saved snapshot of the same team. The VM inherits the snapshot's size, and restores its memory if the snapshot has memory.
   - `env` is pushed with `set_env`.
+  - `fail_fast`: see `no_ready_machine` above. It changes only what a refusal says and that a create does not wait for the startup image conversion; it never makes a request succeed or fail otherwise. The same holds on start and fork.
+  - `count` (1-16, default 1): create that many VMs from one request, **all or none**. All of them pass team quota and host admission together, under one hold of boatd's lock, before any boots; if one then fails to boot, all are deleted and the call returns the first error (no VM of the batch survives). A `name` `x` becomes `x-1` … `x-N` (400 if that is too long). count 0 or 1 replies with the VM object as before; more replies `{"vms":[…]}` in order.
 - **ttl_s** is counted from each start. When it expires, boatd **stops** the VM. **idle_stop_s** overrides the global `idleStopS`; -1 means never. Idle means no exec, file or desktop calls through boatd, and an agent `idle_s` (exec, ssh sessions, desktop input) above the limit. The reaper runs every 30 s. A VM whose agent cannot be reached is never idle-stopped.
 - **stop**
   - boatd syncs the guest, pauses the VM, takes a snapshot (mem + vmstate, see "Memory snapshots") into the VM dir, then kills firecracker. Billing stops.
   - If the snapshot fails or the disk is below its free-space floor, boatd sends the agent `shutdown`, waits up to 30 s, then kills the VM. The next start is then a cold boot.
+  - `force:true` kills firecracker at once: no guest sync, no snapshot, no `shutdown`. Any stop snapshot from before is removed, so the next start is a cold boot from the disk, which keeps only what the guest had written out (the page cache is lost, as on a power cut). The event's reason is `force`. Use it for a guest that hangs a normal stop.
+  - boatd logs each stop's phases: `stop (<reason>|force) snapshot= kill= flush= state= net=` (ms), after the `snapshot (diff|full) sync= pause= write=` line of the snapshot itself.
 - **start**
   - With a snapshot: boatd restores it (load + resume), consumes `vmstate` (`mem` stays as the backing file), and resets the guest clock with `exec date -s @now` as root.
   - Without a snapshot: cold boot.
@@ -130,6 +136,7 @@ data: {"seq":42,"time":"…","type":"vm.state","vm_id":"vm-…","team":"t1","siz
 ```
 
 - VM-seconds count time in `running`. Closed intervals are stored in `stateDir/usage.jsonl`, and they survive VM deletion. Intervals that are still open are counted up to now.
+- boatd keeps a sparse in-memory index of `usage.jsonl` (byte offset and latest end time every 1024 records, built by one scan at the first query), so a query with `since` reads only the records from the last 1024-record block that ends before `since`. A query without `since` still reads the whole file. A file shortened behind boatd (rotated) is re-indexed.
 - Snapshot-days count named snapshots from creation until deletion.
 
 ---
@@ -185,7 +192,7 @@ Semantics:
 - **put_file**
   - Chunks go to `<path>.boat-part`. `offset` must equal the bytes received so far, and `offset:0` truncates.
   - The chunk with `last:true` sets the mode (an octal string or an int), sets the owner (default: like the parent dir), and renames the file into place.
-  - boatd sends 1 MiB chunks.
+  - boatd sends 1 MiB chunks. It sends `last:true` only once the HTTP body ended cleanly at its `Content-Length`: a body that breaks off or comes up short (the client went away) is 400 `short body`, and boatd removes `<path>.boat-part` with `file_delete`, so a truncated upload never replaces the file.
 - **cmd_\***, **file_\***: the ops `POST /v1/vms/{id}/agent` passes through; nothing else is allowed there. Commands outlive the connection. Log offsets are absolute in the merged stdout+stderr stream, with the newest ~64 MiB kept; `cmd_logs` `limit` is at most 4 MiB. `state:"lost"` means the supervisor died, for example across a reboot. `file_delete` refuses `/`, and a non-empty directory without `recursive`. An unknown `cmd_id` or missing path gives an error containing "No such" (404).
 - **reseed**: the agent credits the bytes to the kernel pool with `RNDADDENTROPY`, then forces a CRNG reseed with `RNDRESEEDCRNG`. boatd sends 64 bytes from its own `crypto/rand` right before every `set_identity`, that is, for every new VM (create, fork, from-snapshot). `set_identity` refuses to run unless a reseed came after the previous `set_identity`, and each reseed is good for one `set_identity`. A snapshot holds the parent's used-up state, so siblings forked from one snapshot each derive their machine-id and host keys from fresh entropy. In addition, Firecracker ≥ 1.10 (x86_64) bumps VMGenID on every snapshot load, and the 6.1 `vmgenid` driver reseeds the kernel CRNG at that point; that event is invisible to userspace. Old agents reply `unknown op`, which boatd logs and ignores.
 - **sync**: flushes every guest filesystem. boatd calls it before each pause/snapshot (stop, fork, named snapshot). For agents without this op, it falls back to `exec ["sync"]` as root. Only template builds set `drop_caches`.
@@ -353,6 +360,13 @@ Backups: restic cannot forget one tenant, so data a tenant deletes stays in the 
 - Input validated at the API boundary: names, team, image (no path traversal: `^[a-z0-9][a-z0-9._-]{0,63}$`), labels, env names, absolute file paths, octal modes, ports 1-65535, and JSON bodies of at most 1 MiB.
 
 ---
+
+### boat-api routes that build on these
+
+Documented here because they change what a route token or a boatd call means; the public API itself is in `docs/boat.md`.
+
+- `POST /v1/vms/{id}/port-tokens/revoke` (boat-api, scope `exec`, no body) ends every port route token minted for the VM so far: boat-api bumps the VM's route generation and replies `{"ok":true,"generation":N}`. New tokens are HMACs over `route.<label>.g<N>.<exp>` (generation 0 keeps the old `route.<label>.<exp>`). boat-gateway polls boat-api's `GET /internal/route-gens` (`{"gens":{"vm-…":N}}`, loopback only, refused with `X-Forwarded-For`) every 2 s and rejects tokens of an older generation; a failed poll keeps the last good table, a 404 means an API without revocation. boatd is not involved.
+- `stop {force}`, `fail_fast` and `count` above are what boat-api forwards for the CLI's force stop, fail-fast and batch create requests.
 
 ## 4. routes.json (for boat-gateway)
 

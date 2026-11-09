@@ -25,7 +25,9 @@ type CreateReq struct {
 	Team      string            `json:"team"`
 	Labels    map[string]string `json:"labels"`
 	Env       map[string]string `json:"env"`
-	Snapshot  string            `json:"snapshot"` // create from a saved snapshot instead of an image
+	Snapshot  string            `json:"snapshot"`  // create from a saved snapshot instead of an image
+	FailFast  bool              `json:"fail_fast"` // refuse (no_ready_machine) instead of waiting
+	Count     int               `json:"count"`     // > 1: CreateBatch, all or none
 }
 
 func validEnv(env map[string]string) error {
@@ -90,13 +92,54 @@ func (m *Manager) Create(ctx context.Context, r CreateReq) (VM, error) {
 
 // createFrom creates r, restoring the warm template dir if not "". r is validated.
 func (m *Manager) createFrom(ctx context.Context, r CreateReq, warm string) (VM, error) {
-	if err := r.validate(m.cfg); err != nil {
+	p, err := m.prepareCreate(ctx, r, warm)
+	if err != nil {
 		return VM{}, err
 	}
-	select {
-	case <-m.imagesReady:
-	case <-ctx.Done():
-		return VM{}, ctx.Err()
+	t0 := time.Now()
+	v, err := m.alloc(p.base, Creating)
+	if err != nil {
+		return VM{}, p.admission(err)
+	}
+	return m.finishCreate(ctx, v, p, time.Since(t0))
+}
+
+// createPlan is what a create needs once its VM is allocated.
+type createPlan struct {
+	base     VM
+	src      string
+	restore  bool
+	sameTeam bool // src is the team's own (see copyMem)
+	env      map[string]string
+	failFast bool
+}
+
+// admission labels an admission refusal for a fail_fast request (see failFast).
+func (p createPlan) admission(err error) error {
+	if p.failFast {
+		return failFast(err)
+	}
+	return err
+}
+
+// prepareCreate validates r, waits for the images (or refuses, with fail_fast) and
+// works out the source to materialize from.
+func (m *Manager) prepareCreate(ctx context.Context, r CreateReq, warm string) (createPlan, error) {
+	if err := r.validate(m.cfg); err != nil {
+		return createPlan{}, err
+	}
+	if r.FailFast {
+		select {
+		case <-m.imagesReady:
+		default:
+			return createPlan{}, &apiErr{code: http.StatusServiceUnavailable, msg: "images are still being prepared", kind: codeNoReadyMachine}
+		}
+	} else {
+		select {
+		case <-m.imagesReady:
+		case <-ctx.Done():
+			return createPlan{}, ctx.Err()
+		}
 	}
 	s := m.cfg.Sizes[r.Size]
 	base := VM{Name: r.Name, Team: r.Team, Image: r.Image, Size: r.Size, VCPU: s.VCPU, MemMiB: s.MemMiB,
@@ -107,31 +150,31 @@ func (m *Manager) createFrom(ctx context.Context, r CreateReq, warm string) (VM,
 		sn, ok := m.snaps[r.Snapshot]
 		m.mu.Unlock()
 		if !ok || sn.Team != r.Team {
-			return VM{}, errf(404, "snapshot not found")
+			return createPlan{}, errf(404, "snapshot not found")
 		}
 		base.Image, base.Size, base.VCPU, base.MemMiB, base.DiskGiB = sn.Image, sn.Size, sn.VCPU, sn.MemMiB, sn.DiskGiB
 		base.FromSnapshot, src, restore = sn.ID, m.snapDir(sn.ID), sn.HasMem
 	} else if warm != "" {
 		src, restore = warm, true
 	} else if !exists(filepath.Join(src, diskFile)) || !exists(filepath.Join(src, kernFile)) {
-		return VM{}, errf(400, "image %q is not installed", r.Image)
+		return createPlan{}, errf(400, "image %q is not installed", r.Image)
 	}
 	if err := m.checkFloor(0); err != nil {
-		return VM{}, err
+		return createPlan{}, err
 	}
-	t0 := time.Now()
-	v, err := m.alloc(base, Creating)
-	if err != nil {
-		return VM{}, err
-	}
+	return createPlan{base: base, src: src, restore: restore, sameTeam: warm == "", env: r.Env, failFast: r.FailFast}, nil
+}
+
+// finishCreate materializes and boots v, allocated from p.
+func (m *Manager) finishCreate(ctx context.Context, v VM, p createPlan, allocT time.Duration) (VM, error) {
 	t1 := time.Now()
 	unlock := m.lock(v.ID)
 	defer unlock()
-	if err := m.materialize(v, src, restore, warm == ""); err != nil {
+	if err := m.materialize(v, p.src, p.restore, p.sameTeam); err != nil {
 		return m.fail(v.ID, err)
 	}
-	log.Printf("%s: create alloc=%dms materialize=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
-	return m.bootNew(ctx, v, restore, r.Env)
+	log.Printf("%s: create alloc=%dms materialize=%dms", v.ID, allocT.Milliseconds(), time.Since(t1).Milliseconds())
+	return m.bootNew(ctx, v, p.restore, p.env)
 }
 
 // materialize reflink-copies disk, kernel (+ vmstate/mem) from src into the
@@ -360,6 +403,12 @@ func (m *Manager) syncClock(ctx context.Context, sock string) {
 }
 
 func (m *Manager) Stop(ctx context.Context, id, reason string) (VM, error) {
+	return m.stop(ctx, id, reason, false)
+}
+
+// stop snapshots a running VM (its next start resumes it) or, with force, kills it
+// at once: no guest sync, no snapshot, so the next start cold-boots from its disk.
+func (m *Manager) stop(ctx context.Context, id, reason string, force bool) (VM, error) {
 	unlock := m.lock(id)
 	defer unlock()
 	v, err := m.get(id)
@@ -373,25 +422,31 @@ func (m *Manager) Stop(ctx context.Context, id, reason string) (VM, error) {
 		return v, err
 	}
 	root := m.root(id)
-	err = m.checkFloor(uint64(v.MemMiB) << 20) // a diff is usually far smaller; plan for a full one
-	if err == nil {
-		v, err = m.takeSnapshot(ctx, v, true) // a stop's file is the next start's base: flushed now
-	}
-	snap := err == nil
-	if !snap {
-		// No snapshot: let the guest flush its disk and reboot (= exit) instead.
-		log.Printf("%s: no snapshot, shutting down cold: %v", id, err)
-		newFC(filepath.Join(root, apiSock)).resume(ctx)
-		agentCall(ctx, filepath.Join(root, vsockUDS), map[string]string{"op": "shutdown"})
-		m.mu.Lock()
-		done := m.dones[id]
-		m.mu.Unlock()
-		select {
-		case <-done:
-		case <-time.After(30 * time.Second):
+	t0 := time.Now()
+	snap := false
+	if !force {
+		err = m.checkFloor(uint64(v.MemMiB) << 20) // a diff is usually far smaller; plan for a full one
+		if err == nil {
+			v, err = m.takeSnapshot(ctx, v, true) // a stop's file is the next start's base: flushed now
+		}
+		snap = err == nil
+		if !snap {
+			// No snapshot: let the guest flush its disk and reboot (= exit) instead.
+			log.Printf("%s: no snapshot, shutting down cold: %v", id, err)
+			newFC(filepath.Join(root, apiSock)).resume(ctx)
+			agentCall(ctx, filepath.Join(root, vsockUDS), map[string]string{"op": "shutdown"})
+			m.mu.Lock()
+			done := m.dones[id]
+			m.mu.Unlock()
+			select {
+			case <-done:
+			case <-time.After(30 * time.Second):
+			}
 		}
 	}
+	t1 := time.Now()
 	m.killWait(id, v.PID)
+	t2 := time.Now()
 	if snap {
 		// Now, not behind the call: the next merge would wait for this writeback, and it
 		// is a fork that gets charged (fork 1.3 -> 2.5 s).
@@ -401,13 +456,19 @@ func (m *Manager) Stop(ctx context.Context, id, reason string) (VM, error) {
 		snap = os.Rename(filepath.Join(root, snapState), filepath.Join(root, vmstate)) == nil
 	}
 	if !snap {
-		os.Remove(filepath.Join(root, memFile))
+		for _, f := range []string{memFile, vmstate, snapState, snapDiff, memNew} {
+			os.Remove(filepath.Join(root, f))
+		}
 	}
+	t3 := time.Now()
 	delVMNet(m.run, v)
 	v, err = m.update(id, reason, func(x *VM) {
 		x.State, x.PID, x.HasSnapshot, x.SnapSynced, x.AgentReady, x.ExpiresAt = Stopped, 0, snap, false, false, nil
 	})
+	t4 := time.Now()
 	m.syncNet()
+	log.Printf("%s: stop (%s) snapshot=%dms kill=%dms flush=%dms state=%dms net=%dms", id, map[bool]string{true: "force", false: reason}[force],
+		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), t4.Sub(t3).Milliseconds(), time.Since(t4).Milliseconds())
 	if snap {
 		go m.syncSnapshot(id)
 	}
@@ -644,7 +705,7 @@ func (m *Manager) RemovePort(id string, guest int) error {
 }
 
 func (m *Manager) Usage(since time.Time) (usageReport, error) {
-	recs, err := m.usage.read()
+	recs, err := m.usage.read(since)
 	if err != nil {
 		return usageReport{}, err
 	}

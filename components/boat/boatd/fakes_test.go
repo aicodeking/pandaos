@@ -36,6 +36,8 @@ type fakeHost struct {
 	nftAtStart map[string]string // ruleset in force when each VM's process started
 	idleS      float64
 	hangOps    map[string]bool // agent ops the guest never answers
+	starts     int             // processes started
+	failStart  int             // fail the failStart-th process start (1-based; 0 = never)
 }
 
 func init() { quotaCtl = func(string) error { return nil } }
@@ -108,6 +110,11 @@ type fakeFC struct {
 func (h *fakeHost) Start(v VM, root string, uid, gid int) (int, <-chan struct{}, error) {
 	f := &fakeFC{h: h, id: v.ID, root: root, done: make(chan struct{})}
 	h.mu.Lock()
+	h.starts++
+	if h.starts == h.failStart {
+		h.mu.Unlock()
+		return 0, nil, fmt.Errorf("fake: start %d fails", h.starts)
+	}
 	if h.nftAtStart == nil {
 		h.nftAtStart = map[string]string{}
 	}
@@ -337,13 +344,17 @@ func (f *fakeFC) agentConn(c net.Conn) {
 			send(map[string]any{"exit": 0})
 		case "put_file":
 			d := f.disk()
-			p := q["path"].(string)
+			p := q["path"].(string) + ".boat-part" // like the agent: renamed on last
 			old, _ := base64.StdEncoding.DecodeString(d[p])
 			chunk, _ := base64.StdEncoding.DecodeString(q["data_b64"].(string))
 			if int(q["offset"].(float64)) == 0 {
 				old = nil
 			}
 			d[p] = base64.StdEncoding.EncodeToString(append(old, chunk...))
+			if q["last"] == true {
+				d[q["path"].(string)] = d[p]
+				delete(d, p)
+			}
 			b, _ := json.Marshal(d)
 			os.WriteFile(filepath.Join(f.root, diskFile), b, 0o600)
 			send(map[string]any{"ok": true, "size": len(old) + len(chunk)})
@@ -371,6 +382,12 @@ func (f *fakeFC) agentConn(c net.Conn) {
 			send(map[string]any{"ok": true, "cmd_id": "c1"})
 		case "cmd_status":
 			send(map[string]any{"error": "No such command: 'nope'"})
+		case "file_delete":
+			d := f.disk()
+			delete(d, q["path"].(string))
+			b, _ := json.Marshal(d)
+			os.WriteFile(filepath.Join(f.root, diskFile), b, 0o600)
+			send(map[string]bool{"ok": true})
 		case "file_list":
 			send(map[string]any{"error": "open /nope: No such file or directory"})
 		case "set_clock":

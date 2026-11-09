@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -71,6 +70,12 @@ func createNoCow(path string) bool {
 
 // convertImages rewrites each image's rootfs as a NOCOW file, once per image.
 // Failure keeps the CoW image: copies of it stay CoW and still work.
+//
+// Each copy is flushed before it replaces the image, and creates wait for that
+// (imagesReady): left to writeback, 8.5 GiB of fresh image data made the first VM
+// stops after startup 6-7 s instead of under 1 s (boat-e2e 41652556991, 41669516359:
+// stop_cli right after the conversion), and a crash before writeback could leave a
+// renamed, unwritten image.
 func (m *Manager) convertImages() {
 	dirs, _ := filepath.Glob(filepath.Join(m.cfg.StateDir, "images", "*", diskFile))
 	for _, disk := range dirs {
@@ -91,15 +96,22 @@ func (m *Manager) convertImages() {
 		if err == nil {
 			err = os.Chmod(tmp, st.Mode().Perm())
 		}
+		t1 := time.Now()
+		if err == nil {
+			err = syncPath(tmp)
+		}
 		if err == nil {
 			err = os.Rename(tmp, disk)
+		}
+		if err == nil {
+			err = syncPath(filepath.Dir(disk))
 		}
 		if err != nil {
 			os.Remove(tmp)
 			log.Printf("images: %s stays CoW: %v", disk, err)
 			continue
 		}
-		log.Printf("images: %s converted to NOCOW in %dms", disk, time.Since(t0).Milliseconds())
+		log.Printf("images: %s converted to NOCOW in %dms (flush %dms)", disk, time.Since(t0).Milliseconds(), time.Since(t1).Milliseconds())
 	}
 }
 
@@ -174,7 +186,7 @@ func (m *Manager) realMemCheck(s Size) error {
 	}
 	need := m.cfg.HostReserveMiB + int(float64(s.MemMiB+m.cfg.VMOverheadMiB)/m.cfg.MemOvercommit)
 	if avail < need {
-		return errf(http.StatusServiceUnavailable, "host capacity: %d MiB really free, %d MiB needed", avail, need)
+		return errCapacity("host capacity: %d MiB really free, %d MiB needed", avail, need)
 	}
 	return nil
 }
@@ -386,4 +398,14 @@ func (m *Manager) buildWarm(ctx context.Context, image, size string) error {
 // ksmArgv wraps a launch in the prctl re-exec.
 func ksmArgv(self string, argv []string) []string {
 	return append([]string{self, ksmExecArg, "--"}, argv...)
+}
+
+// syncPath fsyncs a boatd-owned file or directory (not one in a jail: see fsyncFile).
+func syncPath(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
