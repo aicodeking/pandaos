@@ -86,6 +86,10 @@ type Webhook struct {
 	// Rotation overlap: deliveries also carry a signature with the old secret.
 	PrevSealedSecret string     `json:"prev_sealed_secret,omitempty"`
 	PrevUntil        *time.Time `json:"prev_until,omitempty"`
+	// Registered through /api/v1: boat.dev's name, event names and payloads.
+	Name    string    `json:"name,omitempty"`
+	Format  string    `json:"format,omitempty"` // "" native | "boatdev"
+	Updated time.Time `json:"updated,omitempty"`
 }
 
 type Delivery struct {
@@ -135,6 +139,8 @@ type State struct {
 	// CompatIDs: boat.dev bx_ sandbox ids (compat_ids.go), and the reverse.
 	CompatIDs  map[string]*CompatID `json:"compat_ids"`
 	CompatByVM map[string]string    `json:"compat_by_vm"`
+	// CommandSeq: the last ProcessID given out per VM.
+	CommandSeq map[string]int `json:"command_seq"`
 
 	seq uint64 // in memory: bumped per change, so the flusher never writes an older state over a newer one
 }
@@ -150,6 +156,7 @@ type CommandRecord struct {
 	State      string     `json:"state"`
 	Exit       *int       `json:"exit"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	ProcessID  int        `json:"process_id,omitempty"` // boat.dev's integer id of a detached command (per VM)
 }
 
 type PromptRun struct {
@@ -275,6 +282,9 @@ func (st *State) init() {
 	}
 	if st.CompatByVM == nil {
 		st.CompatByVM = map[string]string{}
+	}
+	if st.CommandSeq == nil {
+		st.CommandSeq = map[string]int{}
 	}
 	if st.Users == nil {
 		st.Users = map[string]*User{}

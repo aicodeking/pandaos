@@ -749,6 +749,7 @@ func (s *server) forgetVM(id string) {
 		delete(st.RouteGens, id)
 		delete(st.VMTokens, id)
 		forgetCompatID(st, id)
+		delete(st.CommandSeq, id)
 		for k, sh := range st.SnapShares {
 			if sh.VMID == id {
 				delete(st.SnapShares, k)

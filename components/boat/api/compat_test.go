@@ -60,7 +60,7 @@ func TestCompatQuickstart(t *testing.T) {
 	}
 	e.boatd.mu.Unlock()
 	st, out, _ = e.compat(e.owner, "GET", "/api/v1/sandboxes/"+id, nil, nil)
-	if st != 200 || out["type"] != "sandbox.info" || out["sandbox"].(map[string]any)["state"] != "running" {
+	if st != 200 || out["type"] != "sandbox.info" || out["sandbox"].(map[string]any)["state"] != "ready" {
 		t.Errorf("get: %d %v", st, out)
 	}
 	st, out, _ = e.compat(e.owner, "POST", "/api/v1/sandboxes/"+id+"/commands", map[string]any{"command": "echo hi && uname -a"}, nil)
@@ -74,15 +74,24 @@ func TestCompatQuickstart(t *testing.T) {
 		t.Errorf("native exec: %v", ex)
 	}
 	st, out, _ = e.compat(e.owner, "POST", "/api/v1/sandboxes/"+id+"/stop", nil, nil)
-	if st != 200 || out["status"] != "archived" || out["sandbox"].(map[string]any)["state"] != "archived" {
+	if st != 202 || out["status"] != "archived" || out["sandbox"].(map[string]any)["state"] != "archived" {
 		t.Errorf("stop: %d %v", st, out)
 	}
+	// boat.dev's stop operation: on the answer, on the sandbox, and by id.
+	op, _ := out["operation"].(map[string]any)
+	if op["status"] != "completed" || out["sandbox"].(map[string]any)["stop"].(map[string]any)["id"] != op["id"] {
+		t.Errorf("stop operation: %v", out)
+	}
+	if st, got, _ := e.compat(e.owner, "GET", "/api/v1/sandboxes/"+id+"/stops/"+op["id"].(string), nil, nil); st != 200 ||
+		got["type"] != "stop.status" || got["stop"].(map[string]any)["status"] != "completed" {
+		t.Errorf("get stop: %d %v", st, got)
+	}
 	st, out, _ = e.compat(e.owner, "POST", "/api/v1/sandboxes/"+id+"/resume", map[string]any{"ttlSeconds": 7200, "failFast": true}, nil)
-	if st != 202 || out["type"] != "sandbox.resuming" || out["status"] != "running" {
+	if st != 202 || out["type"] != "sandbox.resuming" || out["status"] != "ready" {
 		t.Errorf("resume: %d %v", st, out)
 	}
 	st, out, _ = e.compat(e.owner, "POST", "/api/v1/sandboxes/"+id+"/stop", map[string]any{"force": true}, nil)
-	if st != 200 || out["forced"] != true {
+	if st != 202 || out["forced"] != true {
 		t.Errorf("force stop: %d %v", st, out)
 	}
 	e.compat(e.owner, "POST", "/api/v1/sandboxes/"+id+"/resume", nil, nil)
@@ -142,7 +151,6 @@ func TestCompatStreamFilesAndErrors(t *testing.T) {
 		{e.owner, "POST", "/api/v1/sandboxes", map[string]any{"ttlSeconds": 0}, 400, "invalid_request"},
 		{e.owner, "POST", "/api/v1/sandboxes", map[string]any{"from": "no-such-snapshot"}, 404, "snapshot_not_found"},
 		{e.owner, "POST", "/api/v1/sandboxes/" + id + "/commands", map[string]any{"command": "x", "timeoutSeconds": 601}, 400, "invalid_timeout"},
-		{e.owner, "POST", "/api/v1/sandboxes/" + id + "/commands", map[string]any{"command": "x", "detached": true}, 400, "invalid_request"},
 	} {
 		st, out, _ := e.compat(c.token, c.method, c.path, c.body, nil)
 		errObj, _ := out["error"].(map[string]any)
@@ -199,7 +207,7 @@ func TestCompatListPagination(t *testing.T) {
 	if n := len(out["sandboxes"].([]any)); n != 3 {
 		t.Errorf("filters: %d", n)
 	}
-	_, out, _ = e.compat(e.owner, "GET", "/api/v1/sandboxes?name=b2&state=running", nil, nil)
+	_, out, _ = e.compat(e.owner, "GET", "/api/v1/sandboxes?name=b2&state=ready", nil, nil)
 	if n := len(out["sandboxes"].([]any)); n != 1 {
 		t.Errorf("name+state: %d", n)
 	}
@@ -295,7 +303,7 @@ func TestCompatBatchAndVMToken(t *testing.T) {
 	}
 	id := out["sandboxes"].([]any)[0].(map[string]any)["id"].(string)
 	other := out["sandboxes"].([]any)[1].(map[string]any)["id"].(string)
-	tok, _ := lastEnvOp(e, id)["BOAT_API_KEY"].(string)
+	tok, _ := lastEnvOp(e, e.srv.store.Snapshot().CompatIDs[id].VM)["BOAT_API_KEY"].(string)
 	if st, _, _ := e.compat(tok, "GET", "/api/v1/sandboxes/"+id, nil, nil); st != 200 {
 		t.Errorf("VM token on itself through compat: %d", st)
 	}

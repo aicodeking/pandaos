@@ -114,6 +114,7 @@ func (s *server) compatResolve(w http.ResponseWriter, r *http.Request, p *princi
 		writeErr(w, r, http.StatusNotFound, "not_found", "sandbox not found")
 		return false
 	}
+	info(r).compatID = id
 	r.SetPathValue("id", c.VM)
 	return true
 }

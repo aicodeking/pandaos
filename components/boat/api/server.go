@@ -67,6 +67,7 @@ type server struct {
 	observe    func(pattern string, r *http.Request, status int) // OpenAPI drift test
 	idem       idemCache                                         // boat.dev Idempotency-Key (compat_idem.go)
 	deletions  deletions                                         // boat.dev deletion operations (compat.go)
+	stops      stopOps                                           // boat.dev stop operations (compat_stops.go)
 	// drawCompatID draws a bx_ id candidate (tests force collisions); nil = random.
 	drawCompatID func() string
 }
@@ -250,12 +251,13 @@ func (a *auditLog) write(e auditEntry) {
 type ctxKey struct{}
 
 type reqInfo struct {
-	id      string
-	p       *principal
-	audit   bool   // audit even though it is a GET (sensitive read)
-	pattern string // the matched route, for traces and the OpenAPI drift test
-	vmOK    bool   // ownVM passed, so a later boatd 404 is about something else
-	vm      VM     // what ownVM fetched, reused within the request
+	id       string
+	p        *principal
+	audit    bool   // audit even though it is a GET (sensitive read)
+	pattern  string // the matched route, for traces and the OpenAPI drift test
+	vmOK     bool   // ownVM passed, so a later boatd 404 is about something else
+	vm       VM     // what ownVM fetched, reused within the request
+	compatID string // the bx_ id an /api/v1 path named (compatResolve)
 }
 
 // baseCtx outlives requests (env builds).
@@ -434,6 +436,9 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 		info(r).audit = audit
 		info(r).pattern = pattern
 		p := s.authenticate(r.Header.Get("Authorization"))
+		if p != nil && strings.Contains(pattern, " "+compatPrefix) && !s.compatResolve(w, r, p) {
+			return // bx_ id of no VM of this team: 404 (before the VM token check, which needs the VM id)
+		}
 		if p != nil && p.VMID != "" && !selfAllowed(pattern, r, p.VMID) {
 			// Like another team's VM: nothing to see here.
 			writeErr(w, r, http.StatusNotFound, "not_found", "not found")

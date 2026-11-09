@@ -72,7 +72,7 @@ func (s *server) compatExec(w http.ResponseWriter, r *http.Request, p *principal
 		writeErr(w, r, 400, "invalid_timeout", "timeoutSeconds must be 1-600")
 		return
 	case c.Detached:
-		writeErr(w, r, 400, "invalid_request", "detached commands are not mapped here; use POST /v1/vms/{id}/commands")
+		s.compatDetached(w, r, p, c)
 		return
 	}
 	if _, ok := s.ownVM(w, r, p); !ok {

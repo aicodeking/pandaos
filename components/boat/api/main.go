@@ -289,6 +289,7 @@ func (s *server) routes() {
 	s.route("POST /v1/vms", "vms:write", s.createVM)
 	s.route("GET /v1/vms/{id}", "vms:read", s.getVM)
 	s.route("DELETE /v1/vms/{id}", "vms:write", s.deleteVM)
+	s.route("PATCH /v1/vms/{id}", "vms:write", s.patchVM)
 	s.route("POST /v1/vms/{id}/start", "vms:write", s.startVM)
 	s.route("POST /v1/vms/{id}/stop", "vms:write", s.stopVM)
 	s.route("POST /v1/vms/{id}/fork", "vms:write", s.forkVM)

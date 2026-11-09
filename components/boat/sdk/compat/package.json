@@ -1,0 +1,8 @@
+{
+  "name": "boat-compat-official-sdks",
+  "private": true,
+  "description": "The official boat.dev TypeScript SDK, pinned, for ../e2e-live.sh (npm ci --ignore-scripts)",
+  "dependencies": {
+    "@boatdev/sdk": "1.13.0"
+  }
+}

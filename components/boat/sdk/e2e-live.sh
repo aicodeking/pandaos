@@ -2,8 +2,10 @@
 # Live check against a running boat. The Python and TypeScript SDKs each go
 # through create, exec, private port URL, detached commands, files, async
 # prompts (stub agent), resize, snapshot share, environments, rotation, fork,
-# stop and rm, and delete everything again. If `boat` is on PATH, the CLI's new
-# commands run too. Called by boat-e2e.yml; also usable by hand:
+# stop and rm, and delete everything again. Then boat.dev's official SDKs
+# (boat-sdk on PyPI, @boatdev/sdk on npm; pinned in compat/) drive /api/v1:
+# create, exec, files, stop, resume, fork, delete. If `boat` is on PATH, the
+# CLI's new commands run too. Called by boat-e2e.yml; also usable by hand:
 #
 #   BOAT_URL=https://api.boat.example BOAT_KEY=boat_… components/boat/sdk/e2e-live.sh
 #
@@ -27,6 +29,29 @@ echo "== python SDK"
 python3 "$here/python/examples/live.py"
 echo "== typescript SDK"
 node "$here/typescript/examples/live.mjs"
+
+# boat.dev's own SDKs (pinned: compat/requirements.txt with hashes, compat/package-lock.json
+# with integrity) against /api/v1. On a real server they must install and pass; against
+# the fake boatd (BOAT_LIVE_FAKE, go test) an offline machine may skip them.
+echo "== official boat.dev SDKs on /api/v1"
+off=$(mktemp -d)
+miss() {
+  if [ -n "${BOAT_LIVE_FAKE:-}" ]; then echo "SKIP - $*"; else echo "official SDKs: FAIL: $*" >&2; exit 1; fi
+}
+if python3 -m venv "$off/venv" >/dev/null 2>&1 &&
+  "$off/venv/bin/python" -m pip install -q --disable-pip-version-check --require-hashes --only-binary :all: \
+    -r "$here/compat/requirements.txt" >"$off/pip.log" 2>&1; then
+  "$off/venv/bin/python" "$here/compat/official_sdk.py"
+else
+  miss "cannot install boat-sdk: $(tail -3 "$off/pip.log" 2>/dev/null)"
+fi
+mkdir "$off/js" && cp "$here/compat/package.json" "$here/compat/package-lock.json" "$off/js/"
+if npm ci --prefix "$off/js" --ignore-scripts --no-audit --no-fund >"$off/npm.log" 2>&1; then
+  NODE_PATH="$off/js/node_modules" node "$here/compat/official_sdk.cjs"
+else
+  miss "cannot install @boatdev/sdk: $(tail -3 "$off/npm.log")"
+fi
+rm -rf "$off"
 if command -v boat >/dev/null 2>&1; then
   echo "== boat CLI"
   fail() { echo "cli live: FAIL: $*" >&2; exit 1; }
@@ -47,6 +72,14 @@ if command -v boat >/dev/null 2>&1; then
   boat telemetry --json | jq -e 'has("configured")' >/dev/null || fail "telemetry"
   boat snapshots --json >/dev/null || fail "snapshots team"
   boat ps "$vm" --json | jq -e 'has("pid")' >/dev/null || fail "ps"
+  # boat.dev's verbs
+  boat limits --json | jq -e '.activeSandboxes >= 1' >/dev/null || fail "limits"
+  boat history "$vm" --json | jq -e --arg c "$cid" 'select(.id == $c)' >/dev/null || fail "history"
+  boat snapshot "$vm" "$name-snap" --json | jq -e '.status == "ready"' >/dev/null || fail "snapshot"
+  boat snapshot rm "$name-snap" --json >/dev/null || fail "snapshot rm"
+  wh=$(boat webhook create https://example.invalid/boat --name live --event archived --json | jq -r .id)
+  boat webhook list --json | jq -e --arg w "$wh" 'select(.id == $w)' >/dev/null || fail "webhook list"
+  boat webhook remove "$wh" --json >/dev/null || fail "webhook remove"
   # The fake boatd of api/livescripts_test.go answers every exec with "hello", so
   # these need a real guest: push, host, ssh-config; current; run deletes its own VM.
   if [ -z "${BOAT_LIVE_FAKE:-}" ]; then

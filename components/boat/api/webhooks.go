@@ -72,10 +72,19 @@ func (s *server) createHook(w http.ResponseWriter, r *http.Request, p *principal
 	}
 	h := &Webhook{ID: "wh_" + randHex(8), TeamID: p.Team.ID, URL: body.URL, Events: body.Events, Created: time.Now().UTC()}
 	secret := "whsec_" + randHex(24)
+	if !s.saveNewHook(w, r, p, h, secret) {
+		return
+	}
+	writeJSON(w, 201, viewHook(h, secret))
+}
+
+// saveNewHook seals secret into h and stores h within the team's limit;
+// false means it already answered.
+func (s *server) saveNewHook(w http.ResponseWriter, r *http.Request, p *principal, h *Webhook, secret string) bool {
 	sealed, err := s.keys.Seal([]byte(secret), "webhook/"+h.ID)
 	if err != nil {
 		writeErr(w, r, 500, "crypto_error", "could not encrypt")
-		return
+		return false
 	}
 	h.SealedSecret = sealed
 	err = s.store.Update(func(st *State) error {
@@ -87,9 +96,9 @@ func (s *server) createHook(w http.ResponseWriter, r *http.Request, p *principal
 	})
 	if err != nil {
 		s.storeErr(w, r, err)
-		return
+		return false
 	}
-	writeJSON(w, 201, viewHook(h, secret))
+	return true
 }
 
 // getHook returns one webhook.
@@ -358,8 +367,25 @@ func matchEvent(filters []string, typ string) bool {
 
 // publish fans an event out to every matching webhook of its team.
 func (d *dispatcher) publish(ctx context.Context, ev Event) {
+	var bd *Event // boat.dev's form of ev, made once for the hooks registered through /api/v1
 	for _, h := range d.s.store.Snapshot().Webhooks {
-		if h.TeamID == ev.TeamID && matchEvent(h.Events, ev.Type) {
+		if h.TeamID != ev.TeamID {
+			continue
+		}
+		if h.Format == hookFormatBoatDev {
+			if bd == nil {
+				e, ok := d.boatDevEvent(ctx, ev)
+				if !ok {
+					e = Event{} // no boat.dev event for this one
+				}
+				bd = &e
+			}
+			if bd.Type != "" && matchEvent(h.Events, bd.Type) {
+				go d.deliver(ctx, *h, *bd)
+			}
+			continue
+		}
+		if matchEvent(h.Events, ev.Type) {
 			go d.deliver(ctx, *h, ev)
 		}
 	}
@@ -390,7 +416,7 @@ func (d *dispatcher) addPending(team string, delta int) bool {
 
 // attempt does one POST holding a global and a team slot; the slots are
 // released before any backoff sleep.
-func (d *dispatcher) attempt(ctx context.Context, h Webhook, ev Event, body []byte) (int, error) {
+func (d *dispatcher) attempt(ctx context.Context, h Webhook, ev Event, body []byte, n int) (int, error) {
 	team := d.slotTeam(h.TeamID)
 	for _, c := range []chan struct{}{team, d.sem} {
 		select {
@@ -414,7 +440,7 @@ func (d *dispatcher) attempt(ctx context.Context, h Webhook, ev Event, body []by
 			older = append(older, old)
 		}
 	}
-	return d.post(ctx, h, ev, body, secret, older)
+	return d.post(ctx, h, ev, body, secret, older, n)
 }
 
 func (d *dispatcher) deliver(ctx context.Context, h Webhook, ev Event) {
@@ -425,8 +451,11 @@ func (d *dispatcher) deliver(ctx context.Context, h Webhook, ev Event) {
 	}
 	defer d.addPending(h.TeamID, -1)
 	body, _ := json.Marshal(ev)
+	if h.Format == hookFormatBoatDev {
+		body = boatDevBody(ev)
+	}
 	for attempt := 1; ; attempt++ {
-		status, err := d.attempt(ctx, h, ev, body)
+		status, err := d.attempt(ctx, h, ev, body, attempt)
 		ok := err == nil && status/100 == 2
 		rec := Delivery{ID: "dlv_" + randHex(8), WebhookID: h.ID, EventID: ev.ID, Event: ev.Type,
 			Attempt: attempt, Status: status, OK: ok, At: time.Now().UTC()}
@@ -448,16 +477,20 @@ func (d *dispatcher) deliver(ctx context.Context, h Webhook, ev Event) {
 	}
 }
 
-func (d *dispatcher) post(ctx context.Context, h Webhook, ev Event, body, secret []byte, older [][]byte) (int, error) {
+func (d *dispatcher) post(ctx context.Context, h Webhook, ev Event, body, secret []byte, older [][]byte, attempt int) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", h.URL, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "boat-webhooks/1")
-	req.Header.Set("X-Boat-Event", ev.Type)
-	req.Header.Set("X-Boat-Delivery", ev.ID)
-	req.Header.Set("X-Boat-Signature", SignWebhook(secret, time.Now().Unix(), body, older...))
+	if h.Format == hookFormatBoatDev {
+		signBoatDev(req, secret, ev, body, attempt)
+	} else {
+		req.Header.Set("X-Boat-Event", ev.Type)
+		req.Header.Set("X-Boat-Delivery", ev.ID)
+		req.Header.Set("X-Boat-Signature", SignWebhook(secret, time.Now().Unix(), body, older...))
+	}
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return 0, err

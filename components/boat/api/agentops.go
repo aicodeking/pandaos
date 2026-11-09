@@ -127,6 +127,8 @@ func (s *server) startDetached(r *http.Request, p *principal, vmID, kind string,
 
 func (s *server) recordCommand(vmID string, rec CommandRecord) error {
 	return s.store.Update(func(st *State) error {
+		st.CommandSeq[vmID]++
+		rec.ProcessID = st.CommandSeq[vmID]
 		list := append(st.Commands[vmID], rec)
 		if len(list) > maxCommandRecords {
 			list = list[len(list)-maxCommandRecords:]

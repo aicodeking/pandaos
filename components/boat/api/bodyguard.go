@@ -24,11 +24,6 @@ func vmBodyRoute(pattern string) bool {
 
 // guardBody runs before a route's handler; false means it already answered.
 func (s *server) guardBody(w http.ResponseWriter, r *http.Request, p *principal, pattern string) bool {
-	if strings.Contains(pattern, " "+compatPrefix) {
-		if !s.compatResolve(w, r, p) {
-			return false
-		}
-	}
 	if !streamRoutes[pattern] && !uploadRoutes[pattern] && r.Body != nil && r.Body != http.NoBody {
 		d := s.cfg.BodyTimeout
 		if d <= 0 {

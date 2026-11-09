@@ -52,3 +52,38 @@ func TestLiveScripts(t *testing.T) {
 		})
 	}
 }
+
+// TestOfficialSDKDrivers runs sdk/compat's official-SDK drivers against this
+// package's stack when the SDKs are at hand: BOAT_SDK_PYTHON names a python
+// that imports boat_sdk, BOAT_SDK_NODE_PATH a node_modules holding
+// @boatdev/sdk. (e2e-live.sh installs both, pinned, and runs the same drivers.)
+func TestOfficialSDKDrivers(t *testing.T) {
+	for _, c := range []struct{ env, bin, script string }{
+		{"BOAT_SDK_PYTHON", "", "../sdk/compat/official_sdk.py"},
+		{"BOAT_SDK_NODE_PATH", "node", "../sdk/compat/official_sdk.cjs"},
+	} {
+		t.Run(c.script, func(t *testing.T) {
+			v := os.Getenv(c.env)
+			if v == "" {
+				t.Skipf("%s not set", c.env)
+			}
+			e := setup(t)
+			bin, extra := c.bin, []string{}
+			if bin == "" {
+				bin = v
+			} else {
+				extra = append(extra, "NODE_PATH="+v)
+			}
+			cmd := exec.Command(bin, c.script)
+			cmd.Env = append(append(os.Environ(), "BOAT_URL="+e.api.URL, "BOAT_API_KEY="+e.owner, "BOAT_LIVE_FAKE=1"), extra...)
+			out, err := cmd.CombinedOutput()
+			if err != nil || strings.Contains(string(out), "FAIL") {
+				t.Fatalf("%s: %v\n%s", c.script, err, out)
+			}
+			t.Logf("%s", out)
+			if n := len(e.boatd.vms); n != 0 {
+				t.Errorf("%s left %d VMs behind", c.script, n)
+			}
+		})
+	}
+}

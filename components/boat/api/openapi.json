@@ -343,6 +343,65 @@
       "$ref": "#/components/responses/Error"
      }
     }
+   },
+   "patch": {
+    "summary": "Rename a VM, set its auto-stop TTL, or push its auto-stop out (boat extend)",
+    "description": "ttl_s sets the auto-stop length and, on a running VM, the deadline to now + ttl_s (0 = no auto-stop). extend_s moves the deadline of a running VM extend_s seconds past max(deadline, now). Starting a prompt also gives the VM a fresh full TTL. 501 not_supported when boatd predates PATCH /v1/vms/{id}.",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "ttl_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2592000
+         },
+         "extend_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2592000
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VM"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
    }
   },
   "/v1/vms/{id}/start": {
@@ -973,7 +1032,7 @@
   },
   "/v1/vms/{id}/commands/{cid}/logs": {
    "get": {
-    "summary": "Output from a byte offset. With follow=1, NDJSON until the command ends: {stream,data_b64,next_offset}… then {exit}; {reconnect,next_offset} means resume from there",
+    "summary": "Output from a byte offset. With follow=1, NDJSON until the command ends: {stream,data_b64,next_offset}\u2026 then {exit}; {reconnect,next_offset} means resume from there",
     "x-boat-scope": "exec",
     "tags": [
      "Commands"
@@ -2188,7 +2247,7 @@
     }
    },
    "post": {
-    "summary": "Expose a port. auth=private (default): the gateway route needs a token from …/ports/{port}/url. auth=public (or public:true): open route plus a raw TCP host port",
+    "summary": "Expose a port. auth=private (default): the gateway route needs a token from \u2026/ports/{port}/url. auth=public (or public:true): open route plus a raw TCP host port",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -4038,7 +4097,7 @@
     }
    },
    "post": {
-    "summary": "Mint a key; scopes ⊆ caller scopes ∩ role. token shown once",
+    "summary": "Mint a key; scopes \u2286 caller scopes \u2229 role. token shown once",
     "tags": [
      "Keys"
     ],
@@ -4804,68 +4863,12 @@
   },
   "/api/v1/sandboxes": {
    "post": {
-    "summary": "boat.dev: create sandbox(es) (POST /v1/vms underneath)",
+    "summary": "boat.dev create: create (POST /v1/vms)",
+    "operationId": "compat_create",
     "x-boat-scope": "vms:write",
     "tags": [
      "boat.dev compatibility"
     ],
-    "responses": {
-     "202": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "sandbox.created"
-           ]
-          },
-          "status": {
-           "type": "string"
-          },
-          "ttlSeconds": {
-           "type": [
-            "integer",
-            "null"
-           ]
-          },
-          "sandbox": {
-           "$ref": "#/components/schemas/CompatSandbox"
-          },
-          "sandboxes": {
-           "type": "array",
-           "items": {
-            "$ref": "#/components/schemas/CompatSandbox"
-           }
-          }
-         },
-         "required": [
-          "ok",
-          "type",
-          "sandbox"
-         ]
-        }
-       }
-      }
-     },
-     "default": {
-      "description": "boat.dev error envelope",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/CompatError"
-        }
-       }
-      }
-     }
-    },
     "parameters": [
      {
       "name": "Idempotency-Key",
@@ -4874,223 +4877,6 @@
       "schema": {
        "type": "string",
        "maxLength": 255
-      },
-      "description": "per team, 24 h, in memory"
-     }
-    ],
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {
-        "type": "object",
-        "properties": {
-         "name": {
-          "type": "string"
-         },
-         "type": {
-          "type": "string"
-         },
-         "ttlSeconds": {
-          "type": [
-           "integer",
-           "string",
-           "null"
-          ],
-          "description": "1-2592000, null or \"infinite\" (none); absent = 3600"
-         },
-         "labels": {
-          "type": "object",
-          "additionalProperties": {
-           "type": "string"
-          }
-         },
-         "env": {
-          "type": "object",
-          "additionalProperties": {
-           "type": "string"
-          }
-         },
-         "environment": {
-          "type": "string",
-          "description": "\"base\" = the team default"
-         },
-         "noEnv": {
-          "type": "boolean"
-         },
-         "failFast": {
-          "type": "boolean"
-         },
-         "count": {
-          "type": "integer",
-          "description": "1-16 here"
-         },
-         "from": {
-          "type": "string",
-          "description": "saved snapshot name or id, or a share code bsh_…"
-         },
-         "snapshots": {
-          "type": "boolean",
-          "description": "ignored"
-         },
-         "monitoring": {
-          "type": "boolean",
-          "description": "ignored"
-         },
-         "visibility": {
-          "type": "string",
-          "description": "ignored"
-         },
-         "org": {
-          "type": "string",
-          "description": "ignored"
-         },
-         "teamId": {
-          "type": "string",
-          "description": "ignored"
-         },
-         "setupScript": {
-          "type": "string",
-          "description": "refused (400)"
-         },
-         "hostedPorts": {
-          "type": "array",
-          "description": "refused (400)"
-         },
-         "files": {
-          "type": "array",
-          "description": "refused (400)"
-         }
-        }
-       }
-      }
-     }
-    }
-   },
-   "get": {
-    "summary": "boat.dev: list sandboxes, cursor pagination",
-    "x-boat-scope": "vms:read",
-    "tags": [
-     "boat.dev compatibility"
-    ],
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "sandbox.list"
-           ]
-          },
-          "sandboxes": {
-           "type": "array",
-           "items": {
-            "$ref": "#/components/schemas/CompatSandbox"
-           }
-          },
-          "pageInfo": {
-           "type": "object",
-           "properties": {
-            "nextCursor": {
-             "type": [
-              "string",
-              "null"
-             ]
-            },
-            "hasMore": {
-             "type": "boolean"
-            },
-            "limit": {
-             "type": "integer"
-            }
-           }
-          }
-         },
-         "required": [
-          "ok",
-          "type",
-          "sandboxes",
-          "pageInfo"
-         ]
-        }
-       }
-      }
-     },
-     "default": {
-      "description": "boat.dev error envelope",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/CompatError"
-        }
-       }
-      }
-     }
-    },
-    "parameters": [
-     {
-      "name": "limit",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "type": "string"
-      }
-     },
-     {
-      "name": "cursor",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "type": "string"
-      }
-     },
-     {
-      "name": "sort",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "type": "string"
-      }
-     },
-     {
-      "name": "state",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "type": "string"
-      }
-     },
-     {
-      "name": "name",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "type": "string"
-      }
-     },
-     {
-      "name": "namePrefix",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "type": "string"
-      }
-     },
-     {
-      "name": "label",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "type": "string"
       }
      },
      {
@@ -5102,599 +4888,12 @@
       }
      },
      {
-      "name": "include",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "type": "string"
-      }
-     }
-    ]
-   }
-  },
-  "/api/v1/sandboxes/{id}": {
-   "get": {
-    "summary": "boat.dev: get sandbox",
-    "x-boat-scope": "vms:read",
-    "tags": [
-     "boat.dev compatibility"
-    ],
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "sandbox.info"
-           ]
-          },
-          "sandbox": {
-           "$ref": "#/components/schemas/CompatSandbox"
-          }
-         },
-         "required": [
-          "ok",
-          "type",
-          "sandbox"
-         ]
-        }
-       }
-      }
-     },
-     "default": {
-      "description": "boat.dev error envelope",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/CompatError"
-        }
-       }
-      }
-     }
-    },
-    "parameters": [
-     {
-      "name": "id",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      },
-      "description": "sandbox (VM) id"
-     }
-    ]
-   },
-   "delete": {
-    "summary": "boat.dev: delete sandbox (needs X-Ascii-Confirm-Delete: <id>); done when it answers",
-    "x-boat-scope": "vms:write",
-    "tags": [
-     "boat.dev compatibility"
-    ],
-    "responses": {
-     "202": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "sandbox.deleting"
-           ]
-          },
-          "operation": {
-           "type": "object",
-           "properties": {
-            "id": {
-             "type": "string"
-            },
-            "kind": {
-             "type": "string"
-            },
-            "targetId": {
-             "type": "string"
-            },
-            "reason": {
-             "type": "string"
-            },
-            "status": {
-             "type": "string"
-            },
-            "stage": {
-             "type": "string"
-            },
-            "expectedBy": {
-             "type": "null"
-            },
-            "attemptCount": {
-             "type": "integer"
-            },
-            "requestedAt": {
-             "type": "string"
-            },
-            "completedAt": {
-             "type": [
-              "string",
-              "null"
-             ]
-            }
-           }
-          }
-         },
-         "required": [
-          "ok",
-          "type",
-          "operation"
-         ]
-        }
-       }
-      }
-     },
-     "default": {
-      "description": "boat.dev error envelope",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/CompatError"
-        }
-       }
-      }
-     }
-    },
-    "parameters": [
-     {
-      "name": "id",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      },
-      "description": "sandbox (VM) id"
-     },
-     {
-      "name": "X-Ascii-Confirm-Delete",
-      "in": "header",
-      "required": true,
-      "schema": {
-       "type": "string"
-      }
-     }
-    ]
-   }
-  },
-  "/api/v1/deletion-operations/{opid}": {
-   "get": {
-    "summary": "boat.dev: a deletion operation (in memory)",
-    "x-boat-scope": "vms:read",
-    "tags": [
-     "boat.dev compatibility"
-    ],
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "deletion.operation"
-           ]
-          },
-          "operation": {
-           "type": "object",
-           "properties": {
-            "id": {
-             "type": "string"
-            },
-            "kind": {
-             "type": "string"
-            },
-            "targetId": {
-             "type": "string"
-            },
-            "reason": {
-             "type": "string"
-            },
-            "status": {
-             "type": "string"
-            },
-            "stage": {
-             "type": "string"
-            },
-            "expectedBy": {
-             "type": "null"
-            },
-            "attemptCount": {
-             "type": "integer"
-            },
-            "requestedAt": {
-             "type": "string"
-            },
-            "completedAt": {
-             "type": [
-              "string",
-              "null"
-             ]
-            }
-           }
-          }
-         },
-         "required": [
-          "ok",
-          "type",
-          "operation"
-         ]
-        }
-       }
-      }
-     },
-     "default": {
-      "description": "boat.dev error envelope",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/CompatError"
-        }
-       }
-      }
-     }
-    },
-    "parameters": [
-     {
-      "name": "opid",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      }
-     }
-    ]
-   }
-  },
-  "/api/v1/sandboxes/{id}/stop": {
-   "post": {
-    "summary": "boat.dev: stop (synchronous here)",
-    "x-boat-scope": "vms:write",
-    "tags": [
-     "boat.dev compatibility"
-    ],
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "sandbox.stopped"
-           ]
-          },
-          "id": {
-           "type": "string"
-          },
-          "status": {
-           "type": "string"
-          },
-          "sandbox": {
-           "$ref": "#/components/schemas/CompatSandbox"
-          },
-          "forced": {
-           "type": "boolean"
-          },
-          "operation": {
-           "type": "object",
-           "properties": {
-            "id": {
-             "type": "string"
-            },
-            "status": {
-             "type": "string"
-            },
-            "requestedAt": {
-             "type": "string"
-            },
-            "lastAttemptAt": {
-             "type": "string"
-            },
-            "error": {
-             "type": "null"
-            },
-            "endedAt": {
-             "type": "string"
-            },
-            "forced": {
-             "type": "boolean"
-            }
-           }
-          },
-          "statusUrl": {
-           "type": "null"
-          }
-         },
-         "required": [
-          "ok",
-          "type",
-          "id",
-          "status"
-         ]
-        }
-       }
-      }
-     },
-     "default": {
-      "description": "boat.dev error envelope",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/CompatError"
-        }
-       }
-      }
-     }
-    },
-    "parameters": [
-     {
-      "name": "id",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      },
-      "description": "sandbox (VM) id"
-     }
-    ],
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {
-        "type": "object",
-        "properties": {
-         "force": {
-          "type": "boolean"
-         }
-        }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/v1/sandboxes/{id}/resume": {
-   "post": {
-    "summary": "boat.dev: resume (POST /v1/vms/{id}/start)",
-    "x-boat-scope": "vms:write",
-    "tags": [
-     "boat.dev compatibility"
-    ],
-    "responses": {
-     "202": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "sandbox.resuming",
-            "sandbox.forking"
-           ]
-          },
-          "id": {
-           "type": "string"
-          },
-          "status": {
-           "type": "string"
-          },
-          "sandbox": {
-           "$ref": "#/components/schemas/CompatSandbox"
-          },
-          "forced": {
-           "type": "boolean"
-          },
-          "operation": {
-           "type": "null"
-          },
-          "statusUrl": {
-           "type": "null"
-          }
-         },
-         "required": [
-          "ok",
-          "type",
-          "id",
-          "status"
-         ]
-        }
-       }
-      }
-     },
-     "default": {
-      "description": "boat.dev error envelope",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/CompatError"
-        }
-       }
-      }
-     }
-    },
-    "parameters": [
-     {
-      "name": "id",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      },
-      "description": "sandbox (VM) id"
-     }
-    ],
-    "requestBody": {
-     "required": false,
-     "content": {
-      "application/json": {
-       "schema": {
-        "type": "object",
-        "properties": {
-         "failFast": {
-          "type": "boolean"
-         },
-         "ttlSeconds": {
-          "type": [
-           "integer",
-           "string",
-           "null"
-          ],
-          "description": "accepted, ignored: the VM keeps its TTL"
-         },
-         "type": {
-          "type": "string",
-          "description": "refused (400)"
-         },
-         "env": {
-          "type": "object",
-          "additionalProperties": {
-           "type": "string"
-          },
-          "description": "refused (400)"
-         },
-         "environment": {
-          "type": "string",
-          "description": "refused (400)"
-         },
-         "noEnv": {
-          "type": "boolean",
-          "description": "refused (400)"
-         }
-        }
-       }
-      }
-     }
-    }
-   }
-  },
-  "/api/v1/sandboxes/{id}/fork": {
-   "post": {
-    "summary": "boat.dev: fork",
-    "x-boat-scope": "vms:write",
-    "tags": [
-     "boat.dev compatibility"
-    ],
-    "responses": {
-     "202": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "sandbox.resuming",
-            "sandbox.forking"
-           ]
-          },
-          "id": {
-           "type": "string"
-          },
-          "status": {
-           "type": "string"
-          },
-          "sandbox": {
-           "$ref": "#/components/schemas/CompatSandbox"
-          },
-          "forced": {
-           "type": "boolean"
-          },
-          "operation": {
-           "type": "null"
-          },
-          "statusUrl": {
-           "type": "null"
-          }
-         },
-         "required": [
-          "ok",
-          "type",
-          "id",
-          "status"
-         ]
-        }
-       }
-      }
-     },
-     "default": {
-      "description": "boat.dev error envelope",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/CompatError"
-        }
-       }
-      }
-     }
-    },
-    "parameters": [
-     {
-      "name": "id",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      },
-      "description": "sandbox (VM) id"
-     },
-     {
-      "name": "Idempotency-Key",
+      "name": "X-Boat-Org",
       "in": "header",
       "required": false,
       "schema": {
-       "type": "string",
-       "maxLength": 255
-      },
-      "description": "per team, 24 h, in memory"
+       "type": "string"
+      }
      }
     ],
     "requestBody": {
@@ -5705,183 +4904,136 @@
         "type": "object",
         "properties": {
          "name": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 120
          },
-         "failFast": {
-          "type": "boolean"
+         "type": {
+          "type": "string",
+          "enum": [
+           "small",
+           "default",
+           "large",
+           "xlarge"
+          ],
+          "default": "default"
          },
          "ttlSeconds": {
-          "type": [
-           "integer",
-           "string",
-           "null"
+          "oneOf": [
+           {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2592000
+           },
+           {
+            "type": "null"
+           }
           ],
-          "description": "accepted, ignored"
-         },
-         "monitoring": {
-          "type": "boolean",
-          "description": "ignored"
+          "default": 3600
          },
          "labels": {
           "type": "object",
           "additionalProperties": {
            "type": "string"
-          },
-          "description": "refused (400)"
+          }
          },
          "env": {
           "type": "object",
           "additionalProperties": {
            "type": "string"
-          },
-          "description": "refused (400)"
+          }
          },
          "environment": {
           "type": "string",
-          "description": "refused (400)"
+          "default": "base"
          },
          "noEnv": {
           "type": "boolean",
-          "description": "refused (400)"
+          "default": false
          },
-         "type": {
+         "failFast": {
+          "type": "boolean",
+          "default": false
+         },
+         "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 1
+         },
+         "from": {
+          "type": "string"
+         },
+         "snapshots": {
+          "type": "boolean",
+          "default": true
+         },
+         "monitoring": {
+          "type": "boolean",
+          "default": true
+         },
+         "visibility": {
           "type": "string",
-          "description": "refused (400)"
+          "enum": [
+           "private",
+           "shared"
+          ]
+         },
+         "org": {
+          "type": "string"
+         },
+         "teamId": {
+          "type": "string"
+         },
+         "setupScript": {
+          "type": "string",
+          "maxLength": 65536
+         },
+         "hostedPorts": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+           "$ref": "#/components/schemas/BDHostPortRequest"
+          }
+         },
+         "files": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+           "type": "object",
+           "required": [
+            "path",
+            "content"
+           ],
+           "properties": {
+            "path": {
+             "type": "string"
+            },
+            "content": {
+             "type": "string"
+            },
+            "encoding": {
+             "type": "string",
+             "enum": [
+              "utf8",
+              "base64"
+             ],
+             "default": "utf8"
+            }
+           }
+          }
          }
         }
        }
       }
      }
-    }
-   }
-  },
-  "/api/v1/sandboxes/{id}/commands": {
-   "post": {
-    "summary": "boat.dev: run a shell command (bash -lc), synchronous or stream:true",
-    "x-boat-scope": "exec",
-    "tags": [
-     "boat.dev compatibility"
-    ],
+    },
     "responses": {
-     "200": {
-      "description": "OK",
+     "202": {
+      "description": "boat.dev 202",
       "content": {
        "application/json": {
         "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "command.finished"
-           ]
-          },
-          "success": {
-           "type": "boolean"
-          },
-          "exitCode": {
-           "type": [
-            "integer",
-            "null"
-           ]
-          },
-          "signal": {
-           "type": [
-            "string",
-            "null"
-           ]
-          },
-          "oomKilled": {
-           "type": "boolean"
-          },
-          "stdout": {
-           "type": "string"
-          },
-          "stderr": {
-           "type": "string"
-          },
-          "stdoutTruncated": {
-           "type": "boolean"
-          },
-          "stderrTruncated": {
-           "type": "boolean"
-          },
-          "timedOut": {
-           "type": "boolean"
-          },
-          "cwd": {
-           "type": "string"
-          },
-          "startedAt": {
-           "type": "string"
-          },
-          "finishedAt": {
-           "type": "string"
-          },
-          "commandId": {
-           "type": "string"
-          },
-          "error": {
-           "type": "string"
-          }
-         },
-         "required": [
-          "ok",
-          "type",
-          "success",
-          "exitCode",
-          "stdout",
-          "stderr",
-          "timedOut"
-         ]
-        }
-       },
-       "application/x-ndjson": {
-        "schema": {
-         "type": "object",
-         "description": "stream:true, one per line: started, then stdout/stderr, then exactly one exit or error",
-         "properties": {
-          "type": {
-           "enum": [
-            "started",
-            "stdout",
-            "stderr",
-            "exit",
-            "error"
-           ]
-          },
-          "commandId": {
-           "type": "string"
-          },
-          "data": {
-           "type": "string"
-          },
-          "exitCode": {
-           "type": "integer"
-          },
-          "success": {
-           "type": "boolean"
-          },
-          "timedOut": {
-           "type": "boolean"
-          },
-          "error": {
-           "type": "string"
-          },
-          "message": {
-           "type": "string"
-          },
-          "retryable": {
-           "type": "boolean"
-          }
-         },
-         "required": [
-          "type"
-         ]
+         "$ref": "#/components/schemas/BDCreateSandboxResponse"
         }
        }
       }
@@ -5896,16 +5048,1223 @@
        }
       }
      }
+    }
+   },
+   "get": {
+    "summary": "boat.dev sandboxes: list (GET /v1/vms)",
+    "operationId": "compat_sandboxes",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "X-Boat-Org",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 200,
+       "default": 100
+      }
+     },
+     {
+      "name": "cursor",
+      "in": "query",
+      "schema": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     {
+      "name": "sort",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "asc",
+        "desc"
+       ],
+       "default": "desc"
+      }
+     },
+     {
+      "name": "state",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "name",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "namePrefix",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "stoppedBefore",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "format": "date-time"
+      }
+     },
+     {
+      "name": "dataExpired",
+      "in": "query",
+      "schema": {
+       "type": "boolean"
+      }
+     },
+     {
+      "name": "label",
+      "in": "query",
+      "style": "form",
+      "explode": true,
+      "schema": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      }
+     },
+     {
+      "name": "include",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}": {
+   "get": {
+    "summary": "boat.dev get: get (GET /v1/vms/{id})",
+    "operationId": "compat_get",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxInfoResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "patch": {
+    "summary": "boat.dev update: rename / auto-stop (PATCH /v1/vms/{id})",
+    "operationId": "compat_update",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+         },
+         "ttlSeconds": {
+          "oneOf": [
+           {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2592000
+           },
+           {
+            "type": "null"
+           }
+          ]
+         }
+        }
+       }
+      }
+     }
     },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxInfoResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteSandbox: delete (DELETE /v1/vms/{id})",
+    "operationId": "compat_deleteSandbox",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "X-Ascii-Confirm-Delete",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "202": {
+      "description": "boat.dev 202",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDDeletionOperationResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/deletion-operations/{opid}": {
+   "get": {
+    "summary": "boat.dev getDeletionOperation: deletion operation (in memory)",
+    "operationId": "compat_getDeletionOperation",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "opid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bdop_[a-f0-9]{32}$"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDDeletionOperationResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/stop": {
+   "post": {
+    "summary": "boat.dev stop: stop (POST /v1/vms/{id}/stop; done when it answers)",
+    "operationId": "compat_stop",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
     "parameters": [
      {
       "name": "id",
       "in": "path",
       "required": true,
       "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "force": {
+          "type": "boolean",
+          "default": false
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxActionResponse"
+        }
+       }
+      }
+     },
+     "202": {
+      "description": "boat.dev 202",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxActionResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/stops/{stopid}": {
+   "get": {
+    "summary": "boat.dev getStop: stop operation (in memory)",
+    "operationId": "compat_getStop",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "stopid",
+      "in": "path",
+      "required": true,
+      "schema": {
        "type": "string"
-      },
-      "description": "sandbox (VM) id"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDStopOperationResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/resume": {
+   "post": {
+    "summary": "boat.dev resume: resume (POST /v1/vms/{id}/start)",
+    "operationId": "compat_resume",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "failFast": {
+          "type": "boolean",
+          "default": false
+         },
+         "ttlSeconds": {
+          "oneOf": [
+           {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2592000
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "type": {
+          "type": "string",
+          "enum": [
+           "small",
+           "default",
+           "large",
+           "xlarge"
+          ]
+         },
+         "env": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         },
+         "environment": {
+          "type": "string"
+         },
+         "noEnv": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "boat.dev 202",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxActionResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/fork": {
+   "post": {
+    "summary": "boat.dev fork: fork (POST /v1/vms/{id}/fork)",
+    "operationId": "compat_fork",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "Idempotency-Key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "maxLength": 255
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {},
+         "failFast": {
+          "type": "boolean",
+          "default": false
+         },
+         "ttlSeconds": {
+          "oneOf": [
+           {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2592000
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": 3600
+         },
+         "monitoring": {
+          "type": "boolean"
+         },
+         "labels": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         },
+         "env": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         },
+         "environment": {
+          "type": "string"
+         },
+         "noEnv": {
+          "type": "boolean"
+         },
+         "type": {
+          "type": "string",
+          "enum": [
+           "small",
+           "default",
+           "large",
+           "xlarge"
+          ]
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "boat.dev 202",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxActionResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/limits": {
+   "get": {
+    "summary": "boat.dev limits: limits",
+    "operationId": "compat_limits",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "X-Boat-Org",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "teamId",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDLimitsResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/me": {
+   "get": {
+    "summary": "boat.dev me: me (GET /v1/me)",
+    "operationId": "compat_me",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDMeResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/usage": {
+   "get": {
+    "summary": "boat.dev usage: usage (GET /v1/vms/{id}/usage)",
+    "operationId": "compat_usage",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "since",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "until",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxUsageResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/prompt": {
+   "post": {
+    "summary": "boat.dev prompt: prompt (POST /v1/vms/{id}/prompts)",
+    "operationId": "compat_prompt",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "provider": {
+          "type": "string",
+          "enum": [
+           "codex",
+           "claude-code",
+           "claude",
+           "pi",
+           "opencode",
+           "prime-agent",
+           "prime",
+           "kimi",
+           "kimi-code",
+           "mistral"
+          ]
+         },
+         "prompt": {
+          "type": "string",
+          "minLength": 1
+         },
+         "model": {
+          "type": [
+           "string",
+           "null"
+          ]
+         },
+         "reasoningEffort": {
+          "type": [
+           "string",
+           "null"
+          ]
+         },
+         "fast": {
+          "type": [
+           "boolean",
+           "null"
+          ]
+         },
+         "new": {
+          "type": "boolean"
+         },
+         "conversationId": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "format": "uuid"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "boat.dev 202",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDPromptResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/prompts/{pid}": {
+   "get": {
+    "summary": "boat.dev promptRunStatus: prompt run (GET /v1/vms/{id}/prompts/{pid})",
+    "operationId": "compat_promptRunStatus",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "pid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDPromptRunResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/events": {
+   "get": {
+    "summary": "boat.dev events: events (prompt runs and their output)",
+    "operationId": "compat_events",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 200,
+       "default": 100
+      }
+     },
+     {
+      "name": "cursor",
+      "in": "query",
+      "schema": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     {
+      "name": "sort",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "asc",
+        "desc"
+       ],
+       "default": "desc"
+      }
+     },
+     {
+      "name": "type",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "conversation",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "If-None-Match",
+      "in": "header",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDEventsResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/conversations": {
+   "get": {
+    "summary": "boat.dev conversations: conversations (GET /v1/vms/{id}/conversations)",
+    "operationId": "compat_conversations",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDConversationsResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/steer": {
+   "post": {
+    "summary": "boat.dev steer: steer (POST /v1/vms/{id}/prompts/{pid}/steer)",
+    "operationId": "compat_steer",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "conversation",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "message": {
+          "type": "string",
+          "minLength": 1
+         },
+         "conversation": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "format": "uuid"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSteerResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/interrupt": {
+   "post": {
+    "summary": "boat.dev interrupt: interrupt (POST /v1/vms/{id}/prompts/{pid}/interrupt)",
+    "operationId": "compat_interrupt",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "conversation",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxActionResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/commands": {
+   "post": {
+    "summary": "boat.dev command: command (exec, or POST /v1/vms/{id}/commands when detached)",
+    "operationId": "compat_command",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
      }
     ],
     "requestBody": {
@@ -5919,80 +6278,46 @@
           "type": "string"
          },
          "cwd": {
-          "type": "string",
-          "description": "relative to the guest home; /home/user maps to it"
+          "type": "string"
          },
          "timeoutSeconds": {
           "type": "integer",
-          "description": "1-600, default 30"
+          "minimum": 1,
+          "maximum": 600,
+          "default": 30
          },
          "detached": {
           "type": "boolean",
-          "description": "refused (400): use /v1/vms/{id}/commands"
+          "default": false
          },
          "stream": {
-          "type": "boolean"
+          "type": "boolean",
+          "default": false
          }
         }
        }
       }
      }
-    }
-   }
-  },
-  "/api/v1/sandboxes/{id}/files": {
-   "get": {
-    "summary": "boat.dev: read a file (≤ 5 MiB)",
-    "x-boat-scope": "exec",
-    "tags": [
-     "boat.dev compatibility"
-    ],
+    },
     "responses": {
      "200": {
-      "description": "OK",
+      "description": "boat.dev 200",
       "content": {
        "application/json": {
         "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
+         "oneOf": [
+          {
+           "$ref": "#/components/schemas/BDCommandResponse"
           },
-          "type": {
-           "enum": [
-            "file.read"
-           ]
-          },
-          "success": {
-           "type": "boolean"
-          },
-          "path": {
-           "type": "string"
-          },
-          "encoding": {
-           "enum": [
-            "utf8",
-            "base64"
-           ]
-          },
-          "size": {
-           "type": "integer"
-          },
-          "content": {
-           "type": "string"
+          {
+           "$ref": "#/components/schemas/BDCommandStartedResponse"
           }
-         },
-         "required": [
-          "ok",
-          "type",
-          "success",
-          "path",
-          "encoding",
-          "size",
-          "content"
          ]
+        }
+       },
+       "application/x-ndjson": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCommandStreamFrame"
         }
        }
       }
@@ -6007,16 +6332,416 @@
        }
       }
      }
-    },
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/commands/{pid}": {
+   "get": {
+    "summary": "boat.dev commandStatus: detached command status",
+    "operationId": "compat_commandStatus",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
     "parameters": [
      {
       "name": "id",
       "in": "path",
       "required": true,
       "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "pid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "integer",
+       "minimum": 1
+      }
+     },
+     {
+      "name": "tailBytes",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 8388608
+      }
+     },
+     {
+      "name": "stdoutOffset",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 0
+      }
+     },
+     {
+      "name": "stderrOffset",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 0
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCommandStatusResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev stopCommand: stop a detached command",
+    "operationId": "compat_stopCommand",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "pid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "integer",
+       "minimum": 1
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCommandStopResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/command-history": {
+   "get": {
+    "summary": "boat.dev commandHistory: command history",
+    "operationId": "compat_commandHistory",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "mode",
+      "in": "query",
+      "schema": {
        "type": "string"
-      },
-      "description": "sandbox (VM) id"
+      }
+     },
+     {
+      "name": "q",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "maxLength": 200
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 100,
+       "default": 20
+      }
+     },
+     {
+      "name": "cursor",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCommandListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/command-history/{cid}": {
+   "get": {
+    "summary": "boat.dev getCommand: one command",
+    "operationId": "compat_getCommand",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "cid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCommandInfoResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/command-history/{cid}/logs": {
+   "get": {
+    "summary": "boat.dev commandLogs: command output",
+    "operationId": "compat_commandLogs",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "cid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "stream",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "stdout",
+        "stderr"
+       ],
+       "default": "stdout"
+      }
+     },
+     {
+      "name": "offset",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 0,
+       "default": 0
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 1048576,
+       "default": 1048576
+      }
+     },
+     {
+      "name": "encoding",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "utf8",
+        "base64"
+       ],
+       "default": "utf8"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCommandLogsResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/processes": {
+   "get": {
+    "summary": "boat.dev processes: processes (ps)",
+    "operationId": "compat_processes",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDProcessListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files": {
+   "get": {
+    "summary": "boat.dev readFile: read a file (up to 5 MiB)",
+    "operationId": "compat_readFile",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
      },
      {
       "name": "path",
@@ -6029,64 +6754,23 @@
      {
       "name": "encoding",
       "in": "query",
-      "required": false,
       "schema": {
+       "type": "string",
        "enum": [
         "utf8",
         "base64"
-       ]
+       ],
+       "default": "utf8"
       }
      }
-    ]
-   },
-   "put": {
-    "summary": "boat.dev: write a file (≤ 5 MiB)",
-    "x-boat-scope": "exec",
-    "tags": [
-     "boat.dev compatibility"
     ],
     "responses": {
      "200": {
-      "description": "OK",
+      "description": "boat.dev 200",
       "content": {
        "application/json": {
         "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "file.written"
-           ]
-          },
-          "success": {
-           "type": "boolean"
-          },
-          "path": {
-           "type": "string"
-          },
-          "encoding": {
-           "enum": [
-            "utf8",
-            "base64"
-           ]
-          },
-          "size": {
-           "type": "integer"
-          }
-         },
-         "required": [
-          "ok",
-          "type",
-          "success",
-          "path",
-          "encoding",
-          "size"
-         ]
+         "$ref": "#/components/schemas/BDFileReadResponse"
         }
        }
       }
@@ -6101,16 +6785,24 @@
        }
       }
      }
-    },
+    }
+   },
+   "put": {
+    "summary": "boat.dev writeFile: write a file (up to 5 MiB)",
+    "operationId": "compat_writeFile",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
     "parameters": [
      {
       "name": "id",
       "in": "path",
       "required": true,
       "schema": {
-       "type": "string"
-      },
-      "description": "sandbox (VM) id"
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
      }
     ],
     "requestBody": {
@@ -6127,11 +6819,92 @@
           "type": "string"
          },
          "encoding": {
+          "type": "string",
           "enum": [
            "utf8",
            "base64"
-          ]
+          ],
+          "default": "utf8"
          }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileWriteResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteFile: delete a file",
+    "operationId": "compat_deleteFile",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "recursive",
+      "in": "query",
+      "schema": {
+       "type": "boolean",
+       "default": false
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileDeleteResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
         }
        }
       }
@@ -6139,58 +6912,781 @@
     }
    }
   },
-  "/api/v1/limits": {
+  "/api/v1/sandboxes/{id}/files/list": {
    "get": {
-    "summary": "boat.dev: limits as this server knows them (maxActiveSandboxes -1 = boatd's quota, unknown here)",
+    "summary": "boat.dev listFiles: list a folder",
+    "operationId": "compat_listFiles",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "default": "/home/user"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files/info": {
+   "get": {
+    "summary": "boat.dev getFileInfo: stat",
+    "operationId": "compat_getFileInfo",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileInfoResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files/search": {
+   "get": {
+    "summary": "boat.dev searchFiles: search file names",
+    "operationId": "compat_searchFiles",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "default": "/home/user"
+      }
+     },
+     {
+      "name": "pattern",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileSearchResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files/folder": {
+   "post": {
+    "summary": "boat.dev createFolder: mkdir -p",
+    "operationId": "compat_createFolder",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "mode": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileInfoResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files/move": {
+   "post": {
+    "summary": "boat.dev moveFile: move",
+    "operationId": "compat_moveFile",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "source": {
+          "type": "string"
+         },
+         "destination": {
+          "type": "string"
+         },
+         "overwrite": {
+          "type": "boolean",
+          "default": false
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileMoveResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files/permissions": {
+   "post": {
+    "summary": "boat.dev setFilePermissions: chmod",
+    "operationId": "compat_setFilePermissions",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "mode": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileInfoResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/saved-snapshots": {
+   "get": {
+    "summary": "boat.dev listSavedSnapshots: saved snapshots (GET /v1/snapshots)",
+    "operationId": "compat_listSavedSnapshots",
     "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "X-Boat-Org",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "name",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "namePrefix",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSavedSnapshotListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "boat.dev saveSavedSnapshot: save (POST /v1/vms/{id}/snapshots)",
+    "operationId": "compat_saveSavedSnapshot",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "sandboxId": {
+          "type": "string"
+         },
+         "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "boat.dev 202",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSavedSnapshotSavingResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/saved-snapshots/{name}": {
+   "get": {
+    "summary": "boat.dev getSavedSnapshot: one saved snapshot",
+    "operationId": "compat_getSavedSnapshot",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "name",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSavedSnapshotInfoResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteSavedSnapshot: delete (DELETE /v1/snapshots/{sid})",
+    "operationId": "compat_deleteSavedSnapshot",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "name",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSavedSnapshotDeletedResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/webhooks": {
+   "get": {
+    "summary": "boat.dev listWebhooks: webhooks registered here",
+    "operationId": "compat_listWebhooks",
+    "x-boat-scope": "admin",
     "tags": [
      "boat.dev compatibility"
     ],
     "responses": {
      "200": {
-      "description": "OK",
+      "description": "boat.dev 200",
       "content": {
        "application/json": {
         "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "enum": [
-            true
-           ]
-          },
-          "type": {
-           "enum": [
-            "limits.info"
-           ]
-          },
-          "activeSandboxes": {
-           "type": "integer"
-          },
-          "maxActiveSandboxes": {
-           "type": "integer"
-          },
-          "activeStates": {
-           "type": "array",
-           "items": {
-            "type": "string"
-           }
-          },
-          "canStart": {
-           "type": "boolean"
-          },
-          "billingStatus": {
-           "type": "string"
-          }
+         "$ref": "#/components/schemas/BDWebhookListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "boat.dev createWebhook: register (boat.dev payloads)",
+    "operationId": "compat_createWebhook",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "minLength": 1,
+          "maxLength": 100
          },
-         "required": [
-          "ok",
-          "type",
-          "activeSandboxes",
-          "maxActiveSandboxes",
-          "canStart",
-          "billingStatus"
-         ]
+         "url": {
+          "type": "string",
+          "format": "uri"
+         },
+         "events": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+           "$ref": "#/components/schemas/BDWebhookEventType"
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "boat.dev 201",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDWebhookSecretResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/webhooks/{id}": {
+   "get": {
+    "summary": "boat.dev getWebhook: one webhook",
+    "operationId": "compat_getWebhook",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDWebhookResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "patch": {
+    "summary": "boat.dev updateWebhook: edit",
+    "operationId": "compat_updateWebhook",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "maxLength": 100
+         },
+         "url": {
+          "type": "string",
+          "format": "uri"
+         },
+         "events": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+           "$ref": "#/components/schemas/BDWebhookEventType"
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDWebhookResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteWebhook: remove",
+    "operationId": "compat_deleteWebhook",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDWebhookDeleteResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/webhooks/{id}/rotate": {
+   "post": {
+    "summary": "boat.dev rotateWebhookSigningSecret: rotate the signing secret",
+    "operationId": "compat_rotateWebhookSigningSecret",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDWebhookSecretResponse"
         }
        }
       }
@@ -6359,7 +7855,7 @@
      },
      "from": {
       "type": "string",
-      "description": "a share code bsh_…; imported first"
+      "description": "a share code bsh_\u2026; imported first"
      },
      "fail_fast": {
       "type": "boolean",
@@ -6367,7 +7863,7 @@
      },
      "count": {
       "type": "integer",
-      "description": "1-16: create that many VMs, all or none; a name x becomes x-1 … x-N. More than 1 answers {\"vms\":[…]}"
+      "description": "1-16: create that many VMs, all or none; a name x becomes x-1 \u2026 x-N. More than 1 answers {\"vms\":[\u2026]}"
      }
     }
    },
@@ -6595,6 +8091,10 @@
      "finished_at": {
       "type": "string",
       "format": "date-time"
+     },
+     "process_id": {
+      "type": "integer",
+      "description": "boat.dev's integer id of this command on its VM (processId under /api/v1)"
      }
     },
     "required": [
@@ -7601,6 +9101,3104 @@
      "state",
      "desktopAvailable",
      "snapshotAvailable"
+    ]
+   },
+   "BDCommandInfoResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "command"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "command.info"
+       },
+       "command": {
+        "$ref": "#/components/schemas/BDCommandRecord"
+       }
+      }
+     }
+    ]
+   },
+   "BDCommandListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "commands",
+       "nextCursor"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "command.list"
+       },
+       "commands": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDCommandRecord"
+        }
+       },
+       "nextCursor": {
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "BDCommandLogsResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "commandId",
+       "stream",
+       "offset",
+       "nextOffset",
+       "size",
+       "encoding",
+       "data",
+       "done"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "command.logs"
+       },
+       "commandId": {
+        "type": "string"
+       },
+       "stream": {
+        "type": "string",
+        "enum": [
+         "stdout",
+         "stderr"
+        ]
+       },
+       "offset": {
+        "type": "integer"
+       },
+       "nextOffset": {
+        "type": "integer"
+       },
+       "size": {
+        "type": "integer"
+       },
+       "encoding": {
+        "type": "string",
+        "enum": [
+         "utf8",
+         "base64"
+        ]
+       },
+       "data": {
+        "type": "string"
+       },
+       "done": {
+        "type": "boolean"
+       }
+      }
+     }
+    ]
+   },
+   "BDCommandRecord": {
+    "type": "object",
+    "required": [
+     "commandId",
+     "sandboxId",
+     "command",
+     "mode",
+     "status",
+     "stdoutBytes",
+     "stderrBytes",
+     "outputTruncated",
+     "startedAt"
+    ],
+    "properties": {
+     "commandId": {
+      "type": "string"
+     },
+     "sandboxId": {
+      "type": "string"
+     },
+     "command": {
+      "type": "string"
+     },
+     "cwd": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "mode": {
+      "type": "string",
+      "enum": [
+       "sync",
+       "stream",
+       "detached",
+       "process"
+      ]
+     },
+     "processId": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "running",
+       "exited",
+       "timed_out",
+       "failed",
+       "killed",
+       "lost"
+      ]
+     },
+     "exitCode": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "signal": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "stdoutBytes": {
+      "type": "integer"
+     },
+     "stderrBytes": {
+      "type": "integer"
+     },
+     "outputTruncated": {
+      "type": "boolean"
+     },
+     "startedAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "finishedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
+    }
+   },
+   "BDCommandResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success",
+       "exitCode",
+       "stdout",
+       "stderr",
+       "timedOut"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "command.finished"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "commandId": {
+        "type": "string"
+       },
+       "exitCode": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "signal": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "oomKilled": {
+        "type": "boolean"
+       },
+       "stdout": {
+        "type": "string"
+       },
+       "stderr": {
+        "type": "string"
+       },
+       "stdoutTruncated": {
+        "type": "boolean"
+       },
+       "stderrTruncated": {
+        "type": "boolean"
+       },
+       "timedOut": {
+        "type": "boolean"
+       },
+       "cwd": {
+        "type": "string"
+       },
+       "startedAt": {
+        "type": "string",
+        "format": "date-time"
+       },
+       "finishedAt": {
+        "type": "string",
+        "format": "date-time"
+       }
+      }
+     }
+    ]
+   },
+   "BDCommandStartedResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success",
+       "processId",
+       "pid",
+       "command",
+       "startedAt"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "command.started"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "commandId": {
+        "type": "string"
+       },
+       "processId": {
+        "type": "integer"
+       },
+       "pid": {
+        "type": "integer"
+       },
+       "command": {
+        "type": "string"
+       },
+       "cwd": {
+        "type": "string"
+       },
+       "startedAt": {
+        "type": "string",
+        "format": "date-time"
+       },
+       "logPath": {
+        "type": "string"
+       },
+       "errLogPath": {
+        "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDCommandStatusResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success",
+       "processId",
+       "status",
+       "running",
+       "exitCode",
+       "stdout",
+       "stderr"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "command.status"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "processId": {
+        "type": "integer"
+       },
+       "pid": {
+        "type": "integer"
+       },
+       "status": {
+        "type": "string",
+        "enum": [
+         "running",
+         "exited",
+         "lost"
+        ]
+       },
+       "known": {
+        "type": "boolean"
+       },
+       "running": {
+        "type": "boolean"
+       },
+       "exitCode": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "signal": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "oomKilled": {
+        "type": "boolean"
+       },
+       "command": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "cwd": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "startedAt": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "format": "date-time"
+       },
+       "finishedAt": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "format": "date-time"
+       },
+       "stdout": {
+        "type": "string"
+       },
+       "stderr": {
+        "type": "string"
+       },
+       "stdoutTruncated": {
+        "type": "boolean"
+       },
+       "stderrTruncated": {
+        "type": "boolean"
+       },
+       "logPath": {
+        "type": "string"
+       },
+       "errLogPath": {
+        "type": "string"
+       },
+       "stdoutOffset": {
+        "type": "integer"
+       },
+       "stderrOffset": {
+        "type": "integer"
+       },
+       "stdoutNextOffset": {
+        "type": "integer"
+       },
+       "stderrNextOffset": {
+        "type": "integer"
+       },
+       "more": {
+        "type": "boolean"
+       }
+      }
+     }
+    ]
+   },
+   "BDCommandStopResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "processId",
+       "running",
+       "signaled",
+       "command"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "command.stopped"
+       },
+       "processId": {
+        "type": "integer"
+       },
+       "running": {
+        "type": "boolean"
+       },
+       "signaled": {
+        "type": "boolean"
+       },
+       "command": {
+        "oneOf": [
+         {
+          "$ref": "#/components/schemas/BDCommandRecord"
+         },
+         {
+          "type": "null"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "BDCommandStreamFrame": {
+    "type": "object",
+    "required": [
+     "type"
+    ],
+    "properties": {
+     "type": {
+      "type": "string",
+      "enum": [
+       "started",
+       "stdout",
+       "stderr",
+       "exit",
+       "error"
+      ]
+     },
+     "commandId": {
+      "type": "string"
+     },
+     "data": {
+      "type": "string"
+     },
+     "exitCode": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "success": {
+      "type": "boolean"
+     },
+     "timedOut": {
+      "type": "boolean"
+     },
+     "error": {
+      "type": "string"
+     },
+     "message": {
+      "type": "string"
+     },
+     "retryable": {
+      "type": "boolean"
+     }
+    }
+   },
+   "BDConversation": {
+    "type": "object",
+    "required": [
+     "id",
+     "createdAt",
+     "lastPromptAt",
+     "prompts",
+     "running",
+     "lastHarness",
+     "lastModel",
+     "lastPromptPreview",
+     "current"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "createdAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "lastPromptAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "prompts": {
+      "type": "integer"
+     },
+     "running": {
+      "type": "boolean"
+     },
+     "lastHarness": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "lastModel": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "lastPromptPreview": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "current": {
+      "type": "boolean"
+     }
+    }
+   },
+   "BDConversationsResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "id",
+       "conversations"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "conversation.list"
+       },
+       "id": {
+        "type": "string"
+       },
+       "conversations": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDConversation"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDCreateSandboxResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "status",
+       "ttlSeconds",
+       "sandbox"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "sandbox.created"
+       },
+       "status": {
+        "type": "string",
+        "enum": [
+         "provisioning",
+         "ready"
+        ]
+       },
+       "ttlSeconds": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "sandbox": {
+        "$ref": "#/components/schemas/BDSandbox"
+       },
+       "sandboxes": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSandbox"
+        }
+       },
+       "hostedPorts": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "additionalProperties": true,
+         "required": [
+          "port"
+         ],
+         "properties": {
+          "port": {
+           "type": "integer"
+          },
+          "url": {
+           "type": "string",
+           "format": "uri"
+          },
+          "isProtected": {
+           "type": "boolean"
+          },
+          "access": {
+           "type": "string",
+           "enum": [
+            "private",
+            "public"
+           ]
+          },
+          "localhost": {
+           "type": "boolean"
+          },
+          "error": {
+           "type": "string"
+          },
+          "message": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "giftLimitNotice": {
+        "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDDeletionOperation": {
+    "type": "object",
+    "required": [
+     "id",
+     "kind",
+     "targetId",
+     "reason",
+     "status",
+     "attemptCount",
+     "requestedAt",
+     "completedAt"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "pattern": "^bdop_[a-f0-9]{32}$"
+     },
+     "kind": {
+      "type": "string",
+      "enum": [
+       "sandbox",
+       "snapshot"
+      ]
+     },
+     "targetId": {
+      "type": "string"
+     },
+     "reason": {
+      "type": "string",
+      "enum": [
+       "explicit",
+       "zdr",
+       "account"
+      ]
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "pending",
+       "processing",
+       "blocked",
+       "completed"
+      ]
+     },
+     "stage": {
+      "type": "string",
+      "enum": [
+       "removing",
+       "waiting_for_uploads",
+       "retrying",
+       "completed"
+      ]
+     },
+     "expectedBy": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "attemptCount": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "requestedAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "completedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
+    }
+   },
+   "BDDeletionOperationResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "operation"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "enum": [
+         "deletion.operation",
+         "sandbox.deleting",
+         "snapshot.deleting"
+        ]
+       },
+       "operation": {
+        "$ref": "#/components/schemas/BDDeletionOperation"
+       }
+      }
+     }
+    ]
+   },
+   "BDEventsResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "id",
+       "events"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "events.list"
+       },
+       "id": {
+        "type": "string"
+       },
+       "events": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSandboxEvent"
+        }
+       },
+       "pageInfo": {
+        "$ref": "#/components/schemas/BDPageInfo"
+       }
+      }
+     }
+    ]
+   },
+   "BDFileDeleteResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "path"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "file.deleted"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "path": {
+        "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDFileEntry": {
+    "type": "object",
+    "required": [
+     "name",
+     "path",
+     "isDir",
+     "isSymlink",
+     "size",
+     "mode",
+     "modifiedAt"
+    ],
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "path": {
+      "type": "string"
+     },
+     "isDir": {
+      "type": "boolean"
+     },
+     "isSymlink": {
+      "type": "boolean"
+     },
+     "size": {
+      "type": "integer"
+     },
+     "mode": {
+      "type": "string"
+     },
+     "modifiedAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "BDFileInfoResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "$ref": "#/components/schemas/BDFileEntry"
+     },
+     {
+      "type": "object",
+      "properties": {
+       "type": {
+        "type": "string",
+        "enum": [
+         "file.info",
+         "folder.created",
+         "file.permissions_set"
+        ]
+       },
+       "success": {
+        "type": "boolean"
+       }
+      }
+     }
+    ]
+   },
+   "BDFileListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "path",
+       "files",
+       "truncated"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "file.list"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "path": {
+        "type": "string"
+       },
+       "files": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDFileEntry"
+        }
+       },
+       "truncated": {
+        "type": "boolean"
+       }
+      }
+     }
+    ]
+   },
+   "BDFileMoveResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "path",
+       "destination"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "file.moved"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "path": {
+        "type": "string"
+       },
+       "destination": {
+        "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDFileReadResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success",
+       "path",
+       "encoding",
+       "size",
+       "content"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "file.read"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "path": {
+        "type": "string"
+       },
+       "encoding": {
+        "type": "string",
+        "enum": [
+         "utf8",
+         "base64"
+        ]
+       },
+       "size": {
+        "type": "integer"
+       },
+       "content": {
+        "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDFileSearchResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "files",
+       "truncated"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "file.search"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "files": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       },
+       "truncated": {
+        "type": "boolean"
+       },
+       "errors": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDFileWriteResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success",
+       "path",
+       "encoding",
+       "size"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "file.written"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "path": {
+        "type": "string"
+       },
+       "encoding": {
+        "type": "string",
+        "enum": [
+         "utf8",
+         "base64"
+        ]
+       },
+       "size": {
+        "type": "integer"
+       }
+      }
+     }
+    ]
+   },
+   "BDHostPortRequest": {
+    "type": "object",
+    "required": [
+     "port"
+    ],
+    "properties": {
+     "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+     },
+     "public": {
+      "type": "boolean",
+      "default": false
+     },
+     "localhost": {
+      "type": "boolean",
+      "default": false
+     },
+     "title": {
+      "type": "string"
+     }
+    }
+   },
+   "BDLimitsFields": {
+    "type": "object",
+    "required": [
+     "activeSandboxes",
+     "maxActiveSandboxes",
+     "canStart",
+     "billingStatus"
+    ],
+    "additionalProperties": true,
+    "properties": {
+     "accessTier": {
+      "type": "string"
+     },
+     "blockedReason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "currentLimits": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+       "activeSandboxes": {
+        "type": "integer"
+       },
+       "creationRatePerMinute": {
+        "type": "integer"
+       },
+       "creationRequestsPerHour": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "creationRequestsPerDay": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       }
+      }
+     },
+     "standardLimits": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+       "activeSandboxes": {
+        "type": "integer"
+       },
+       "creationRatePerMinute": {
+        "type": "integer"
+       },
+       "creationRequestsPerHour": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "creationRequestsPerDay": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       }
+      }
+     },
+     "trialLimits": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+       "activeSandboxes": {
+        "type": "integer"
+       },
+       "creationRatePerMinute": {
+        "type": "integer"
+       },
+       "creationRequestsPerHour": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "creationRequestsPerDay": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       }
+      }
+     },
+     "upgradeEffects": {
+      "type": "object",
+      "additionalProperties": true
+     },
+     "canStart": {
+      "type": "boolean"
+     },
+     "checkoutRequired": {
+      "type": "boolean"
+     },
+     "startBlockedReason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "contactMessage": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "activeSandboxes": {
+      "type": "integer"
+     },
+     "activeStates": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "maxActiveSandboxes": {
+      "type": "integer"
+     },
+     "maxCreationRequestsPerMinute": {
+      "type": "integer"
+     },
+     "maxCreationRequestsPerDay": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "startLimits": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "properties": {
+       "perMinute": {
+        "type": "integer"
+       },
+       "perHour": {
+        "type": "integer"
+       },
+       "perDay": {
+        "type": "integer"
+       }
+      }
+     },
+     "wallet": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "properties": {
+       "balanceDollars": {
+        "type": "number"
+       }
+      }
+     },
+     "planIncluded": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "properties": {
+       "vmHours": {
+        "type": "number"
+       },
+       "vmHoursRemaining": {
+        "type": "number"
+       },
+       "periodEnd": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "format": "date-time"
+       }
+      }
+     },
+     "overagePrices": {
+      "type": "object",
+      "properties": {
+       "vmHourDollars": {
+        "type": "number"
+       },
+       "savedSnapshotDayDollars": {
+        "type": "number"
+       },
+       "startBrackets": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "aboveMultiple": {
+           "type": "number"
+          },
+          "upToMultiple": {
+           "type": "number"
+          },
+          "dollars": {
+           "type": "number"
+          }
+         }
+        }
+       },
+       "startLimitMultiplier": {
+        "type": "number"
+       },
+       "startMinuteLimitMultiplier": {
+        "type": "number"
+       }
+      }
+     },
+     "nextStartDollars": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "startLimitsWithWallet": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "properties": {
+       "perMinute": {
+        "type": "integer"
+       },
+       "perHour": {
+        "type": "integer"
+       },
+       "perDay": {
+        "type": "integer"
+       }
+      }
+     },
+     "starts": {
+      "type": "object",
+      "properties": {
+       "unlimited": {
+        "type": "boolean"
+       },
+       "minute": {
+        "$ref": "#/components/schemas/BDStartWindowUsage"
+       },
+       "hour": {
+        "$ref": "#/components/schemas/BDStartWindowUsage"
+       },
+       "day": {
+        "$ref": "#/components/schemas/BDStartWindowUsage"
+       }
+      }
+     },
+     "creditBalanceHours": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "packBalanceHours": {
+      "type": "number"
+     },
+     "packBalanceDollars": {
+      "type": "number"
+     },
+     "hasPaymentHistory": {
+      "type": "boolean"
+     },
+     "subscriptionQuotaSeconds": {
+      "type": "integer"
+     },
+     "subscriptionRemainingSeconds": {
+      "type": "integer"
+     },
+     "packBalanceSeconds": {
+      "type": "integer"
+     },
+     "creditPurchasedSeconds": {
+      "type": "integer"
+     },
+     "creditUsedSeconds": {
+      "type": "integer"
+     },
+     "liveUsageSeconds": {
+      "type": "integer"
+     },
+     "creditSecondsPerDollar": {
+      "type": "integer"
+     },
+     "sandboxPlanKey": {
+      "type": "string"
+     },
+     "sandboxPlanDollars": {
+      "type": "number"
+     },
+     "sandboxPlanTiers": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "key": {
+         "type": "string"
+        },
+        "dollars": {
+         "type": "number"
+        },
+        "displayPrice": {
+         "type": "string"
+        },
+        "maxActiveSandboxes": {
+         "type": "integer"
+        },
+        "startsPerMinute": {
+         "type": "integer"
+        },
+        "startsPerHour": {
+         "type": "integer"
+        },
+        "startsPerDay": {
+         "type": "integer"
+        },
+        "includedSeconds": {
+         "type": "integer"
+        },
+        "purchasable": {
+         "type": "boolean"
+        }
+       }
+      }
+     },
+     "accountPlan": {
+      "type": "string"
+     },
+     "plan": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "planName": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "serviceAccount": {
+      "type": "boolean"
+     },
+     "unlimited": {
+      "type": "boolean"
+     },
+     "hasSeatPlan": {
+      "type": "boolean"
+     },
+     "last24hUsageSeconds": {
+      "type": "integer"
+     },
+     "trialComputeCapSeconds": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "trialComputeUsedSeconds": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "trialLine": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "machineTypes": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "required": [
+        "type",
+        "available",
+        "reason"
+       ],
+       "properties": {
+        "type": {
+         "type": "string",
+         "enum": [
+          "small",
+          "default",
+          "large",
+          "xlarge"
+         ]
+        },
+        "available": {
+         "type": "boolean"
+        },
+        "reason": {
+         "type": [
+          "string",
+          "null"
+         ]
+        }
+       }
+      }
+     },
+     "giftLimit": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "properties": {
+       "maxActiveSandboxes": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "maxTtlSeconds": {
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "line": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "message": {
+        "type": "string"
+       }
+      }
+     },
+     "billingStatus": {
+      "type": "string"
+     },
+     "subscriptionStatus": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "subscriptionCancelAtPeriodEnd": {
+      "type": "boolean"
+     },
+     "hasSubscription": {
+      "type": "boolean"
+     },
+     "subscriptionTrialEndsAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "subscriptionCurrentPeriodEnd": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "creditBalanceSeconds": {
+      "type": "integer"
+     },
+     "teamId": {
+      "type": "string"
+     },
+     "teamRole": {
+      "type": "string"
+     }
+    }
+   },
+   "BDLimitsResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "$ref": "#/components/schemas/BDLimitsFields"
+     }
+    ]
+   },
+   "BDMeResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "user"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "user.info"
+       },
+       "user": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string"
+         },
+         "login": {
+          "type": "string"
+         },
+         "email": {
+          "type": [
+           "string",
+           "null"
+          ]
+         },
+         "displayName": {
+          "type": "string"
+         },
+         "connectionMethod": {
+          "type": "string",
+          "enum": [
+           "github",
+           "google",
+           "email",
+           "agentid",
+           "service"
+          ]
+         },
+         "connectionMethods": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "accountPlan": {
+          "type": "string"
+         },
+         "serviceAccount": {
+          "type": "boolean"
+         },
+         "accountStatus": {
+          "type": "string",
+          "enum": [
+           "active",
+           "suspended",
+           "closed"
+          ]
+         },
+         "suspended": {
+          "type": "boolean"
+         },
+         "suspendedAt": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "format": "date-time"
+         },
+         "suspendedReason": {
+          "type": [
+           "string",
+           "null"
+          ]
+         },
+         "closed": {
+          "type": "boolean"
+         },
+         "closedAt": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "format": "date-time"
+         },
+         "purgeAt": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "format": "date-time"
+         },
+         "purgedAt": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "format": "date-time"
+         },
+         "closureContactEmail": {
+          "type": "string"
+         },
+         "zeroDataRetention": {
+          "type": "boolean"
+         },
+         "zeroDataRetentionEnabledAt": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "format": "date-time"
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDPageInfo": {
+    "type": "object",
+    "required": [
+     "nextCursor",
+     "hasMore",
+     "limit"
+    ],
+    "properties": {
+     "nextCursor": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "hasMore": {
+      "type": "boolean"
+     },
+     "limit": {
+      "type": "integer"
+     }
+    }
+   },
+   "BDProcessListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "live",
+       "sampledAt",
+       "processes",
+       "total"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "process.list"
+       },
+       "live": {
+        "type": "boolean"
+       },
+       "sampledAt": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "format": "date-time"
+       },
+       "total": {
+        "type": "integer"
+       },
+       "processes": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSandboxProcess"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDPromptResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "id",
+       "promptId",
+       "promptRun",
+       "status",
+       "provider"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "prompt.queued"
+       },
+       "id": {
+        "type": "string"
+       },
+       "promptId": {
+        "type": "string"
+       },
+       "conversationId": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "promptRun": {
+        "$ref": "#/components/schemas/BDPromptRun"
+       },
+       "status": {
+        "type": "string",
+        "enum": [
+         "queued"
+        ]
+       },
+       "provider": {
+        "type": "string"
+       },
+       "model": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "reasoningEffort": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "fast": {
+        "type": "boolean"
+       }
+      }
+     }
+    ]
+   },
+   "BDPromptRun": {
+    "type": "object",
+    "required": [
+     "id",
+     "promptId",
+     "sandboxId",
+     "status",
+     "done"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "promptId": {
+      "type": "string"
+     },
+     "sandboxId": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "sending",
+       "queued",
+       "running",
+       "finished",
+       "failed",
+       "interrupted"
+      ]
+     },
+     "done": {
+      "type": "boolean"
+     },
+     "createdAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "model": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "reasoningEffort": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "fast": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "conversationId": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    }
+   },
+   "BDPromptRunResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "id",
+       "promptRun"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "prompt.run"
+       },
+       "id": {
+        "type": "string"
+       },
+       "promptRun": {
+        "$ref": "#/components/schemas/BDPromptRun"
+       }
+      }
+     }
+    ]
+   },
+   "BDSandbox": {
+    "type": "object",
+    "required": [
+     "id",
+     "name",
+     "state",
+     "desktopAvailable",
+     "snapshotAvailable"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+     },
+     "name": {
+      "type": "string"
+     },
+     "state": {
+      "type": "string",
+      "enum": [
+       "init",
+       "provisioning",
+       "provisioned",
+       "cloning",
+       "ready",
+       "idle",
+       "running",
+       "archiving",
+       "archived",
+       "error",
+       "cancelled"
+      ]
+     },
+     "error": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "dataExpiredAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "stoppedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "labels": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string"
+      }
+     },
+     "health": {
+      "type": "string",
+      "enum": [
+       "ok",
+       "degraded"
+      ]
+     },
+     "healthReason": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "degradedSince": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "hydrated": {
+      "type": "boolean"
+     },
+     "hydratedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "hydration": {
+      "oneOf": [
+       {
+        "type": "null"
+       },
+       {
+        "type": "object",
+        "required": [
+         "phase",
+         "entriesDone",
+         "entriesTotal",
+         "percent"
+        ],
+        "properties": {
+         "phase": {
+          "type": "string"
+         },
+         "entriesDone": {
+          "type": "integer"
+         },
+         "entriesTotal": {
+          "type": [
+           "integer",
+           "null"
+          ]
+         },
+         "percent": {
+          "type": [
+           "integer",
+           "null"
+          ]
+         }
+        }
+       }
+      ]
+     },
+     "type": {
+      "type": "string",
+      "enum": [
+       "small",
+       "default",
+       "large",
+       "xlarge"
+      ]
+     },
+     "vcpu": {
+      "type": "integer"
+     },
+     "memoryGB": {
+      "type": "integer"
+     },
+     "billingMultiplier": {
+      "type": "number"
+     },
+     "machineProvider": {
+      "type": "string",
+      "enum": [
+       "baremetal"
+      ]
+     },
+     "url": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "uri"
+     },
+     "ip": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "sshEndpoint": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "createdAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "updatedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "archiveAfter": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "ttlSeconds": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "desktopAvailable": {
+      "type": "boolean"
+     },
+     "desktopUrl": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "uri"
+     },
+     "snapshots": {
+      "type": "boolean"
+     },
+     "monitoring": {
+      "type": "boolean"
+     },
+     "snapshotAvailable": {
+      "type": "boolean"
+     },
+     "snapshotCompletedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "snapshotVerifiedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "team": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "required": [
+       "id",
+       "name"
+      ],
+      "properties": {
+       "id": {
+        "type": "string"
+       },
+       "name": {
+        "type": "string"
+       }
+      }
+     },
+     "createdBy": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "createdById": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "access": {
+      "type": "string",
+      "enum": [
+       "owner",
+       "use",
+       "view"
+      ]
+     },
+     "holdsCreatorLogins": {
+      "type": "boolean"
+     },
+     "visibility": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "shared",
+       "private",
+       null
+      ]
+     },
+     "cost": {
+      "type": "object",
+      "required": [
+       "since",
+       "seconds",
+       "dollars"
+      ],
+      "properties": {
+       "since": {
+        "type": "string",
+        "format": "date-time"
+       },
+       "seconds": {
+        "type": "integer"
+       },
+       "dollars": {
+        "type": "number"
+       }
+      }
+     },
+     "wipePendingUntilRestart": {
+      "type": "boolean"
+     },
+     "subdomain": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "lastSnapshotAttemptAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "lastSnapshotStatus": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "queued",
+       "in_progress",
+       "completed",
+       "failed",
+       "cancelled",
+       null
+      ]
+     },
+     "lastReboot": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "properties": {
+       "at": {
+        "type": "string",
+        "format": "date-time"
+       },
+       "reason": {
+        "type": "string",
+        "enum": [
+         "crash",
+         "clean",
+         "unknown"
+        ]
+       }
+      }
+     },
+     "setupStatus": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "pending",
+       "running",
+       "done",
+       "failed",
+       null
+      ]
+     },
+     "setupError": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "environment": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "environmentVersion": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "stop": {
+      "oneOf": [
+       {
+        "$ref": "#/components/schemas/BDStopOperation"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     }
+    }
+   },
+   "BDSandboxActionResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "id",
+       "status"
+      ],
+      "properties": {
+       "type": {
+        "type": "string"
+       },
+       "id": {
+        "type": "string"
+       },
+       "status": {
+        "type": "string"
+       },
+       "sandbox": {
+        "oneOf": [
+         {
+          "$ref": "#/components/schemas/BDSandbox"
+         },
+         {
+          "type": "null"
+         }
+        ]
+       },
+       "forced": {
+        "type": "boolean"
+       },
+       "operation": {
+        "oneOf": [
+         {
+          "$ref": "#/components/schemas/BDStopOperation"
+         },
+         {
+          "type": "null"
+         }
+        ]
+       },
+       "statusUrl": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "giftLimitNotice": {
+        "type": "string"
+       },
+       "conversationId": {
+        "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDSandboxEvent": {
+    "type": "object",
+    "required": [
+     "type"
+    ],
+    "additionalProperties": true,
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "type": {
+      "type": "string"
+     },
+     "timestamp": {
+      "type": "integer"
+     },
+     "taskId": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "conversationId": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "data": {
+      "type": "object",
+      "additionalProperties": true
+     }
+    }
+   },
+   "BDSandboxInfoResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "sandbox"
+      ],
+      "properties": {
+       "type": {
+        "type": "string"
+       },
+       "sandbox": {
+        "$ref": "#/components/schemas/BDSandbox"
+       },
+       "giftLimitNotice": {
+        "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDSandboxListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "sandboxes"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "sandbox.list"
+       },
+       "sandboxes": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSandbox"
+        }
+       },
+       "pageInfo": {
+        "$ref": "#/components/schemas/BDPageInfo"
+       },
+       "deletedCost": {
+        "type": "object",
+        "required": [
+         "since",
+         "seconds",
+         "dollars"
+        ],
+        "properties": {
+         "since": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "seconds": {
+          "type": "integer"
+         },
+         "dollars": {
+          "type": "number"
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDSandboxProcess": {
+    "type": "object",
+    "required": [
+     "pid",
+     "command"
+    ],
+    "properties": {
+     "pid": {
+      "type": "integer"
+     },
+     "parentPid": {
+      "type": "integer"
+     },
+     "user": {
+      "type": "string"
+     },
+     "cpuPercent": {
+      "type": "number"
+     },
+     "memoryMB": {
+      "type": "number"
+     },
+     "startedAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "command": {
+      "type": "string"
+     },
+     "commandId": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    }
+   },
+   "BDSandboxUsageResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "sandboxId",
+       "sandboxType",
+       "billingMultiplier",
+       "since",
+       "until",
+       "seconds",
+       "dollars",
+       "secondsPerDollar",
+       "running"
+      ],
+      "properties": {
+       "type": {
+        "type": "string"
+       },
+       "sandboxId": {
+        "type": "string",
+        "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+       },
+       "sandboxType": {
+        "type": "string",
+        "enum": [
+         "small",
+         "default",
+         "large",
+         "xlarge"
+        ]
+       },
+       "billingMultiplier": {
+        "type": "number"
+       },
+       "since": {
+        "type": "string",
+        "format": "date-time"
+       },
+       "until": {
+        "type": "string",
+        "format": "date-time"
+       },
+       "seconds": {
+        "type": "integer"
+       },
+       "dollars": {
+        "type": "number"
+       },
+       "secondsPerDollar": {
+        "type": "integer"
+       },
+       "running": {
+        "type": "boolean"
+       }
+      }
+     }
+    ]
+   },
+   "BDSavedSnapshot": {
+    "type": "object",
+    "required": [
+     "name",
+     "status",
+     "sourceSandboxId",
+     "createdAt"
+    ],
+    "properties": {
+     "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "saving",
+       "ready",
+       "failed"
+      ]
+     },
+     "error": {
+      "type": "string"
+     },
+     "sourceSandboxId": {
+      "type": "string"
+     },
+     "snapshotId": {
+      "type": "string"
+     },
+     "type": {
+      "type": "string"
+     },
+     "sizeBytes": {
+      "type": "integer"
+     },
+     "createdAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "BDSavedSnapshotAllowance": {
+    "type": "object",
+    "properties": {
+     "org": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "orgName": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "included": {
+      "type": "integer"
+     },
+     "free": {
+      "type": "integer"
+     },
+     "used": {
+      "type": "integer"
+     },
+     "extra": {
+      "type": "integer"
+     },
+     "extraMonthlyDollars": {
+      "type": "number"
+     },
+     "extraDailyDollars": {
+      "type": "number"
+     },
+     "pricePerExtraMonthlyDollars": {
+      "type": "number"
+     },
+     "pricePerExtraDailyDollars": {
+      "type": "number"
+     }
+    }
+   },
+   "BDSavedSnapshotDeletedResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "name",
+       "status"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.saved.deleted"
+       },
+       "name": {
+        "type": "string"
+       },
+       "status": {
+        "type": "string",
+        "const": "deleted"
+       }
+      }
+     }
+    ]
+   },
+   "BDSavedSnapshotInfoResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "snapshot"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.saved.info"
+       },
+       "snapshot": {
+        "$ref": "#/components/schemas/BDSavedSnapshot"
+       }
+      }
+     }
+    ]
+   },
+   "BDSavedSnapshotListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "snapshots"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.saved.list"
+       },
+       "snapshots": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSavedSnapshot"
+        }
+       },
+       "allowance": {
+        "$ref": "#/components/schemas/BDSavedSnapshotAllowance"
+       }
+      }
+     }
+    ]
+   },
+   "BDSavedSnapshotSavingResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "status",
+       "snapshot"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.saved.saving"
+       },
+       "status": {
+        "type": "string",
+        "const": "saving"
+       },
+       "snapshot": {
+        "$ref": "#/components/schemas/BDSavedSnapshot"
+       }
+      }
+     }
+    ]
+   },
+   "BDStartWindowUsage": {
+    "type": [
+     "object",
+     "null"
+    ],
+    "properties": {
+     "limit": {
+      "type": "integer"
+     },
+     "used": {
+      "type": "integer"
+     },
+     "remaining": {
+      "type": "integer"
+     }
+    }
+   },
+   "BDSteerResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "id",
+       "conversationId",
+       "promptId",
+       "native",
+       "status"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "prompt.steered"
+       },
+       "id": {
+        "type": "string"
+       },
+       "conversationId": {
+        "type": "string"
+       },
+       "promptId": {
+        "type": "string"
+       },
+       "native": {
+        "type": "boolean"
+       },
+       "mode": {
+        "type": "string",
+        "enum": [
+         "native",
+         "fallback",
+         "late"
+        ]
+       },
+       "status": {
+        "type": "string",
+        "enum": [
+         "steered"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "BDStopOperation": {
+    "type": "object",
+    "required": [
+     "id",
+     "status",
+     "requestedAt",
+     "lastAttemptAt",
+     "error",
+     "endedAt"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "pending",
+       "failing",
+       "completed",
+       "superseded"
+      ]
+     },
+     "requestedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "lastAttemptAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "error": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "endedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "forced": {
+      "type": "boolean"
+     }
+    }
+   },
+   "BDStopOperationResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "id",
+       "stop"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "stop.status"
+       },
+       "id": {
+        "type": "string"
+       },
+       "stop": {
+        "$ref": "#/components/schemas/BDStopOperation"
+       }
+      }
+     }
+    ]
+   },
+   "BDSuccessBase": {
+    "type": "object",
+    "required": [
+     "ok",
+     "type"
+    ],
+    "properties": {
+     "ok": {
+      "type": "boolean"
+     },
+     "type": {
+      "type": "string"
+     }
+    }
+   },
+   "BDWebhook": {
+    "type": "object",
+    "required": [
+     "id",
+     "name",
+     "url",
+     "events",
+     "createdAt",
+     "updatedAt"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "pattern": "^wh_[a-f0-9]{24}$"
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "maxLength": 100
+     },
+     "url": {
+      "type": "string",
+      "format": "uri"
+     },
+     "events": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+       "$ref": "#/components/schemas/BDWebhookEventType"
+      }
+     },
+     "createdAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "BDWebhookDeleteResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "id"
+      ],
+      "properties": {
+       "id": {
+        "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDWebhookEventType": {
+    "type": "string",
+    "enum": [
+     "sandbox.ready",
+     "sandbox.error",
+     "sandbox.archived",
+     "sandbox.hydrated",
+     "sandbox.degraded",
+     "sandbox.recovered"
+    ]
+   },
+   "BDWebhookListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "webhooks"
+      ],
+      "properties": {
+       "webhooks": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDWebhook"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDWebhookResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "webhook"
+      ],
+      "properties": {
+       "webhook": {
+        "$ref": "#/components/schemas/BDWebhook"
+       }
+      }
+     }
+    ]
+   },
+   "BDWebhookSecretResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDWebhookResponse"
+     },
+     {
+      "type": "object",
+      "required": [
+       "secret"
+      ],
+      "properties": {
+       "secret": {
+        "type": "string",
+        "pattern": "^whsec_[a-f0-9]{64}$"
+       }
+      }
+     }
     ]
    }
   },

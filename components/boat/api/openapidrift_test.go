@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -141,20 +142,35 @@ func validate(v any, s map[string]any, at string) []string {
 	if all, ok := s["allOf"].([]any); ok {
 		merged := map[string]any{"type": "object", "properties": map[string]any{}}
 		req := []any{}
-		for _, x := range all {
-			sub := resolveRef(x.(map[string]any))
-			for k, p := range asMap(sub["properties"]) {
-				merged["properties"].(map[string]any)[k] = p
-			}
-			if r, ok := sub["required"].([]any); ok {
-				req = append(req, r...)
-			}
-			if sub["additionalProperties"] != nil {
-				merged["additionalProperties"] = sub["additionalProperties"]
+		var add func(all []any)
+		add = func(all []any) { // nested allOf (boat.dev's responses) flattens too
+			for _, x := range all {
+				sub := resolveRef(x.(map[string]any))
+				if inner, ok := sub["allOf"].([]any); ok {
+					add(inner)
+				}
+				for k, p := range asMap(sub["properties"]) {
+					merged["properties"].(map[string]any)[k] = p
+				}
+				if r, ok := sub["required"].([]any); ok {
+					req = append(req, r...)
+				}
+				if sub["additionalProperties"] != nil {
+					merged["additionalProperties"] = sub["additionalProperties"]
+				}
 			}
 		}
+		add(all)
 		merged["required"] = req
 		return validate(v, merged, at)
+	}
+	if c, ok := s["const"]; ok && !reflect.DeepEqual(c, v) {
+		return []string{fmt.Sprintf("%s: %v is not the constant %v", at, v, c)}
+	}
+	if pat, ok := s["pattern"].(string); ok {
+		if str, isStr := v.(string); isStr && !regexp.MustCompile(pat).MatchString(str) {
+			out = append(out, fmt.Sprintf("%s: %q does not match %s", at, str, pat))
+		}
 	}
 	if enum, ok := s["enum"].([]any); ok {
 		for _, e := range enum {
@@ -424,6 +440,18 @@ func TestDriftValidatorCatches(t *testing.T) {
 	}
 	if p := validate("c", map[string]any{"enum": []any{"a", "b"}}, "x"); len(p) == 0 {
 		t.Error("bad enum accepted")
+	}
+	// boat.dev's schemas use const and pattern (bx_ ids); nested allOf must merge.
+	if p := validate("vm-1", map[string]any{"type": "string", "pattern": "^bx_[a-z2-9]{8}$"}, "x"); len(p) == 0 {
+		t.Error("pattern not checked")
+	}
+	if p := validate("a", map[string]any{"const": "b"}, "x"); len(p) == 0 {
+		t.Error("const not checked")
+	}
+	nested := map[string]any{"allOf": []any{map[string]any{"allOf": []any{map[string]any{"type": "object", "required": []any{"ok"},
+		"properties": map[string]any{"ok": map[string]any{"type": "boolean"}}}}}, map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}}}}}
+	if p := validate(map[string]any{"ok": true, "id": "x"}, nested, "x"); len(p) != 0 {
+		t.Errorf("nested allOf: %v", p)
 	}
 	if p := validate(nil, map[string]any{"type": []any{"integer", "null"}}, "x"); len(p) != 0 {
 		t.Errorf("nullable rejected: %v", p)

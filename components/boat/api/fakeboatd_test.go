@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeBoatd implements the boatd internal contract in memory.
@@ -28,6 +29,8 @@ type fakeBoatd struct {
 	events   chan string
 	n        int
 	creates  []map[string]any // POST /v1/vms bodies
+	patches  []map[string]any // PATCH /v1/vms/{id} bodies
+	noPatch  bool             // answer PATCH 405, like a boatd from before it
 	stops    []map[string]any
 	forks    []map[string]any
 	refuse   string // non-empty: lifecycle POSTs answer 503 with this code (host full)
@@ -89,6 +92,10 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 				return
 			}
 		}
+		if ttl, _ := in["ttl_s"].(float64); ttl > 0 { // like boatd: the deadline starts at boot
+			vm["ttl_s"] = ttl
+			vm["expires_at"] = time.Now().UTC().Add(time.Duration(ttl) * time.Second).Format(time.RFC3339)
+		}
 		f.vms[id] = vm
 		f.mu.Unlock()
 		writeJSON(w, 201, vm)
@@ -117,6 +124,41 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		if vm := get(w, r); vm != nil {
 			writeJSON(w, 200, vm)
 		}
+	})
+	// PATCH like boatd's: rename, ttl_s (deadline now+ttl), extend_s (deadline +extend).
+	mux.HandleFunc("PATCH /v1/vms/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if f.noPatch {
+			http.Error(w, "method not allowed", 405) // an older boatd
+			return
+		}
+		vm := get(w, r)
+		if vm == nil {
+			return
+		}
+		var in map[string]any
+		json.NewDecoder(r.Body).Decode(&in)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.patches = append(f.patches, in)
+		now := time.Now().UTC()
+		if n, ok := in["name"].(string); ok {
+			vm["name"] = n
+		}
+		if t, ok := in["ttl_s"].(float64); ok {
+			vm["ttl_s"] = t
+			vm["expires_at"] = now.Add(time.Duration(t) * time.Second).Format(time.RFC3339)
+			if t == 0 {
+				delete(vm, "expires_at")
+			}
+		}
+		if x, ok := in["extend_s"].(float64); ok {
+			base := now
+			if e, err := time.Parse(time.RFC3339, fmt.Sprint(vm["expires_at"])); err == nil && e.After(now) {
+				base = e
+			}
+			vm["expires_at"] = base.Add(time.Duration(x) * time.Second).Format(time.RFC3339)
+		}
+		writeJSON(w, 200, vm)
 	})
 	mux.HandleFunc("POST /v1/vms/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
 		vm := get(w, r)

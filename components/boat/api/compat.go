@@ -32,15 +32,52 @@ func (s *server) compatRoutes() {
 	s.route("POST /api/v1/sandboxes", "vms:write", s.compatCreate)
 	s.route("GET /api/v1/sandboxes", "vms:read", s.compatList)
 	s.route("GET /api/v1/sandboxes/{id}", "vms:read", s.compatGet)
+	s.route("PATCH /api/v1/sandboxes/{id}", "vms:write", s.compatUpdate)
 	s.route("DELETE /api/v1/sandboxes/{id}", "vms:write", s.compatDelete)
 	s.route("GET /api/v1/deletion-operations/{opid}", "vms:read", s.compatDeletion)
 	s.route("POST /api/v1/sandboxes/{id}/stop", "vms:write", s.compatStop)
+	s.route("GET /api/v1/sandboxes/{id}/stops/{stopid}", "vms:read", s.compatGetStop)
 	s.route("POST /api/v1/sandboxes/{id}/resume", "vms:write", s.compatResume)
 	s.route("POST /api/v1/sandboxes/{id}/fork", "vms:write", s.compatFork)
+	s.route("GET /api/v1/limits", "vms:read", s.compatLimits)
+	s.route("GET /api/v1/me", "", s.compatMe)
+	s.route("GET /api/v1/sandboxes/{id}/usage", "vms:read", s.compatUsage)
+	// prompts (compat_prompts.go)
+	s.route("POST /api/v1/sandboxes/{id}/prompt", "exec", s.compatPrompt)
+	s.route("GET /api/v1/sandboxes/{id}/prompts/{pid}", "exec", s.compatPromptRun)
+	s.route("GET /api/v1/sandboxes/{id}/events", "exec", s.compatEvents)
+	s.route("GET /api/v1/sandboxes/{id}/conversations", "exec", s.compatConversations)
+	s.route("POST /api/v1/sandboxes/{id}/steer", "exec", s.compatSteer)
+	s.route("POST /api/v1/sandboxes/{id}/interrupt", "exec", s.compatInterrupt)
+	// commands (compat_exec.go, compat_cmds.go)
 	s.route("POST /api/v1/sandboxes/{id}/commands", "exec", s.compatExec)
+	s.route("GET /api/v1/sandboxes/{id}/commands/{pid}", "exec", s.compatCommandStatus)
+	s.route("DELETE /api/v1/sandboxes/{id}/commands/{pid}", "exec", s.compatStopCommand)
+	s.route("GET /api/v1/sandboxes/{id}/command-history", "exec", s.compatCommandHistory)
+	s.route("GET /api/v1/sandboxes/{id}/command-history/{cid}", "exec", s.compatCommandInfo)
+	s.route("GET /api/v1/sandboxes/{id}/command-history/{cid}/logs", "exec", s.compatCommandLogs)
+	s.route("GET /api/v1/sandboxes/{id}/processes", "exec", s.compatProcesses)
+	// files (compat_exec.go, compat_files.go)
 	s.route("GET /api/v1/sandboxes/{id}/files", "exec", s.compatReadFile)
 	s.route("PUT /api/v1/sandboxes/{id}/files", "exec", s.compatWriteFile)
-	s.route("GET /api/v1/limits", "vms:read", s.compatLimits)
+	s.route("DELETE /api/v1/sandboxes/{id}/files", "exec", s.compatDeleteFile)
+	s.route("GET /api/v1/sandboxes/{id}/files/list", "exec", s.compatListFiles)
+	s.route("GET /api/v1/sandboxes/{id}/files/info", "exec", s.compatFileInfo)
+	s.route("GET /api/v1/sandboxes/{id}/files/search", "exec", s.compatSearchFiles)
+	s.route("POST /api/v1/sandboxes/{id}/files/folder", "exec", s.compatMakeFolder)
+	s.route("POST /api/v1/sandboxes/{id}/files/move", "exec", s.compatMoveFile)
+	s.route("POST /api/v1/sandboxes/{id}/files/permissions", "exec", s.compatChmod)
+	// saved snapshots and webhooks (compat_account.go)
+	s.route("GET /api/v1/saved-snapshots", "vms:read", s.compatSavedList)
+	s.route("POST /api/v1/saved-snapshots", "vms:write", s.compatSavedSave)
+	s.route("GET /api/v1/saved-snapshots/{name}", "vms:read", s.compatSavedGet)
+	s.route("DELETE /api/v1/saved-snapshots/{name}", "vms:write", s.compatSavedDelete)
+	s.route("GET /api/v1/webhooks", "admin", s.compatHookList)
+	s.route("POST /api/v1/webhooks", "admin", s.compatHookCreate)
+	s.route("GET /api/v1/webhooks/{id}", "admin", s.compatHookGet)
+	s.route("PATCH /api/v1/webhooks/{id}", "admin", s.compatHookUpdate)
+	s.route("DELETE /api/v1/webhooks/{id}", "admin", s.compatHookDelete)
+	s.route("POST /api/v1/webhooks/{id}/rotate", "admin", s.compatHookRotate)
 }
 
 // ---- envelope ----
@@ -168,8 +205,17 @@ func (c *nativeAnswer) ok() bool { return c.status/100 == 2 }
 
 // callNative runs h as if pattern had been requested with body as its JSON,
 // under the same principal and request id.
-func (s *server) callNative(r *http.Request, p *principal, pattern string, h handlerFunc, id string, body any) *nativeAnswer {
+// kv are more path values: name, value, …; the name "?" sets the query string.
+func (s *server) callNative(r *http.Request, p *principal, pattern string, h handlerFunc, id string, body any, kv ...string) *nativeAnswer {
 	method, path, _ := strings.Cut(pattern, " ")
+	query := ""
+	for i := 0; i+1 < len(kv); i += 2 {
+		if kv[i] == "?" {
+			query = kv[i+1]
+			continue
+		}
+		path = strings.Replace(path, "{"+kv[i]+"}", url.PathEscape(kv[i+1]), 1)
+	}
 	var rd io.Reader = http.NoBody
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -181,6 +227,12 @@ func (s *server) callNative(r *http.Request, p *principal, pattern string, h han
 	if id != "" {
 		r2.SetPathValue("id", id)
 	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		if kv[i] != "?" {
+			r2.SetPathValue(kv[i], kv[i+1])
+		}
+	}
+	r2.URL.RawQuery = query
 	c := &nativeAnswer{h: http.Header{}}
 	h(c, r2, p)
 	return c
@@ -188,8 +240,9 @@ func (s *server) callNative(r *http.Request, p *principal, pattern string, h han
 
 // ---- sandboxes ----
 
-// compatState maps boatd's states onto boat.dev's.
-func compatState(st string) string {
+// compatState maps boatd's states onto boat.dev's. A running VM is "ready",
+// or "running" while one of its prompts is (boat.dev: an agent is working).
+func compatState(st string, agentBusy bool) string {
 	switch st {
 	case "creating", "starting", "forking":
 		return "provisioning"
@@ -197,14 +250,28 @@ func compatState(st string) string {
 		return "archiving"
 	case "stopped":
 		return "archived"
-	case "running", "error":
+	case "running":
+		if agentBusy {
+			return "running"
+		}
+		return "ready"
+	case "error":
 		return st
 	}
 	return "error"
 }
 
+// compatTypes are boat.dev's machine types; another size reads as null.
+var compatTypes = map[string]bool{"small": true, "default": true, "large": true, "xlarge": true}
+
 // sandbox is a native VM as a boat.dev Sandbox object.
 func (s *server) sandbox(vm VM) map[string]any {
+	team, id := str(vm, "team"), str(vm, "id")
+	return s.sandboxAs(vm, s.compatID(team, id))
+}
+
+// sandboxAs renders vm under the bx_ id already looked up for it.
+func (s *server) sandboxAs(vm VM, bx string) map[string]any {
 	labels := map[string]any{}
 	if l, ok := vm["labels"].(map[string]any); ok {
 		for k, v := range l {
@@ -213,19 +280,40 @@ func (s *server) sandbox(vm VM) map[string]any {
 			}
 		}
 	}
+	id := str(vm, "id")
 	state := str(vm, "state")
 	mem, _ := vm["mem_mib"].(float64)
-	out := map[string]any{"id": str(vm, "id"), "name": str(vm, "name"), "state": compatState(state),
+	ttl, _ := vm["ttl_s"].(float64)
+	out := map[string]any{"id": bx, "name": str(vm, "name"),
+		"state":            compatState(state, s.promptBusy(id)),
 		"desktopAvailable": s.cfg.DesktopURL != "" && state == "running", "snapshotAvailable": vm["has_snapshot"] == true,
-		"type": str(vm, "size"), "vcpu": vm["vcpu"], "memoryGB": mem / 1024, "ip": str(vm, "ip"), "labels": labels,
-		"createdAt": vm["created_at"], "updatedAt": vm["updated_at"], "ttlSeconds": vm["ttl_s"]}
-	if e := str(vm, "error"); e != "" {
-		out["error"] = e
+		"memoryGB": int64(mem+512) / 1024, "ip": nullIfEmpty(str(vm, "ip")), "labels": labels,
+		"createdAt": vm["created_at"], "updatedAt": vm["updated_at"], "ttlSeconds": nullIfZero(int64(ttl)),
+		"archiveAfter": nil, "stop": s.stops.last(id), "error": nullIfEmpty(str(vm, "error")),
+		"environment": nullIfEmpty(str(vm, "environment")), "access": "owner"}
+	if compatTypes[str(vm, "size")] {
+		out["type"] = str(vm, "size")
 	}
-	if e := str(vm, "environment"); e != "" {
-		out["environment"] = e
+	if v, ok := vm["vcpu"].(float64); ok {
+		out["vcpu"] = int64(v)
+	}
+	if e, ok := vm["expires_at"].(string); ok && state == "running" {
+		out["archiveAfter"] = e
+	}
+	if state == "stopped" {
+		out["stoppedAt"] = vm["updated_at"]
 	}
 	return out
+}
+
+// promptBusy reports whether a prompt of the VM is running (boat-api's record).
+func (s *server) promptBusy(vmID string) bool {
+	for _, run := range s.store.Snapshot().Prompts[vmID] {
+		if run.State == "running" {
+			return true
+		}
+	}
+	return false
 }
 
 type compatCreateReq struct {
@@ -398,12 +486,19 @@ func (s *server) compatList(w http.ResponseWriter, r *http.Request, p *principal
 		writeUpstream(w, r, err)
 		return
 	}
+	var ids []string
+	for _, vm := range list.VMs {
+		if str(vm, "team") == p.Team.ID {
+			ids = append(ids, str(vm, "id"))
+		}
+	}
+	bx := s.compatIDs(p.Team.ID, ids)
 	boxes := []map[string]any{}
 	for _, vm := range list.VMs {
 		if str(vm, "team") != p.Team.ID {
 			continue
 		}
-		if sb := s.sandbox(publicVM(vm)); compatMatch(sb, q) {
+		if sb := s.sandboxAs(publicVM(vm), bx[str(vm, "id")]); compatMatch(sb, q) {
 			boxes = append(boxes, sb)
 		}
 	}
@@ -513,7 +608,8 @@ func (d *deletions) get(team, id string) map[string]any {
 
 func (s *server) compatDelete(w http.ResponseWriter, r *http.Request, p *principal) {
 	id := r.PathValue("id")
-	if r.Header.Get("X-Ascii-Confirm-Delete") != id {
+	asked := orDefault(info(r).compatID, id)
+	if c := r.Header.Get("X-Ascii-Confirm-Delete"); c != asked && c != id {
 		writeErr(w, r, 409, "confirmation_required", "set X-Ascii-Confirm-Delete to the sandbox id")
 		return
 	}
@@ -525,7 +621,7 @@ func (s *server) compatDelete(w http.ResponseWriter, r *http.Request, p *princip
 	now := time.Now().UTC()
 	b := make([]byte, 16)
 	rand.Read(b)
-	op := map[string]any{"id": "bdop_" + hex.EncodeToString(b), "kind": "sandbox", "targetId": id, "reason": "explicit",
+	op := map[string]any{"id": "bdop_" + hex.EncodeToString(b), "kind": "sandbox", "targetId": asked, "reason": "explicit",
 		"status": "completed", "stage": "completed", "expectedBy": nil, "attemptCount": 1, "requestedAt": now, "completedAt": now}
 	s.deletions.add(p.Team.ID, op)
 	writeCompat(w, http.StatusAccepted, "sandbox.deleting", map[string]any{"operation": op})
@@ -553,18 +649,33 @@ func (s *server) compatStop(w http.ResponseWriter, r *http.Request, p *principal
 	if body.Force {
 		in = map[string]any{"force": true}
 	}
-	now := time.Now().UTC()
-	res := s.callNative(r, p, "POST /v1/vms/{id}/stop", s.stopVM, r.PathValue("id"), in)
+	id := r.PathValue("id")
+	op := s.stops.begin(p.Team.ID, id)
+	res := s.callNative(r, p, "POST /v1/vms/{id}/stop", s.stopVM, id, in)
 	if !res.ok() {
+		s.stops.fail(id, op, res.body.String())
 		res.relay(w)
 		return
 	}
+	op = s.stops.complete(id, op)
 	var vm VM
 	json.Unmarshal(res.body.Bytes(), &vm)
-	op := map[string]any{"id": "stop_" + randHex(8), "status": "completed", "requestedAt": now, "lastAttemptAt": now,
-		"error": nil, "endedAt": time.Now().UTC(), "forced": body.Force}
-	writeCompat(w, 200, "sandbox.stopped", map[string]any{"id": r.PathValue("id"), "status": "archived",
-		"sandbox": s.sandbox(vm), "forced": body.Force, "operation": op, "statusUrl": nil})
+	sb := s.sandbox(vm)
+	writeCompat(w, http.StatusAccepted, "sandbox.stopping", map[string]any{"id": sb["id"], "status": sb["state"],
+		"sandbox": sb, "forced": body.Force, "operation": op,
+		"statusUrl": "/api/v1/sandboxes/" + sb["id"].(string) + "/stops/" + op["id"].(string)})
+}
+
+func (s *server) compatGetStop(w http.ResponseWriter, r *http.Request, p *principal) {
+	if _, ok := s.ownVM(w, r, p); !ok {
+		return
+	}
+	op := s.stops.get(p.Team.ID, r.PathValue("id"), r.PathValue("stopid"))
+	if op == nil {
+		writeErr(w, r, 404, "not_found", "stop not found")
+		return
+	}
+	writeCompat(w, 200, "stop.status", map[string]any{"id": op["id"], "stop": op})
 }
 
 func (s *server) compatResume(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -583,6 +694,7 @@ func (s *server) compatResume(w http.ResponseWriter, r *http.Request, p *princip
 		writeErr(w, r, 400, "invalid_request", "resume with type, env, environment or noEnv is not supported by this server; use POST /v1/vms/{id}/resize")
 		return
 	}
+	s.stops.supersede(r.PathValue("id"))
 	s.compatAction(w, r, p, "POST /v1/vms/{id}/start", s.startVM, r.PathValue("id"), map[string]any{"fail_fast": body.FailFast}, "sandbox.resuming")
 }
 

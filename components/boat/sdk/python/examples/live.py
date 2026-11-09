@@ -206,7 +206,14 @@ try:
                 check(b"boat_proxy_error" in bad, "VM reaches the proxy; a bad token is refused (%r)" % bad[:120])
                 # The good token gets past the proxy to the real provider, which rejects
                 # the fake key: the swap happened and the request went out and back.
-                good = boat.run(ai_vm.id, ["bash", "-lc", curl % "$ANTHROPIC_API_KEY"]).stdout
+                # The proxy resolves the provider through the runner's DNS, which can time
+                # out (boat-e2e 42643725761): "cannot reach the provider" is retried.
+                for attempt in range(4):
+                    good = boat.run(ai_vm.id, ["bash", "-lc", curl % "$ANTHROPIC_API_KEY"]).stdout
+                    if b"cannot reach the provider" not in good:
+                        break
+                    print("retry - the proxy could not reach the provider (attempt %d)" % (attempt + 1))
+                    time.sleep(5 * (attempt + 1))
                 check(b"boat_proxy_error" not in good and b"error" in good, "the proxy forwards to the provider (%r)" % good[:120])
                 check(boat.ai_usage(ai_vm.id)["totals"]["requests"] >= 1, "the proxy metered the request")
             boat.delete(ai_vm.id)

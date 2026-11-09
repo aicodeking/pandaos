@@ -203,7 +203,8 @@ func (s *server) startPrompt(w http.ResponseWriter, r *http.Request, p *principa
 		writeErr(w, r, 400, "invalid_request", msg)
 		return
 	}
-	if _, ok := s.ownVM(w, r, p); !ok {
+	vm, ok := s.ownVM(w, r, p)
+	if !ok {
 		return
 	}
 	run, code, msg := s.runTurn(r, p, r.PathValue("id"), body, "")
@@ -211,6 +212,7 @@ func (s *server) startPrompt(w http.ResponseWriter, r *http.Request, p *principa
 		writeErr(w, r, code, "invalid_request", msg)
 		return
 	}
+	s.refreshTTL(r, vm) // an agent at work gets a fresh full TTL, as on boat.dev
 	writeJSON(w, 202, run)
 }
 
