@@ -8,6 +8,13 @@
 #   --update-input pandaos`): fetch the branch, bump flake.lock, build,
 #   nix-env --set, switch-to-configuration, then panda-health.
 #
+# Signatures: release commits are SSH-signed with a key generated at build
+# time whose public half is pandaos.updates.allowedSignersFile. An unsigned
+# commit, one signed by another key, and a move of the branch back to an older
+# signed release are each refused, with flake.lock and the system unchanged.
+# Staged mode's unit (panda-update-stage) builds the next release without
+# switching or touching flake.lock.
+#
 # One substitution: the release repo's flake is a stand-in whose
 # lib.mkPandaSystem returns a prebuilt toplevel (a store path string with
 # context) instead of evaluating PandaOS's modules, because evaluating and
@@ -18,6 +25,13 @@
 { pkgs, self, t }:
 let
   inherit (pkgs) lib;
+  # Test-only signing keys: `good` is allowed, `evil` is not.
+  keys = pkgs.runCommand "update-e2e-release-keys" { nativeBuildInputs = [ pkgs.openssh ]; } ''
+    mkdir $out
+    ssh-keygen -q -t ed25519 -N "" -C release -f $out/good
+    ssh-keygen -q -t ed25519 -N "" -C evil -f $out/evil
+    echo "release@pandaos.test $(cat $out/good.pub)" >$out/allowed_signers
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "update-e2e";
@@ -43,6 +57,7 @@ pkgs.testers.runNixOSTest {
         config.system.build.toplevel
         config.system.build.nixos-rebuild
       ];
+      pandaos.updates.allowedSignersFile = "${keys}/allowed_signers";
       environment.etc."pandaos-test-gen".text = lib.mkDefault "base";
       specialisation.r2.configuration.environment.etc."pandaos-test-gen".text = "release-2";
       specialisation.r3.configuration.environment.etc."pandaos-test-gen".text = "release-3";
@@ -99,9 +114,26 @@ pkgs.testers.runNixOSTest {
           return machine.succeed("readlink -f /run/current-system").strip()
 
 
-      def release(target, msg):
-          machine.succeed(f"echo {target} > {rel}/target", f"{git} add -A", f"{git} commit -qm '{msg}'")
+      def release(target, msg, key="good"):
+          # key: "good" (allowed), "evil" (not allowed) or None (unsigned).
+          sign = f"-c gpg.format=ssh -c user.signingkey=/root/{key} commit -S" if key else "commit"
+          machine.succeed(f"echo {target} > {rel}/target", f"{git} add -A", f"{git} {sign} -qm '{msg}'")
           return machine.succeed(f"{git} rev-parse HEAD").strip()
+
+
+      def reset_release(rev):
+          machine.succeed(f"{git} reset -q --hard {rev}")
+
+
+      def refused(why, lock_rev, system):
+          rc, log = upgrade()
+          assert rc != 0, f"accepted a release that should be refused ({why}): {log}"
+          assert "REFUSING" in log and why in log, log
+          assert locked_rev() == lock_rev, (locked_rev(), lock_rev)
+          assert current() == system, current()
+          assert machine.succeed("cut -d' ' -f1 /var/lib/pandaos/update-verify").strip() == "refused"
+          status = machine.succeed("panda-update status")
+          assert "last release check: refused" in status, status
 
 
       def locked_rev():
@@ -121,6 +153,8 @@ pkgs.testers.runNixOSTest {
       base = current()
 
       with subtest("release repo and /etc/pandaos, locked to the installed release"):
+          for k in ["good", "evil"]:
+              machine.succeed(f"install -m 0600 ${keys}/{k} /root/{k}")
           machine.succeed(f"mkdir -p {rel} && git -C {rel} init -q -b release")
           machine.succeed(f"cp ${releaseFlake} {rel}/flake.nix")
           r1 = release(base, "release 1: the installed system")
@@ -132,7 +166,17 @@ pkgs.testers.runNixOSTest {
           )
           assert locked_rev() == r1, (locked_rev(), r1)
 
-      with subtest("a new release commit: nixos-upgrade bumps the lock, switches, and is healthy"):
+      with subtest("an unsigned release commit is refused"):
+          release("${gen "r2"}", "unsigned", key=None)
+          refused("has no SSH signature", r1, base)
+
+      with subtest("a release signed by a key not in allowedSigners is refused"):
+          reset_release(r1)
+          release("${gen "r2"}", "wrong key", key="evil")
+          refused("not from a key in pandaos.updates.allowedSigners", r1, base)
+          reset_release(r1)
+
+      with subtest("a new signed release commit: nixos-upgrade verifies, bumps the lock, switches, and is healthy"):
           r2 = release("${gen "r2"}", "release 2")
           rc, log = upgrade()
           assert rc == 0, log
@@ -141,17 +185,32 @@ pkgs.testers.runNixOSTest {
           assert machine.succeed("cat /etc/pandaos-test-gen").strip() == "release-2"
           assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == current()
           assert "is healthy" in log, log
+          assert "is signed by release@pandaos.test" in log, log
 
       with subtest("no new release: the update is a no-op"):
           rc, log = upgrade()
           assert rc == 0 and "system unchanged" in log, log
           assert locked_rev() == r2
 
-      with subtest("the next release is picked up the same way"):
+      with subtest("staged: the next release is verified and built, not switched to"):
           r3 = release("${gen "r3"}", "release 3")
+          lock_before = machine.succeed("cat /etc/pandaos/flake.lock")
+          machine.succeed("systemctl start panda-update-stage.service")
+          assert machine.succeed("cat /etc/pandaos/flake.lock") == lock_before
+          assert current() == "${gen "r2"}", current()
+          staged = machine.succeed("cat /var/lib/pandaos/update-staged").split()
+          assert staged[0] == r3, staged
+          assert "staged: " + r3 in machine.succeed("panda-update status")
+
+      with subtest("the next release is picked up the same way"):
           rc, log = upgrade()
           assert rc == 0, log
           assert locked_rev() == r3 and current() == "${gen "r3"}", (locked_rev(), current())
           assert "is healthy" in log, log
+          machine.fail("test -e /var/lib/pandaos/update-staged")
+
+      with subtest("moving the branch back to an older signed release is refused"):
+          reset_release(r2)
+          refused("does not descend from the running release", r3, "${gen "r3"}")
     '';
 }

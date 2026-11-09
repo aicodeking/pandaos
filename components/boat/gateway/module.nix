@@ -25,6 +25,7 @@ let
     }
   '';
   isLocal = lib.hasSuffix ".localhost" d;
+  acceptsOnDemand = lib.elem "on-demand-tls" boat.untrustedTenantsAcceptRisks;
   # The API's own paths; everything else is the dashboard, when there is one.
   apiPaths = [ "/v1/*" "/healthz" ];
   apiProxy = "reverse_proxy 127.0.0.1:${toString boat.apiPort}";
@@ -117,8 +118,17 @@ in
             services.boat.gateway: set dnsProvider (DNS-01, one wildcard certificate; recommended) or, knowing
             that a tenant can then burn your Let's Encrypt rate limit, allowOnDemandTLS = true. See docs/boat.md.'';
         }
+        {
+          # Untrusted tenants: allowOnDemandTLS alone is not enough.
+          assertion = boat.untrustedTenants && !isLocal && cfg.dnsProvider == null -> acceptsOnDemand;
+          message = ''
+            services.boat.untrustedTenants needs services.boat.gateway.dnsProvider (DNS-01 wildcards): with
+            on-demand HTTP-01 certificates any tenant can exhaust ${d}'s Let's Encrypt rate limit (TLS for new
+            routes then fails for everyone) and publishes every route name in CT logs. To run so anyway, set
+            services.boat.untrustedTenantsAcceptRisks = [ "on-demand-tls" ]; (and allowOnDemandTLS = true).'';
+        }
       ];
-      warnings = lib.optional (cfg.dnsProvider == null && !isLocal) ''
+      warnings = lib.optional (cfg.dnsProvider == null && !isLocal && (!boat.untrustedTenants || acceptsOnDemand)) ''
         services.boat.gateway has no dnsProvider, so every port route and desktop gets its own on-demand
         HTTP-01 certificate: a tenant can exhaust ${d}'s Let's Encrypt rate limit (TLS for new routes then
         fails for everyone) and all names are published in CT logs. Use DNS-01 in production; see docs/boat.md.'';

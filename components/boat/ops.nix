@@ -4,8 +4,11 @@
 # Updates never restart boatd (persistent VMs), so a new kernel, boatd or
 # Firecracker only takes effect on the next reboot. boat-reboot-check notices
 # that, logs it, and exports boat_reboot_pending for node-exporter's textfile
-# collector. A maintenance reboot drains by itself: stopping boatd pauses and
-# snapshots every VM, and boatd resumes them after boot.
+# collector. The opt-in maintenance window (services.boat.maintenance.reboot)
+# applies what is pending: a boatd restart when only boatd/firecracker changed
+# (action = "auto"), else a reboot. Both drain by themselves: stopping boatd
+# pauses and snapshots every VM, and boatd resumes them when it starts.
+# `panda-update status` shows what is pending and when the window is.
 { config, lib, pkgs, ... }:
 let
   boat = config.services.boat;
@@ -66,6 +69,9 @@ let
       echo "# HELP boat_reboot_pending 1 if the running kernel/boatd/firecracker differ from the installed ones."
       echo "# TYPE boat_reboot_pending gauge"
       echo "boat_reboot_pending $(( ''${#reasons[@]} > 0 ))"
+      echo "# HELP boat_maintenance_window_enabled 1 if the maintenance window applies pending changes on its own."
+      echo "# TYPE boat_maintenance_window_enabled gauge"
+      echo "boat_maintenance_window_enabled ${if mcfg.reboot then "1" else "0"}"
       for r in "''${reasons[@]}"; do echo "boat_reboot_pending_reason{reason=\"$r\"} 1"; done
     } >${metricsDir}/boat.prom.tmp
     mv ${metricsDir}/boat.prom.tmp ${metricsDir}/boat.prom
@@ -78,20 +84,51 @@ let
   '';
 
   maintScript = pkgs.writeShellScript "boat-maintenance-reboot" ''
+    set -u
     export PATH=${lib.makeBinPath [ pkgs.coreutils config.systemd.package ]}
+    last() { # action
+      { echo "# TYPE boat_maintenance_last_run_timestamp_seconds gauge"
+        echo "boat_maintenance_last_run_timestamp_seconds{action=\"$1\"} $(date +%s)"
+      } >${metricsDir}/boat-maintenance.prom.tmp
+      mv ${metricsDir}/boat-maintenance.prom.tmp ${metricsDir}/boat-maintenance.prom
+    }
     ${checkScript}
-    if ${lib.boolToString mcfg.onlyWhenPending} && [ ! -e /run/boat/reboot-pending ]; then
-      echo "boat-maintenance: nothing pending, not rebooting"
+    pending=$(cat /run/boat/reboot-pending 2>/dev/null || true)
+    if ${lib.boolToString mcfg.onlyWhenPending} && [ -z "$pending" ]; then
+      echo "boat-maintenance: nothing pending"
+      last none
       exit 0
     fi
-    echo "boat-maintenance: rebooting (pending: $(cat /run/boat/reboot-pending 2>/dev/null || echo forced)); boatd snapshots all VMs first"
+    # Only boatd/firecracker changed: a boatd restart applies it (VMs are
+    # snapshotted and resumed by the new boatd), no reboot needed.
+    if [ ${mcfg.action} = auto ] && [ "$pending" = boatd-or-firecracker ]; then
+      echo "boat-maintenance: restarting boatd (pending: $pending); it snapshots and resumes all VMs"
+      last restart-boatd
+      systemctl restart boatd.service
+      ${checkScript}
+      exit 0
+    fi
+    echo "boat-maintenance: rebooting (pending: ''${pending:-forced}); boatd snapshots all VMs first"
+    last reboot
     exec systemctl reboot
   '';
 in
 {
   options.services.boat = {
     maintenance = {
-      reboot = lib.mkEnableOption "scheduled maintenance reboots (VMs are snapshotted and resumed)";
+      reboot = lib.mkEnableOption ''
+        the maintenance window: at {option}`onCalendar`, apply what boat-reboot-check
+        reports pending (boat_reboot_pending), by restarting boatd or rebooting (see
+        {option}`action`). VMs are snapshotted and resumed either way'';
+      action = mkOption {
+        type = types.enum [ "auto" "reboot" ];
+        default = "auto";
+        description = ''
+          `auto`: restart only boatd when nothing but boatd/firecracker changed
+          (VMs are snapshotted and resumed, the host stays up), reboot for a new
+          kernel. `reboot`: always reboot.
+        '';
+      };
       onCalendar = mkOption {
         type = types.str;
         default = "Sun *-*-* 04:00:00";

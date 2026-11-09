@@ -1,10 +1,23 @@
 # Daily unattended updates from the installed system's local flake, with a
-# health check that rolls back on failure. Never reboots.
+# health check that rolls back on failure. Never reboots (boat hosts: see
+# services.boat.maintenance in components/boat/ops.nix).
 #
 # Release channel: the installer writes /etc/pandaos/flake.nix with
 #   inputs.pandaos.url = "github:AICodeKing/pandaos/release";
 # plus a flake.lock pinned to the ISO's revision. The release workflow moves
 # the `release` branch only after CI passes, so boxes never track main HEAD.
+#
+# Trust: the GitHub branch alone is not trusted. Before switching,
+# panda-update-verify (update-verify.sh) requires the new release commit to be
+# SSH-signed by a key in pandaos.updates.allowedSigners, to descend from the
+# running release, and to be the tree Nix fetched; otherwise it restores
+# flake.lock and the box keeps running what it runs.
+# OWNER ITEM: the owner must create the release-signing key, publish its
+# public half in allowedSigners (the default below, or local.nix), and sign
+# every commit the `release` branch points at with that key (`git commit -S`
+# with gpg.format=ssh; a signed tag is not enough, the commit itself must
+# carry the signature).
+# Until then, every update is refused and a build-time warning says so.
 #
 # Runtime conditions, not eval-time checks (the flake is written after this
 # config is built; the live ISO and VM tests have none):
@@ -19,6 +32,70 @@ let
   holdFile = "/var/lib/pandaos/update-hold";
   rundir = "/run/panda-update";
   health = config.system.build.panda-health;
+  verifyState = "/var/lib/pandaos/update-verify";
+  stagedFile = "/var/lib/pandaos/update-staged";
+  signersFile =
+    if cfg.allowedSignersFile != null then
+      cfg.allowedSignersFile
+    else
+      pkgs.writeText "pandaos-allowed-signers" (lib.concatLines cfg.allowedSigners);
+  noSigners = cfg.allowedSigners == [ ] && cfg.allowedSignersFile == null;
+
+  verify = pkgs.writeShellApplication {
+    name = "panda-update-verify";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.gnugrep
+      pkgs.jq
+      pkgs.gitMinimal
+      pkgs.openssh # ssh-keygen -Y verify, for git verify-commit
+      config.nix.package.out
+    ];
+    text = builtins.readFile ./update-verify.sh;
+  };
+  # Bump the pandaos input in flake.lock, verified (or refused, lock restored).
+  fetchVerified = lib.escapeShellArgs [
+    (lib.getExe verify)
+    flakeDir
+    "pandaos"
+    signersFile
+    "/var/lib/pandaos/release.git"
+    verifyState
+  ];
+  rebuildFlags = toString config.system.autoUpgrade.flags;
+
+  # Staged mode: fetch, verify and build the next release without switching to
+  # it; `panda-update run` applies (it fetches and verifies again).
+  stager = pkgs.writeShellApplication {
+    name = "panda-update-stage";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.diffutils
+      pkgs.jq
+      pkgs.gitMinimal
+      config.nix.package.out
+      config.system.build.nixos-rebuild
+    ];
+    text = ''
+      lock=${flakeDir}/flake.lock
+      saved=$(mktemp)
+      cp -p "$lock" "$saved"
+      # flake.lock always goes back: it names what runs, not what is staged.
+      trap 'cp -p "$saved" "$lock"; rm -f "$saved"' EXIT
+      ${fetchVerified}
+      if cmp -s "$saved" "$lock"; then
+        echo "panda-update: nothing new to stage"
+        exit 0
+      fi
+      rev=$(jq -r '.nodes.pandaos.locked.rev' "$lock")
+      mkdir -p /var/lib/pandaos/staged
+      cd /var/lib/pandaos/staged || exit 1
+      nixos-rebuild build ${rebuildFlags}
+      echo "$rev $(readlink -f result)" >${stagedFile}.tmp
+      mv ${stagedFile}.tmp ${stagedFile}
+      echo "panda-update: staged release $rev ($(readlink -f result)). Apply with: sudo panda-update run"
+    '';
+  };
 
   # The switch runs inside this wrapper so the EXIT trap does the health check
   # and rollback whether the switch succeeded, failed half-way or was killed.
@@ -83,6 +160,9 @@ let
         fi
         if [ "$switch_rc" -eq 0 ] && panda-health "''${health_args[@]}"; then
           echo "panda-update: $now is healthy"
+          rm -f ${stagedFile}
+          # Boat hosts: refresh boat_reboot_pending now, not within the hour.
+          systemctl start --no-block boat-reboot-check.service 2>/dev/null || true
           exit 0
         fi
         if shutting_down; then
@@ -162,11 +242,21 @@ let
           if [ -e "$hold" ]; then
             echo "updates: on hold ($(cat "$hold"))"
           else
-            echo "updates: automatic"
+            echo "updates: ${cfg.mode}"
           fi
           echo "system:  $(readlink -f /run/current-system)"
+          echo "signed releases: ${
+            if !cfg.requireSignedRelease then "NOT required"
+            else if noSigners then "required, but no allowed signers are configured (every update is refused)"
+            else "required (allowed signers: ${signersFile})"
+          }"
+          if [ -s ${verifyState} ]; then echo "last release check: $(cat ${verifyState})"; fi
+          if [ -s ${stagedFile} ]; then echo "staged: $(cat ${stagedFile})"; fi
+          if [ -s /run/boat/reboot-pending ]; then
+            echo "reboot pending: $(cat /run/boat/reboot-pending) (boat maintenance window applies it)"
+          fi
           systemctl show nixos-upgrade.service -p Result -p InactiveEnterTimestamp || true
-          systemctl list-timers --no-pager nixos-upgrade.timer || true
+          systemctl list-timers --no-pager nixos-upgrade.timer panda-update-stage.timer boat-maintenance-reboot.timer || true
           ;;
         *)
           echo "usage: panda-update run|hold|unhold|rollback|status" >&2
@@ -183,12 +273,54 @@ in
       default = true;
       description = "Daily auto-upgrade of the `pandaos` input of /etc/pandaos, with health-checked rollback.";
     };
+    mode = lib.mkOption {
+      type = lib.types.enum [ "automatic" "staged" "manual" ];
+      default = "automatic";
+      description = ''
+        `automatic`: the daily timer fetches, verifies and switches.
+        `staged`: the daily timer fetches, verifies and builds the next release
+        but does not switch; `sudo panda-update run` applies it.
+        `manual`: no timer; only `sudo panda-update run` updates.
+        Hosts with `services.boat.untrustedTenants` default to `staged`.
+      '';
+    };
+    requireSignedRelease = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Refuse a release unless its commit is SSH-signed by a key in
+        {option}`pandaos.updates.allowedSigners`, descends from the running
+        release, and is the tree Nix fetched. Turning this off trusts whoever
+        can move the GitHub branch with root on this machine.
+      '';
+    };
+    allowedSigners = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ ''release@pandaos namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...'' ];
+      description = ''
+        Lines of an ssh `allowed_signers` file (`git config gpg.ssh.allowedSignersFile`):
+        `<principal> [options] <keytype> <key>`. Release commits must be signed by
+        one of these keys. The owner provides the key and signs releases; while
+        this is empty, every update is refused.
+      '';
+    };
+    allowedSignersFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "An allowed_signers file to use instead of {option}`allowedSigners`.";
+    };
     switchCommand = lib.mkOption {
       type = lib.types.str;
       internal = true;
-      # Flags from system.autoUpgrade: --refresh, --flake ..., --update-input pandaos.
-      default = "nixos-rebuild switch ${toString config.system.autoUpgrade.flags}";
-      defaultText = lib.literalExpression ''"nixos-rebuild switch ''${toString config.system.autoUpgrade.flags}"'';
+      # Flags from system.autoUpgrade: --refresh, --flake ... (and --update-input
+      # pandaos only when signatures are not required).
+      # Separate lines, not `&&`: panda-update-run's errexit must stop on a
+      # refused release (the left side of `&&` never trips errexit).
+      default =
+        lib.optionalString cfg.requireSignedRelease "${fetchVerified}\n"
+        + "nixos-rebuild switch ${rebuildFlags}";
+      defaultText = lib.literalExpression ''"panda-update-verify ... && nixos-rebuild switch ''${toString config.system.autoUpgrade.flags}"'';
       description = ''
         Shell command that builds and activates the new system. VM tests
         override it to switch to a prebuilt generation offline; the health
@@ -205,7 +337,9 @@ in
       # nixos-rebuild-ng (26.05) accepts --update-input and passes it to Nix
       # 2.34, which still honours it but marks it deprecated in favour of
       # `nix flake update pandaos --flake /etc/pandaos`.
-      flags = [
+      # With signatures required, panda-update-verify bumps and checks the lock
+      # first, and nixos-rebuild builds exactly that lock.
+      flags = lib.optionals (!cfg.requireSignedRelease) [
         "--update-input"
         "pandaos"
       ];
@@ -215,7 +349,36 @@ in
       allowReboot = false;
     };
 
-    systemd.timers.nixos-upgrade.unitConfig.ConditionPathExists = "${flakeDir}/flake.nix";
+    warnings = lib.optional (cfg.requireSignedRelease && noSigners) ''
+      pandaos.updates.allowedSigners is empty: every update will be refused, because no release
+      signature can be trusted. Add the release-signing public key (an ssh allowed_signers line).'';
+
+    systemd.timers.nixos-upgrade = {
+      unitConfig.ConditionPathExists = "${flakeDir}/flake.nix";
+      wantedBy = lib.mkIf (cfg.mode != "automatic") (lib.mkForce [ ]);
+    };
+
+    systemd.services.panda-update-stage = {
+      description = "PandaOS: fetch, verify and build the next release without switching";
+      unitConfig.ConditionPathExists = [
+        "${flakeDir}/flake.nix"
+        "!${holdFile}"
+      ];
+      environment.HOME = "/root";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = lib.getExe stager;
+      };
+    };
+    systemd.timers.panda-update-stage = lib.mkIf (cfg.mode == "staged") {
+      wantedBy = [ "timers.target" ];
+      unitConfig.ConditionPathExists = "${flakeDir}/flake.nix";
+      timerConfig = {
+        OnCalendar = config.system.autoUpgrade.dates;
+        RandomizedDelaySec = config.system.autoUpgrade.randomizedDelaySec;
+        Persistent = true;
+      };
+    };
     systemd.services.nixos-upgrade = {
       unitConfig.ConditionPathExists = [
         "${flakeDir}/flake.nix"

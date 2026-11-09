@@ -4,6 +4,11 @@
 #   its children keep running (restartIfChanged = false), boat-api moves to the
 #   new version, panda-health passes, the pending-reboot metric turns on, and a
 #   boatd restart then snapshots and resumes.
+#   The boatd restart is the maintenance window's (maintenance.reboot, action
+#   auto): only boatd changed, so it restarts boatd instead of rebooting, and
+#   `panda-update status` showed the pending change first.
+# - Hardening: boat-api has its MemoryMax and no OOM protection; node_exporter
+#   listens on 127.0.0.1 only.
 #   This proves the unit behaviour. Real VMs through a boatd stop and restart
 #   are in gateway/e2e-edge.sh, on a runner where Firecracker works.
 # - Backup and restore: a real restic repository, restored into a scratch dir;
@@ -61,6 +66,11 @@ pkgs.testers.runNixOSTest {
         boatdPackage = lib.mkDefault (stubBoatd "v1");
         apiPackage = lib.mkDefault (stubApi "v1");
         cliPackage = stubCli;
+        # The test starts the window's unit itself; the timer never fires.
+        maintenance = {
+          reboot = true;
+          onCalendar = "2099-01-01";
+        };
         backup = {
           enable = true;
           repository = "/var/backup/restic";
@@ -87,6 +97,15 @@ pkgs.testers.runNixOSTest {
       read = lambda f: machine.succeed(f"cat {f}").strip()
       main_pid = lambda: machine.succeed("systemctl show -P MainPID boatd.service").strip()
 
+      with subtest("hardening: boat-api memory cap, node_exporter on loopback"):
+          show = lambda u, p: machine.succeed(f"systemctl show -P {p} {u}").strip()
+          assert show("boat-api", "MemoryMax") == str(2 * 1024**3), show("boat-api", "MemoryMax")
+          assert int(show("boat-api", "OOMScoreAdjust")) > -900, show("boat-api", "OOMScoreAdjust")
+          machine.wait_for_unit("prometheus-node-exporter.service")
+          machine.wait_until_succeeds("ss -Hltn 'sport = :9100' | grep -q 127.0.0.1:9100")
+          listen = machine.succeed("ss -Hltn 'sport = :9100'")
+          assert "0.0.0.0:9100" not in listen and "[::]:9100" not in listen and "*:9100" not in listen, listen
+
       with subtest("switch to the next generation with VMs running"):
           assert read("/var/lib/boat/api/version") == "v1"
           boatd_before, vm_before = main_pid(), read("/var/lib/boat/stub/vm.pid")
@@ -108,8 +127,14 @@ pkgs.testers.runNixOSTest {
           assert "boat_reboot_pending 1" in prom and "boatd-or-firecracker" in prom, prom
           assert "boatd" in read("/run/boat/reboot-pending")
 
-      with subtest("restarting boatd applies it: snapshot, then resume on the new version"):
-          machine.succeed("systemctl restart boatd.service")
+      with subtest("the maintenance window applies it with a boatd restart: snapshot, then resume on the new version"):
+          status = machine.succeed("panda-update status")
+          assert "reboot pending: boatd-or-firecracker" in status, status
+          assert "boat_maintenance_window_enabled 1" in read("/var/lib/boat-metrics/boat.prom")
+          boot_id = read("/proc/sys/kernel/random/boot_id")
+          machine.succeed("systemctl start boat-maintenance-reboot.service")
+          assert read("/proc/sys/kernel/random/boot_id") == boot_id, "the window rebooted for a boatd-only change"
+          assert 'action="restart-boatd"' in read("/var/lib/boat-metrics/boat-maintenance.prom")
           assert read("/var/lib/boat/stub/snapshotted") == "v1"
           machine.wait_until_succeeds("grep -qx v2 /var/lib/boat/stub/resumed-by")
           machine.fail(f"kill -0 {vm_before}")

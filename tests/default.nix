@@ -377,6 +377,8 @@ in
   update-rollback = import ./update-rollback.nix { inherit pkgs self t; };
   boot-fallback = import ./boot-fallback.nix { inherit pkgs self t; };
   update-e2e = import ./update-e2e.nix { inherit pkgs self t; };
+  # Evaluation only: boat host hardening options, units and assertions.
+  boat-eval = import ./boat-eval.nix { inherit pkgs self; };
   iso-boot = import ./iso-boot.nix { inherit pkgs self t; };
   pandacode-host = import ./pandacode-host.nix { inherit pkgs self t; };
   panda-ckpt = import ../components/checkpoint/vmtest.nix { inherit pkgs self; };

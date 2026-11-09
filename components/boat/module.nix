@@ -87,8 +87,16 @@ let
   };
 
   # Last two labels: a heuristic (co.uk looks like a registrable domain), good
-  # enough to warn on.
+  # enough to warn on, and to refuse on under untrustedTenants (with an escape
+  # hatch, untrustedTenantsAcceptRisks, for when the heuristic is wrong).
   regDomain = name: lib.concatStringsSep "." (lib.takeEnd 2 (lib.splitString "." name));
+  isLocal = lib.hasSuffix ".localhost" cfg.domain;
+  sameSite = name: !isLocal && regDomain name == regDomain cfg.domain;
+  accepts = risk: lib.elem risk cfg.untrustedTenantsAcceptRisks;
+  sameSiteMsg = what: name: ''
+    services.boat.${what} (${name}) shares a registrable domain with ${cfg.domain}: tenant content
+    there is same-site with api.${cfg.domain} and can set cookies for ${regDomain cfg.domain}. Use a separate
+    domain (or one on the Public Suffix List); see docs/boat.md.'';
 
   # Exit status for "this host cannot run boatd" (EX_CONFIG): no restart loop.
   exConfig = 78;
@@ -180,6 +188,7 @@ let
     "-ai-proxy-listen" "10.200.0.1:${toString aiProxyPort}"
     "-public-url" "https://api.${cfg.domain}"
   ]
+  ++ lib.optionals (cfg.vmApiUrl != null) [ "-vm-api-url" cfg.vmApiUrl ]
   ++ lib.optionals cfg.sshGateway.enable [ "-ssh-jump" "jump@ssh.${cfg.domain}:${toString cfg.sshGateway.port}" ]
   ++ lib.optionals (imageIds != [ ]) [ "-images" (lib.concatStringsSep "," imageIds) ];
 in
@@ -360,6 +369,41 @@ in
       default = true;
       description = "Refuse to start boatd without /dev/kvm. Turn off only for stub-boatd tests.";
     };
+    vmApiUrl = mkOption {
+      type = types.nullOr (types.strMatching "https?://.+");
+      default = "https://api.${cfg.domain}";
+      defaultText = lib.literalExpression ''"https://api.''${config.services.boat.domain}"'';
+      example = "https://api.boat.example.com";
+      description = ''
+        boat-api as guests reach it (`-vm-api-url`): injected into each VM as
+        `BOAT_URL` together with a per-VM token, so code in a VM can call the API
+        about itself. Null: guests get only `BOAT_ID`.
+      '';
+    };
+    apiMemoryMax = mkOption {
+      type = types.str;
+      default = "2G";
+      example = "4G";
+      description = ''
+        Hard memory limit (systemd `MemoryMax`) for boat-api. Past it the kernel
+        kills boat-api inside its own cgroup (and systemd restarts it) instead of
+        the host OOM killer picking tenant VMs. Imports stream to disk, so this
+        bounds the API's own state, not archive sizes.
+      '';
+    };
+    untrustedTenantsAcceptRisks = mkOption {
+      type = types.listOf (types.enum [ "shared-registrable-domain" "on-demand-tls" ]);
+      default = [ ];
+      example = [ "shared-registrable-domain" ];
+      description = ''
+        Escape hatch for checks that {option}`untrustedTenants` turns from warnings
+        into errors. `shared-registrable-domain`: vmDomain or desktopDomain shares
+        the last two labels with {option}`domain` (right when that parent is on the
+        Public Suffix List, e.g. a `co.uk` name, which the check cannot tell).
+        `on-demand-tls`: no {option}`gateway.dnsProvider`, so a tenant can exhaust
+        the domain's Let's Encrypt rate limit. Each entry accepts that risk.
+      '';
+    };
     sshGateway = {
       enable = lib.mkEnableOption "the ssh jump host for VMs" // { default = true; };
       port = mkOption {
@@ -371,15 +415,12 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    warnings =
-      lib.optional (!(lib.hasSuffix ".localhost" cfg.domain) && regDomain cfg.vmDomain == regDomain cfg.domain) ''
-        services.boat.vmDomain (${cfg.vmDomain}) shares a registrable domain with ${cfg.domain}: tenant apps
-        are same-site with api.${cfg.domain} and can set cookies for ${regDomain cfg.domain}. Use a separate
-        domain (or one on the Public Suffix List) before you host untrusted tenants; see docs/boat.md.''
-      ++ lib.optional (!(lib.hasSuffix ".localhost" cfg.domain) && regDomain cfg.desktopDomain == regDomain cfg.domain) ''
-        services.boat.desktopDomain (${cfg.desktopDomain}) shares a registrable domain with ${cfg.domain}: the
-        pages a VM's desktop serves are same-site with api.${cfg.domain}. Use a separate domain before you
-        host untrusted tenants; see docs/boat.md.'';
+    # Trusted tenants: a warning. untrustedTenants: an error (assertions below),
+    # unless accepted in untrustedTenantsAcceptRisks.
+    warnings = lib.optionals (!cfg.untrustedTenants || accepts "shared-registrable-domain") (
+      lib.optional (sameSite cfg.vmDomain) (sameSiteMsg "vmDomain" cfg.vmDomain)
+      ++ lib.optional (sameSite cfg.desktopDomain) (sameSiteMsg "desktopDomain" cfg.desktopDomain)
+    );
 
     assertions = [
       {
@@ -389,6 +430,16 @@ in
       {
         assertion = lib.hasAttr cfg.defaultSize cfg.sizes;
         message = "services.boat.defaultSize must name one of services.boat.sizes.";
+      }
+      {
+        assertion = cfg.untrustedTenants && !accepts "shared-registrable-domain" -> !sameSite cfg.vmDomain && !sameSite cfg.desktopDomain;
+        message = lib.concatStringsSep "\n" (
+          [ "services.boat.untrustedTenants refuses tenant content on the API's site:" ]
+          ++ lib.optional (sameSite cfg.vmDomain) (sameSiteMsg "vmDomain" cfg.vmDomain)
+          ++ lib.optional (sameSite cfg.desktopDomain) (sameSiteMsg "desktopDomain" cfg.desktopDomain)
+          ++ [ ''If that parent domain is on the Public Suffix List (the check only compares the last two labels),
+            set services.boat.untrustedTenantsAcceptRisks = [ "shared-registrable-domain" ];'' ]
+        );
       }
       {
         assertion = cfg.untrustedTenants -> !(cfg.boatdSettings.warmPool or false) && (cfg.boatdSettings.ksmTeam or "") == "";
@@ -584,7 +635,12 @@ in
         RestartPreventExitStatus = exConfig;
         # Read by boat-api from $CREDENTIALS_DIRECTORY/boat-master-key.
         LoadCredentialEncrypted = [ masterCred desktopCred ];
-        OOMScoreAdjust = -900;
+        # Bounded: a leak or a flood kills boat-api inside its own cgroup and
+        # Restart=always brings it back in 2 s; the host OOM killer never has to
+        # choose between it and tenant VMs. No OOMScoreAdjust protection
+        # either: a restartable API should not outrank a tenant's VM.
+        MemoryMax = cfg.apiMemoryMax;
+        MemorySwapMax = 0;
         User = "boat";
         Group = "boat";
         Restart = "always";

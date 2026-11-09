@@ -9,10 +9,12 @@
 #
 # Hosting tenants you do not trust? Also set services.boat.untrustedTenants = true,
 # and reboot: SMT off, abuse limits on, KSM and warmPool refused (PROTOCOL.md).
+# Updates then default to `staged` (fetched, verified and built daily, applied
+# by `sudo panda-update run`); set pandaos.updates.mode = "automatic" to undo.
 #
 # Already on via the base modules: nftables firewall, key-only ssh, sshguard,
-# daily unattended updates with rollback (updates.nix).
-{ lib, ... }:
+# daily signed-release updates with rollback (updates.nix).
+{ config, lib, ... }:
 {
   imports = [ ./headless.nix ];
 
@@ -20,6 +22,8 @@
     enable = true;
     domain = lib.mkDefault "boat.localhost";
   };
+  # An untrusted-tenant host changes only when its operator says so.
+  pandaos.updates.mode = lib.mkIf config.services.boat.untrustedTenants (lib.mkDefault "staged");
   # Firewall: the gateway opens 80/443 (tcp) + 443 (udp, HTTP/3); the openssh
   # module opens 22 and the jump port 2222 (services.boat.sshGateway.port).
 
@@ -42,11 +46,13 @@
     ];
   };
 
-  # Host metrics on :9100, not opened in the firewall: scrape over ssh,
-  # WireGuard or add the port to networking.firewall.interfaces.<if>.
+  # Host metrics on 127.0.0.1:9100 only: they name units, mounts and tenant
+  # load. Scrape through an ssh tunnel, or set listenAddress to an admin
+  # (WireGuard) address and open the port on that interface only.
   # boat-reboot-check writes boat_reboot_pending to the textfile collector.
   services.prometheus.exporters.node = {
     enable = true;
+    listenAddress = lib.mkDefault "127.0.0.1";
     enabledCollectors = [ "systemd" "textfile" ];
     extraFlags = [ "--collector.textfile.directory=/var/lib/boat-metrics" ];
   };
