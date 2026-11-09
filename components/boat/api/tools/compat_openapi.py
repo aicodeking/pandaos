@@ -76,10 +76,24 @@ ROUTES = [
     ("PATCH", "/api/v1/webhooks/{id}", "/webhooks/{webhookId}", "admin", ["name", "url", "events"], "edit"),
     ("DELETE", "/api/v1/webhooks/{id}", "/webhooks/{webhookId}", "admin", None, "remove"),
     ("POST", "/api/v1/webhooks/{id}/rotate", "/webhooks/{webhookId}/rotate", "admin", None, "rotate the signing secret"),
+    # API keys: actions are this server's scopes (compat_admin.go)
+    ("GET", "/api/v1/api-keys", "/api-keys", "", None, "keys you can manage (GET /v1/keys)"),
+    ("POST", "/api/v1/api-keys/scoped", "/api-keys/scoped", "",
+     ["name", "ttl", "preset", "actions", "sandboxIds", "environmentIds"], "create (POST /v1/keys)"),
+    ("DELETE", "/api/v1/api-keys/{id}", "/api-keys/{apiKeyId}", "", None, "revoke (DELETE /v1/keys/{id})"),
+    ("POST", "/api/v1/api-keys/{id}/rotate", "/api-keys/{apiKeyId}/rotate", "", None, "rotate, no overlap"),
+    ("GET", "/api/v1/api-keys/{id}/usage", "/api-keys/{apiKeyId}/usage", "", None, "requests since this process started"),
+    # environments: variables and secret selection (compat_admin.go)
+    ("GET", "/api/v1/environments", "/environments", "vms:read", None, "environments (GET /v1/environments)"),
+    ("POST", "/api/v1/environments", "/environments", "admin", ["name"], "create (POST /v1/environments)"),
+    ("PUT", "/api/v1/environments/{id}", "/environments/{environmentId}", "admin",
+     ["name", "isDefault", "envContents", "passSecrets"], "update (PUT /v1/environments/{id})"),
+    ("DELETE", "/api/v1/environments/{id}", "/environments/{environmentId}", "admin", None, "delete"),
 ]
 
 PARAM_RENAME = {"sandboxId": "id", "operationId": "opid", "stopId": "stopid", "promptId": "pid", "processId": "pid",
-                "commandId": "cid", "webhookId": "id"}
+                "commandId": "cid", "webhookId": "id",
+                "apiKeyId": "id", "environmentId": "id"}
 
 
 def main(src, dst):

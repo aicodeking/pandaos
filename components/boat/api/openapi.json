@@ -7703,6 +7703,396 @@
      }
     }
    }
+  },
+  "/api/v1/api-keys": {
+   "get": {
+    "summary": "boat.dev apiKeys: keys you can manage (GET /v1/keys)",
+    "operationId": "compat_apiKeys",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDApiKeysResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/api-keys/scoped": {
+   "post": {
+    "summary": "boat.dev createScopedApiKey: create (POST /v1/keys)",
+    "operationId": "compat_createScopedApiKey",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "ttl": {
+          "type": "string"
+         },
+         "preset": {
+          "type": "string",
+          "enum": [
+           "read-only",
+           "full-sandbox",
+           "ci",
+           "admin"
+          ]
+         },
+         "actions": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "sandboxIds": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "environmentIds": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "boat.dev 201",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDApiKeySecretResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/api-keys/{id}": {
+   "delete": {
+    "summary": "boat.dev revokeApiKey: revoke (DELETE /v1/keys/{id})",
+    "operationId": "compat_revokeApiKey",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDApiKeyRevokeResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/api-keys/{id}/rotate": {
+   "post": {
+    "summary": "boat.dev rotateApiKey: rotate, no overlap",
+    "operationId": "compat_rotateApiKey",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDApiKeySecretResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/api-keys/{id}/usage": {
+   "get": {
+    "summary": "boat.dev apiKeyUsage: requests since this process started",
+    "operationId": "compat_apiKeyUsage",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDApiKeyUsageResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/environments": {
+   "get": {
+    "summary": "boat.dev environments: environments (GET /v1/environments)",
+    "operationId": "compat_environments",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxEnvironmentListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "boat.dev createEnvironment: create (POST /v1/environments)",
+    "operationId": "compat_createEnvironment",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9._-]+$"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxEnvironmentListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/environments/{id}": {
+   "put": {
+    "summary": "boat.dev updateEnvironment: update (PUT /v1/environments/{id})",
+    "operationId": "compat_updateEnvironment",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "isDefault": {
+          "type": "boolean"
+         },
+         "envContents": {
+          "type": "string"
+         },
+         "passSecrets": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxEnvironmentResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteEnvironment: delete",
+    "operationId": "compat_deleteEnvironment",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxEnvironmentResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
   }
  },
  "components": {
@@ -9101,6 +9491,384 @@
      "state",
      "desktopAvailable",
      "snapshotAvailable"
+    ]
+   },
+   "BDApiKey": {
+    "type": "object",
+    "required": [
+     "id",
+     "name",
+     "credentialLane",
+     "keyPrefix",
+     "keyLastFour",
+     "sandboxId",
+     "createdAt",
+     "lastUsedAt",
+     "usage",
+     "resources"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "credentialLane": {
+      "type": "string",
+      "enum": [
+       "legacy",
+       "scoped-v1"
+      ]
+     },
+     "keyPrefix": {
+      "type": "string"
+     },
+     "keyLastFour": {
+      "type": "string"
+     },
+     "sandboxId": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "createdAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "lastUsedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "usage": {
+      "$ref": "#/components/schemas/BDApiKeyRequestUsage"
+     },
+     "resources": {
+      "$ref": "#/components/schemas/BDApiKeyResourceTotals"
+     },
+     "expiresAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "expired": {
+      "type": "boolean"
+     },
+     "expiringSoon": {
+      "type": "boolean"
+     },
+     "scope": {
+      "type": "object",
+      "properties": {
+       "expiresAt": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "format": "date-time"
+       },
+       "actions": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       },
+       "sandboxes": {
+        "oneOf": [
+         {
+          "type": "string",
+          "enum": [
+           "*"
+          ]
+         },
+         {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        ]
+       },
+       "environments": {
+        "oneOf": [
+         {
+          "type": "string",
+          "enum": [
+           "*"
+          ]
+         },
+         {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        ]
+       },
+       "grandfathered": {
+        "type": "boolean"
+       }
+      }
+     }
+    }
+   },
+   "BDApiKeyCatalog": {
+    "type": "object",
+    "required": [
+     "actions",
+     "presets",
+     "defaultTtl",
+     "maxTtl",
+     "scopedCreationEnabled"
+    ],
+    "properties": {
+     "actions": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "presets": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      }
+     },
+     "defaultTtl": {
+      "type": "string"
+     },
+     "maxTtl": {
+      "type": "string"
+     },
+     "scopedCreationEnabled": {
+      "type": "boolean"
+     },
+     "scopeResources": {
+      "type": "object",
+      "required": [
+       "sandboxes",
+       "environments"
+      ],
+      "properties": {
+       "sandboxes": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDApiKeyScopeResource"
+        }
+       },
+       "environments": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDApiKeyScopeResource"
+        }
+       }
+      }
+     }
+    }
+   },
+   "BDApiKeyCreatedResource": {
+    "type": "object",
+    "required": [
+     "kind",
+     "id",
+     "name",
+     "state",
+     "createdAt"
+    ],
+    "properties": {
+     "kind": {
+      "type": "string",
+      "enum": [
+       "sandbox",
+       "agent"
+      ]
+     },
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "state": {
+      "type": "string"
+     },
+     "createdAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
+    }
+   },
+   "BDApiKeyRequestUsage": {
+    "type": "object",
+    "required": [
+     "requests",
+     "windowDays"
+    ],
+    "properties": {
+     "requests": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "windowDays": {
+      "type": "integer",
+      "const": 30
+     }
+    }
+   },
+   "BDApiKeyResourceTotals": {
+    "type": "object",
+    "required": [
+     "total",
+     "sandboxes",
+     "agents"
+    ],
+    "properties": {
+     "total": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "sandboxes": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "agents": {
+      "type": "integer",
+      "minimum": 0
+     }
+    }
+   },
+   "BDApiKeyRevokeResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "apiKeys"
+      ],
+      "properties": {
+       "apiKeys": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDApiKey"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDApiKeyScopeResource": {
+    "type": "object",
+    "required": [
+     "id",
+     "name",
+     "organizationId",
+     "organizationName"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "organizationId": {
+      "type": "string"
+     },
+     "organizationName": {
+      "type": "string"
+     }
+    }
+   },
+   "BDApiKeySecretResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "apiKey",
+       "secret",
+       "apiKeys"
+      ],
+      "properties": {
+       "apiKey": {
+        "$ref": "#/components/schemas/BDApiKey"
+       },
+       "secret": {
+        "type": "string"
+       },
+       "apiKeys": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDApiKey"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDApiKeyUsageResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "$ref": "#/components/schemas/BDApiKey"
+     },
+     {
+      "type": "object",
+      "required": [
+       "createdResources"
+      ],
+      "properties": {
+       "createdResources": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDApiKeyCreatedResource"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDApiKeysResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "apiKeys",
+       "catalog"
+      ],
+      "properties": {
+       "apiKeys": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDApiKey"
+        }
+       },
+       "catalog": {
+        "$ref": "#/components/schemas/BDApiKeyCatalog"
+       }
+      }
+     }
     ]
    },
    "BDCommandInfoResponse": {
@@ -11063,6 +11831,66 @@
      }
     ]
    },
+   "BDRepository": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+     "id": {
+      "type": "integer"
+     },
+     "databaseId": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "fullName": {
+      "type": "string"
+     },
+     "url": {
+      "type": "string",
+      "format": "uri"
+     },
+     "private": {
+      "type": "boolean"
+     },
+     "permissions": {
+      "type": "string"
+     },
+     "pushedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "lastUserCommitAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
+    }
+   },
+   "BDResourceAccess": {
+    "type": "object",
+    "required": [
+     "restricted",
+     "members"
+    ],
+    "properties": {
+     "restricted": {
+      "type": "boolean"
+     },
+     "members": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   },
    "BDSandbox": {
     "type": "object",
     "required": [
@@ -11516,6 +12344,167 @@
      }
     ]
    },
+   "BDSandboxEnvironment": {
+    "type": "object",
+    "required": [
+     "id",
+     "name",
+     "isDefault",
+     "latestVersionId",
+     "safeForThirdParties",
+     "passGithub",
+     "passSecrets",
+     "passSandboxCredentials",
+     "passAgentsCredentials",
+     "envContents",
+     "secretFiles",
+     "versions"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "name": {
+      "type": "string"
+     },
+     "isDefault": {
+      "type": "boolean"
+     },
+     "latestVersionId": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "uuid"
+     },
+     "latestVersionNumber": {
+      "type": "integer"
+     },
+     "safetyAnsweredAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "safeForThirdParties": {
+      "type": "boolean"
+     },
+     "passGithub": {
+      "type": "boolean"
+     },
+     "passSecrets": {
+      "type": "boolean"
+     },
+     "passSandboxCredentials": {
+      "type": "boolean"
+     },
+     "passAgentsCredentials": {
+      "type": "boolean"
+     },
+     "credentialProfileId": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "proxyAiCredentials": {
+      "type": "boolean"
+     },
+     "access": {
+      "$ref": "#/components/schemas/BDResourceAccess"
+     },
+     "envContents": {
+      "type": "string"
+     },
+     "secretFiles": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/BDSecretFile"
+      }
+     },
+     "selectedRepositories": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/BDSelectedRepository"
+      }
+     },
+     "versions": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/BDSandboxEnvironmentVersionSummary"
+      }
+     }
+    }
+   },
+   "BDSandboxEnvironmentListResponse": {
+    "type": "object",
+    "required": [
+     "environments"
+    ],
+    "properties": {
+     "ok": {
+      "type": "boolean"
+     },
+     "type": {
+      "type": "string",
+      "const": "environments.list"
+     },
+     "environments": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/BDSandboxEnvironment"
+      }
+     }
+    }
+   },
+   "BDSandboxEnvironmentResponse": {
+    "type": "object",
+    "required": [
+     "success"
+    ],
+    "properties": {
+     "success": {
+      "type": "boolean"
+     },
+     "environment": {
+      "oneOf": [
+       {
+        "$ref": "#/components/schemas/BDSandboxEnvironment"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     }
+    }
+   },
+   "BDSandboxEnvironmentVersionSummary": {
+    "type": "object",
+    "required": [
+     "id",
+     "versionNumber",
+     "sandboxCount",
+     "createdAt"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "versionNumber": {
+      "type": "integer"
+     },
+     "sandboxCount": {
+      "type": "integer"
+     },
+     "createdAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
    "BDSandboxEvent": {
     "type": "object",
     "required": [
@@ -11903,6 +12892,48 @@
        },
        "snapshot": {
         "$ref": "#/components/schemas/BDSavedSnapshot"
+       }
+      }
+     }
+    ]
+   },
+   "BDSecretFile": {
+    "type": "object",
+    "required": [
+     "path",
+     "contents"
+    ],
+    "properties": {
+     "path": {
+      "type": "string"
+     },
+     "contents": {
+      "type": "string"
+     }
+    }
+   },
+   "BDSelectedRepository": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDRepository"
+     },
+     {
+      "type": "object",
+      "properties": {
+       "baseBranch": {
+        "type": "string"
+       },
+       "setupRoutineId": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "setupScript": {
+        "type": "string"
+       },
+       "setupBlocking": {
+        "type": "boolean"
        }
       }
      }

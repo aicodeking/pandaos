@@ -353,3 +353,70 @@ func TestCompatWebhooks(t *testing.T) {
 		t.Errorf("delete: %v", d)
 	}
 }
+
+func TestCompatKeysAndEnvironments(t *testing.T) {
+	e := setup(t)
+	list := e.ok("GET", "/api/v1/api-keys", nil, 200)
+	if len(list["apiKeys"].([]any)) != 1 || list["catalog"].(map[string]any)["scopedCreationEnabled"] != true {
+		t.Fatalf("keys: %v", list)
+	}
+	cr := e.ok("POST", "/api/v1/api-keys/scoped", map[string]any{"name": "ci", "preset": "read-only"}, 201)
+	k := cr["apiKey"].(map[string]any)
+	secret := cr["secret"].(string)
+	if acts := k["scope"].(map[string]any)["actions"].([]any); len(acts) != 1 || acts[0] != "vms:read" || len(cr["apiKeys"].([]any)) != 2 {
+		t.Fatalf("create: %v", cr)
+	}
+	if st, _, _ := e.compat(secret, "GET", "/api/v1/sandboxes", nil, nil); st != 200 {
+		t.Errorf("the new key reads: %d", st)
+	}
+	if st, _, _ := e.compat(secret, "POST", "/api/v1/sandboxes", map[string]any{}, nil); st != 403 {
+		t.Errorf("a read-only key creates: %d", st)
+	}
+	if st, _, _ := e.compat(e.owner, "POST", "/api/v1/api-keys/scoped", map[string]any{"name": "x", "sandboxIds": []string{"bx_22222222"}}, nil); st != 400 {
+		t.Errorf("per-sandbox key accepted: %d", st)
+	}
+	kid := k["id"].(string)
+	rot := e.ok("POST", "/api/v1/api-keys/"+kid+"/rotate", nil, 200)
+	if rot["secret"] == secret {
+		t.Error("rotation kept the secret")
+	}
+	if st, _, _ := e.compat(secret, "GET", "/api/v1/sandboxes", nil, nil); st != 401 {
+		t.Errorf("old secret after rotation: %d", st)
+	}
+	if u := e.ok("GET", "/api/v1/api-keys/"+kid+"/usage", nil, 200); u["id"] != kid {
+		t.Errorf("usage: %v", u)
+	}
+	if l := e.ok("DELETE", "/api/v1/api-keys/"+kid, nil, 200)["apiKeys"].([]any); len(l) != 1 {
+		t.Errorf("revoke: %v", l)
+	}
+
+	envs := e.ok("POST", "/api/v1/environments", map[string]any{"name": "web"}, 200)["environments"].([]any)
+	if len(envs) != 1 {
+		t.Fatalf("create env: %v", envs)
+	}
+	env := envs[0].(map[string]any)
+	id := env["id"].(string)
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(id) {
+		t.Errorf("environment id %q is not a UUID", id)
+	}
+	st, out, _ := e.compat(e.owner, "PUT", "/api/v1/environments/"+id, map[string]any{"envContents": "A=1\n# c\nB=two\n", "passSecrets": false}, nil)
+	upd, _ := out["environment"].(map[string]any)
+	if st != 200 || out["success"] != true || upd["envContents"] != "A=1\nB=two\n" || upd["passSecrets"] != false || upd["id"] != id {
+		t.Fatalf("update env: %d %v", st, out)
+	}
+	if got := e.ok("GET", "/api/v1/environments", nil, 200)["environments"].([]any); len(got) != 1 {
+		t.Errorf("list envs: %v", got)
+	}
+	if st, out, _ := e.compat(e.owner, "DELETE", "/api/v1/environments/"+id, nil, nil); st != 200 || out["success"] != true {
+		t.Errorf("delete env: %d %v", st, out)
+	}
+	other := otherTeamKey(e)
+	e.ok("POST", "/api/v1/environments", map[string]any{"name": "mine"}, 200)
+	if l := e.ok("GET", "/api/v1/environments", nil, 200)["environments"].([]any); len(l) != 1 {
+		t.Fatal(l)
+	}
+	mine := e.ok("GET", "/api/v1/environments", nil, 200)["environments"].([]any)[0].(map[string]any)["id"].(string)
+	if st, _, _ := e.compat(other, "DELETE", "/api/v1/environments/"+mine, nil, nil); st != 404 {
+		t.Errorf("other team deletes my environment: %d", st)
+	}
+}

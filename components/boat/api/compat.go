@@ -78,6 +78,16 @@ func (s *server) compatRoutes() {
 	s.route("PATCH /api/v1/webhooks/{id}", "admin", s.compatHookUpdate)
 	s.route("DELETE /api/v1/webhooks/{id}", "admin", s.compatHookDelete)
 	s.route("POST /api/v1/webhooks/{id}/rotate", "admin", s.compatHookRotate)
+	// keys and environments (compat_admin.go)
+	s.route("GET /api/v1/api-keys", "", s.compatAPIKeys)
+	s.route("POST /api/v1/api-keys/scoped", "", s.compatCreateKey)
+	s.route("DELETE /api/v1/api-keys/{id}", "", s.compatRevokeKey)
+	s.route("POST /api/v1/api-keys/{id}/rotate", "", s.compatRotateKey)
+	s.route("GET /api/v1/api-keys/{id}/usage", "", s.compatKeyUsage)
+	s.route("GET /api/v1/environments", "vms:read", s.compatEnvironments)
+	s.route("POST /api/v1/environments", "admin", s.compatCreateEnv)
+	s.route("PUT /api/v1/environments/{id}", "admin", s.compatUpdateEnv)
+	s.route("DELETE /api/v1/environments/{id}", "admin", s.compatDeleteEnv)
 }
 
 // ---- envelope ----

@@ -17,10 +17,13 @@ import time
 from boat_sdk import ApiClient, BoatApi, Configuration
 from boat_sdk.exceptions import ApiException
 from boat_sdk.models.command_request import CommandRequest
+from boat_sdk.models.create_sandbox_environment_request import CreateSandboxEnvironmentRequest
 from boat_sdk.models.create_sandbox_request import CreateSandboxRequest
+from boat_sdk.models.create_scoped_api_key_request import CreateScopedApiKeyRequest
 from boat_sdk.models.file_write_request import FileWriteRequest
 from boat_sdk.models.fork_request import ForkRequest
 from boat_sdk.models.saved_snapshot_save_request import SavedSnapshotSaveRequest
+from boat_sdk.models.update_sandbox_environment_request import UpdateSandboxEnvironmentRequest
 from boat_sdk.models.update_sandbox_request import UpdateSandboxRequest
 from boat_sdk.models.webhook_create_request import WebhookCreateRequest
 from boat_sdk.models.webhook_update_request import WebhookUpdateRequest
@@ -125,6 +128,21 @@ try:
     check(api.rotate_webhook_signing_secret(hook.webhook.id).secret != hook.secret, "rotate its secret")
     check(any(h.id == hook.webhook.id for h in api.list_webhooks().webhooks), "list webhooks")
     api.delete_webhook(hook.webhook.id)
+
+    key = api.create_scoped_api_key(CreateScopedApiKeyRequest(name=prefix[-30:], preset="read-only"))
+    check(key.api_key.scope.actions == ["vms:read"] and key.secret.startswith("boat_"), "create a scoped key")
+    reader = BoatApi(ApiClient(Configuration(host=base, access_token=key.secret)))
+    check(any(x.id == sid for x in reader.sandboxes().sandboxes), "the read-only key lists sandboxes")
+    check(api.rotate_api_key(key.api_key.id).secret != key.secret, "rotate the key")
+    check(api.api_key_usage(key.api_key.id).id == key.api_key.id, "key usage")
+    check(all(k.id != key.api_key.id for k in api.revoke_api_key(key.api_key.id).api_keys), "revoke the key")
+
+    envs = api.create_environment(CreateSandboxEnvironmentRequest(name=prefix + "-env")).environments
+    env = next(e for e in envs if e.name == prefix + "-env")
+    upd = api.update_environment(str(env.id), UpdateSandboxEnvironmentRequest(env_contents="GREETING=hi\n")).environment
+    check(upd.env_contents == "GREETING=hi\n" and upd.id == env.id, "environment variables")
+    check(any(e.id == env.id for e in api.environments().environments), "list environments")
+    api.delete_environment(str(env.id))
 
     lim = api.limits()
     check(lim.active_sandboxes >= 2, "limits")
