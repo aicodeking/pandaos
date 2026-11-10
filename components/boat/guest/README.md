@@ -148,7 +148,8 @@ Sizes (MiB, CI build):
 | slim, before the boat CLI | 2821 | 3065 | 842 |
 | full, before the four extra harnesses | 4508 | 4803 | 1348 |
 | slim, now (boat CLI) | 2828 | 3072 | 844 |
-| full, now (boat CLI, pi, Kimi Code, Prime Agent, Mistral Vibe) | 5189 | 5504 | 1486 |
+| full, before the boat.dev languages | 5189 | 5510 | 1489 |
+| full, now (+ the boat.dev languages and tools above) | 7659 | 8048 | 2439 |
 
 Trimming: tight ext4 packing (above); dpkg excludes for docs/man/info/locales;
 opencode's unused `x64-baseline` and musl binaries (npm installs both CPU variants,
