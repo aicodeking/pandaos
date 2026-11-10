@@ -147,7 +147,7 @@ func setupCgroups(c *Config) error {
 	c.cgroupLimits = true
 	c.stateDisk = stateDisk(c.StateDir)
 	if c.IOCost {
-		if err := enableIOCost(cgroupRoot, c.stateDisk); err != nil {
+		if err := enableIOCost(cgroupRoot, c.stateDisk, c.IOCostModel); err != nil {
 			log.Printf("cgroups: ioCost: %v (VMs share the disk first come, first served; io.max still applies)", err)
 		}
 	}
@@ -156,11 +156,16 @@ func setupCgroups(c *Config) error {
 
 // enableIOCost turns on blk-iocost for dev. Without it (or BFQ) io.weight does nothing
 // on a disk with the none scheduler, which NVMe uses: io.max is then the only control.
-// The cost model is the kernel's default for the device class; io.cost.model can be
-// tuned to the device on the host (iocost_coef_gen.py) and boatd leaves it alone.
-func enableIOCost(root, dev string) error {
+// model (ioCostModel) is the disk's measured capacity; without one the kernel's default
+// for an SSD (about 8.5k rand IOPS) throttles a fast disk for everyone (run 42749629578).
+func enableIOCost(root, dev, model string) error {
 	if dev == "" {
 		return errors.New("stateDir's disk unknown")
+	}
+	if model != "" {
+		if err := os.WriteFile(filepath.Join(root, "io.cost.model"), []byte(dev+" ctrl=user model=linear "+model), 0); err != nil {
+			return fmt.Errorf("io.cost.model: %w", err)
+		}
 	}
 	return os.WriteFile(filepath.Join(root, "io.cost.qos"), []byte(dev+" enable=1"), 0)
 }

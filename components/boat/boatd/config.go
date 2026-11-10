@@ -97,15 +97,18 @@ type Config struct {
 
 	// Per-VM limits. 0 = none. Firecracker limiters apply from the next cold boot
 	// (a restored VM keeps those saved in its snapshot).
-	IngressMbit   int  `json:"ingressMbit"`   // Firecracker rx rate limiter
-	DiskMBps      int  `json:"diskMBps"`      // Firecracker drive rate limiter
-	DiskIOPS      int  `json:"diskIOPS"`      // ... operations
-	IOMaxMBps     int  `json:"ioMaxMBps"`     // cgroup io.max on stateDir's disk (rbps+wbps)
-	IOMaxIOPS     int  `json:"ioMaxIOPS"`     // ... riops+wiops
-	IOCost        bool `json:"ioCost"`        // blk-iocost on stateDir's disk: busy VMs share it by io.weight (equal), idle capacity is free to take
-	CtPerVM       int  `json:"ctPerVM"`       // new forwarded connections refused past this many tracked
-	MaxPortsPerVM int  `json:"maxPortsPerVM"` // routes + public ports of one VM
-	ResumeCrashed bool `json:"resumeCrashed"` // cold-boot VMs that were running when boatd/the host died
+	IngressMbit int  `json:"ingressMbit"` // Firecracker rx rate limiter
+	DiskMBps    int  `json:"diskMBps"`    // Firecracker drive rate limiter
+	DiskIOPS    int  `json:"diskIOPS"`    // ... operations
+	IOMaxMBps   int  `json:"ioMaxMBps"`   // cgroup io.max on stateDir's disk (rbps+wbps)
+	IOMaxIOPS   int  `json:"ioMaxIOPS"`   // ... riops+wiops
+	IOCost      bool `json:"ioCost"`      // blk-iocost on stateDir's disk: busy VMs share it by io.weight (equal), idle capacity is free to take
+	// io.cost.model for that disk, e.g. "rbps=3e9 rseqiops=400000 rrandiops=400000 wbps=2e9 wseqiops=300000 wrandiops=300000"
+	// (iocost_coef_gen.py or fio on the disk). Empty: the kernel's default, which caps an SSD near 8.5k rand read IOPS.
+	IOCostModel   string `json:"ioCostModel"`
+	CtPerVM       int    `json:"ctPerVM"`       // new forwarded connections refused past this many tracked
+	MaxPortsPerVM int    `json:"maxPortsPerVM"` // routes + public ports of one VM
+	ResumeCrashed bool   `json:"resumeCrashed"` // cold-boot VMs that were running when boatd/the host died
 
 	IndexQuarantineS int `json:"indexQuarantineS"` // a deleted VM's IP/MAC/uid is not reused for this long (if another is free); 0 = off
 
@@ -116,11 +119,12 @@ type Config struct {
 }
 
 var (
-	reName  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	reTeam  = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
-	reEnv   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
-	reLabel = regexp.MustCompile(`^[A-Za-z0-9_./-]{1,63}$`)
-	reImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	reIOCostModel = regexp.MustCompile(`^((rbps|rseqiops|rrandiops|wbps|wseqiops|wrandiops)=[0-9]+ ?)+$`)
+	reName        = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	reTeam        = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+	reEnv         = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+	reLabel       = regexp.MustCompile(`^[A-Za-z0-9_./-]{1,63}$`)
+	reImage       = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
 func defaultConfig() Config {
@@ -215,6 +219,9 @@ func (c Config) validate() error {
 	}
 	if c.DiskEngine != "auto" && c.DiskEngine != "Async" && c.DiskEngine != "Sync" {
 		return fmt.Errorf("diskEngine must be auto, Async or Sync")
+	}
+	if c.IOCostModel != "" && !reIOCostModel.MatchString(c.IOCostModel) {
+		return fmt.Errorf("ioCostModel: rbps= rseqiops= rrandiops= wbps= wseqiops= wrandiops= with integers")
 	}
 	if c.DiskCache != "Unsafe" && c.DiskCache != "Writeback" {
 		return fmt.Errorf("diskCache must be Unsafe or Writeback")

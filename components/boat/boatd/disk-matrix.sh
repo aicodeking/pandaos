@@ -43,10 +43,14 @@ caps_async@.ioMaxMBps = 500 | .ioMaxIOPS = 20000@0
 untrusted_2g_80k@.diskEngine = \"Sync\" | .ioMaxMBps = 2000 | .ioMaxIOPS = 80000@0
 base_again@.@0"}
 
+# blk-iocost stays on once a config enabled it: every restart turns it off first.
+STATE_DEV=$(lsblk -no MAJ:MIN "$(findmnt -no SOURCE "$STATE")" | head -1 | tr -d ' ')
+MODEL=${IOCOST_MODEL:-} # io.cost.model measured from the host pass (host_model), for %MODEL% in filters
 restart() { # JQ_FILTER
-  jq "$1" "$BASE" >"$WORK/boatd.matrix.json"
+  jq "${1//%MODEL%/$MODEL}" "$BASE" >"$WORK/boatd.matrix.json"
   sudo kill -9 "$(cat "$WORK/boatd.pid")" 2>/dev/null || true
   sleep 0.5
+  echo "$STATE_DEV enable=0" | sudo tee /sys/fs/cgroup/io.cost.qos >/dev/null 2>&1 || true
   sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >>"$4" 2>&1' _ \
     "$WORK/boatd.pid" "$WORK/bin/boatd" "$WORK/boatd.matrix.json" "$WORK/boatd.log" &
   for _ in $(seq 600); do curl -fs --unix-socket "$SOCK" http://boatd/v1/health >/dev/null && return; sleep 0.1; done
@@ -142,6 +146,7 @@ $JOBS_DUR"
     [ -n "$name" ] || continue
     before=$(fc_ticks "$pid"); t=$(date +%s.%N)
     r=$(bx "$id" "python3 /tmp/gj.py $name ${args//@F@//root/bbdisk/f}; rm -f /root/bbdisk/f" 400 </dev/null | sed -n 's/^GJ //p') || r='{"error":"exec failed"}'
+    [ -n "$r" ] || r='{"error":"no result"}'
     after=$(fc_ticks "$pid")
     cg=$(cpu_delta "$before" "$after" "$(awk -v a="$t" -v b="$(date +%s.%N)" 'BEGIN { print b - a }')")
     emit "$(jq -c --arg c "$label" --argjson cpu "$cg" '. + {side: "vm", config: $c, fc_cpu_pct: $cpu}' <<<"$r")"
@@ -173,6 +178,7 @@ victim() { # LABEL PHASE ID
   while IFS='|' read -r name args; do
     [ -n "$name" ] || continue
     r=$(bx "$3" "python3 /tmp/gj.py $name ${args//@F@//root/bbdisk/f}; rm -f /root/bbdisk/f" 400 </dev/null | sed -n 's/^GJ //p') || r='{"error":"exec failed"}'
+    [ -n "$r" ] || r='{"error":"no result"}'
     emit "$(jq -c --arg c "$1" --arg p "$2" '. + {side: "pair", phase: $p, config: $c}' <<<"$r")"
   done <<<"$VICTIM"
 }
@@ -201,10 +207,25 @@ emit "$(jq -nc --arg m "$(findmnt -no SOURCE,FSTYPE,OPTIONS "$STATE")" --arg l "
   --arg dr "$(sysctl -n vm.dirty_ratio) $(sysctl -n vm.dirty_background_ratio)" --arg sched "$(cat /sys/block/"$(basename "$loopdev")"/queue/scheduler 2>/dev/null)" \
   '{side: "hostinfo", mount: $m, loop: $l, kernel: $k, cpu: $cpu, backing: $b, dirty_ratio_bg: $dr, loop_sched: $sched}')"
 
+# The host's own fio numbers as an io.cost.model: what the disk does, not the kernel's SSD default.
+host_model() {
+  python3 - "$OUTF" <<'PY2'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+h = {r["job"]: r for r in rows if r.get("side") == "host" and r.get("config") == "host0"}
+rr, wr = h["rand_read"]["read_iops"], h["rand_write"]["write_iops"]
+print("rbps=%d rseqiops=%d rrandiops=%d wbps=%d wseqiops=%d wrandiops=%d" % (
+    h["seq_read"]["read_mbps"] * 1e6, rr, rr, h["seq_write"]["write_mbps"] * 1e6, wr, wr))
+PY2
+}
+
 i=0
 while IFS='@' read -r label filter pts; do
   [ -n "$label" ] || continue
-  if [ $((i % 4)) = 0 ]; then log "host pass $((i / 4))"; host_run "host$((i / 4))" </dev/null; fi
+  if [ $((i % 4)) = 0 ]; then
+    log "host pass $((i / 4))"; host_run "host$((i / 4))" </dev/null
+    if [ "$i" = 0 ] && [ -z "$MODEL" ]; then MODEL=$(host_model); emit "$(jq -nc --arg m "$MODEL" '{side: "iocost-model", model: $m}')"; fi
+  fi
   vm_run "$label" "$filter" "$pts" </dev/null || emit "$(jq -nc --arg c "$label" '{side: "vm", config: $c, error: "config failed"}')"
   i=$((i + 1))
 done <<<"$CONFIGS"
@@ -218,7 +239,7 @@ restart .
 log "table (MB/s or IOPS; vda KiB/request)"
 python3 - "$OUTF" <<'PY'
 import json, sys
-rows = [json.loads(l) for l in open(sys.argv[1])]
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 val = lambda r: (r.get("write_mbps") or r.get("read_mbps")) if r["job"].startswith("seq") or "mibps" in r["job"] else (r.get("write_iops") or r.get("read_iops"))
 jobs = []
 for r in rows:

@@ -82,12 +82,21 @@ func TestListenSocket(t *testing.T) {
 
 func TestEnableIOCost(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "io.cost.qos"), nil, 0o600) // cgroupfs has it already
-	if err := enableIOCost(dir, ""); err == nil {
+	os.WriteFile(filepath.Join(dir, "io.cost.qos"), nil, 0o600) // cgroupfs has them already
+	os.WriteFile(filepath.Join(dir, "io.cost.model"), nil, 0o600)
+	if err := enableIOCost(dir, "", ""); err == nil {
 		t.Fatal("unknown disk accepted")
 	}
-	if err := enableIOCost(dir, "259:0"); err != nil {
+	if err := enableIOCost(dir, "259:0", "rbps=3000000000 rrandiops=400000"); err != nil {
 		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "io.cost.model")); string(b) != "259:0 ctrl=user model=linear rbps=3000000000 rrandiops=400000" {
+		t.Fatalf("io.cost.model = %q", b)
+	}
+	c := defaultConfig()
+	c.IOCostModel = "rbps=1; echo"
+	if c.validate() == nil {
+		t.Fatal("ioCostModel with junk accepted")
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "io.cost.qos")); string(b) != "259:0 enable=1" {
 		t.Fatalf("io.cost.qos = %q", b)
