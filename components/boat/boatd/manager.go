@@ -756,6 +756,11 @@ func (m *Manager) reapVM(ctx context.Context, v VM, now time.Time) {
 	case <-ctx.Done():
 		return
 	}
+	if reason == "ttl" { // a PATCH may have moved the deadline while this waited for a slot
+		if cur, err := m.get(v.ID); err != nil || cur.ExpiresAt == nil || !now.After(*cur.ExpiresAt) {
+			return
+		}
+	}
 	if _, err := m.Stop(ctx, v.ID, reason); err != nil && !errors.Is(err, errNotFound) {
 		log.Printf("%s: auto-stop (%s): %v", v.ID, reason, err)
 	}

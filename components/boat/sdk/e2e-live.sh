@@ -38,18 +38,26 @@ off=$(mktemp -d)
 miss() {
   if [ -n "${BOAT_LIVE_FAKE:-}" ]; then echo "SKIP - $*"; else echo "official SDKs: FAIL: $*" >&2; exit 1; fi
 }
+# boatd answers PATCH /v1/vms/{id} now: on a real server the drivers' rename/ttl
+# step must run, not print its SKIP for a boatd without it (501).
+patched() { # LOG
+  if [ -z "${BOAT_LIVE_FAKE:-}" ] && grep -q '^SKIP - PATCH' "$1"; then echo "official SDKs: FAIL: rename (PATCH) skipped: $(grep '^SKIP - PATCH' "$1")" >&2; exit 1; fi
+}
 pins=(--disable-pip-version-check --require-hashes --only-binary :all: -r "$here/compat/requirements.txt")
 if python3 -m venv "$off/venv" >/dev/null 2>&1 &&
   "$off/venv/bin/python" -m pip install -q "${pins[@]}" >"$off/pip.log" 2>&1; then
-  "$off/venv/bin/python" "$here/compat/official_sdk.py"
+  "$off/venv/bin/python" "$here/compat/official_sdk.py" | tee "$off/py.out"
+  patched "$off/py.out"
 elif python3 -m pip install -q --target "$off/py" --break-system-packages "${pins[@]}" >>"$off/pip.log" 2>&1; then
-  PYTHONPATH="$off/py" python3 "$here/compat/official_sdk.py" # no venv module (Debian's python3-venv missing)
+  PYTHONPATH="$off/py" python3 "$here/compat/official_sdk.py" | tee "$off/py.out" # no venv module (Debian's python3-venv missing)
+  patched "$off/py.out"
 else
   miss "cannot install boat-sdk: $(tail -3 "$off/pip.log" 2>/dev/null)"
 fi
 mkdir "$off/js" && cp "$here/compat/package.json" "$here/compat/package-lock.json" "$off/js/"
 if npm ci --prefix "$off/js" --ignore-scripts --no-audit --no-fund >"$off/npm.log" 2>&1; then
-  NODE_PATH="$off/js/node_modules" node "$here/compat/official_sdk.cjs"
+  NODE_PATH="$off/js/node_modules" node "$here/compat/official_sdk.cjs" | tee "$off/js.out"
+  patched "$off/js.out"
 else
   miss "cannot install @boatdev/sdk: $(tail -3 "$off/npm.log")"
 fi
@@ -60,6 +68,17 @@ if command -v boat >/dev/null 2>&1; then
   name=$BOAT_LIVE_PREFIX-cli-$$
   vm=$(boat new --name "$name" --no-secrets --json | jq -r .id)
   trap 'boat rm "$vm" --json >/dev/null 2>&1 || true' EXIT
+  # PATCH /v1/vms/{id}: rename through the API, auto-stop through boat extend.
+  ren=$(curl -fsS -X PATCH "$BOAT_URL/v1/vms/$vm" -H "Authorization: Bearer $BOAT_API_KEY" -H 'content-type: application/json' \
+    -d "{\"name\":\"$name-r\"}") || fail "rename (PATCH /v1/vms/$vm)"
+  jq -e --arg n "$name-r" '.name == $n' <<<"$ren" >/dev/null || fail "rename: $ren"
+  boat info "$vm" --json | jq -e --arg n "$name-r" '.name == $n' >/dev/null || fail "rename not kept"
+  boat extend "$vm" --hours 1 --json | jq -e '.ttl_s == 3600 and (.expires_at | length > 0)' >/dev/null || fail "extend --hours"
+  e1=$(boat info "$vm" --json | jq -r '.expires_at | sub("\\.[0-9]+"; "") | fromdateiso8601')
+  e2=$(boat extend "$vm" --by 30m --json | jq -r '.expires_at | sub("\\.[0-9]+"; "") | fromdateiso8601')
+  [ "$((e2 - e1))" -ge 1790 ] && [ "$((e2 - e1))" -le 1810 ] || fail "extend --by 30m moved expires_at by $((e2 - e1)) s"
+  boat extend "$vm" --no-auto-stop --json | jq -e '(.expires_at // "") == ""' >/dev/null || fail "extend --no-auto-stop"
+  echo "ok - rename and extend (PATCH /v1/vms/{id})"
   cid=$(boat exec "$vm" --detach --json -- sleep 300 | jq -r .id)
   [ -n "$cid" ] && [ "$cid" != null ] || fail "exec --detach"
   boat cmd ls "$vm" --json | jq -e --arg c "$cid" 'select(.id == $c)' >/dev/null || fail "cmd ls"

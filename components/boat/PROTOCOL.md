@@ -50,6 +50,7 @@ boatd also writes `/run/boat/routes.json` for boat-gateway (see the last section
 | `POST /v1/vms` | `{name?, size?, image?, ttl_s?, idle_stop_s?, team, labels?, env?, snapshot?, fail_fast?, count?}` | 201, VM; with `count` > 1: 201, `{"vms":[VM…]}` |
 | `GET /v1/vms[?team=]` | | `{"vms":[VM…]}` |
 | `GET /v1/vms/{id}` | | VM |
+| `PATCH /v1/vms/{id}` | `{name?, ttl_s?, extend_s?}` | VM, as GET (see below) |
 | `POST /v1/vms/{id}/start` | `{env?, fail_fast?}` | VM (running) |
 | `POST /v1/vms/{id}/stop` | `{force?}` | VM (stopped) |
 | `POST /v1/vms/{id}/fork` | `{name?, team?, fail_fast?}` | 201, child VM |
@@ -86,6 +87,11 @@ Notes:
   - `fail_fast`: see `no_ready_machine` above. It changes only what a refusal says and that a create does not wait for the startup image conversion; it never makes a request succeed or fail otherwise. The same holds on start and fork.
   - `count` (1-16, default 1): create that many VMs from one request, **all or none**. All of them pass team quota and host admission together, under one hold of boatd's lock, before any boots; if one then fails to boot, all are deleted and the call returns the first error (no VM of the batch survives). A `name` `x` becomes `x-1` … `x-N` (400 if that is too long). count 0 or 1 replies with the VM object as before; more replies `{"vms":[…]}` in order.
 - **ttl_s** is counted from each start. When it expires, boatd **stops** the VM. **idle_stop_s** overrides the global `idleStopS`; -1 means never. Idle means no exec, file or desktop calls through boatd, and an agent `idle_s` (exec, ssh sessions, desktop input) above the limit. The reaper runs every 30 s. A VM whose agent cannot be reached is never idle-stopped.
+- **PATCH** renames a VM or moves its auto-stop. At least one field; `null` is the same as absent. Applied in the order name, `ttl_s`, `extend_s`, and nothing changes unless every part applies. It runs under boatd's state lock, not the VM's lifecycle lock, so it answers at once even while a stop is dumping memory.
+  - `name`: the create rules (lowercase letters, digits, `-`, max 63). 409 if another VM **of the same team** already has that name; a name used in another team is fine, renaming to the current name is a no-op. Create itself does not refuse duplicate names (ids are the key), so a rename can not make a name unique where creates already duplicated it. The guest's hostname was set from the name at its first boot and is not changed.
+  - `ttl_s` (0 to 315360000): sets the VM's `ttl_s`. While running, `expires_at` becomes now + `ttl_s`; 0 clears it (no auto-stop). On a stopped VM it applies from the next start.
+  - `extend_s` (1 to 315360000): `expires_at` = max(`expires_at`, now) + `extend_s`; `ttl_s` stays as it was, so the next start counts the full `ttl_s` again. 409 if the VM is not running, 400 if it has no auto-stop (`ttl_s` 0).
+  - 400 for an empty body, bad JSON or a value out of range; 404 for an unknown VM. The change is persisted in `vm.json` before the reply. No event is published for it (`vm.state` is only for state changes).
 - **stop**
   - boatd syncs the guest, pauses the VM, takes a snapshot (mem + vmstate, see "Memory snapshots") into the VM dir, then kills firecracker. Billing stops.
   - If the snapshot fails or the disk is below its free-space floor, boatd sends the agent `shutdown`, waits up to 30 s, then kills the VM. The next start is then a cold boot.
