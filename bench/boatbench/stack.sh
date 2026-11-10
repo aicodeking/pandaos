@@ -112,6 +112,13 @@ up() {
  "bootTimeoutS":120,"defaultImage":"slim","memOvercommit":${BENCH_MEM_OVERCOMMIT:-8},"cpuOvercommit":${BENCH_CPU_OVERCOMMIT:-12},
  "defaultTeam":{"maxVMs":16}}
 JSON
+  # ioCost needs the state disk's model (untrustedTenants refuses to start without one):
+  # measure it once, as the NixOS module's boat-iocost-model.service does.
+  if jq -e '.untrustedTenants == true or (.ioCost == true and (.ioCostModel // "") == "")' "$WORK/boatd.json" >/dev/null &&
+    ! sudo test -s "$STATE/iocost-model"; then
+    log "iocost model of the state disk (boatd -measure-disk, about 25 s)"
+    sudo "$WORK/bin/boatd" -measure-disk -config "$WORK/boatd.json" | tee "$WORK/iocost-model.txt"
+  fi
   sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
     "$WORK/boatd.pid" "$WORK/bin/boatd" "$WORK/boatd.json" "$WORK/boatd.log" &
   for _ in $(seq 1200); do [ -S "$SOCK" ] && break; sleep 0.1; done

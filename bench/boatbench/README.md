@@ -83,9 +83,14 @@ input) picks one per job:
 - `trusted`: boatd's defaults.
 - `trusted-warm`: `warmPool` on.
 - `untrusted`: `components/boat/module.nix` `untrustedSettings`, key by key (the unit test
-  compares them): `Sync` disk engine, `io.max` 500 MB/s and 20,000 IOPS, 1 Gbit/s
-  egress and ingress, `storageOvercommit` 1, `hostDirtyRatio` 20, no `warmPool` or KSM.
-  `stack.sh` also turns SMT off if the runner allows it, sets `kernel.io_uring_disabled=2`
+  compares them): `Sync` disk engine, the disk shared by weight (`ioCost` with
+  `ioCostQoS` latency targets) under an `io.max` ceiling of 4,000 MB/s and 200,000 IOPS
+  (until 2026-11-10: `io.max` 500 MB/s and 20,000 IOPS, which run 42677142859 measured),
+  1 Gbit/s egress and ingress, `storageOvercommit` 1, `hostDirtyRatio` 20, no `warmPool` or KSM.
+  `stack.sh` first measures the state disk once for `ioCost` (`boatd -measure-disk`,
+  about 25 s, stored in the store's `iocost-model`, as the module's
+  `boat-iocost-model.service` does; any config with `ioCost` and no `ioCostModel` gets it
+  too). It also turns SMT off if the runner allows it, sets `kernel.io_uring_disabled=2`
   and stops KSM, as the module's kernel parameters do, and makes the store a sparse 1 TiB
   file so `storageOvercommit` 1 admits the bench's VMs. **`memOvercommit` 1 is not
   applied**: on a 16 GiB runner it admits one 8 GiB VM. It sets density, which
