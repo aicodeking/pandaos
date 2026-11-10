@@ -29,7 +29,7 @@ bx() { # ID CMD [TIMEOUT]
 emit() { echo "MATRIX $1"; echo "$1" >>"$OUTF"; }
 # The guest installs fio from the runner's apt mirror: archive.ubuntu.com can stall for minutes.
 HOST_MIRROR=$(grep -rhoE 'https?://[a-z0-9.-]+\.ubuntu\.com/ubuntu/?' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null |
-  grep -vE '//(archive|security)\.ubuntu\.com' | head -1 | sed 's|/*$||')
+  grep -vE '//(archive|security)\.ubuntu\.com' | head -1 | sed 's|/*$||' || true)
 guest_fio() {
   [ -z "$HOST_MIRROR" ] || printf "sed -i -e 's|http://archive.ubuntu.com/ubuntu|%s|' -e 's|http://security.ubuntu.com/ubuntu|%s|' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null; " "$HOST_MIRROR" "$HOST_MIRROR"
   echo 'command -v fio >/dev/null || { apt-get install -y -qq fio >/dev/null 2>&1 || { apt-get update -qq >/dev/null && apt-get install -y -qq fio >/dev/null; }; }'

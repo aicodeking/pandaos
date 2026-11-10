@@ -102,7 +102,7 @@ cold_read() {
 # 300 s in runs 42757402652 (both attempts) while the runner's own mirror answered:
 # the guest uses the runner's mirror, so the gate does not depend on the public archive.
 HOST_MIRROR=$(grep -rhoE 'https?://[a-z0-9.-]+\.ubuntu\.com/ubuntu/?' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null |
-  grep -vE '//(archive|security)\.ubuntu\.com' | head -1 | sed 's|/*$||')
+  grep -vE '//(archive|security)\.ubuntu\.com' | head -1 | sed 's|/*$||' || true)
 put_disk() {
   local t0=$SECONDS
   curl -fsS --unix-socket "$SOCK" -X PUT --data-binary "@$WORK/tmp/disk.sh" "http://boatd/v1/vms/$1/files?path=/tmp/disk.sh&mode=755" >/dev/null
