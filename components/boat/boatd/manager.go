@@ -36,6 +36,10 @@ type Manager struct {
 	dones  map[string]<-chan struct{}
 	active map[string]time.Time // last exec/file/desktop seen by boatd
 	netMu  sync.Mutex
+	// snapDirMu: syncSaved rewrites snap.json behind CreateSnapshot; a delete of
+	// the snapshot meanwhile must not race it (RemoveAll fails with ENOTEMPTY when
+	// the temp file appears mid-removal). Taken before m.mu, never inside it.
+	snapDirMu sync.Mutex
 
 	imagesReady   chan struct{}  // closed when images are NOCOW: a clone of one that is not stays CoW
 	reservedSnaps map[string]int // by team: storage being written, see reservation

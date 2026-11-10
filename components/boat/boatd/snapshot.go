@@ -252,6 +252,14 @@ func (m *Manager) syncSaved(s Snapshot) {
 		}
 	}
 	s.Unsynced = false
+	m.snapDirMu.Lock()
+	defer m.snapDirMu.Unlock()
+	m.mu.Lock()
+	_, ok := m.snaps[s.ID]
+	m.mu.Unlock()
+	if !ok {
+		return // deleted while its files were synced: the dir is gone or going
+	}
 	if err := writeJSONAtomic(filepath.Join(dir, "snap.json"), s, 0o600); err != nil {
 		log.Printf("%s: %v", s.ID, err)
 		return
@@ -423,6 +431,8 @@ func (m *Manager) DeleteSnapshot(vmID, sid string) error {
 		log.Printf("usage: %v", err)
 	}
 	m.ev.publish(Event{Type: "snapshot.deleted", VMID: vmID, SnapID: sid, Team: s.Team})
+	m.snapDirMu.Lock() // after a syncSaved still writing snap.json; it sees the delete and stops
+	defer m.snapDirMu.Unlock()
 	return m.removeStoreDir(m.snapDir(sid))
 }
 

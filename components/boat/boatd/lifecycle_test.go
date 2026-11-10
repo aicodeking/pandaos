@@ -695,3 +695,33 @@ func TestSnapshotDurability(t *testing.T) {
 		t.Fatalf("cold boot: %v", err)
 	}
 }
+
+// boat-e2e 42677441200: DELETE of a snapshot right after its create got a 500
+// ("unlinkat ...: directory not empty"): syncSaved, still behind the create,
+// wrote snap.json's temp file into the dir RemoveAll was emptying.
+func TestDeleteSnapshotWhileSyncing(t *testing.T) {
+	m, _ := newTestManager(t, nil)
+	ctx := context.Background()
+	v, err := m.Create(ctx, CreateReq{Name: "racer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		s, err := m.CreateSnapshot(ctx, v.ID, fmt.Sprintf("s%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !s.HasMem {
+			t.Fatal("want a snapshot with memory: only those are synced behind the call")
+		}
+		done := make(chan struct{})
+		go func() { m.syncSaved(s); close(done) }() // one more, as the create's own may be done already
+		if err := m.DeleteSnapshot(v.ID, s.ID); err != nil {
+			t.Fatalf("delete %d while its files sync: %v", i, err)
+		}
+		<-done
+		if exists(m.snapDir(s.ID)) {
+			t.Fatalf("snapshot dir %d back after its delete", i)
+		}
+	}
+}
