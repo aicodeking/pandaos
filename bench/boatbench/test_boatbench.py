@@ -349,8 +349,6 @@ class FakeDriver:
             return 0, 'BB_JSON {"node": "v22.22.3"}', ""
         if cmd == density.RUN:
             return 0, "Geometric mean: 10.0 runs/s\nBB_CPU 20.0 22.0 2.0", ""
-        if cmd == density.HAS_NODE:
-            return (1 if self.fail_fork else 0), "", ""
         if cmd == W.NODE_RUN:
             return 0, "Geometric mean: 21.5 runs/s", ""
         if cmd == W.DISK:
@@ -456,19 +454,19 @@ class DensityTests(unittest.TestCase):
         self.assertEqual(m["density_efficiency_n4"], 1.0)
         self.assertAlmostEqual(m["density_cpu_per_loop_n1"], 1.2)
         self.assertAlmostEqual(rec["levels"][2]["loops_per_cpu"], 4 * 1.2 / 4)
-        self.assertEqual(d.setups, 1)  # forks keep /tmp/bb: one setup
+        self.assertEqual(d.setups, 4)  # fresh VMs, each set up: no forks
         self.assertEqual(d.live, set())
 
-    def test_capacity_refusal_stops_growth_and_fork_failure_falls_back(self):
-        d = FakeDriver(fail_fork=True, max_vms=2)
+    def test_capacity_refusal_leaves_vms_out(self):
+        d = FakeDriver(max_vms=2)
         d.name = "boatdev"
         rec, m = self.run_density(d)
         self.assertEqual(rec["max_vms"], 2)
         self.assertEqual([lv["n"] for lv in rec["levels"]], [1, 2])
         self.assertIsNone(rec["levels"][0]["host_cpus"])  # not one host: no loads per CPU
         self.assertNotIn("loops_per_cpu", rec["levels"][1])
-        self.assertTrue(any("fork" in e for e in rec["errors"]) and any("clone 2" in e for e in rec["errors"]))
-        self.assertEqual(d.setups, 2)  # the fallback VM is set up again
+        self.assertEqual(len(rec["errors"]), 2)
+        self.assertTrue(all("host_capacity" in e for e in rec["errors"]))
         self.assertEqual(d.live, set())
 
     def test_levels_env_and_cpu_parse(self):

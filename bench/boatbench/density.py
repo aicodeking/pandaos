@@ -1,8 +1,9 @@
 """Workload (g): density under load. N VMs run the Node loop (a) at the same time.
 
-One base VM is set up (NODE_SETUP), then cloned by fork (or created and set up
-again where a fork does not keep /tmp/bb) up to the largest level the provider
-admits. For each level n, n of those VMs start DENSITY_PASSES passes of the
+The largest level's VMs are created at once, each a fresh VM set up on its own
+(NODE_SETUP); the ones the provider refuses are left out. Not forks: on PandaOS a
+long exec on a fork's SOURCE VM never returned (502 after timeout_s, run
+42818758694), and forks would share page cache. For each level n, n of those VMs start DENSITY_PASSES passes of the
 Node loop together, from one barrier. Per level the result holds:
 
   per_vm_runs_s   median of each VM's passes (geomean runs/s, as in (a))
@@ -31,9 +32,7 @@ DEFAULT_LEVELS = (1, 2, 4, 6)
 DENSITY_PASSES = 2
 _CPU = re.compile(r"BB_CPU ([\d.]+) ([\d.]+) ([\d.]+)")
 RUN = ("TIMEFORMAT='BB_CPU %R %U %S'; { time ( " + W.NODE_RUN + " ) ; } 2>&1")
-HAS_NODE = "test -x /tmp/bb/node/bin/node && test -f /tmp/bb/wtb/web-tooling-benchmark-0.5.3/dist/cli.js"
-# Read the benchmark's files once so a lazily restored disk (boat.dev fork) is not timed.
-WARM = "find /tmp/bb/node /tmp/bb/wtb/web-tooling-benchmark-0.5.3 -type f -exec cat {} + >/dev/null"
+PASS_TIMEOUT_S = 900  # one solo pass takes about 1 min on the runner; 6 on 2 CPUs about 8
 
 
 def levels_from_env(env=None):
@@ -102,34 +101,25 @@ class Density:
     def __init__(self, d, prefix, levels, log, gexec, ready):
         self.d, self.prefix, self.levels, self.log = d, prefix, levels, log
         self.gexec, self.ready = gexec, ready
-        self.vms, self.errors = [], []
+        self.vms, self.broken, self.errors = [], [], []
 
-    def clone(self, base, i):
-        name = f"{self.prefix}-g{i}"
+    def one_vm(self, i):
+        vm = None
         try:
-            vm, _ = self.ready(self.d, lambda: self.d.fork(base, name))
-        except Exception as e:  # e.g. fork unsupported or failed: a fresh VM instead
-            self.errors.append(f"fork {i}: {type(e).__name__}: {e}")
-            vm, _ = self.ready(self.d, lambda: self.d.create(name))
-        self.vms.append(vm)
-        rc, _, _ = self.d.exec(vm, HAS_NODE, 60)
-        if rc != 0:
+            vm, _ = self.ready(self.d, lambda: self.d.create(f"{self.prefix}-g{i}"))
             self.gexec(self.d, vm, W.NODE_SETUP)
-        self.gexec(self.d, vm, WARM)
-        return vm
+            return vm
+        except Exception as e:  # refused (capacity) or broken: measure without it
+            self.errors.append(f"vm {i}: {type(e).__name__}: {e}")
+            return ("failed", vm)
 
     def grow(self, want):
-        """Base + clones up to `want` VMs; stops at the first that the provider refuses."""
-        base, _ = self.ready(self.d, lambda: self.d.create(f"{self.prefix}-g0"))
-        self.vms.append(base)
-        self.gexec(self.d, base, W.NODE_SETUP)
-        for i in range(1, want):
-            try:
-                self.clone(base, i)
-            except Exception as e:
-                self.errors.append(f"clone {i}: {type(e).__name__}: {e}")
-                self.log(f"density: stopped at {len(self.vms)} VMs: {e}")
-                break
+        """`want` fresh VMs at once, each set up; the provider's refusals are left out."""
+        with concurrent.futures.ThreadPoolExecutor(want) as ex:
+            got = list(ex.map(self.one_vm, range(want)))
+        self.vms = [v for v in got if isinstance(v, str)]
+        self.broken = [v[1] for v in got if isinstance(v, tuple) and v[1]]
+        self.log(f"density: {len(self.vms)} of {want} VMs set up")
 
     def level(self, n, cpus):
         vms = self.vms[:n]
@@ -139,7 +129,7 @@ class Density:
             barrier.wait(timeout=600)
             out = []
             for _ in range(DENSITY_PASSES):
-                o = self.gexec(self.d, vm, RUN, 1800)
+                o = self.gexec(self.d, vm, RUN, PASS_TIMEOUT_S)
                 out.append((W.parse_geomean(o), parse_cpu(o)))
             return out
 
@@ -170,9 +160,9 @@ class Density:
 
     def cleanup(self):
         self.vms_made = list(self.vms)
-        for vm in self.vms:
+        for vm in self.vms + self.broken:
             try:
                 self.d.delete(vm)
             except Exception as e:
                 self.log(f"delete {vm}: {e}")
-        self.vms = []
+        self.vms, self.broken = [], []
