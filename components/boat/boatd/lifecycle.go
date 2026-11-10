@@ -589,6 +589,7 @@ func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 		return v, err
 	}
 	m.mu.Lock()
+	m.freeIndexLocked(v.Index)
 	delete(m.vms, id)
 	delete(m.dirty, id)
 	delete(m.dones, id)

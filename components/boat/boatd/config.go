@@ -83,6 +83,7 @@ type Config struct {
 
 	// Performance and density. See PROTOCOL.md "Performance and density".
 	DiskEngine     string `json:"diskEngine"`     // auto (Async, else Sync), Async or Sync
+	DiskCache      string `json:"diskCache"`      // Firecracker cache_type: Unsafe (guest flushes ignored) or Writeback (honoured)
 	DiskNoCow      bool   `json:"diskNoCow"`      // btrfs: images and the VM disks reflinked from them are NOCOW
 	Balloon        bool   `json:"balloon"`        // virtio-balloon: free page reporting, deflate on OOM
 	HostDirtyRatio int    `json:"hostDirtyRatio"` // vm.dirty_ratio set at startup, 0 = leave the host's: a dump must not be throttled to the disk
@@ -101,9 +102,12 @@ type Config struct {
 	DiskIOPS      int  `json:"diskIOPS"`      // ... operations
 	IOMaxMBps     int  `json:"ioMaxMBps"`     // cgroup io.max on stateDir's disk (rbps+wbps)
 	IOMaxIOPS     int  `json:"ioMaxIOPS"`     // ... riops+wiops
+	IOCost        bool `json:"ioCost"`        // blk-iocost on stateDir's disk: busy VMs share it by io.weight (equal), idle capacity is free to take
 	CtPerVM       int  `json:"ctPerVM"`       // new forwarded connections refused past this many tracked
 	MaxPortsPerVM int  `json:"maxPortsPerVM"` // routes + public ports of one VM
 	ResumeCrashed bool `json:"resumeCrashed"` // cold-boot VMs that were running when boatd/the host died
+
+	IndexQuarantineS int `json:"indexQuarantineS"` // a deleted VM's IP/MAC/uid is not reused for this long (if another is free); 0 = off
 
 	cgroupLimits bool                  // set at startup when the cgroup controllers could be delegated
 	stateDisk    string                // "major:minor" of stateDir's disk, for io.max
@@ -150,12 +154,14 @@ func defaultConfig() Config {
 		DiffSnapshots:     true,
 		CgroupParent:      "boat-vms",
 		DiskEngine:        "auto",
+		DiskCache:         "Unsafe",
 		DiskNoCow:         true,
 		Balloon:           true,
 		HostDirtyRatio:    50,
 		CtPerVM:           4096, // nf_conntrack_max is about 260k on 16 GiB, or the module's 1M
 		MaxPortsPerVM:     32,
 		ResumeCrashed:     true,
+		IndexQuarantineS:  600, // boat-api's jump grants follow deletes through events: minutes when it reconnects
 		DefaultTeam:       TeamPolicy{MaxTotalVMs: 100, MaxSnapshots: 200, MaxDiskGiB: 4096, MaxPorts: 512},
 		Sizes: map[string]Size{
 			"small":   {2, 4096, 51},
@@ -210,6 +216,9 @@ func (c Config) validate() error {
 	if c.DiskEngine != "auto" && c.DiskEngine != "Async" && c.DiskEngine != "Sync" {
 		return fmt.Errorf("diskEngine must be auto, Async or Sync")
 	}
+	if c.DiskCache != "Unsafe" && c.DiskCache != "Writeback" {
+		return fmt.Errorf("diskCache must be Unsafe or Writeback")
+	}
 	if c.KSMTeam != "" && c.KSMTeam != "*" && !reTeam.MatchString(c.KSMTeam) {
 		return fmt.Errorf("ksmTeam must be a team name or *")
 	}
@@ -233,7 +242,7 @@ func (c Config) validate() error {
 	if c.HostDirtyRatio < 0 || c.HostDirtyRatio > 90 {
 		return fmt.Errorf("hostDirtyRatio must be 0-90")
 	}
-	for _, n := range []int{c.AIProxyPort, c.EgressMbit, c.IngressMbit, c.DiskMBps, c.DiskIOPS, c.IOMaxMBps, c.IOMaxIOPS, c.CtPerVM, c.MaxPortsPerVM, c.VMOverheadMiB, c.VMPageCacheMiB} {
+	for _, n := range []int{c.AIProxyPort, c.EgressMbit, c.IngressMbit, c.DiskMBps, c.DiskIOPS, c.IOMaxMBps, c.IOMaxIOPS, c.CtPerVM, c.MaxPortsPerVM, c.VMOverheadMiB, c.VMPageCacheMiB, c.IndexQuarantineS} {
 		if n < 0 {
 			return fmt.Errorf("limits must be >= 0")
 		}

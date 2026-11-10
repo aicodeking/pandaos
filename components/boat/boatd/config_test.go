@@ -79,3 +79,17 @@ func TestListenSocket(t *testing.T) {
 		conn.Close()
 	}
 }
+
+func TestEnableIOCost(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "io.cost.qos"), nil, 0o600) // cgroupfs has it already
+	if err := enableIOCost(dir, ""); err == nil {
+		t.Fatal("unknown disk accepted")
+	}
+	if err := enableIOCost(dir, "259:0"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "io.cost.qos")); string(b) != "259:0 enable=1" {
+		t.Fatalf("io.cost.qos = %q", b)
+	}
+}

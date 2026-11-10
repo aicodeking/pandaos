@@ -115,7 +115,8 @@ func rateLimiter(bytesPerS, opsPerS int64) map[string]any {
 // putDrive configures the root disk. "auto" asks for io_uring and takes the Sync
 // engine when Firecracker refuses it (host kernel < 5.10.51, io_uring disabled).
 func (c *fcClient) putDrive(ctx context.Context, v VM, cfg Config) error {
-	drive := map[string]any{"drive_id": "rootfs", "path_on_host": diskFile, "is_root_device": true, "is_read_only": false}
+	drive := map[string]any{"drive_id": "rootfs", "path_on_host": diskFile, "is_root_device": true, "is_read_only": false,
+		"cache_type": cfg.DiskCache}
 	if rl := rateLimiter(int64(cfg.DiskMBps)<<20, int64(cfg.DiskIOPS)); rl != nil {
 		drive["rate_limiter"] = rl
 	}

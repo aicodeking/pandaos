@@ -221,6 +221,7 @@ func (f *fakeFC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.record("engine " + str("io_engine"))
+		f.record("cache " + str("cache_type"))
 		if f.h.noAsync && str("io_engine") == "Async" {
 			fault(w, "no io_uring")
 			return

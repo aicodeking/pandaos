@@ -35,6 +35,7 @@ type Manager struct {
 	locks  map[string]*sync.Mutex
 	dones  map[string]<-chan struct{}
 	active map[string]time.Time // last exec/file/desktop seen by boatd
+	freed  map[int]time.Time    // quarantined VM indexes -> end of quarantine (quarantine.go)
 	netMu  sync.Mutex
 	// snapDirMu: syncSaved rewrites snap.json behind CreateSnapshot; a delete of
 	// the snapshot meanwhile must not race it (RemoveAll fails with ENOTEMPTY when
@@ -102,6 +103,7 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 		m.hostCPU = runtime.NumCPU()
 	}
 	m.hostMem -= cfg.HostReserveMiB
+	m.loadFreed()
 	if err := m.enableQuota(); err != nil {
 		return nil, err
 	}
@@ -280,12 +282,7 @@ func (m *Manager) allocLocked(v VM, st State) (VM, error) {
 	for _, o := range m.vms {
 		used[o.Index], pub[o.PublicIP] = true, true
 	}
-	idx := 0
-	for i := 2; i <= maxIndex && idx == 0; i++ {
-		if !used[i] {
-			idx = i
-		}
-	}
+	idx := m.pickIndexLocked(used)
 	if idx == 0 {
 		return VM{}, errCapacity("no free VM addresses")
 	}

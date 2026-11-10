@@ -33,6 +33,30 @@ func TestDiskEngine(t *testing.T) {
 	}
 }
 
+func TestDiskCache(t *testing.T) {
+	m, h := newTestManager(t, nil)
+	v, err := m.Create(context.Background(), CreateReq{Team: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.fcOf(t, m, v.ID).called("cache Unsafe") {
+		t.Fatal("default cache_type must be Unsafe (see PROTOCOL.md, Durability)")
+	}
+	m2, h2 := newTestManager(t, func(c *Config) { c.DiskCache = "Writeback" })
+	v2, err := m2.Create(context.Background(), CreateReq{Team: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h2.fcOf(t, m2, v2.ID).called("cache Writeback") {
+		t.Fatal("diskCache Writeback not passed to Firecracker")
+	}
+	c := defaultConfig()
+	c.DiskCache = "None"
+	if c.validate() == nil {
+		t.Fatal("diskCache None accepted")
+	}
+}
+
 func TestDefaultsDoNotThrottleDisk(t *testing.T) {
 	c := defaultConfig()
 	if c.DiskMBps != 0 || c.DiskIOPS != 0 {
