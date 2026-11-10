@@ -27,6 +27,12 @@ bx() { # ID CMD [TIMEOUT]
   [ "$(jq -s 'map(select(has("exit")))[0].exit' <<<"$out")" = 0 ] || { jq -rs 'map(select(.stream=="stderr").data_b64 | @base64d) | join("")' <<<"$out" >&2; return 1; }
 }
 emit() { echo "MATRIX $1"; echo "$1" >>"$OUTF"; }
+# The guest installs fio from the runner's apt mirror: archive.ubuntu.com can stall for minutes.
+HOST_MIRROR=$(sed -n 's|^URIs: *\(http[^ ]*/ubuntu\)/*$|\1|p' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null | head -1)
+guest_fio() {
+  [ -z "$HOST_MIRROR" ] || printf "sed -i -e 's|http://archive.ubuntu.com/ubuntu|%s|' -e 's|http://security.ubuntu.com/ubuntu|%s|' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null; " "$HOST_MIRROR" "$HOST_MIRROR"
+  echo 'command -v fio >/dev/null || { apt-get install -y -qq fio >/dev/null 2>&1 || { apt-get update -qq >/dev/null && apt-get install -y -qq fio >/dev/null; }; }'
+}
 BASE=$WORK/boatd.json
 [ -f "$WORK/boatd.base.json" ] || cp "$BASE" "$WORK/boatd.base.json"
 BASE=$WORK/boatd.base.json
@@ -130,7 +136,7 @@ vm_run() { # LABEL FILTER PTS
   restart "$2"
   id=$(bd POST /v1/vms "$(jq -nc --arg n "m$label" '{name: ($n | gsub("_"; "-")), team: "matrix", size: "default"}')" | jq -r .id)
   pid=$(bd GET "/v1/vms/$id" | jq -r .pid)
-  bx "$id" 'command -v fio >/dev/null || { apt-get install -y -qq fio >/dev/null 2>&1 || { apt-get update -qq >/dev/null && apt-get install -y -qq fio >/dev/null; }; }' 400
+  bx "$id" "$(guest_fio)" 400
   bx "$id" "cat >/tmp/gj.py <<'EOF'
 $GJ
 EOF
@@ -167,7 +173,7 @@ seq_write|$OURS --rw=write --bs=1M"
 AGGR="--name=ag --filename=/root/bbdisk/ag --size=4G --direct=1 --ioengine=libaio --iodepth=32 --rw=write --bs=1M --time_based --runtime=75"
 newvm() { bd POST /v1/vms "$(jq -nc --arg n "$1" '{name: $n, team: "matrix", size: "default"}')" | jq -r .id; }
 prep() {
-  bx "$1" 'command -v fio >/dev/null || { apt-get install -y -qq fio >/dev/null 2>&1 || { apt-get update -qq >/dev/null && apt-get install -y -qq fio >/dev/null; }; }' 400
+  bx "$1" "$(guest_fio)" 400
   bx "$1" "cat >/tmp/gj.py <<'EOF'
 $GJ
 EOF

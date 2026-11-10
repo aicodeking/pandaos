@@ -98,7 +98,14 @@ cold_read() {
   sudo sh -c 'sync; echo 1 >/proc/sys/vm/drop_caches'
   bx "$1" 'fio --name=c --filename=/root/c --size=2G --direct=1 --ioengine=libaio --iodepth=32 --rw=randread --bs=4k --runtime=15 --time_based --output-format=json --output=/tmp/c.json; rm /root/c; grep -m1 "\"iops\" " /tmp/c.json | tr -dc "0-9."' 200
 }
-put_disk() { curl -fsS --unix-socket "$SOCK" -X PUT --data-binary "@$WORK/tmp/disk.sh" "http://boatd/v1/vms/$1/files?path=/tmp/disk.sh&mode=755" >/dev/null; }
+# disk.sh apt-installs fio in the guest. The guest's archive.ubuntu.com timed out for
+# 300 s in runs 42757402652 (both attempts) while the runner's own mirror answered:
+# the guest uses the runner's mirror, so the gate does not depend on the public archive.
+HOST_MIRROR=$(sed -n 's|^URIs: *\(http[^ ]*/ubuntu\)/*$|\1|p' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null | head -1)
+put_disk() {
+  curl -fsS --unix-socket "$SOCK" -X PUT --data-binary "@$WORK/tmp/disk.sh" "http://boatd/v1/vms/$1/files?path=/tmp/disk.sh&mode=755" >/dev/null
+  [ -z "$HOST_MIRROR" ] || bx "$1" "sed -i -e 's|http://archive.ubuntu.com/ubuntu|$HOST_MIRROR|' -e 's|http://security.ubuntu.com/ubuntu|$HOST_MIRROR|' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null; true" >/dev/null
+}
 put_disk "$pv"
 disk=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p') || disk_stuck "fio with quotas on"
 echo "disk (Async): $disk"
