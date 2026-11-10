@@ -196,7 +196,35 @@ func loadConfig(path string) (Config, error) {
 			c.Sizes = sizes
 		}
 	}
-	return c, c.validate()
+	if c.IOCost && c.IOCostModel == "" {
+		c.IOCostModel = storedIOCostModel(c.StateDir) // boatd -measure-disk
+	}
+	if err := c.validate(); errors.Is(err, errNoIOCostModel) {
+		return c, fmt.Errorf("%w: run `%s -config %s` once (about 25 s of direct I/O; it writes %s), or set ioCostModel (NixOS: services.boat.ioCostModel; the boat-iocost-model unit runs the measurement before boatd)",
+			err, measureCmd, path, filepath.Join(c.StateDir, ioCostModelFile))
+	} else if err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+// readConfig: the file over the defaults, not validated (boatd -measure-disk needs
+// only stateDir, and runs exactly when the config lacks a model).
+func readConfig(path string) (Config, error) {
+	c := defaultConfig()
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return c, err
+	}
+	if err == nil {
+		if err := json.Unmarshal(data, &c); err != nil {
+			return c, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if c.StateDir == "" {
+		return c, errors.New("no stateDir")
+	}
+	return c, nil
 }
 
 func (c Config) validate() error {
@@ -291,6 +319,10 @@ func (c Config) validateUntrusted() error {
 		return fmt.Errorf("untrustedTenants: storageOvercommit must be in (0, 1]")
 	case c.EgressMbit == 0 || c.IngressMbit == 0 || c.IOMaxMBps == 0 || c.IOMaxIOPS == 0 || c.CtPerVM == 0:
 		return fmt.Errorf("untrustedTenants: egressMbit, ingressMbit, ioMaxMBps, ioMaxIOPS and ctPerVM must be set")
+	case !c.IOCost:
+		return fmt.Errorf("untrustedTenants: needs ioCost (busy VMs share the disk by weight, see PROTOCOL.md \"Disk: measured\")")
+	case c.IOCostModel == "":
+		return fmt.Errorf("untrustedTenants: %w", errNoIOCostModel)
 	}
 	return nil
 }

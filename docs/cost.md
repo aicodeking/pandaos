@@ -148,13 +148,28 @@ At 1× CPU (no overcommit) the AX42, AX102, ADVANCE-3 and Latitude boxes become 
 | SMT | on | **off** (`nosmt=force`): an AX102 has 16 threads, not 32 |
 | VMs by CPU at `cpuOvercommit` 4 | 32 on an AX102 | **16**: RAM (15) still binds first, but 15 VMs are 60 vCPUs on 16 cores, 3.75 per core instead of 1.9 per thread |
 | VMs at 1× CPU (no CPU overcommit) | 8 | **4** |
-| Disk | `auto` engine (io_uring), no I/O cap | `Sync` engine, io_uring off, `io.max` 500 MB/s and 20,000 IOPS per VM |
+| Disk | `auto` engine (io_uring), no I/O cap | `Sync` engine, io_uring off; busy VMs share the disk by weight (blk-iocost with the disk's measured model and p95 latency targets), `io.max` 4,000 MB/s and 200,000 IOPS per VM as a ceiling. Until 2026-11-10: `io.max` 500 MB/s and 20,000 IOPS (the run below) |
 | Network | no cap | 1,000 Mbit/s egress and ingress per VM, 4,096 tracked connections |
 | Storage | `storageOvercommit` 10 | **1**: committed storage (51 GiB disk + 8 GiB memory + logs, about 59 GiB per VM, running or stopped, plus snapshots) must fit the disk. About 30 kept VMs on an AX102's 1.92 TB mirror and about 8 on an AX42's 512 GB mirror *(estimate: usable size after RAID 1 and btrfs not measured)* |
 | `warmPool`, `ksmTeam` | allowed (off by default) | refused |
 | Cost per VM-hour, AX102, 100% | $0.019 (22 VMs) | **$0.028** (15 VMs), 78% full to break even with boat.dev, never with operator time |
 
 So against boat.dev, a public PandaOS service is priced by the conservative rows: **$0.028 per VM-hour on an AX102 at 100% utilization versus boat.dev's $0.036, and more expensive than boat.dev below 78% utilization or once operator time counts.** SMT off does not lower the VM count at `cpuOvercommit` 4, but it halves the CPU behind each busy vCPU. [Measured](#measured-boatbench-on-a-github-runner) below on a runner, not on these servers.
+
+### Untrusted disk: the old caps and what replaced them
+
+Same-runner disk matrix ([42769967285](https://github.com/aicodeking/pandaos/actions/runs/42769967285), `boatd/disk-matrix.sh`, 4 vCPU / 8 GiB VM, `Unsafe` cache; full table in [PROTOCOL.md "Disk: measured"](../components/boat/PROTOCOL.md)):
+
+| | VM, trusted defaults | untrusted, old (`Sync`, `io.max` 500 MB/s / 20k IOPS) | untrusted, now (`Sync`, iocost model + QoS, `io.max` 4,000 / 200k) |
+|---|---|---|---|
+| seq write, MB/s | 919-1006 | **564** (-41%) | 858 |
+| seq read, MB/s | 2539-3497 | 3192 | 2142 |
+| rand write, IOPS | 19.0-20.3k | 20.7k | 19.6k |
+| rand read, IOPS | 49.6-56.7k | 79.8k | 82.9k |
+
+- **The old caps were per VM and always on**: 41% of sequential write on a runner whose disk does 400-750 MB/s, and on an NVMe server (3-7 GB/s, 500k-1M IOPS) a ceiling 6-14x below the disk on bandwidth and 25-50x on IOPS, busy disk or idle.
+- **What replaced them protects only modestly.** A victim VM next to one flooding 1 MiB writes kept 24-26% of its fsync'd 4k writes with iocost + QoS, against 11-17% unprotected, and 40-53% of its sequential write against 46-61% (same run). iocost needs the disk's model: `services.boat.ioCostModel`, or `boat-iocost-model.service` measures it once (`boatd -measure-disk`); without either, boatd refuses to start in untrusted mode and names that command.
+- **`Writeback` cannot protect fsync.** With honest flushes, a flooding neighbour stalled the victim's fsync loop to 0 IOPS with or without iocost (runs 42759114633, 42769967285): both VMs' I/O passes through the host's page cache and one writeback queue. Tenants who need durable writes next to hostile neighbours need their own disk; price that in.
 
 ## Measured: boatbench on a GitHub runner
 
@@ -181,11 +196,11 @@ Run [42677142859](https://github.com/aicodeking/pandaos/actions/runs/42677142859
 Medians; brackets are IQR. n = 15 passes for (a), 10 creates for the first row of (b), 5 for the rest. Full tables with IQRs and the runner-vs-VM disk ratios are in the reports.
 
 ¹ GitHub gave the trusted-warm job an Intel runner, so its CPU-bound rows (a, f, exec round trip) cannot be compared with the other two columns. Its VM / host ratio and its lifecycle rows can: a `warmPool` create is 2.3× faster than a cold one, and its snapshot is slower.
-² `stack.sh` turned SMT off as `nosmt=force` would, so the runner had 2 CPUs online, and the untrusted VM's 4 vCPUs and the host-side runs shared those 2. `memOvercommit` stayed at the bench's 8 (see the [bench README](../bench/boatbench/README.md#boatd-presets-options-and-the-warm-pool)). The disk rows show the `Sync` engine and the `io.max` caps: seq write is a third of trusted. Random-write IOPS (28k) are above the 20,000 `ioMaxIOPS` cap, and reads (62–91k) are well above it. My guess, *not checked*, is that the host page cache absorbs or serves that I/O (`Unsafe` cache, below) before the cgroup's `io.max` counts it. The download is well under the 1,000 Mbit/s cap and on a different runner and region, so this run does not show what the cap costs.
+² `stack.sh` turned SMT off as `nosmt=force` would, so the runner had 2 CPUs online, and the untrusted VM's 4 vCPUs and the host-side runs shared those 2. `memOvercommit` stayed at the bench's 8 (see the [bench README](../bench/boatbench/README.md#boatd-presets-options-and-the-warm-pool)). The disk rows show the `Sync` engine and the old `io.max` caps (500 MB/s, 20,000 IOPS; replaced since, see [Untrusted disk](#untrusted-disk-the-old-caps-and-what-replaced-them)): seq write is a third of trusted. Random-write IOPS (28k) are above the 20,000 `ioMaxIOPS` cap, and reads (62–91k) are well above it. My guess, *not checked*, is that the host page cache absorbs or serves that I/O (`Unsafe` cache, below) before the cgroup's `io.max` counts it. The download is well under the 1,000 Mbit/s cap and on a different runner and region, so this run does not show what the cap costs.
 ³ All 5 repeats: 4 of 10 creates got `503 host_capacity: 24 vCPUs already active (limit 24)`, which is 2 CPUs × the bench's `cpuOvercommit` 12. This is a harness limit (SMT off halves the runner's CPUs), not a boatd bug. `stack.sh` should raise `cpuOvercommit` for the untrusted preset. That is not fixed yet.
 
 **Caveats for every number above:**
-- **† Unsafe cache.** All three presets ran with Firecracker's drive `cache_type` `Unsafe`, which is Firecracker's default because boatd sets none. Guest flushes stop at the host page cache, so the write rows are not durable-write numbers. They are also not the same kind of number as boat.dev's published fio results. A boatd change that adds `diskCache` (to honour flushes) was not on main for this run.
+- **† Unsafe cache.** All three presets ran with Firecracker's drive `cache_type` `Unsafe`, which is Firecracker's default because boatd sets none. Guest flushes stop at the host page cache, so the write rows are not durable-write numbers. They are also not the same kind of number as boat.dev's published fio results. boatd has since got `diskCache` (`Writeback` honours flushes); `Unsafe` stays the default because `Writeback` costs 5-10x on fsync-heavy writes (PROTOCOL.md "Disk: measured").
 - **Three CPUs, none of them the one priced.** boat.dev's published 27.67 runs/s is a VM on an **AMD Ryzen 9 9950X** (Zen 5). The self-hosted price above is a Hetzner AX102, a **Ryzen 9 7950X3D** (Zen 4). The speeds were measured on an EPYC 9V74 or a Xeon 8370C runner. A cost per run that multiplies one CPU's price by another's speed is no machine's cost, and the report marks it **MIXED CPUs**. The only CPU-consistent figure is boat.dev's price at boat.dev's published speed: **$0.000361 per 1000 runs**. PandaOS has none until someone runs boatbench on a 7950X3D.
 - **Projection, not measurement.** The report scales the VM / host ratio to a 9950X: 24.8–25.8 runs/s (trusted) and 24.0–25.0 (untrusted), against boat.dev's 27.67. That is arithmetic on public averages for a CPU nobody ran PandaOS on. It is also not the AX102's CPU, and boatbench has no 7950X3D projection.
 - **Runner, not server.** These are shared 4-vCPU cloud VMs with nested KVM and a loop-file disk. Each preset ran on its own runner, so runner-to-runner variance is in the column differences too.
@@ -207,7 +222,7 @@ As of run 42677142859 and the 2026-11-02 prices:
 
 1. **Price: a public PandaOS service is not cheaper than boat.dev.** It must run untrusted mode (no RAM overcommit). On an AX102 that is $0.028 per VM-hour at 100% utilization against boat.dev's $0.036. It is dearer than boat.dev below 78% utilization, and dearer at any utilization once operator time is counted. The default-overcommit figure ($0.019) applies only to your own trusted agents and only while they stay mostly idle.
 2. **Speed: no head-to-head measurement exists.** The boat.dev job has never run (no API key), and PandaOS has never run on the CPU it is priced on. What was measured: on the same runner, a PandaOS VM keeps 85–90% of the host's Node throughput in every preset, and untrusted mode costs about 3 points of that. Projected to a 9950X, that is 24–26 runs/s against boat.dev's published 27.67. This is a projection, not a result, and suggests at best parity per vCPU, not a win.
-3. **Untrusted mode's measured cost is mostly disk and CPU.** On the runner its caps cut sequential writes to a third and random writes to under half. SMT off halves the threads behind each busy vCPU, and on the runner resume and fork took twice as long. All write numbers are `Unsafe`-cache numbers.
+3. **Untrusted mode's measured cost is mostly disk and CPU.** On the runner its old caps cut sequential writes to a third and random writes to under half; in a same-runner matrix they took 41% of a VM's sequential write, and on an NVMe server they would sit 6-14x below the disk's bandwidth and 25-50x below its IOPS. They are replaced by iocost (below), which keeps a single VM at the trusted speed. SMT off halves the threads behind each busy vCPU, and on the runner resume and fork took twice as long. All write numbers are `Unsafe`-cache numbers.
 4. **Where self-hosting does win** is unchanged: against E2B, Daytona, Modal and Vercel (6–9× cheaper at 50% utilization), for trusted workloads that tolerate overcommit, and for control (kernels, images, data locality, no start or snapshot fees).
 
 **What would change this verdict:**

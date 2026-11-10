@@ -309,7 +309,16 @@ bd DELETE "/v1/vms/$d1/snapshots/$sn" >/dev/null
 sudo rm -f "$WORK/tmp/victim"
 
 log "limits e2e: untrustedTenants refuses a weaker config or host"
-ut_filter=".untrustedTenants = true | .storageOvercommit = 1 | .egressMbit = 100 | .ingressMbit = 100 | .ioMaxMBps = 100 | .ioMaxIOPS = 1000 | .socket = \"$WORK/run/ut.sock\""
+ut_filter=".untrustedTenants = true | .storageOvercommit = 1 | .egressMbit = 100 | .ingressMbit = 100 | .ioMaxMBps = 100 | .ioMaxIOPS = 1000 | .ioCost = true | .ioCostModel = \"rbps=500000000 rseqiops=20000 rrandiops=20000 wbps=400000000 wseqiops=10000 wrandiops=10000\" | .socket = \"$WORK/run/ut.sock\""
+# ioCost without a model: refused, naming the command; that command measures this disk.
+sudo rm -f "$STATE/iocost-model"
+if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | del(.ioCostModel)" ut0)" 2>&1); then fail "untrustedTenants started without an ioCostModel"; fi
+grep -q "boatd -measure-disk -config $WORK/boatd-ut0.json" <<<"$out" || fail "no-model refusal does not name the command: $out"
+model=$(sudo timeout 120 "$WORK/bin/boatd" -measure-disk -config "$WORK/boatd-ut0.json" 2>/dev/null) || fail "boatd -measure-disk failed"
+grep -qE '^rbps=[1-9][0-9]* rseqiops=[1-9][0-9]* rrandiops=[1-9][0-9]* wbps=[1-9][0-9]* wseqiops=[1-9][0-9]* wrandiops=[1-9][0-9]*$' <<<"$model" || fail "measured model: $model"
+[ "$(sudo cat "$STATE/iocost-model")" = "$model" ] || fail "measure-disk did not store its model"
+echo "iocost model of the state disk: $model"
+sudo rm -f "$STATE/iocost-model"
 if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | .warmPool = true" ut1)" 2>&1); then fail "untrustedTenants accepted warmPool"; fi
 grep -q 'warmPool' <<<"$out" || fail "untrustedTenants + warmPool: $out"
 if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | .ksmTeam = \"*\"" ut2)" 2>&1); then fail "untrustedTenants accepted KSM"; fi

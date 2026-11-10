@@ -53,8 +53,13 @@ let
     memOvercommit = 1;
     egressMbit = 1000;
     ingressMbit = 1000;
-    ioMaxMBps = 500;
-    ioMaxIOPS = 20000;
+    # Busy VMs share the disk by weight, with latency targets; io.max is only a ceiling.
+    # io.max 500/20k cost 41% of a VM's sequential write on a slow runner and sat 6-14x
+    # (bandwidth) and 25-50x (IOPS) below an NVMe disk (PROTOCOL.md "Disk: measured").
+    ioCost = true; # needs the disk's model: services.boat.ioCostModel or boat-iocost-model.service
+    ioCostQoS = "rpct=95 rlat=5000 wpct=95 wlat=10000 min=25 max=400";
+    ioMaxMBps = 4000;
+    ioMaxIOPS = 200000;
     ctPerVM = 4096;
     diskEngine = "Sync"; # with kernel.io_uring_disabled: no io_uring for a broken-out VMM
     hostDirtyRatio = 20; # a tenant must not be able to dirty half of the host's RAM
@@ -172,7 +177,12 @@ let
   }
   // lib.optionalAttrs (imageIds != [ ]) { defaultImage = lib.head imageIds; }
   // lib.optionalAttrs cfg.untrustedTenants untrustedSettings
+  // lib.optionalAttrs (cfg.ioCostModel != null) { inherit (cfg) ioCostModel; }
   // cfg.boatdSettings;
+
+  # ioCost without a model in the config: boat-iocost-model.service measures the
+  # state disk once (boatd -measure-disk) into dataDir/iocost-model, which boatd reads.
+  measureIOCost = (boatdConfig.ioCost or false) && !(boatdConfig ? ioCostModel);
 
   apiArgs = [
     "serve"
@@ -346,11 +356,25 @@ in
       example = { egressMbit = 200; storageOvercommit = 2; idleStopS = 3600; warmPool = true; ksmTeam = "ci"; teams.ci = { maxVMs = 50; }; };
       description = "Extra keys merged into /etc/boat/boatd.json (see boatd/config.go and PROTOCOL.md \"Performance and density\"); they win over the module's.";
     };
+    ioCostModel = mkOption {
+      type = types.nullOr (types.strMatching "((rbps|rseqiops|rrandiops|wbps|wseqiops|wrandiops)=[0-9]+ ?)+");
+      default = null;
+      example = "rbps=3000000000 rseqiops=400000 rrandiops=400000 wbps=2000000000 wseqiops=300000 wrandiops=300000";
+      description = ''
+        blk-iocost model of the disk under {option}`dataDir`, for boatd's `ioCost`
+        (on with {option}`untrustedTenants`): bytes/s and 4 KiB IOPS the disk sustains.
+        null: `boat-iocost-model.service` measures the disk once before boatd starts
+        (`boatd -measure-disk`, about 25 s of direct I/O) and keeps the result in
+        `dataDir/iocost-model`; delete that file to measure again (new disk). Without
+        either, boatd refuses to start under {option}`untrustedTenants` and names the command.
+      '';
+    };
     untrustedTenants = lib.mkEnableOption ''
       hosting tenants you do not trust. Turns on what is off by default because it costs
       performance or density: SMT off (`nosmt=force`, half the threads of an SMT host),
-      CPU mitigations and flushes on the kernel command line, per-VM egress, ingress, disk and connection
-      limits, committed storage capped at the disk's size, memory overcommit 1.0, the
+      CPU mitigations and flushes on the kernel command line, per-VM egress, ingress and connection
+      limits, the disk shared by weight (blk-iocost, see {option}`ioCostModel`) under per-VM
+      ceilings, committed storage capped at the disk's size, memory overcommit 1.0, the
       `Sync` disk engine with io_uring off in the kernel, no swap, and refuses KSM and
       `warmPool`. Needs a reboot to take effect; until then boatd refuses to start.
       Each limit can be raised in {option}`boatdSettings`, not removed
@@ -576,12 +600,32 @@ in
       };
     };
 
+    systemd.services.boat-iocost-model = lib.mkIf measureIOCost {
+      description = "boat: measure the state disk once for blk-iocost";
+      unitConfig = {
+        RequiresMountsFor = cfg.dataDir;
+        ConditionPathExists = "!${cfg.dataDir}/iocost-model";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStartPre = dataCheck;
+        ExecStart = "${lib.getExe' cfg.boatdPackage "boatd"} -measure-disk -config /etc/boat/boatd.json";
+        TimeoutStartSec = 300;
+        ProtectSystem = "strict";
+        ReadWritePaths = [ cfg.dataDir ];
+        PrivateTmp = true;
+        ProtectHome = true;
+        NoNewPrivileges = true;
+      };
+    };
+
     systemd.services.boatd = {
       description = "boat VM manager (Firecracker)";
       wantedBy = [ "multi-user.target" ];
-      wants = [ "boat-images.service" "network-online.target" ];
+      wants = [ "boat-images.service" "network-online.target" ] ++ lib.optional measureIOCost "boat-iocost-model.service";
       requires = [ "boat-secrets.service" ];
-      after = [ "boat-images.service" "boat-secrets.service" "network-online.target" ];
+      after = [ "boat-images.service" "boat-secrets.service" "network-online.target" ] ++ lib.optional measureIOCost "boat-iocost-model.service";
       # Persistent VMs: never restart on `nixos-rebuild switch` or the daily
       # auto-upgrade; a new boatd takes effect on reboot or a manual restart.
       restartIfChanged = false;

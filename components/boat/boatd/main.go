@@ -29,20 +29,41 @@ func main() {
 	}
 	cfgPath := flag.String("config", "/etc/boat/boatd.json", "config file")
 	showVersion := flag.Bool("version", false, "print version")
+	measure := flag.Bool("measure-disk", false, "measure stateDir's disk once for ioCost, write stateDir/"+ioCostModelFile+" and exit")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
 		return
 	}
+	if *measure {
+		c, err := readConfig(*cfgPath)
+		if err == nil {
+			err = measureDisk(c)
+		}
+		if err != nil {
+			log.Fatalf("boatd -measure-disk: %v", err)
+		}
+		return
+	}
 	if err := serve(*cfgPath); err != nil {
-		log.Fatalf("boatd: %v", err)
+		log.Printf("boatd: %v", err)
+		if errors.Is(err, errBadConfig) {
+			os.Exit(exConfig) // systemd: RestartPreventExitStatus, no restart loop on a config it will refuse again
+		}
+		os.Exit(1)
 	}
 }
+
+// errBadConfig: boatd refuses this config; restarting will not help. exConfig is EX_CONFIG,
+// the status the NixOS unit does not restart on.
+var errBadConfig = errors.New("config refused")
+
+const exConfig = 78
 
 func serve(cfgPath string) error {
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errBadConfig, err)
 	}
 	log.Printf("boatd %s starting: bridge %s, stateDir %s", version, cfg.Bridge, cfg.StateDir)
 	if cfg.UntrustedTenants {
@@ -146,7 +167,9 @@ func setupCgroups(c *Config) error {
 	}
 	c.cgroupLimits = true
 	c.stateDisk = stateDisk(c.StateDir)
-	if c.IOCost {
+	if c.IOCost && c.IOCostModel == "" {
+		log.Printf("cgroups: ioCost: no ioCostModel, iocost left off (the kernel's default model throttles a fast disk); run `%s`", measureCmd)
+	} else if c.IOCost {
 		if err := enableIOCost(cgroupRoot, c.stateDisk, c.IOCostModel, c.IOCostQoS); err != nil {
 			log.Printf("cgroups: ioCost: %v (VMs share the disk first come, first served; io.max still applies)", err)
 		}

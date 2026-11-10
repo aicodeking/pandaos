@@ -344,6 +344,7 @@ func TestUntrustedTenantsConfig(t *testing.T) {
 	ok := defaultConfig()
 	ok.UntrustedTenants, ok.Jailer, ok.StorageOvercommit = true, "/bin/jailer", 1
 	ok.EgressMbit, ok.IngressMbit, ok.IOMaxMBps, ok.IOMaxIOPS = 1, 1, 1, 1
+	ok.IOCost, ok.IOCostModel = true, "rbps=1000000000 rrandiops=100000"
 	if err := ok.validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -358,6 +359,8 @@ func TestUntrustedTenantsConfig(t *testing.T) {
 		"egress":    func(c *Config) { c.EgressMbit = 0 },
 		"io":        func(c *Config) { c.IOMaxIOPS = 0 },
 		"ct":        func(c *Config) { c.CtPerVM = 0 },
+		"no ioCost": func(c *Config) { c.IOCost = false },
+		"no model":  func(c *Config) { c.IOCostModel = "" },
 	} {
 		c := ok
 		spoil(&c)
