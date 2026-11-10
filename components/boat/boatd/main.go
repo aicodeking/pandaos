@@ -147,7 +147,7 @@ func setupCgroups(c *Config) error {
 	c.cgroupLimits = true
 	c.stateDisk = stateDisk(c.StateDir)
 	if c.IOCost {
-		if err := enableIOCost(cgroupRoot, c.stateDisk, c.IOCostModel); err != nil {
+		if err := enableIOCost(cgroupRoot, c.stateDisk, c.IOCostModel, c.IOCostQoS); err != nil {
 			log.Printf("cgroups: ioCost: %v (VMs share the disk first come, first served; io.max still applies)", err)
 		}
 	}
@@ -158,7 +158,7 @@ func setupCgroups(c *Config) error {
 // on a disk with the none scheduler, which NVMe uses: io.max is then the only control.
 // model (ioCostModel) is the disk's measured capacity; without one the kernel's default
 // for an SSD (about 8.5k rand IOPS) throttles a fast disk for everyone (run 42749629578).
-func enableIOCost(root, dev, model string) error {
+func enableIOCost(root, dev, model, qos string) error {
 	if dev == "" {
 		return errors.New("stateDir's disk unknown")
 	}
@@ -167,7 +167,11 @@ func enableIOCost(root, dev, model string) error {
 			return fmt.Errorf("io.cost.model: %w", err)
 		}
 	}
-	return os.WriteFile(filepath.Join(root, "io.cost.qos"), []byte(dev+" enable=1"), 0)
+	q := dev + " enable=1"
+	if qos != "" {
+		q += " ctrl=user " + qos
+	}
+	return os.WriteFile(filepath.Join(root, "io.cost.qos"), []byte(q), 0)
 }
 
 func delegateCgroups(c *Config) error {

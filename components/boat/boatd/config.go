@@ -105,7 +105,10 @@ type Config struct {
 	IOCost      bool `json:"ioCost"`      // blk-iocost on stateDir's disk: busy VMs share it by io.weight (equal), idle capacity is free to take
 	// io.cost.model for that disk, e.g. "rbps=3e9 rseqiops=400000 rrandiops=400000 wbps=2e9 wseqiops=300000 wrandiops=300000"
 	// (iocost_coef_gen.py or fio on the disk). Empty: the kernel's default, which caps an SSD near 8.5k rand read IOPS.
-	IOCostModel   string `json:"ioCostModel"`
+	IOCostModel string `json:"ioCostModel"`
+	// io.cost.qos targets, e.g. "rpct=95 rlat=5000 wpct=95 wlat=10000 min=25 max=400": iocost lowers the
+	// disk's virtual rate when p95 latency misses them, so a flood cannot starve a VM that flushes. Empty: none.
+	IOCostQoS     string `json:"ioCostQoS"`
 	CtPerVM       int    `json:"ctPerVM"`       // new forwarded connections refused past this many tracked
 	MaxPortsPerVM int    `json:"maxPortsPerVM"` // routes + public ports of one VM
 	ResumeCrashed bool   `json:"resumeCrashed"` // cold-boot VMs that were running when boatd/the host died
@@ -119,6 +122,7 @@ type Config struct {
 }
 
 var (
+	reIOCostQoS   = regexp.MustCompile(`^((rpct|rlat|wpct|wlat|min|max)=[0-9]+(\.[0-9]+)? ?)+$`)
 	reIOCostModel = regexp.MustCompile(`^((rbps|rseqiops|rrandiops|wbps|wseqiops|wrandiops)=[0-9]+ ?)+$`)
 	reName        = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	reTeam        = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
@@ -219,6 +223,9 @@ func (c Config) validate() error {
 	}
 	if c.DiskEngine != "auto" && c.DiskEngine != "Async" && c.DiskEngine != "Sync" {
 		return fmt.Errorf("diskEngine must be auto, Async or Sync")
+	}
+	if c.IOCostQoS != "" && !reIOCostQoS.MatchString(c.IOCostQoS) {
+		return fmt.Errorf("ioCostQoS: rpct= rlat= wpct= wlat= min= max= with numbers")
 	}
 	if c.IOCostModel != "" && !reIOCostModel.MatchString(c.IOCostModel) {
 		return fmt.Errorf("ioCostModel: rbps= rseqiops= rrandiops= wbps= wseqiops= wrandiops= with integers")

@@ -84,10 +84,10 @@ func TestEnableIOCost(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "io.cost.qos"), nil, 0o600) // cgroupfs has them already
 	os.WriteFile(filepath.Join(dir, "io.cost.model"), nil, 0o600)
-	if err := enableIOCost(dir, "", ""); err == nil {
+	if err := enableIOCost(dir, "", "", ""); err == nil {
 		t.Fatal("unknown disk accepted")
 	}
-	if err := enableIOCost(dir, "259:0", "rbps=3000000000 rrandiops=400000"); err != nil {
+	if err := enableIOCost(dir, "259:0", "rbps=3000000000 rrandiops=400000", ""); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "io.cost.model")); string(b) != "259:0 ctrl=user model=linear rbps=3000000000 rrandiops=400000" {
@@ -98,7 +98,18 @@ func TestEnableIOCost(t *testing.T) {
 	if c.validate() == nil {
 		t.Fatal("ioCostModel with junk accepted")
 	}
+	c = defaultConfig()
+	c.IOCostQoS = "rpct=95 enable=0"
+	if c.validate() == nil {
+		t.Fatal("ioCostQoS with another key accepted")
+	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "io.cost.qos")); string(b) != "259:0 enable=1" {
 		t.Fatalf("io.cost.qos = %q", b)
+	}
+	if err := enableIOCost(dir, "259:0", "", "rpct=95 rlat=5000 wpct=95 wlat=10000 min=25 max=400"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "io.cost.qos")); string(b) != "259:0 enable=1 ctrl=user rpct=95 rlat=5000 wpct=95 wlat=10000 min=25 max=400" {
+		t.Fatalf("io.cost.qos with targets = %q", b)
 	}
 }
