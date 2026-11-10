@@ -4306,6 +4306,10 @@
              "updated": {
               "type": "string",
               "format": "date-time"
+             },
+             "inject": {
+              "type": "boolean",
+              "description": "Default-injected: a VM created without a secrets selection gets it. Only admins set it; false for new secrets."
              }
             },
             "required": [
@@ -4351,6 +4355,10 @@
         "properties": {
          "value": {
           "type": "string"
+         },
+         "inject": {
+          "type": "boolean",
+          "description": "Mark it default-injected (true) or not (false). Absent keeps the current mark."
          }
         },
         "required": [
@@ -4380,6 +4388,9 @@
           },
           "note": {
            "type": "string"
+          },
+          "inject": {
+           "type": "boolean"
           }
          },
          "required": [
@@ -6462,6 +6473,76 @@
     }
    }
   },
+  "/api/v1/sandboxes/{id}/commands/{pid}/stream": {
+   "get": {
+    "summary": "boat.dev attachCommand: attach to a detached command (NDJSON; one combined log, served as stdout)",
+    "operationId": "compat_attachCommand",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "pid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "integer",
+       "minimum": 1
+      }
+     },
+     {
+      "name": "stdoutOffset",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 0,
+       "default": 0
+      }
+     },
+     {
+      "name": "stderrOffset",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 0,
+       "default": 0
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/x-ndjson": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCommandAttachFrame"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/v1/sandboxes/{id}/command-history": {
    "get": {
     "summary": "boat.dev commandHistory: command history",
@@ -8093,6 +8174,1126 @@
      }
     }
    }
+  },
+  "/api/v1/sandboxes/{id}/host": {
+   "post": {
+    "summary": "boat.dev hostPort: host a port (POST /v1/vms/{id}/ports + GET \u2026/ports/{port}/url; localhost refused)",
+    "operationId": "compat_hostPort",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+         },
+         "public": {
+          "type": "boolean",
+          "default": false
+         },
+         "localhost": {
+          "type": "boolean",
+          "default": false
+         },
+         "title": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDHostPortResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/desktop": {
+   "post": {
+    "summary": "boat.dev desktop: desktop link (GET /v1/vms/{id}/desktop; vnc mode, publicAccess refused)",
+    "operationId": "compat_desktop",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "vnc",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "enum": [
+        1
+       ]
+      }
+     },
+     {
+      "name": "theme",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "light",
+        "dark"
+       ]
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "publicAccess": {
+          "type": "boolean",
+          "default": false
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDDesktopResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/sshkey": {
+   "post": {
+    "summary": "boat.dev sshKey: authorize an ssh key (POST /v1/vms/{id}/ssh)",
+    "operationId": "compat_sshKey",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "key": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSshKeyResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/snapshots": {
+   "get": {
+    "summary": "boat.dev listSnapshots: team snapshots (GET /v1/snapshots; one page)",
+    "operationId": "compat_listSnapshots",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "limit",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 200,
+       "default": 100
+      }
+     },
+     {
+      "name": "cursor",
+      "in": "query",
+      "schema": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     {
+      "name": "sort",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "asc",
+        "desc"
+       ],
+       "default": "desc"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSnapshotListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/snapshots/{sid}": {
+   "delete": {
+    "summary": "boat.dev deleteSnapshot: delete one (DELETE /v1/snapshots/{sid})",
+    "operationId": "compat_deleteSnapshot",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "sid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "X-Ascii-Confirm-Delete",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "202": {
+      "description": "boat.dev 202",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDDeletionOperationResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/snapshots": {
+   "get": {
+    "summary": "boat.dev listSandboxSnapshots: a sandbox's snapshots (GET /v1/vms/{id}/snapshots)",
+    "operationId": "compat_listSandboxSnapshots",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 200,
+       "default": 100
+      }
+     },
+     {
+      "name": "cursor",
+      "in": "query",
+      "schema": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     {
+      "name": "sort",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "asc",
+        "desc"
+       ],
+       "default": "desc"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSnapshotListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteSandboxSnapshots: delete a sandbox's captures (its unnamed snapshots; saved ones stay)",
+    "operationId": "compat_deleteSandboxSnapshots",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "X-Ascii-Confirm-Delete",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "202": {
+      "description": "boat.dev 202",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDDeletionOperationListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/snapshots/latest": {
+   "get": {
+    "summary": "boat.dev getLatestSandboxSnapshot: newest snapshot or null",
+    "operationId": "compat_getLatestSandboxSnapshot",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSnapshotLatestResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/named-snapshots": {
+   "get": {
+    "summary": "boat.dev listNamedSnapshots: named snapshots (= saved snapshots)",
+    "operationId": "compat_listNamedSnapshots",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDNamedSnapshotListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "boat.dev saveNamedSnapshot: save (= POST /saved-snapshots)",
+    "operationId": "compat_saveNamedSnapshot",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "sandboxId": {
+          "type": "string"
+         },
+         "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "boat.dev 202",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDNamedSnapshotSavingResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/named-snapshots/{name}": {
+   "get": {
+    "summary": "boat.dev getNamedSnapshot: one named snapshot",
+    "operationId": "compat_getNamedSnapshot",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "name",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDNamedSnapshotInfoResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteNamedSnapshot: delete a named snapshot",
+    "operationId": "compat_deleteNamedSnapshot",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "name",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDNamedSnapshotDeletedResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/saved-snapshots/{name}/shares": {
+   "get": {
+    "summary": "boat.dev listSnapshotShares: share codes (GET /v1/vms/{id}/snapshots/{sid}/shares)",
+    "operationId": "compat_listSnapshotShares",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDNamedSnapshotShareListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "boat.dev createSnapshotShare: new share code (POST \u2026/shares; valid 30 days)",
+    "operationId": "compat_createSnapshotShare",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "201": {
+      "description": "boat.dev 201",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDNamedSnapshotShareCreatedResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/saved-snapshots/{name}/shares/{share}": {
+   "delete": {
+    "summary": "boat.dev revokeSnapshotShare: revoke a share code",
+    "operationId": "compat_revokeSnapshotShare",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDNamedSnapshotShareRevokedResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/secrets": {
+   "get": {
+    "summary": "boat.dev secrets: default-injected team secrets (names only)",
+    "operationId": "compat_secrets",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSecretsResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "boat.dev updateSecrets: set default-injected team secrets (secretFiles refused)",
+    "operationId": "compat_updateSecrets",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "envContents": {
+          "type": "string"
+         },
+         "secretFiles": {
+          "type": "array",
+          "items": {
+           "$ref": "#/components/schemas/BDSecretFile"
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSecretsResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/ai-proxy": {
+   "get": {
+    "summary": "boat.dev getAiProxy: AI credentials proxy switch (GET /v1/ai/proxy)",
+    "operationId": "compat_getAiProxy",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "X-Boat-Org",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDAiProxySettings"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "put": {
+    "summary": "boat.dev updateAiProxy: turn it on or off (PUT /v1/ai/proxy)",
+    "operationId": "compat_updateAiProxy",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "X-Boat-Org",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "enabled": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDAiProxySettings"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files/find": {
+   "get": {
+    "summary": "boat.dev findInFiles: find text in files (ripgrep)",
+    "operationId": "compat_findInFiles",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "default": "/home/user"
+      }
+     },
+     {
+      "name": "pattern",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "regex",
+      "in": "query",
+      "schema": {
+       "type": "boolean",
+       "default": false
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileFindResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files/download-url": {
+   "post": {
+    "summary": "boat.dev createDownloadUrl: signed short-lived download URL (/api/v1/file-downloads/{token})",
+    "operationId": "compat_createDownloadUrl",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "ttlSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 900
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileUrlResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/file-downloads/{token}": {
+   "get": {
+    "summary": "Download a file through a signed URL from POST /api/v1/sandboxes/{id}/files/download-url (no API key)",
+    "operationId": "compat_fileDownload",
+    "security": [],
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "token",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The file's bytes",
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
   }
  },
  "components": {
@@ -9493,6 +10694,65 @@
      "snapshotAvailable"
     ]
    },
+   "BDAiProxySettings": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success",
+       "accountId",
+       "org",
+       "enabled",
+       "enabledAt",
+       "pricing",
+       "proxyUrl"
+      ],
+      "properties": {
+       "success": {
+        "type": "boolean"
+       },
+       "accountId": {
+        "type": "string"
+       },
+       "org": {
+        "type": "boolean"
+       },
+       "enabled": {
+        "type": "boolean"
+       },
+       "enabledAt": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "format": "date-time"
+       },
+       "pricing": {
+        "type": "object",
+        "required": [
+         "dailyDollars",
+         "dollarsPer1000Requests"
+        ],
+        "properties": {
+         "dailyDollars": {
+          "type": "number"
+         },
+         "dollarsPer1000Requests": {
+          "type": "number"
+         }
+        }
+       },
+       "proxyUrl": {
+        "type": "string",
+        "format": "uri"
+       }
+      }
+     }
+    ]
+   },
    "BDApiKey": {
     "type": "object",
     "required": [
@@ -9870,6 +11130,67 @@
       }
      }
     ]
+   },
+   "BDCommandAttachFrame": {
+    "type": "object",
+    "required": [
+     "type"
+    ],
+    "properties": {
+     "type": {
+      "type": "string",
+      "enum": [
+       "attached",
+       "stdout",
+       "stderr",
+       "heartbeat",
+       "exit",
+       "reconnect",
+       "error"
+      ]
+     },
+     "processId": {
+      "type": "integer"
+     },
+     "data": {
+      "type": "string"
+     },
+     "nextOffset": {
+      "type": "integer"
+     },
+     "stdoutOffset": {
+      "type": "integer"
+     },
+     "stderrOffset": {
+      "type": "integer"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "running",
+       "exited",
+       "lost"
+      ]
+     },
+     "exitCode": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "signal": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "error": {
+      "type": "string"
+     },
+     "message": {
+      "type": "string"
+     }
+    }
    },
    "BDCommandInfoResponse": {
     "allOf": [
@@ -10651,6 +11972,33 @@
      }
     }
    },
+   "BDDeletionOperationListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "operations"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "enum": [
+         "snapshot.deleting"
+        ]
+       },
+       "operations": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDDeletionOperation"
+        }
+       }
+      }
+     }
+    ]
+   },
    "BDDeletionOperationResponse": {
     "allOf": [
      {
@@ -10672,6 +12020,47 @@
        },
        "operation": {
         "$ref": "#/components/schemas/BDDeletionOperation"
+       }
+      }
+     }
+    ]
+   },
+   "BDDesktopResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+       "type": {
+        "type": "string"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "desktopUrl": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "format": "uri"
+       },
+       "ip": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "mode": {
+        "type": "string"
+       },
+       "provisioning": {
+        "type": "boolean"
+       },
+       "message": {
+        "type": "string"
        }
       }
      }
@@ -10769,6 +12158,60 @@
       "format": "date-time"
      }
     }
+   },
+   "BDFileFindResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "matches",
+       "truncated"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "file.find"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "matches": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "file",
+          "line",
+          "content"
+         ],
+         "properties": {
+          "file": {
+           "type": "string"
+          },
+          "line": {
+           "type": "integer"
+          },
+          "content": {
+           "type": "string"
+          }
+         }
+        }
+       },
+       "truncated": {
+        "type": "boolean"
+       },
+       "errors": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    ]
    },
    "BDFileInfoResponse": {
     "allOf": [
@@ -10941,6 +12384,49 @@
      }
     ]
    },
+   "BDFileUrlResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "url",
+       "method",
+       "path",
+       "expiresAt"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "enum": [
+         "file.download_url",
+         "file.upload_url"
+        ]
+       },
+       "url": {
+        "type": "string",
+        "format": "uri"
+       },
+       "method": {
+        "type": "string",
+        "enum": [
+         "GET",
+         "PUT"
+        ]
+       },
+       "path": {
+        "type": "string"
+       },
+       "expiresAt": {
+        "type": "string",
+        "format": "date-time"
+       }
+      }
+     }
+    ]
+   },
    "BDFileWriteResponse": {
     "allOf": [
      {
@@ -11002,6 +12488,45 @@
       "type": "string"
      }
     }
+   },
+   "BDHostPortResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+       "type": {
+        "type": "string"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "port": {
+        "type": "integer"
+       },
+       "url": {
+        "type": "string",
+        "format": "uri"
+       },
+       "isProtected": {
+        "type": "boolean"
+       },
+       "access": {
+        "type": "string",
+        "enum": [
+         "private",
+         "public"
+        ]
+       },
+       "localhost": {
+        "type": "boolean"
+       }
+      }
+     }
+    ]
    },
    "BDLimitsFields": {
     "type": "object",
@@ -11609,6 +13134,323 @@
           "format": "date-time"
          }
         }
+       }
+      }
+     }
+    ]
+   },
+   "BDNamedSnapshot": {
+    "type": "object",
+    "required": [
+     "name",
+     "status",
+     "sourceSandboxId",
+     "createdAt"
+    ],
+    "properties": {
+     "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "saving",
+       "ready",
+       "failed"
+      ]
+     },
+     "error": {
+      "type": "string"
+     },
+     "sourceSandboxId": {
+      "type": "string"
+     },
+     "snapshotId": {
+      "type": "string"
+     },
+     "type": {
+      "type": "string"
+     },
+     "sizeBytes": {
+      "type": "integer"
+     },
+     "createdAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "BDNamedSnapshotAllowance": {
+    "type": "object",
+    "properties": {
+     "org": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "orgName": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "free": {
+      "type": "integer"
+     },
+     "used": {
+      "type": "integer"
+     },
+     "extra": {
+      "type": "integer"
+     },
+     "extraMonthlyDollars": {
+      "type": "number"
+     },
+     "extraDailyDollars": {
+      "type": "number"
+     },
+     "pricePerExtraMonthlyDollars": {
+      "type": "number"
+     },
+     "pricePerExtraDailyDollars": {
+      "type": "number"
+     }
+    }
+   },
+   "BDNamedSnapshotDeletedResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "name",
+       "status"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.named.deleted"
+       },
+       "name": {
+        "type": "string"
+       },
+       "status": {
+        "type": "string",
+        "const": "deleted"
+       }
+      }
+     }
+    ]
+   },
+   "BDNamedSnapshotInfoResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "snapshot"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.named.info"
+       },
+       "snapshot": {
+        "$ref": "#/components/schemas/BDNamedSnapshot"
+       }
+      }
+     }
+    ]
+   },
+   "BDNamedSnapshotListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "snapshots"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.named.list"
+       },
+       "snapshots": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDNamedSnapshot"
+        }
+       },
+       "allowance": {
+        "$ref": "#/components/schemas/BDNamedSnapshotAllowance"
+       }
+      }
+     }
+    ]
+   },
+   "BDNamedSnapshotSavingResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "status",
+       "snapshot"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.named.saving"
+       },
+       "status": {
+        "type": "string",
+        "const": "saving"
+       },
+       "snapshot": {
+        "$ref": "#/components/schemas/BDNamedSnapshot"
+       }
+      }
+     }
+    ]
+   },
+   "BDNamedSnapshotShare": {
+    "type": "object",
+    "required": [
+     "id",
+     "codePrefix",
+     "status",
+     "useCount",
+     "lastUsedAt",
+     "revokedAt",
+     "createdAt"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "codePrefix": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "active",
+       "revoked"
+      ]
+     },
+     "useCount": {
+      "type": "integer"
+     },
+     "lastUsedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "revokedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "createdAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "BDNamedSnapshotShareCreatedResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "name",
+       "shareCode",
+       "share"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.share.created"
+       },
+       "name": {
+        "type": "string"
+       },
+       "shareCode": {
+        "type": "string"
+       },
+       "share": {
+        "$ref": "#/components/schemas/BDNamedSnapshotShare"
+       }
+      }
+     }
+    ]
+   },
+   "BDNamedSnapshotShareListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "name",
+       "shares"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.share.list"
+       },
+       "name": {
+        "type": "string"
+       },
+       "shares": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDNamedSnapshotShare"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDNamedSnapshotShareRevokedResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "name",
+       "share"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.share.revoked"
+       },
+       "name": {
+        "type": "string"
+       },
+       "share": {
+        "$ref": "#/components/schemas/BDNamedSnapshotShare"
        }
       }
      }
@@ -12912,6 +14754,45 @@
      }
     }
    },
+   "BDSecretsResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "environmentId",
+       "envContents",
+       "secretFiles"
+      ],
+      "properties": {
+       "success": {
+        "type": "boolean"
+       },
+       "environmentId": {
+        "type": "string"
+       },
+       "subenvironmentId": {
+        "type": "string"
+       },
+       "envContents": {
+        "type": "string"
+       },
+       "secretFiles": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSecretFile"
+        }
+       },
+       "pushed": {
+        "type": "object",
+        "additionalProperties": true
+       }
+      }
+     }
+    ]
+   },
    "BDSelectedRepository": {
     "allOf": [
      {
@@ -12934,6 +14815,189 @@
        },
        "setupBlocking": {
         "type": "boolean"
+       }
+      }
+     }
+    ]
+   },
+   "BDSnapshotLatestResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "snapshot"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.latest"
+       },
+       "snapshot": {
+        "oneOf": [
+         {
+          "$ref": "#/components/schemas/BDSnapshotSummary"
+         },
+         {
+          "type": "null"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "BDSnapshotListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "snapshots"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.list"
+       },
+       "snapshots": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSnapshotSummary"
+        }
+       },
+       "pageInfo": {
+        "$ref": "#/components/schemas/BDPageInfo"
+       }
+      }
+     }
+    ]
+   },
+   "BDSnapshotSummary": {
+    "type": "object",
+    "required": [
+     "id",
+     "sandboxId",
+     "status",
+     "generation",
+     "createdAt",
+     "sizeBytes",
+     "fileCount"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "sandboxId": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "completed"
+      ]
+     },
+     "kind": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "base",
+       "incremental",
+       null
+      ]
+     },
+     "generation": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "chainId": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "uuid"
+     },
+     "createdAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "completedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "sizeBytes": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "fileCount": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "contentSizeBytes": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "contentFileCount": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "origin": {
+      "type": "string",
+      "enum": [
+       "captured",
+       "template"
+      ]
+     }
+    }
+   },
+   "BDSshKeyResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "properties": {
+       "success": {
+        "type": "boolean"
+       },
+       "machineIp": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "sshUser": {
+        "type": "string"
+       },
+       "sshEndpoint": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "hostKey": {
+        "type": "string"
        }
       }
      }

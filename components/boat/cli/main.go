@@ -55,7 +55,7 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat snapshots team | shared | import FILE [--name N] [--image I] [--size S] | take --share ID | take --code CODE | delete <id>
   boat ai credentials [ls | set PROVIDER [KEY|-] | rm PROVIDER] | proxy [on|off] | usage [vm] | block <vm> | unblock <vm>
   boat telemetry [show | set ENDPOINT [-H k=v] | unset]
-  boat secrets ls | set NAME [VALUE|-] | rotate NAME [VALUE|-] | rm NAME
+  boat secrets ls | set NAME [VALUE|-] [--no-inject] | rotate NAME [VALUE|-] | rm NAME
   boat keys [ls | create [--name N] [--scopes a,b] [--team T] | rm ID | rotate ID [--overlap 24h] | usage ID]
   boat teams [ls | create NAME [--owner U] | show ID | rm ID | add-member TEAM NAME [--role R] | rm-member TEAM USER]
   boat upgrade [--version vX.Y.Z]       replace this binary with a release build (checksum-verified)

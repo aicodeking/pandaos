@@ -126,6 +126,8 @@ test("secrets and delete", async () => {
   const boat = new Boat({ url, key: TOKEN });
   await boat.setSecret("OPENAI_API_KEY", "sk");
   assert.deepEqual(JSON.parse(log.at(-1).body), { value: "sk" });
+  await boat.setSecret("OPENAI_API_KEY", "sk", { inject: true });
+  assert.deepEqual(JSON.parse(log.at(-1).body), { value: "sk", inject: true });
   await boat.delete("vm1");
 });
 

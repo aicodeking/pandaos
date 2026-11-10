@@ -15,6 +15,10 @@
 #   BOAT_GATEWAY_ADDR=host:port    optional: also fetch the port route through the
 #                                  gateway (with and without the route token)
 #   BOAT_LIVE_PREFIX               VM name prefix (default sdk-live)
+#   BOAT_COMPAT_URL                base URL the official boat.dev SDKs use (their
+#                                  /api/v1 under it; default BOAT_URL). e2e-edge.sh
+#                                  sets https://api.<domain>, through Caddy
+#   BOAT_CA_FILE                   CA bundle for BOAT_COMPAT_URL (Caddy's internal CA)
 # Needs python3 and node >= 18. At most 3 VMs run at a time; builders stay stopped
 # until their environment is deleted. Exit 0 = pass.
 set -euo pipefail
@@ -33,8 +37,16 @@ node "$here/typescript/examples/live.mjs"
 # boat.dev's own SDKs (pinned: compat/requirements.txt with hashes, compat/package-lock.json
 # with integrity) against /api/v1. On a real server they must install and pass; against
 # the fake boatd (BOAT_LIVE_FAKE, go test) an offline machine may skip them.
-echo "== official boat.dev SDKs on /api/v1"
+compat_url=${BOAT_COMPAT_URL:-$BOAT_URL}
+echo "== official boat.dev SDKs on $compat_url/api/v1"
 off=$(mktemp -d)
+official() { # python3|node SCRIPT: one official SDK driver against compat_url
+  if [ -n "${BOAT_CA_FILE:-}" ]; then
+    BOAT_URL=$compat_url NODE_EXTRA_CA_CERTS=$BOAT_CA_FILE "$@"
+  else
+    BOAT_URL=$compat_url "$@"
+  fi
+}
 miss() {
   if [ -n "${BOAT_LIVE_FAKE:-}" ]; then echo "SKIP - $*"; else echo "official SDKs: FAIL: $*" >&2; exit 1; fi
 }
@@ -42,21 +54,23 @@ miss() {
 # step must run, not print its SKIP for a boatd without it (501).
 patched() { # LOG
   if [ -z "${BOAT_LIVE_FAKE:-}" ] && grep -q '^SKIP - PATCH' "$1"; then echo "official SDKs: FAIL: rename (PATCH) skipped: $(grep '^SKIP - PATCH' "$1")" >&2; exit 1; fi
+  # BOAT_LIVE_NO_SKIP (e2e-edge.sh): every step must run, the desktop included.
+  if [ -n "${BOAT_LIVE_NO_SKIP:-}" ] && grep -q '^SKIP' "$1"; then echo "official SDKs: FAIL: skipped: $(grep '^SKIP' "$1")" >&2; exit 1; fi
 }
 pins=(--disable-pip-version-check --require-hashes --only-binary :all: -r "$here/compat/requirements.txt")
 if python3 -m venv "$off/venv" >/dev/null 2>&1 &&
   "$off/venv/bin/python" -m pip install -q "${pins[@]}" >"$off/pip.log" 2>&1; then
-  "$off/venv/bin/python" "$here/compat/official_sdk.py" | tee "$off/py.out"
+  official "$off/venv/bin/python" "$here/compat/official_sdk.py" | tee "$off/py.out"
   patched "$off/py.out"
 elif python3 -m pip install -q --target "$off/py" --break-system-packages "${pins[@]}" >>"$off/pip.log" 2>&1; then
-  PYTHONPATH="$off/py" python3 "$here/compat/official_sdk.py" | tee "$off/py.out" # no venv module (Debian's python3-venv missing)
+  PYTHONPATH="$off/py" official python3 "$here/compat/official_sdk.py" | tee "$off/py.out" # no venv module (Debian's python3-venv missing)
   patched "$off/py.out"
 else
   miss "cannot install boat-sdk: $(tail -3 "$off/pip.log" 2>/dev/null)"
 fi
 mkdir "$off/js" && cp "$here/compat/package.json" "$here/compat/package-lock.json" "$off/js/"
 if npm ci --prefix "$off/js" --ignore-scripts --no-audit --no-fund >"$off/npm.log" 2>&1; then
-  NODE_PATH="$off/js/node_modules" node "$here/compat/official_sdk.cjs" | tee "$off/js.out"
+  NODE_PATH="$off/js/node_modules" official node "$here/compat/official_sdk.cjs" | tee "$off/js.out"
   patched "$off/js.out"
 else
   miss "cannot install @boatdev/sdk: $(tail -3 "$off/npm.log")"

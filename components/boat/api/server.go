@@ -353,6 +353,9 @@ func auditPath(r *http.Request) string {
 	if strings.HasPrefix(r.URL.Path, "/v1/snapshot-links/") {
 		return "/v1/snapshot-links/REDACTED/download"
 	}
+	if strings.HasPrefix(r.URL.Path, fileDownloadPath) {
+		return fileDownloadPath + "REDACTED"
+	}
 	return r.URL.Path
 }
 

@@ -50,6 +50,8 @@ ROUTES = [
      ["command", "cwd", "timeoutSeconds", "detached", "stream"], "command (exec, or POST /v1/vms/{id}/commands when detached)"),
     ("GET", "/api/v1/sandboxes/{id}/commands/{pid}", "/sandboxes/{sandboxId}/commands/{processId}", "exec", None, "detached command status"),
     ("DELETE", "/api/v1/sandboxes/{id}/commands/{pid}", "/sandboxes/{sandboxId}/commands/{processId}", "exec", None, "stop a detached command"),
+    ("GET", "/api/v1/sandboxes/{id}/commands/{pid}/stream", "/sandboxes/{sandboxId}/commands/{processId}/stream", "exec", None,
+     "attach to a detached command (NDJSON; one combined log, served as stdout)"),
     ("GET", "/api/v1/sandboxes/{id}/command-history", "/sandboxes/{sandboxId}/command-history", "exec", None, "command history"),
     ("GET", "/api/v1/sandboxes/{id}/command-history/{cid}", "/sandboxes/{sandboxId}/command-history/{commandId}", "exec", None, "one command"),
     ("GET", "/api/v1/sandboxes/{id}/command-history/{cid}/logs", "/sandboxes/{sandboxId}/command-history/{commandId}/logs", "exec", None, "command output"),
@@ -89,9 +91,54 @@ ROUTES = [
     ("PUT", "/api/v1/environments/{id}", "/environments/{environmentId}", "admin",
      ["name", "isDefault", "envContents", "passSecrets"], "update (PUT /v1/environments/{id})"),
     ("DELETE", "/api/v1/environments/{id}", "/environments/{environmentId}", "admin", None, "delete"),
+    # host, desktop, ssh key (compat_host.go)
+    ("POST", "/api/v1/sandboxes/{id}/host", "/sandboxes/{sandboxId}/host", "vms:write", ["port", "public", "localhost", "title"],
+     "host a port (POST /v1/vms/{id}/ports + GET …/ports/{port}/url; localhost refused)"),
+    ("POST", "/api/v1/sandboxes/{id}/desktop", "/sandboxes/{sandboxId}/desktop", "exec", ["publicAccess"],
+     "desktop link (GET /v1/vms/{id}/desktop; vnc mode, publicAccess refused)"),
+    ("POST", "/api/v1/sandboxes/{id}/sshkey", "/sandboxes/{sandboxId}/sshkey", "exec", ["key"], "authorize an ssh key (POST /v1/vms/{id}/ssh)"),
+    # snapshots (compat_snaps.go)
+    ("GET", "/api/v1/snapshots", "/snapshots", "vms:read", None, "team snapshots (GET /v1/snapshots; one page)"),
+    ("DELETE", "/api/v1/snapshots/{sid}", "/snapshots/{snapshotId}", "vms:write", None, "delete one (DELETE /v1/snapshots/{sid})"),
+    ("GET", "/api/v1/sandboxes/{id}/snapshots", "/sandboxes/{sandboxId}/snapshots", "vms:read", None, "a sandbox's snapshots (GET /v1/vms/{id}/snapshots)"),
+    ("DELETE", "/api/v1/sandboxes/{id}/snapshots", "/sandboxes/{sandboxId}/snapshots", "vms:write", None,
+     "delete a sandbox's captures (its unnamed snapshots; saved ones stay)"),
+    ("GET", "/api/v1/sandboxes/{id}/snapshots/latest", "/sandboxes/{sandboxId}/snapshots/latest", "vms:read", None, "newest snapshot or null"),
+    ("GET", "/api/v1/named-snapshots", "/named-snapshots", "vms:read", None, "named snapshots (= saved snapshots)"),
+    ("POST", "/api/v1/named-snapshots", "/named-snapshots", "vms:write", ["sandboxId", "name"], "save (= POST /saved-snapshots)"),
+    ("GET", "/api/v1/named-snapshots/{name}", "/named-snapshots/{name}", "vms:read", None, "one named snapshot"),
+    ("DELETE", "/api/v1/named-snapshots/{name}", "/named-snapshots/{name}", "vms:write", None, "delete a named snapshot"),
+    ("GET", "/api/v1/saved-snapshots/{name}/shares", "/saved-snapshots/{name}/shares", "admin", None,
+     "share codes (GET /v1/vms/{id}/snapshots/{sid}/shares)"),
+    ("POST", "/api/v1/saved-snapshots/{name}/shares", "/saved-snapshots/{name}/shares", "admin", None,
+     "new share code (POST …/shares; valid 30 days)"),
+    ("DELETE", "/api/v1/saved-snapshots/{name}/shares/{share}", "/saved-snapshots/{name}/shares/{shareId}", "admin", None, "revoke a share code"),
+    # secrets and the AI proxy switch (compat_secrets.go)
+    ("GET", "/api/v1/secrets", "/secrets", "admin", None, "default-injected team secrets (names only)"),
+    ("POST", "/api/v1/secrets", "/secrets", "admin", ["envContents", "secretFiles"],
+     "set default-injected team secrets (secretFiles refused)"),
+    ("GET", "/api/v1/ai-proxy", "/ai-proxy", "vms:read", None, "AI credentials proxy switch (GET /v1/ai/proxy)"),
+    ("PUT", "/api/v1/ai-proxy", "/ai-proxy", "admin", ["enabled"], "turn it on or off (PUT /v1/ai/proxy)"),
+    # find and download URLs (compat_download.go)
+    ("GET", "/api/v1/sandboxes/{id}/files/find", "/sandboxes/{sandboxId}/files/find", "exec", None, "find text in files (ripgrep)"),
+    ("POST", "/api/v1/sandboxes/{id}/files/download-url", "/sandboxes/{sandboxId}/files/download-url", "exec", ["path", "ttlSeconds"],
+     "signed short-lived download URL (/api/v1/file-downloads/{token})"),
 ]
 
-PARAM_RENAME = {"sandboxId": "id", "operationId": "opid", "stopId": "stopid", "promptId": "pid", "processId": "pid",
+# Paths under /api/v1 that are this server's own, not boat.dev operations.
+EXTRA = {
+    "/api/v1/file-downloads/{token}": {"get": {
+        "summary": "Download a file through a signed URL from POST /api/v1/sandboxes/{id}/files/download-url (no API key)",
+        "operationId": "compat_fileDownload", "security": [], "tags": ["boat.dev compatibility"],
+        "parameters": [{"name": "token", "in": "path", "required": True, "schema": {"type": "string"}}],
+        "responses": {
+            "200": {"description": "The file's bytes", "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}},
+            "default": {"description": "boat.dev error envelope",
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}},
+        }}},
+}
+
+PARAM_RENAME = {"sandboxId": "id", "operationId": "opid", "snapshotId": "sid", "shareId": "share", "stopId": "stopid", "promptId": "pid", "processId": "pid",
                 "commandId": "cid", "webhookId": "id",
                 "apiKeyId": "id", "environmentId": "id"}
 
@@ -169,6 +216,7 @@ def main(src, dst):
                             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}}
         out["responses"] = resps
         paths.setdefault(ours, {})[method.lower()] = out
+    paths.update(copy.deepcopy(EXTRA))
     spec["paths"] = paths
     keep = {k: v for k, v in spec["components"]["schemas"].items() if not k.startswith("BD")}
     for name, s in sorted(schemas.items()):

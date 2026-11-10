@@ -28,6 +28,8 @@ type Keyring struct {
 	pepper []byte
 	aiKey  []byte // signs per-VM AI proxy tokens
 	vmKey  []byte // signs per-VM API tokens (selftoken.go)
+	// fileKey signs boat.dev download URLs (compat_download.go)
+	fileKey []byte
 }
 
 func derive(master []byte, label string) []byte {
@@ -49,7 +51,7 @@ func NewKeyring(master []byte) (*Keyring, error) {
 		return nil, err
 	}
 	return &Keyring{aead: aead, pepper: derive(master, "boat-api key pepper v1"), aiKey: derive(master, "boat-api ai proxy v1"),
-		vmKey: derive(master, "boat-api vm token v1")}, nil
+		vmKey: derive(master, "boat-api vm token v1"), fileKey: derive(master, "boat-api file download v1")}, nil
 }
 
 // LoadMasterKey reads 32 raw bytes or 64 hex chars. With create, a missing
@@ -147,6 +149,24 @@ func ParseToken(tok string) (id, secret string, ok bool) {
 func isHex(s string) bool {
 	_, err := hex.DecodeString(s)
 	return err == nil
+}
+
+// The desktop key file (-desktop-key-file, shared with boat-gateway) is a
+// master key: each kind of token is signed with its own key derived from it,
+// HMAC-SHA256(master, "boat-hmac-v2/<purpose>"), so a token of one kind can
+// never verify as another whatever its payload. boat-gateway derives the same
+// keys (gateway/auth.go). Tokens minted before the split were signed with the
+// master key itself; the gateway accepts those until they expire
+// (-legacy-hmac-until), then never again.
+const (
+	purposeDesktopLink  = "desktop-link"
+	purposePortRoute    = "port-route"
+	purposeGuestDesktop = "guest-desktop"
+)
+
+// PurposeKey is the key for one kind of token.
+func PurposeKey(master []byte, purpose string) []byte {
+	return derive(master, "boat-hmac-v2/"+purpose)
 }
 
 // SignDesktop: sig = hex(HMAC-SHA256(key, vmID + "." + exp)). The desktop

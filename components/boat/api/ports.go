@@ -226,7 +226,7 @@ func (s *server) portURL(w http.ResponseWriter, r *http.Request, p *principal) {
 	out := map[string]any{"url": "", "auth": route["auth"], "guest_port": port}
 	if route["auth"] == "private" {
 		exp := time.Now().Add(ttl).Unix()
-		sig := SignRoute(s.cfg.DesktopKey, label, s.store.Snapshot().RouteGens[id], exp)
+		sig := SignRoute(PurposeKey(s.cfg.DesktopKey, purposePortRoute), label, s.store.Snapshot().RouteGens[id], exp)
 		u.RawQuery = url.Values{"boat_exp": {strconv.FormatInt(exp, 10)}, "boat_sig": {sig}}.Encode()
 		out["expires_at"] = time.Unix(exp, 0).UTC()
 		out["token"] = fmt.Sprintf("%d.%s", exp, sig) // header X-Boat-Route-Token

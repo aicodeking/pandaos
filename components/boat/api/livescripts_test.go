@@ -68,6 +68,7 @@ func TestOfficialSDKDrivers(t *testing.T) {
 				t.Skipf("%s not set", c.env)
 			}
 			e := setup(t)
+			e.srv.cfg.VMDomain = "vm.boat.example" // for host_port
 			bin, extra := c.bin, []string{}
 			if bin == "" {
 				bin = v

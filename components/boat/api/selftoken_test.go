@@ -118,7 +118,7 @@ func TestGuestTokenScopedToItsVM(t *testing.T) {
 		t.Errorf("token of a deleted VM: %d, want 401", st)
 	}
 	// A team's own BOAT_API_KEY secret wins over the VM token.
-	e.do(e.owner, "PUT", "/v1/secrets/BOAT_API_KEY", map[string]any{"value": "team-key"})
+	e.do(e.owner, "PUT", "/v1/secrets/BOAT_API_KEY", map[string]any{"value": "team-key", "inject": true})
 	c := e.createVM()
 	if got := lastEnvOp(e, c)["BOAT_API_KEY"]; got != nil && got != "team-key" {
 		t.Errorf("team key replaced: %v", got)

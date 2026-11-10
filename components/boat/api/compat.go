@@ -28,68 +28,6 @@ import (
 
 const compatPrefix = "/api/v1/"
 
-func (s *server) compatRoutes() {
-	s.route("POST /api/v1/sandboxes", "vms:write", s.compatCreate)
-	s.route("GET /api/v1/sandboxes", "vms:read", s.compatList)
-	s.route("GET /api/v1/sandboxes/{id}", "vms:read", s.compatGet)
-	s.route("PATCH /api/v1/sandboxes/{id}", "vms:write", s.compatUpdate)
-	s.route("DELETE /api/v1/sandboxes/{id}", "vms:write", s.compatDelete)
-	s.route("GET /api/v1/deletion-operations/{opid}", "vms:read", s.compatDeletion)
-	s.route("POST /api/v1/sandboxes/{id}/stop", "vms:write", s.compatStop)
-	s.route("GET /api/v1/sandboxes/{id}/stops/{stopid}", "vms:read", s.compatGetStop)
-	s.route("POST /api/v1/sandboxes/{id}/resume", "vms:write", s.compatResume)
-	s.route("POST /api/v1/sandboxes/{id}/fork", "vms:write", s.compatFork)
-	s.route("GET /api/v1/limits", "vms:read", s.compatLimits)
-	s.route("GET /api/v1/me", "", s.compatMe)
-	s.route("GET /api/v1/sandboxes/{id}/usage", "vms:read", s.compatUsage)
-	// prompts (compat_prompts.go)
-	s.route("POST /api/v1/sandboxes/{id}/prompt", "exec", s.compatPrompt)
-	s.route("GET /api/v1/sandboxes/{id}/prompts/{pid}", "exec", s.compatPromptRun)
-	s.route("GET /api/v1/sandboxes/{id}/events", "exec", s.compatEvents)
-	s.route("GET /api/v1/sandboxes/{id}/conversations", "exec", s.compatConversations)
-	s.route("POST /api/v1/sandboxes/{id}/steer", "exec", s.compatSteer)
-	s.route("POST /api/v1/sandboxes/{id}/interrupt", "exec", s.compatInterrupt)
-	// commands (compat_exec.go, compat_cmds.go)
-	s.route("POST /api/v1/sandboxes/{id}/commands", "exec", s.compatExec)
-	s.route("GET /api/v1/sandboxes/{id}/commands/{pid}", "exec", s.compatCommandStatus)
-	s.route("DELETE /api/v1/sandboxes/{id}/commands/{pid}", "exec", s.compatStopCommand)
-	s.route("GET /api/v1/sandboxes/{id}/command-history", "exec", s.compatCommandHistory)
-	s.route("GET /api/v1/sandboxes/{id}/command-history/{cid}", "exec", s.compatCommandInfo)
-	s.route("GET /api/v1/sandboxes/{id}/command-history/{cid}/logs", "exec", s.compatCommandLogs)
-	s.route("GET /api/v1/sandboxes/{id}/processes", "exec", s.compatProcesses)
-	// files (compat_exec.go, compat_files.go)
-	s.route("GET /api/v1/sandboxes/{id}/files", "exec", s.compatReadFile)
-	s.route("PUT /api/v1/sandboxes/{id}/files", "exec", s.compatWriteFile)
-	s.route("DELETE /api/v1/sandboxes/{id}/files", "exec", s.compatDeleteFile)
-	s.route("GET /api/v1/sandboxes/{id}/files/list", "exec", s.compatListFiles)
-	s.route("GET /api/v1/sandboxes/{id}/files/info", "exec", s.compatFileInfo)
-	s.route("GET /api/v1/sandboxes/{id}/files/search", "exec", s.compatSearchFiles)
-	s.route("POST /api/v1/sandboxes/{id}/files/folder", "exec", s.compatMakeFolder)
-	s.route("POST /api/v1/sandboxes/{id}/files/move", "exec", s.compatMoveFile)
-	s.route("POST /api/v1/sandboxes/{id}/files/permissions", "exec", s.compatChmod)
-	// saved snapshots and webhooks (compat_account.go)
-	s.route("GET /api/v1/saved-snapshots", "vms:read", s.compatSavedList)
-	s.route("POST /api/v1/saved-snapshots", "vms:write", s.compatSavedSave)
-	s.route("GET /api/v1/saved-snapshots/{name}", "vms:read", s.compatSavedGet)
-	s.route("DELETE /api/v1/saved-snapshots/{name}", "vms:write", s.compatSavedDelete)
-	s.route("GET /api/v1/webhooks", "admin", s.compatHookList)
-	s.route("POST /api/v1/webhooks", "admin", s.compatHookCreate)
-	s.route("GET /api/v1/webhooks/{id}", "admin", s.compatHookGet)
-	s.route("PATCH /api/v1/webhooks/{id}", "admin", s.compatHookUpdate)
-	s.route("DELETE /api/v1/webhooks/{id}", "admin", s.compatHookDelete)
-	s.route("POST /api/v1/webhooks/{id}/rotate", "admin", s.compatHookRotate)
-	// keys and environments (compat_admin.go)
-	s.route("GET /api/v1/api-keys", "", s.compatAPIKeys)
-	s.route("POST /api/v1/api-keys/scoped", "", s.compatCreateKey)
-	s.route("DELETE /api/v1/api-keys/{id}", "", s.compatRevokeKey)
-	s.route("POST /api/v1/api-keys/{id}/rotate", "", s.compatRotateKey)
-	s.route("GET /api/v1/api-keys/{id}/usage", "", s.compatKeyUsage)
-	s.route("GET /api/v1/environments", "vms:read", s.compatEnvironments)
-	s.route("POST /api/v1/environments", "admin", s.compatCreateEnv)
-	s.route("PUT /api/v1/environments/{id}", "admin", s.compatUpdateEnv)
-	s.route("DELETE /api/v1/environments/{id}", "admin", s.compatDeleteEnv)
-}
-
 // ---- envelope ----
 
 func writeCompat(w http.ResponseWriter, status int, typ string, fields map[string]any) {
@@ -338,14 +276,14 @@ type compatCreateReq struct {
 	Count       int               `json:"count"`
 	From        string            `json:"from"`
 	// Accepted and ignored: always on here, or no meaning on one host.
-	Snapshots  *bool  `json:"snapshots"`
-	Monitoring *bool  `json:"monitoring"`
-	Visibility string `json:"visibility"`
-	Org        string `json:"org"`
-	TeamID     string `json:"teamId"`
+	Snapshots   *bool           `json:"snapshots"`
+	Monitoring  *bool           `json:"monitoring"`
+	Visibility  string          `json:"visibility"`
+	Org         string          `json:"org"`
+	TeamID      string          `json:"teamId"`
+	HostedPorts []compatHostReq `json:"hostedPorts"` // POST …/host for each, after the create
 	// Refused with a clear message: not supported by this server.
 	SetupScript string `json:"setupScript"`
-	HostedPorts []any  `json:"hostedPorts"`
 	Files       []any  `json:"files"`
 }
 
@@ -378,13 +316,19 @@ func (s *server) compatCreate(w http.ResponseWriter, r *http.Request, p *princip
 		switch {
 		case !ok:
 			msg = "ttlSeconds must be 1-2592000, null or \"infinite\""
-		case c.SetupScript != "" || len(c.HostedPorts) > 0 || len(c.Files) > 0:
-			msg = "setupScript, hostedPorts and files are not supported by this server: use an environment, POST /api/v1/sandboxes/{id}/files, or the native /v1 API"
+		case c.SetupScript != "" || len(c.Files) > 0:
+			msg = "setupScript and files are not supported by this server: use an environment, POST /api/v1/sandboxes/{id}/files, or the native /v1 API"
+		case hostedPortsMsg(c.HostedPorts, c.Count, c.FailFast) != "":
+			msg = hostedPortsMsg(c.HostedPorts, c.Count, c.FailFast)
 		case c.Count > maxBatch:
 			msg = "count must be 1-16 on this server"
 		}
 		if msg != "" {
-			writeErr(w, r, 400, "invalid_request", msg)
+			code := "invalid_request"
+			if k, text, ok := strings.Cut(msg, ": "); ok && strings.HasSuffix(k, "hosted_ports") {
+				code, msg = k, text // boat.dev's codes for hostedPorts
+			}
+			writeErr(w, r, 400, code, msg)
 			return
 		}
 		body := map[string]any{"name": c.Name, "size": c.Type, "ttl_s": ttl, "labels": c.Labels, "env": c.Env,
@@ -424,6 +368,9 @@ func (s *server) compatCreate(w http.ResponseWriter, r *http.Request, p *princip
 		} else {
 			json.Unmarshal(res.body.Bytes(), &one)
 			out["sandbox"] = s.sandbox(one)
+			if len(c.HostedPorts) > 0 {
+				out["hostedPorts"] = s.compatHostedPorts(r, p, str(one, "id"), c.HostedPorts)
+			}
 		}
 		writeCompat(w, http.StatusAccepted, "sandbox.created", out)
 	})

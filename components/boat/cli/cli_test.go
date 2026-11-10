@@ -192,6 +192,7 @@ func TestGolden(t *testing.T) {
 		{"scp_up_json", []string{"scp", "--json", local, "vm1:/tmp/x"}},
 		{"secrets_ls_json", []string{"secrets", "ls", "--json"}},
 		{"secrets_set_json", []string{"secrets", "set", "OPENAI_API_KEY", "sk-1", "--json"}},
+		{"secrets_set_no_inject_json", []string{"secrets", "set", "OPENAI_API_KEY", "sk-1", "--no-inject", "--json"}},
 		{"keys_create_json", []string{"keys", "create", "--name", "ci", "--scopes", "vms:read", "--json"}},
 		{"teams_json", []string{"teams", "--json"}},
 		{"webhooks_json", []string{"webhooks", "ls", "--json"}},

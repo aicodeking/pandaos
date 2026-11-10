@@ -1,27 +1,42 @@
 """boat.dev's official Python SDK (boat-sdk, pinned in requirements.txt) against
-this server's /api/v1: create, get, list, rename, commands (sync and
-detached), files, stop, resume, fork, saved snapshots, webhooks, limits and
-delete, each answer parsed by the SDK's own models (they check every id,
-enum and required field). Run by ../e2e-live.sh:
+this server's /api/v1: create, get, list, rename, commands (sync, and long ones
+through the SDK's own run_command / follow_command helpers), files, find,
+download URLs, hosted ports, ssh keys, the desktop (wait_for_desktop), stop,
+resume, fork, snapshot listings, saved and named snapshots, share codes,
+secrets, the AI proxy switch, webhooks, keys, environments, limits and delete,
+each answer parsed by the SDK's own models (they check every id, enum and
+required field). Run by ../e2e-live.sh:
 
     BOAT_URL=https://api.example BOAT_API_KEY=boat_… python3 official_sdk.py
 
+BOAT_CA_FILE: CA bundle for BOAT_URL (e2e-edge.sh: Caddy's internal CA).
+BOAT_LIVE_DESKTOP_NAME: name of a running sandbox with a desktop (a full
+image) for wait_for_desktop; without it that step prints SKIP.
 BOAT_LIVE_FAKE=1: the fake boatd of api/livescripts_test.go answers every
 command with "hello", so command output is not compared.
 """
 import os
 import secrets
+import ssl
 import sys
 import time
+import urllib.request
 
 from boat_sdk import ApiClient, BoatApi, Configuration
+from boat_sdk.boat_helpers import follow_command, run_command, wait_for_desktop
 from boat_sdk.exceptions import ApiException
 from boat_sdk.models.command_request import CommandRequest
 from boat_sdk.models.create_sandbox_environment_request import CreateSandboxEnvironmentRequest
 from boat_sdk.models.create_sandbox_request import CreateSandboxRequest
 from boat_sdk.models.create_scoped_api_key_request import CreateScopedApiKeyRequest
+from boat_sdk.models.file_url_request import FileUrlRequest
 from boat_sdk.models.file_write_request import FileWriteRequest
 from boat_sdk.models.fork_request import ForkRequest
+from boat_sdk.models.host_port_request import HostPortRequest
+from boat_sdk.models.named_snapshot_save_request import NamedSnapshotSaveRequest
+from boat_sdk.models.secrets_update_request import SecretsUpdateRequest
+from boat_sdk.models.ssh_key_request import SshKeyRequest
+from boat_sdk.models.update_ai_proxy_request import UpdateAiProxyRequest
 from boat_sdk.models.saved_snapshot_save_request import SavedSnapshotSaveRequest
 from boat_sdk.models.update_sandbox_environment_request import UpdateSandboxEnvironmentRequest
 from boat_sdk.models.update_sandbox_request import UpdateSandboxRequest
@@ -30,7 +45,16 @@ from boat_sdk.models.webhook_update_request import WebhookUpdateRequest
 
 REAL = not os.environ.get("BOAT_LIVE_FAKE")
 base = os.environ["BOAT_URL"].rstrip("/") + "/api/v1"
-api = BoatApi(ApiClient(Configuration(host=base, access_token=os.environ["BOAT_API_KEY"])))
+CA = os.environ.get("BOAT_CA_FILE") or None
+
+
+def client(token):
+    return BoatApi(ApiClient(Configuration(host=base, access_token=token, ssl_ca_cert=CA)))
+
+
+api = client(os.environ["BOAT_API_KEY"])
+print("official python SDK: " + base)
+SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK0wmN/Cr3JXqmLW7u+g9pTh+wyqDHpSQEIQczXkVx9q official-sdk"
 prefix = os.environ.get("BOAT_LIVE_PREFIX", "sdk-live") + "-off-py-" + secrets.token_hex(3)
 made = []
 
@@ -82,13 +106,26 @@ try:
     check(res.exit_code == 3 or not REAL, "command exit code (%r)" % res.exit_code)
     if REAL:
         check(res.stdout == "boat-compat\n" and res.stderr == "err\n", "command output")
-    det = api.command(sid, CommandRequest(command="sleep 300", detached=True)).actual_instance
-    check(det.process_id >= 1, "detached command")
-    st = api.command_status(sid, det.process_id)
+    # Long commands: the SDK's run_command (detached + the attach stream) and follow_command.
+    long_cmd = "echo out-1; echo err-1 >&2; sleep 2; echo out-2; exit 4"
+    frames = list(run_command(api, sid, long_cmd))
+    check(frames[0]["type"] == "started" and frames[0]["processId"] >= 1, "run_command started (%r)" % frames[0])
+    pid = frames[0]["processId"]
+    out = "".join(f["data"] for f in frames if f["type"] in ("stdout", "stderr"))
+    check(frames[-1]["type"] == "exit", "run_command ends with exit (%r)" % frames[-1])
+    if REAL:
+        check(out == "out-1\nerr-1\nout-2\n" and frames[-1]["exitCode"] == 4, "run_command output and exit code (%r %r)" % (out, frames[-1]))
+    again = list(follow_command(api, sid, pid))
+    check("".join(f.get("data", "") for f in again) == out and again[-1]["type"] == "exit", "follow_command replays the whole output")
+    gen = run_command(api, sid, "sleep 300")
+    det = next(gen)
+    gen.close()  # leaves the command running, as the SDK documents
+    check(det["processId"] >= 1, "detached command (run_command)")
+    st = api.command_status(sid, det["processId"])
     check(st.running or not REAL, "detached command runs")
     hist = api.command_history(sid).commands
-    check(any(c.process_id == det.process_id for c in hist), "command history")
-    check(api.stop_command(sid, det.process_id).signaled, "stop a detached command")
+    check(any(c.process_id == det["processId"] for c in hist), "command history")
+    check(api.stop_command(sid, det["processId"]).signaled, "stop a detached command")
 
     payload = "hello from the official SDK " + secrets.token_hex(4)
     api.write_file(sid, FileWriteRequest(path="compat/a.txt", content=payload))
@@ -97,6 +134,28 @@ try:
     names = [f.name for f in api.list_files(sid, path="compat").files]
     check("a.txt" in names, "list files")
     check(api.get_file_info(sid, path="compat/a.txt").size == len(payload) or not REAL, "file info")
+    found = api.find_in_files(sid, pattern=payload[-8:], path="compat")
+    check(not REAL or any(m.file.endswith("compat/a.txt") and m.line == 1 for m in found.matches), "find in files")
+    dl = api.create_download_url(sid, FileUrlRequest(path="compat/a.txt", ttl_seconds=120))
+    check(dl.method == "GET" and dl.url.startswith(os.environ["BOAT_URL"].rstrip("/") + "/api/v1/"), "download URL " + dl.url.split("/file-downloads/")[0])
+    if REAL:
+        with urllib.request.urlopen(dl.url, context=ssl.create_default_context(cafile=CA), timeout=30) as resp:
+            check(resp.read().decode() == payload, "the download URL serves the file with no API key")
+
+    hosted = api.host_port(sid, HostPortRequest(port=8080))
+    check(hosted.access == "private" and hosted.is_protected and "8080-" in hosted.url, "host a private port")
+    check(api.host_port(sid, HostPortRequest(port=8081, public=True)).access == "public", "host a public port")
+    key = api.ssh_key(sid, SshKeyRequest(key=SSH_KEY))
+    check(key.ssh_user and (key.machine_ip or not REAL), "authorize an ssh key")
+    if REAL:
+        check(SSH_KEY in api.read_file(sid, path="/home/user/.ssh/authorized_keys").content, "the ssh key is authorized")
+    desk_name = os.environ.get("BOAT_LIVE_DESKTOP_NAME")
+    if desk_name:
+        desk = next(x for x in api.sandboxes(name_prefix=desk_name).sandboxes if x.name == desk_name)
+        d = wait_for_desktop(api, desk.id, timeout_seconds=120)
+        check(d.desktop_url and not d.provisioning, "wait_for_desktop " + d.desktop_url.split("?")[0])
+    else:
+        print("SKIP - desktop: BOAT_LIVE_DESKTOP_NAME is not set")
 
     stopped = api.stop(sid)
     op = stopped.sandbox.stop
@@ -120,7 +179,28 @@ try:
     snap = api.save_saved_snapshot(SavedSnapshotSaveRequest(sandbox_id=sid, name=prefix.replace("_", "-")[:60] + "-s"))
     check(snap.snapshot.source_sandbox_id == sid, "save a snapshot")
     check(any(s.name == snap.snapshot.name for s in api.list_saved_snapshots().snapshots), "list saved snapshots")
+    share = api.create_snapshot_share(snap.snapshot.name)
+    check(share.share_code.startswith("bsh_") and share.share.status == "active", "share code")
+    check([x.id for x in api.list_snapshot_shares(snap.snapshot.name).shares] == [share.share.id], "list share codes")
+    check(api.revoke_snapshot_share(snap.snapshot.name, share.share.id).share.status == "revoked", "revoke a share code")
     api.delete_saved_snapshot(snap.snapshot.name)
+    nname = prefix.replace("_", "-")[:60] + "-n"
+    check(api.save_named_snapshot(NamedSnapshotSaveRequest(sandbox_id=sid, name=nname)).snapshot.name == nname, "save a named snapshot")
+    check(api.get_named_snapshot(nname).snapshot.source_sandbox_id == sid, "get a named snapshot")
+    check(any(x.name == nname for x in api.list_named_snapshots().snapshots), "list named snapshots")
+    mine = api.list_sandbox_snapshots(sid).snapshots
+    check(mine and all(str(x.sandbox_id) == sid for x in mine), "list the sandbox's snapshots (%d)" % len(mine))
+    check(api.get_latest_sandbox_snapshot(sid).snapshot is not None, "latest snapshot")
+    check({str(x.id) for x in mine} <= {str(x.id) for x in api.list_snapshots(limit=200).snapshots}, "the team's snapshots")
+    api.delete_named_snapshot(nname)
+
+    before = api.secrets().env_contents
+    sec = api.update_secrets(SecretsUpdateRequest(env_contents=before + "OFFICIAL_SDK_SECRET=v-" + secrets.token_hex(4) + "\n"))
+    check("OFFICIAL_SDK_SECRET=\n" in sec.env_contents and "v-" not in sec.env_contents, "set a default-injected secret (value never returned)")
+    api.update_secrets(SecretsUpdateRequest(env_contents=before))
+    check("OFFICIAL_SDK_SECRET" not in api.secrets().env_contents, "unmark it")
+    proxy = api.get_ai_proxy()
+    check(api.update_ai_proxy(UpdateAiProxyRequest(enabled=proxy.enabled)).enabled == proxy.enabled, "AI proxy switch")
 
     hook = api.create_webhook(WebhookCreateRequest(name="official", url="https://example.invalid/h", events=["sandbox.ready"]))
     check(hook.secret.startswith("whsec_"), "create a webhook")
@@ -131,7 +211,7 @@ try:
 
     key = api.create_scoped_api_key(CreateScopedApiKeyRequest(name=prefix[-30:], preset="read-only"))
     check(key.api_key.scope.actions == ["vms:read"] and key.secret.startswith("boat_"), "create a scoped key")
-    reader = BoatApi(ApiClient(Configuration(host=base, access_token=key.secret)))
+    reader = client(key.secret)
     check(any(x.id == sid for x in reader.sandboxes().sandboxes), "the read-only key lists sandboxes")
     check(api.rotate_api_key(key.api_key.id).secret != key.secret, "rotate the key")
     check(api.api_key_usage(key.api_key.id).id == key.api_key.id, "key usage")
@@ -146,6 +226,20 @@ try:
 
     lim = api.limits()
     check(lim.active_sandboxes >= 2, "limits")
+
+    n2 = prefix.replace("_", "-")[:60] + "-k"
+    api.save_named_snapshot(NamedSnapshotSaveRequest(sandbox_id=kid, name=n2))
+    latest = api.get_latest_sandbox_snapshot(kid).snapshot
+    op = api.delete_snapshot(latest.id, x_ascii_confirm_delete=str(latest.id)).operation
+    check(op.target_id == str(latest.id) and op.kind == "snapshot", "delete one snapshot")
+    try:
+        api.delete_named_snapshot(n2)
+    except ApiException as e:
+        if e.status != 404:  # gone already when it was the latest
+            raise
+    caps = [x for x in api.list_sandbox_snapshots(kid).snapshots]
+    gone = api.delete_sandbox_snapshots(kid, x_ascii_confirm_delete=kid).operations
+    check(len(gone) <= len(caps) and all(o.kind == "snapshot" for o in gone), "delete the fork's snapshots (%d)" % len(gone))
 
     for x in list(made):
         op = delete(x)

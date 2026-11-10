@@ -661,7 +661,7 @@ func (s *server) listSecrets(w http.ResponseWriter, r *http.Request, p *principa
 	out := []map[string]any{}
 	for _, sec := range s.store.Snapshot().Secrets {
 		if sec.TeamID == p.Team.ID {
-			out = append(out, map[string]any{"name": sec.Name, "updated": sec.Updated})
+			out = append(out, map[string]any{"name": sec.Name, "updated": sec.Updated, "inject": sec.Inject})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i]["name"].(string) < out[j]["name"].(string) })
@@ -671,7 +671,8 @@ func (s *server) listSecrets(w http.ResponseWriter, r *http.Request, p *principa
 func (s *server) putSecret(w http.ResponseWriter, r *http.Request, p *principal) {
 	name := r.PathValue("name")
 	var body struct {
-		Value *string `json:"value"`
+		Value  *string `json:"value"`
+		Inject *bool   `json:"inject"` // default-injected; absent keeps the current mark
 	}
 	if !decode(w, r, &body) {
 		return
@@ -691,19 +692,26 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request, p *principal)
 	}
 	now := time.Now().UTC()
 	existed := s.store.Snapshot().Secrets[secretKey(p.Team.ID, name)] != nil
+	inject := false
 	err = s.store.Update(func(st *State) error {
 		k := secretKey(p.Team.ID, name)
 		if !secretFits(st, p.Team.ID, k, len(sealed)) {
 			return errLimit
 		}
-		st.Secrets[k] = &Secret{TeamID: p.Team.ID, Name: name, Sealed: sealed, Updated: now}
+		if old := st.Secrets[k]; old != nil {
+			inject = old.Inject
+		}
+		if body.Inject != nil {
+			inject = *body.Inject
+		}
+		st.Secrets[k] = &Secret{TeamID: p.Team.ID, Name: name, Sealed: sealed, Updated: now, Inject: inject}
 		return nil
 	})
 	if err != nil {
 		s.storeErr(w, r, err)
 		return
 	}
-	out := map[string]any{"name": name, "updated": now}
+	out := map[string]any{"name": name, "updated": now, "inject": inject}
 	if existed {
 		out["rotated"] = true
 		out["note"] = rotateNote
