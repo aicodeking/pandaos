@@ -89,6 +89,8 @@ type Config struct {
 	HostDirtyRatio int    `json:"hostDirtyRatio"` // vm.dirty_ratio set at startup, 0 = leave the host's: a dump must not be throttled to the disk
 	WarmPool       bool   `json:"warmPool"`       // create restores a booted template of the image + size
 	KSMTeam        string `json:"ksmTeam"`        // "" off; one team's VMs may merge; "*" all (one trust domain only)
+	VCPUCPUWeight  int    `json:"vcpuCpuWeight"`  // cpu.weight of <vm>/vcpu, the VM's vCPU threads apart from the VMM thread (vcpucg.go); 0 = one cgroup
+	CPUTraceS      int    `json:"cpuTraceS"`      // log each running VM's per-thread CPU and PSI every N s; 0 = off
 
 	// Egress policy.
 	AllowSMTP   bool `json:"allowSMTP"`   // else tcp 25/465/587 out is dropped
@@ -146,6 +148,7 @@ func defaultConfig() Config {
 		Bridge:            "boatbr0",
 		Subnet:            "10.200.0.0/16",
 		DNS:               []string{"1.1.1.1", "9.9.9.9"},
+		VCPUCPUWeight:     100,
 		PortMin:           20000,
 		PortMax:           40000,
 		DesktopPort:       6080,
@@ -287,6 +290,9 @@ func (c Config) validate() error {
 	}
 	if c.HostDirtyRatio < 0 || c.HostDirtyRatio > 90 {
 		return fmt.Errorf("hostDirtyRatio must be 0-90")
+	}
+	if c.VCPUCPUWeight < 0 || c.VCPUCPUWeight > 10000 || c.CPUTraceS < 0 {
+		return fmt.Errorf("vcpuCpuWeight must be 0-10000 and cpuTraceS >= 0")
 	}
 	if c.HostHTTPSPort < 0 || c.HostHTTPSPort > 65535 || (c.HostHTTPSPort >= c.PortMin && c.HostHTTPSPort <= c.PortMax) {
 		return fmt.Errorf("hostHttpsPort must be 0-65535 and outside portMin-portMax")

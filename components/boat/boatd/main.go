@@ -97,6 +97,7 @@ func serve(cfgPath string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go m.cpuTrace(ctx.Done())
 	go func() {
 		t := time.NewTicker(time.Duration(cfg.ReapS) * time.Second)
 		defer t.Stop()
