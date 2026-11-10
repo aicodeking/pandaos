@@ -27,6 +27,8 @@ METRICS = [
     ("pts_rand_read_iops", "(d) PTS fio job: rand read 4k", "IOPS", True),
     ("pts_rand_write_iops", "(d) PTS fio job: rand write 4k", "IOPS", True),
     ("pts_seq_write_mibps", "(d) PTS fio job: seq write 1M", "MiB/s", True),
+    ("fsync_rand_write_iops", "(d) rand write 4k, fsync after every write, iodepth 1", "IOPS", True),
+    ("seq_write_endfsync_mbps", "(d) seq write 1M, fsync at the end", "MB/s", True),
     ("dl_go_tarball_googlecdn_mbit", "(e) download Go 1.25.0 tarball, 59.7 MB (dl.google.com)", "Mbit/s", True),
     ("dl_nodejs_tarball_mbit", "(e) download Node.js 22.22.3 tarball, ~30 MB (nodejs.org)", "Mbit/s", True),
     ("tcp_connect_cloudflare_1.1.1.1_ms", "(e) TCP connect 1.1.1.1, median of 10", "ms", False),
@@ -65,11 +67,13 @@ CAVEATS = [
     "no clear winner.",
 ]
 
-WRITE_METRICS = ("seq_write_mbps", "rand_write_iops", "pts_rand_write_iops", "pts_seq_write_mibps")
+WRITE_METRICS = ("seq_write_mbps", "rand_write_iops", "pts_rand_write_iops", "pts_seq_write_mibps",
+                 "fsync_rand_write_iops", "seq_write_endfsync_mbps")
 
 # Measured both on the runner itself and in a VM on it.
 HOST_VM_METRICS = ("node_runs_s", "seq_write_mbps", "seq_read_mbps", "rand_write_iops", "rand_read_iops",
-                   "pts_rand_read_iops", "pts_rand_write_iops", "pts_seq_write_mibps")
+                   "pts_rand_read_iops", "pts_rand_write_iops", "pts_seq_write_mibps", "fsync_rand_write_iops",
+                   "seq_write_endfsync_mbps")
 WARM_POOL_CAVEAT = ("`warmPool` is ON in this run, and it is off by default. VMs from one template share boot-time "
                     "randomness, including the ASLR offsets of already-running processes, across tenants "
                     "(components/boat/PROTOCOL.md). Do not read warm numbers as the default configuration.")
@@ -343,6 +347,7 @@ def normalization(host_results, vm, published):
 PRESET_METRICS = ("node_runs_s", "api_rtt_p50_ms", "create_ready_s", "exec_rtt_p50_ms", "fork_ready_s", "stop_s", "resume_ready_s",
                   "snapshot_s", "from_snapshot_ready_s", "concurrent10_wall_s", "seq_write_mbps", "seq_read_mbps",
                   "rand_write_iops", "rand_read_iops", "pts_rand_write_iops", "pts_rand_read_iops",
+                  "fsync_rand_write_iops", "seq_write_endfsync_mbps",
                   "dl_go_tarball_googlecdn_mbit", "npm_ci_s")
 
 

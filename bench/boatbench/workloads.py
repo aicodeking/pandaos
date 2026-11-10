@@ -9,6 +9,8 @@ default user and ends with one `BB_JSON {...}` line. Pins:
   (d) fio (installed with apt if absent) or dd fallback, on $HOME (disk, not tmpfs).
       Two parameter sets: ours (iodepth 32, 15 s), and the job file of pts/fio-2.1.0,
       which boat.dev's published numbers used (pts_* metrics). PTS reports MiB/s as "MB/s".
+      Two flushing jobs (fsync after every 4k write; 1M writes + fsync at the end), the
+      only ones where a durable cache (Firecracker Writeback) differs from Unsafe.
   (e) fixed downloads from two CDNs + TCP connect latency.
   (f) npm ci of npm-project/ (lockfile committed), cold cache, no scripts.
 """
@@ -82,13 +84,20 @@ if out["tool"] == "fio":
     ours = common + ["--name=bb", f"--filename={f}", "--size=2G", "--iodepth=32", "--runtime=15"]
     pts = common + ["--name=test", f"--filename={f}", "--size=1g", "--iodepth=64", "--startdelay=20",
                     "--ramp_time=5", "--runtime=60"]
+    # Flushing jobs: under Firecracker's Unsafe cache the guest's fsync stops at the host
+    # page cache, under Writeback it reaches the disk, so only these differ between the two.
+    fsync4k = common + ["--name=bbfs", f"--filename={f}", "--size=1G", "--iodepth=1", "--runtime=15", "--fsync=1"]
+    endfsync = common + ["--name=bbef", f"--filename={f}", "--size=2G", "--iodepth=32", "--runtime=15",
+                         "--end_fsync=1"]
     for key, rw, bs, field, unit, base in [("seq_write_mbps", "write", "1M", "write", "bw", ours),
                                            ("seq_read_mbps", "read", "1M", "read", "bw", ours),
                                            ("rand_write_iops", "randwrite", "4k", "write", "iops", ours),
                                            ("rand_read_iops", "randread", "4k", "read", "iops", ours),
                                            ("pts_rand_read_iops", "randread", "4k", "read", "iops", pts),
                                            ("pts_rand_write_iops", "randwrite", "4k", "write", "iops", pts),
-                                           ("pts_seq_write_mibps", "write", "1M", "write", "mib", pts)]:
+                                           ("pts_seq_write_mibps", "write", "1M", "write", "mib", pts),
+                                           ("fsync_rand_write_iops", "randwrite", "4k", "write", "iops", fsync4k),
+                                           ("seq_write_endfsync_mbps", "write", "1M", "write", "bw", endfsync)]:
         r = subprocess.run(base + [f"--rw={rw}", f"--bs={bs}"], capture_output=True, text=True, timeout=240)
         try:
             job = json.loads(r.stdout[r.stdout.index("{"):])["jobs"][0][field]
