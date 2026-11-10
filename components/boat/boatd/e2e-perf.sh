@@ -101,7 +101,7 @@ cold_read() {
 # disk.sh apt-installs fio in the guest. The guest's archive.ubuntu.com timed out for
 # 300 s in runs 42757402652 (both attempts) while the runner's own mirror answered:
 # the guest uses the runner's mirror, so the gate does not depend on the public archive.
-HOST_MIRROR=$(grep -rhoE 'https?://[^ ]+/ubuntu/?' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null |
+HOST_MIRROR=$(grep -rhoE 'https?://[a-z0-9.-]+\.ubuntu\.com/ubuntu/?' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null |
   grep -vE '//(archive|security)\.ubuntu\.com' | head -1 | sed 's|/*$||')
 put_disk() {
   local t0=$SECONDS
