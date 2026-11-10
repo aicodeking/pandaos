@@ -433,6 +433,9 @@ func TestPurposeKeysAndLegacyWindow(t *testing.T) {
 // /api/v1/* in the API's paths they get the dashboard's index.html.
 func TestCaddyProxiesCompatAPI(t *testing.T) {
 	mod, err := os.ReadFile("module.nix")
+	if os.IsNotExist(err) {
+		t.Skip("not in the source tree (the nix package builds only the Go files); ci.yml's go test runs it")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
