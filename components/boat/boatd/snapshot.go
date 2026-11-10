@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -55,11 +56,20 @@ func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, err
 	diff := m.cfg.DiffSnapshots && v.DiffOK
 	os.Remove(filepath.Join(root, memNew))
 	m.liftMemLimits(v)
+	// A first dump to be flushed loses its zero blocks first (zeroblocks.go), so boatd
+	// flushes it, not Firecracker.
+	dump := map[bool]string{true: snapDiff, false: memNew}[diff]
+	first := fsync && (!diff || !exists(filepath.Join(root, memFile)))
 	var err error
 	if diff {
-		err = fc.snapshot(ctx, "Diff", snapState, snapDiff, fsync)
+		err = fc.snapshot(ctx, "Diff", snapState, snapDiff, fsync && !first)
 	} else {
-		err = fc.snapshot(ctx, "Full", snapState, memNew, fsync)
+		err = fc.snapshot(ctx, "Full", snapState, memNew, fsync && !first)
+	}
+	t3 := time.Now()
+	zeros := ""
+	if err == nil && first {
+		zeros, err = m.flushFirstDump(v, filepath.Join(root, dump), filepath.Join(root, snapState))
 	}
 	if err != nil {
 		m.setMemLimits(v)
@@ -67,9 +77,33 @@ func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, err
 		return false, err
 	}
 	written := allocatedBytes(filepath.Join(root, snapDiff)) + allocatedBytes(filepath.Join(root, memNew))
-	log.Printf("%s: snapshot (%s) sync=%dms pause=%dms write=%dms written=%dMiB", v.ID, map[bool]string{true: "diff", false: "full"}[diff],
-		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), time.Since(t2).Milliseconds(), written>>20)
+	log.Printf("%s: snapshot (%s) sync=%dms pause=%dms write=%dms%s written=%dMiB", v.ID, map[bool]string{true: "diff", false: "full"}[diff],
+		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), zeros, written>>20)
 	return diff, nil
+}
+
+// flushFirstDump punches the zero blocks out of a first dump, then fsyncs it and
+// the state file, as Firecracker's sync_snapshot_files would have. A failed punch
+// only costs the write it would have saved.
+func (m *Manager) flushFirstDump(v VM, dump, state string) (string, error) {
+	t0 := time.Now()
+	f, err := openJail(dump, os.O_RDWR)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	scanned, punched, perr := punchZeroBlocks(f)
+	if perr != nil {
+		log.Printf("%s: zero blocks of %s: %v", v.ID, filepath.Base(dump), perr)
+	}
+	t1 := time.Now()
+	if err := f.Sync(); err != nil {
+		return "", err
+	}
+	if err := fsyncFile(state); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(" zeros=%dms(scanned=%dMiB punched=%dMiB) fsync=%dms", t1.Sub(t0).Milliseconds(), scanned>>20, punched>>20, time.Since(t1).Milliseconds()), nil
 }
 
 // failSnapshot drops a partial snapshot. Firecracker may have cleared its dirty

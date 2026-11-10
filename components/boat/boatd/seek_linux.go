@@ -1,6 +1,9 @@
 package main
 
-import "syscall"
+import (
+	"os"
+	"syscall"
+)
 
 const seekData, seekHole = 3, 4 // SEEK_DATA, SEEK_HOLE
 
@@ -11,4 +14,11 @@ func setMemoryMerge() error {
 		return e
 	}
 	return nil
+}
+
+// punchHole frees [off, off+n) of f: it reads back as zeros, and dirty page
+// cache pages there are dropped instead of written back.
+func punchHole(f *os.File, off, n int64) error {
+	const punch = 0x02 | 0x01 // FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE
+	return syscall.Fallocate(int(f.Fd()), punch, off, n)
 }

@@ -48,6 +48,7 @@ bd POST "/v1/vms/$d1/start" '{}' >/dev/null
 t=$(now); d2=$(bd POST "/v1/vms/$d1/fork" '{"name":"d2"}' | jq -r .id); dfork_s=$(secs "$t" "$(now)")
 [ "$(bx "$d2" 'sha256sum /dev/shm/d/dirty | cut -c1-64')" = "$dsum" ] || fail "fork lost the parent's memory"
 echo "default size: create ${dcreate_s}s, first stop ${dstop_s}s (2 GiB dirty), resume ${dresume_s}s, stop ${dstop2_s}s (200 MiB dirty), fork ${dfork_s}s"
+grep -E "$d1: (snapshot \(|stop \()" "$WORK/boatd.log" | head -4 || true # where each stop's time went
 check_max default_create "$dcreate_s" "$DEFAULT_CREATE_MAX"
 check_max default_stop1 "$dstop_s" "$DEFAULT_STOP_MAX"
 check_max default_resume "$dresume_s" "$RESUME_MAX"
