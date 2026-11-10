@@ -103,8 +103,13 @@ cold_read() {
 # the guest uses the runner's mirror, so the gate does not depend on the public archive.
 HOST_MIRROR=$(sed -n 's|^URIs: *\(http[^ ]*/ubuntu\)/*$|\1|p' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null | head -1)
 put_disk() {
+  local t0=$SECONDS
   curl -fsS --unix-socket "$SOCK" -X PUT --data-binary "@$WORK/tmp/disk.sh" "http://boatd/v1/vms/$1/files?path=/tmp/disk.sh&mode=755" >/dev/null
   [ -z "$HOST_MIRROR" ] || bx "$1" "sed -i -e 's|http://archive.ubuntu.com/ubuntu|$HOST_MIRROR|' -e 's|http://security.ubuntu.com/ubuntu|$HOST_MIRROR|' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null; true" >/dev/null
+  # Installed here, outside disk.sh's 300 s, so a slow mirror is not a slow disk.
+  bx "$1" 'command -v fio >/dev/null || { apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fio >/dev/null 2>&1; }; command -v fio' 600 >/dev/null ||
+    fail "guest could not install fio from ${HOST_MIRROR:-archive.ubuntu.com} in 600 s"
+  echo "guest fio ready in $((SECONDS - t0)) s (${HOST_MIRROR:-archive.ubuntu.com})"
 }
 put_disk "$pv"
 disk=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p') || disk_stuck "fio with quotas on"
