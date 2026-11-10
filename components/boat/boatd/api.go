@@ -61,6 +61,13 @@ func (m *Manager) routes() *http.ServeMux {
 		return map[string]any{"vms": m.list(r.URL.Query().Get("team"))}, nil
 	})
 	h("GET /v1/vms/{id}", func(r *http.Request) (any, error) { return m.get(r.PathValue("id")) })
+	h("PATCH /v1/vms/{id}", func(r *http.Request) (any, error) {
+		var b PatchReq
+		if err := decode(r, &b); err != nil {
+			return nil, err
+		}
+		return m.Patch(r.PathValue("id"), b)
+	})
 	del := func(r *http.Request) (any, error) { return m.Delete(r.Context(), r.PathValue("id")) }
 	h("DELETE /v1/vms/{id}", del)
 	h("POST /v1/vms/{id}/delete", del)
