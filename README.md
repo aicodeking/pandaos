@@ -21,8 +21,16 @@ approve agent tasks on it.
 - **Self-hosted agent VMs (server profile).** `boat` turns a dedicated server into a boat.dev-style
   host: persistent Firecracker microVMs with an API, a `boat` CLI, Python/TypeScript SDKs, ssh, port
   URLs, a browser desktop, stop/resume, forks, snapshots, secrets, webhooks, quotas and metering.
-  Off unless `services.boat.enable`. boat.dev's official Python and TypeScript SDKs work against its
-  `/api/v1` with only the base URL changed (54 of boat.dev's 122 operations; CI drives them on real VMs).
+  Off unless `services.boat.enable`. Its `/api/v1` is a drop-in for the boat.dev SDK paths CI proves:
+  boat.dev's official Python and TypeScript SDKs, with only the base URL changed, run on real VMs
+  through the TLS edge in CI for sandboxes (create, list, get, rename, stop, resume, fork, delete),
+  sync and long commands (`run_command`/`follow_command`), files, find, download URLs, hosted ports,
+  ssh keys, the desktop, snapshots (saved, named, listings, share codes), secrets, the AI proxy
+  switch, webhooks, API keys, environments and limits. 76 of boat.dev's 122 operations are mapped;
+  prompts, events and `hostedPorts` are tested against a fake boatd only, and orgs, repos, CI,
+  credential profiles, AI usage, telemetry, data retention, environment vars/repos/secret files
+  one by one, share/unshare, recover, file replace, upload URLs, artifacts and snapshot
+  trees/files/download are not mapped ([list](docs/boat.md#boatdev-api-compatibility-apiv1)).
   **Pre-release:** not for untrusted tenants without the operator checklist and an external pentest;
   see [docs/boat.md](docs/boat.md).
 
