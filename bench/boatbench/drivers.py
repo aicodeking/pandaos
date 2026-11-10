@@ -8,7 +8,12 @@ exec-readiness and all workloads live in boatbench.py so they are shared.
   create(name) -> id          stop(id)              snapshot(id, name) -> ref
   exec(id, cmd, timeout)      resume(id)            from_snapshot(ref, name) -> id
   run_true(id)                fork(id, name) -> id  delete(id) / delete_snapshot(ref)
-  put_file(id, path, data)
+  put_file(id, path, data)    ping(id): one cheap authenticated GET (API round-trip baseline)
+
+ROUND_TRIPS: per lifecycle metric, the fewest sequential API calls its timing
+must contain (e.g. create -> exec-ready = the create POST + the first `true`
+that succeeds). boatbench subtracts that many baseline round trips to report
+lifecycle times net of the harness-to-API distance (localhost vs WAN).
 """
 import base64
 import json
@@ -57,6 +62,8 @@ class PandaOS:
     """components/boat/api (README: Endpoints). Size names are boatd's config."""
 
     name = "pandaos"
+    ROUND_TRIPS = {"create_ready_s": 2, "fork_ready_s": 2, "resume_ready_s": 2, "from_snapshot_ready_s": 2,
+                   "stop_s": 1, "snapshot_s": 1, "concurrent10_wall_s": 2, "exec_rtt_p50_ms": 1}
 
     def __init__(self, url=None, key=None, size=None):
         self.url = (url or os.environ["BOAT_URL"]).rstrip("/")
@@ -118,6 +125,9 @@ class PandaOS:
     def delete_snapshot(self, ref):
         self._j("DELETE", f"/v1/snapshots/{ref}")
 
+    def ping(self, vm):
+        self._j("GET", f"/v1/vms/{vm}")
+
 
 class BoatDev:
     """boat.dev Public API v1 (base https://boat.dev/api/v1), as its OpenAPI
@@ -138,6 +148,9 @@ class BoatDev:
 
     name = "boatdev"
     READY = ("ready", "idle", "running")
+    # stop and saved snapshot are a POST plus at least one GET poll.
+    ROUND_TRIPS = {"create_ready_s": 2, "fork_ready_s": 2, "resume_ready_s": 2, "from_snapshot_ready_s": 2,
+                   "stop_s": 2, "snapshot_s": 2, "concurrent10_wall_s": 2, "exec_rtt_p50_ms": 1}
 
     def __init__(self, base=None, key=None, size=None):
         self.url = (base or os.environ.get("BOATDEV_API_BASE", "https://boat.dev/api/v1")).rstrip("/")
@@ -216,6 +229,9 @@ class BoatDev:
     def delete_snapshot(self, ref):
         self._j("DELETE", f"/saved-snapshots/{ref}")
 
+    def ping(self, sid):
+        self._state(sid)
+
 
 class Host:
     """No VM: the same scripts on the machine running the harness, to measure
@@ -224,6 +240,7 @@ class Host:
 
     name, size = "host", "host"
     PARTS = frozenset("ad")
+    ROUND_TRIPS = {}
 
     def __init__(self):
         self.env = dict(os.environ, HOME=os.environ.get("BOATBENCH_HOST_DIR", os.path.expanduser("~")))
@@ -239,6 +256,9 @@ class Host:
         return 0
 
     def delete(self, vm):
+        pass
+
+    def ping(self, vm):
         pass
 
 

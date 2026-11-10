@@ -6,6 +6,13 @@
     "usd_per_hour_overcommit_1_5": 0.019,
     "usd_per_hour_untrusted": 0.0279,
     "cpu": "AMD Ryzen 9 7950X3D (Zen 4), Hetzner AX102",
+    "density_model": {
+      "name": "Hetzner AX102",
+      "host_usd_per_hour": 0.4188,
+      "source": "docs/cost.md monthly cost $305.70 / 730 h; VMs from bench/boatbench/admission.py; CPUs = threads (trusted, SMT on) or cores (untrusted, nosmt=force)",
+      "untrusted": {"vms": 15, "cpus": 16},
+      "trusted": {"vms": 22, "cpus": 32}
+    },
     "source": "docs/cost.md: Hetzner AX102 (EUR 259/mo + EUR 129 setup/12 + EUR 3.20 backup, x1.12 USD/EUR) / 15 default VMs (memOvercommit 1.0: the conservative row, and what untrustedTenants runs) / 730 h, 100% utilization, no operator time. usd_per_hour_overcommit_1_5 is 22 VMs at the default 1.5: a bet that guests stay idle, because under load the host OOM killer takes VMs. VM counts: bench/boatbench/admission.py (boatd's admission, constants read from its Go source, MemTotal estimated)."
   },
   "boatdev": {

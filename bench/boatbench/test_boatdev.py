@@ -228,6 +228,11 @@ class BoatDevAgainstSpec(unittest.TestCase):
             ("POST /sandboxes/{sandboxId}/resume", 202, resuming),
         ], lambda d: (d.stop(SID), d.resume(SID)))
 
+    def test_ping_is_one_documented_get(self):
+        info = {"ok": True, "type": "sandbox.info", "sandbox": sandbox(SID, "running")}
+        _, sent = self.run_with([("GET /sandboxes/{sandboxId}", 200, info)], lambda d: d.ping(SID))
+        self.assertEqual(len(sent), 1)
+
     def test_saved_snapshot_round_trip_and_cleanup(self):
         saving = {"ok": True, "type": "snapshot.saved.saving", "status": "saving", "snapshot": snap("saving")}
         info = lambda st: {"ok": True, "type": "snapshot.saved.info", "snapshot": snap(st)}  # noqa: E731

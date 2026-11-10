@@ -62,6 +62,7 @@ Ascii Box, and its 27.67 is the "Ascii Box (bare metal)" row there. What that re
 | c | 10 concurrent creates | wall time from one shared start until all 10 answer `true` |
 | d | disk | fio (apt-installed if missing; dd fallback, flagged in the report) in `$HOME`, O_DIRECT, libaio, 1 job. Ours: 1M seq write/read MB/s, 4k rand write/read IOPS, iodepth 32, 15 s, 2 GiB file. `pts_*`: the job file of [`pts/fio-2.1.0`](https://github.com/phoronix-test-suite/test-profiles/blob/d2f1a150d388bd062737b445891edda0780f7e25/pts/fio-2.1.0/install.sh), which boat.dev's numbers used: 4k rand read/write, 1M seq write, iodepth 64, 1 GiB, 20 s start delay, 5 s ramp, 60 s. The published comparison uses these. A loop file on a shared runner still cannot speak for NVMe |
 | e | network | curl download of two fixed files on two CDNs: the Go 1.25.0 linux-amd64 tarball (59.7 MB, dl.google.com) and the pinned Node tarball (nodejs.org) in Mbit/s; error pages (<1 MB) count as failures, not samples. speed.cloudflare.com was dropped because it answers curl with 403; TCP connect time (connect minus DNS) to 1.1.1.1 and github.com, median of 10 |
+| g | density under load | N VMs (`BOATBENCH_DENSITY_LEVELS`, default 1,2,4,6) run 2 passes of the Node loop (a) at once from one barrier. One VM is set up, the rest are forks of it (or fresh VMs set up again if a fork lacks `/tmp/bb`); growth stops at the first VM the provider refuses. Per level: per-VM runs/s, host runs/s (their sum; PandaOS only, since all VMs share one host), efficiency (per-VM at N / at 1), CPU per loop ((user+sys)/real of node in the guest) and loops per host CPU (host CPUs = CPUs online where the harness runs, or `BOATBENCH_HOST_CPUS`). The report projects the AX102 from the measured efficiency at its load, **labelled as a projection** |
 | f | cold npm install | `npm ci --ignore-scripts` of `npm-project/` (committed lockfile, 538 packages: express, react, eslint, jest, typescript, webpack), empty cache, pinned Node's npm |
 
 Sizes: PandaOS `default` = 4 vCPU / 8192 MiB / 51 GiB (boatd's default). boat.dev
@@ -72,16 +73,25 @@ colo). The report flags any VM that is not 4 vCPU / ~8 GiB.
 Fairness: both adapters (`drivers.py`) are thin urllib clients with no SDK or CLI on
 either side. Guest scripts (`workloads.py`) are the same bytes, run with `bash -lc` as
 each provider's default user. Lifecycle times include the API round trip from the
-harness host, so run `run-on-server.sh` on the server, or close to it, for a fair
-WAN picture.
+harness host (localhost for CI's PandaOS, the WAN for boat.dev). So every repeat that
+runs b or c first measures a baseline: 25 authenticated GETs of the VM
+(`api_rtt_p50_ms`; PandaOS `GET /v1/vms/{id}`, boat.dev `GET /sandboxes/{id}`). Each
+lifecycle metric is reported raw and as `<metric>_net` = raw − k × that p50, where k
+(`drivers.py` `ROUND_TRIPS`) is the fewest sequential API calls the timing contains:
+2 for create/fork/resume/from-snapshot (the call plus the first `true` that succeeds),
+1 for PandaOS stop and snapshot (synchronous), 2 for boat.dev's (a POST plus at least
+one poll), 1 for the exec RTT.
 
 ## boatd presets, options and the warm pool
 
-`presets.json` holds three presets, and `BOATBENCH_PRESET` (the workflow's `presets`
+`presets.json` holds four presets, and `BOATBENCH_PRESET` (the workflow's `presets`
 input) picks one per job:
 
 - `trusted`: boatd's defaults.
 - `trusted-warm`: `warmPool` on.
+- `trusted-writeback`: `diskCache` `Writeback`: Firecracker passes guest flushes to the
+  host, so fsync and O_DIRECT writes are durable. Every other preset's write numbers
+  are `Unsafe`-cache numbers.
 - `untrusted`: `components/boat/module.nix` `untrustedSettings`, key by key (the unit test
   compares them): `Sync` disk engine, the disk shared by weight (`ioCost` with
   `ioCostQoS` latency targets) under an `io.max` ceiling of 4,000 MB/s and 200,000 IOPS
@@ -117,6 +127,10 @@ OpenBenchmarking's public averages for this benchmark, and by the CPU ratio from
 averages or from PassMark single-thread (`published.json`, `cpu_scaling`). The vendor's
 repo has no EPYC 7763 row. Only a run on comparable hardware can replace this estimate.
 
+`stack.sh` sets `cpuOvercommit` from the CPUs online after SMT is turned off: room for
+12 × 4 vCPUs, never below 12 (`BENCH_CPU_OVERCOMMIT` overrides). On a 4-vCPU runner that
+stays 12; in `untrusted` (2 CPUs online) it is 24, so workload (c)'s 10 VMs fit.
+
 ## Latest measured run
 
 [42677142859](https://github.com/aicodeking/pandaos/actions/runs/42677142859) (commit
@@ -129,8 +143,8 @@ in that run:
 - GitHub gave `trusted-warm` an Intel Xeon 8370C runner and the other two an EPYC 9V74.
   Compare `trusted-warm`'s CPU-bound rows only through its VM / host ratio.
 - `untrusted` ran with SMT off (2 CPUs online). Workload (c) failed in every repeat with
-  `503 host_capacity` (24 vCPUs = 2 CPUs × the bench's `cpuOvercommit` 12).
-  `stack.sh` needs a higher `cpuOvercommit` for that preset. This is not fixed yet.
+  `503 host_capacity` (24 vCPUs = 2 CPUs × the bench's `cpuOvercommit` 12). Fixed since:
+  `stack.sh` derives `cpuOvercommit` from the online CPUs.
 - All three ran with `cache_type` `Unsafe`, so the write rows are marked †.
 
 ## Cost

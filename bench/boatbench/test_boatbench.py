@@ -10,6 +10,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import admission  # noqa: E402
 import boatbench  # noqa: E402
+import density  # noqa: E402
 import drivers  # noqa: E402
 import report  # noqa: E402
 import workloads as W  # noqa: E402
@@ -318,8 +319,11 @@ class Parsing(unittest.TestCase):
 class FakeDriver:
     name, size = "fake", "default"
 
-    def __init__(self, fail_fork=False):
+    ROUND_TRIPS = {"create_ready_s": 2, "stop_s": 1, "exec_rtt_p50_ms": 1}
+
+    def __init__(self, fail_fork=False, max_vms=None):
         self.n, self.live, self.snaps, self.fail_fork, self.files = 0, set(), set(), fail_fork, {}
+        self.max_vms, self.pings, self.setups = max_vms, 0, 0
 
     def _new(self):
         self.n += 1
@@ -327,7 +331,12 @@ class FakeDriver:
         return f"vm{self.n}"
 
     def create(self, name):
+        if self.max_vms is not None and len(self.live) >= self.max_vms:
+            raise RuntimeError("503 host_capacity")
         return self._new()
+
+    def ping(self, vm):
+        self.pings += 1
 
     def run_true(self, vm):
         return 0 if vm in self.live else None
@@ -336,7 +345,12 @@ class FakeDriver:
         if cmd == W.PROBE:
             return 0, 'BB_JSON {"nproc": 4, "mem_mib": 8000}', ""
         if cmd == W.NODE_SETUP:
+            self.setups += 1
             return 0, 'BB_JSON {"node": "v22.22.3"}', ""
+        if cmd == density.RUN:
+            return 0, "Geometric mean: 10.0 runs/s\nBB_CPU 20.0 22.0 2.0", ""
+        if cmd == density.HAS_NODE:
+            return (1 if self.fail_fork else 0), "", ""
         if cmd == W.NODE_RUN:
             return 0, "Geometric mean: 21.5 runs/s", ""
         if cmd == W.DISK:
@@ -389,6 +403,24 @@ class Runner(unittest.TestCase):
         self.assertEqual(len(rec["exec_rtt_ms"]), boatbench.RTT_CALLS)
         self.assertEqual(rec["disk_tool"], "fio")
         self.assertEqual((d.live, d.snaps), (set(), set()))
+        self.assertEqual(len(rec["api_rtt_ms"]), boatbench.API_RTT_CALLS)
+        self.assertEqual(d.pings, boatbench.API_RTT_CALLS)
+        self.assertIn("api_rtt_p50_ms", m)
+
+    def test_add_net_subtracts_round_trips_without_mutating(self):
+        m = {"api_rtt_p50_ms": 100.0, "create_ready_s": 2.0, "stop_s": 0.5, "exec_rtt_p50_ms": 150.0}
+        out = boatbench.add_net(m, FakeDriver.ROUND_TRIPS)
+        self.assertAlmostEqual(out["create_ready_s_net"], 1.8)
+        self.assertAlmostEqual(out["stop_s_net"], 0.4)
+        self.assertAlmostEqual(out["exec_rtt_p50_ms_net"], 50.0)
+        self.assertNotIn("create_ready_s_net", m)
+        self.assertEqual(boatbench.add_net({"stop_s": 1}, FakeDriver.ROUND_TRIPS), {"stop_s": 1})
+
+    def test_drivers_declare_round_trips_and_ping(self):
+        for cls in (drivers.PandaOS, drivers.BoatDev):
+            self.assertTrue(callable(getattr(cls, "ping")))
+            self.assertTrue(set(cls.ROUND_TRIPS) <= {k for k in report.NET_KEYS})
+        self.assertEqual(drivers.BoatDev.ROUND_TRIPS["stop_s"], 2)  # POST + at least one GET poll
 
     def test_failed_step_is_recorded_not_fatal(self):
         d = FakeDriver(fail_fork=True)
@@ -403,6 +435,86 @@ class Runner(unittest.TestCase):
         self.assertEqual(len(each), 10)
         self.assertGreaterEqual(wall, each[-1])
         self.assertEqual(d.live, set())
+
+
+class DensityTests(unittest.TestCase):
+    def run_density(self, d, levels=(1, 2, 4)):
+        os.environ["BOATBENCH_HOST_CPUS"] = "4"
+        try:
+            return density.Density(d, "bb-x-0", levels, lambda m: None, boatbench.gexec, boatbench.ready).run()
+        finally:
+            del os.environ["BOATBENCH_HOST_CPUS"]
+
+    def test_levels_measure_host_throughput_and_clean_up(self):
+        d = FakeDriver()
+        d.name = "pandaos"
+        rec, m = self.run_density(d)
+        self.assertEqual([lv["n"] for lv in rec["levels"]], [1, 2, 4])
+        self.assertEqual(rec["max_vms"], 4)
+        self.assertEqual(m["density_host_runs_s_n4"], 40.0)
+        self.assertEqual(m["density_per_vm_runs_s_n4"], 10.0)
+        self.assertEqual(m["density_efficiency_n4"], 1.0)
+        self.assertAlmostEqual(m["density_cpu_per_loop_n1"], 1.2)
+        self.assertAlmostEqual(rec["levels"][2]["loops_per_cpu"], 4 * 1.2 / 4)
+        self.assertEqual(d.setups, 1)  # forks keep /tmp/bb: one setup
+        self.assertEqual(d.live, set())
+
+    def test_capacity_refusal_stops_growth_and_fork_failure_falls_back(self):
+        d = FakeDriver(fail_fork=True, max_vms=2)
+        d.name = "boatdev"
+        rec, m = self.run_density(d)
+        self.assertEqual(rec["max_vms"], 2)
+        self.assertEqual([lv["n"] for lv in rec["levels"]], [1, 2])
+        self.assertIsNone(rec["levels"][0]["host_cpus"])  # not one host: no loads per CPU
+        self.assertNotIn("loops_per_cpu", rec["levels"][1])
+        self.assertTrue(any("fork" in e for e in rec["errors"]) and any("clone 2" in e for e in rec["errors"]))
+        self.assertEqual(d.setups, 2)  # the fallback VM is set up again
+        self.assertEqual(d.live, set())
+
+    def test_levels_env_and_cpu_parse(self):
+        self.assertEqual(density.levels_from_env({}), density.DEFAULT_LEVELS)
+        self.assertEqual(density.levels_from_env({"BOATBENCH_DENSITY_LEVELS": "4, 1 15"}), (1, 4, 15))
+        with self.assertRaises(ValueError):
+            density.levels_from_env({"BOATBENCH_DENSITY_LEVELS": "0,2"})
+        self.assertAlmostEqual(density.parse_cpu("x\nBB_CPU 10.00 9.0 1.0\n"), 1.0)
+        self.assertIsNone(density.parse_cpu("no timing"))
+
+    def test_interpolate_and_projection(self):
+        pts = [(0.3, 1.0), (0.6, 0.9), (1.2, 0.5)]
+        self.assertEqual(report.interpolate(pts, 0.9), (0.7, True))
+        self.assertEqual(report.interpolate(pts, 2.0), (0.5, False))
+        lv = {1: {"cpu_per_loop": {"median": 1.0}, "per_vm_runs_s": {"median": 10.0}},
+              2: {"loops_per_cpu": {"median": 0.5}, "efficiency": {"median": 0.8}}}
+        lv[1].update(loops_per_cpu={"median": 0.25}, efficiency={"median": 1.0})
+        vms, cpus, load, eff, inside = report.density_projection(lv, {"vms": 15, "cpus": 16})
+        self.assertEqual((vms, cpus, inside), (15, 16, False))
+        self.assertAlmostEqual(load, 15 / 16)
+        self.assertEqual(eff, 0.8)
+
+    def test_report_renders_density_with_projection(self):
+        d = FakeDriver()
+        d.name = "pandaos"
+        rec, m = self.run_density(d)
+        res = {"driver": "pandaos", "preset": "untrusted", "repeats": [{"index": 0, "metrics": m, "density": rec,
+                                                                          "errors": {}}]}
+        md = report.render([res], report.load_prices(os.path.join(report.HERE, "prices.json")))
+        self.assertIn("(g) Density under load: pandaos (MEASURED)", md)
+        self.assertIn("PROJECTION: Hetzner AX102, untrusted (15 VMs on 16 CPUs), NOT A MEASUREMENT", md)
+        self.assertIn("MIXED CPUs", md)
+
+
+class HarnessFiles(unittest.TestCase):
+    def test_stack_derives_cpu_overcommit_from_online_cpus(self):
+        with open(os.path.join(report.HERE, "stack.sh")) as f:
+            sh = f.read()
+        self.assertNotIn("BENCH_CPU_OVERCOMMIT:-12}", sh)
+        self.assertIn('"cpuOvercommit":$cpu_oc', sh)
+        self.assertIn("cpus=$(nproc)", sh)
+
+    def test_writeback_preset(self):
+        with open(os.path.join(report.HERE, "presets.json")) as f:
+            self.assertEqual(json.load(f)["trusted-writeback"], {"diskCache": "Writeback"})
+        self.assertTrue(boatbench.fc_cache_type('{"diskCache":"Writeback"}').startswith("Writeback"))
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ SIDES = ("pandaos", "boatdev")
 # key, label, unit, higher_is_better
 METRICS = [
     ("node_runs_s", "(a) Node.js build/test loop: PTS node-web-tooling", "runs/s", True),
+    ("api_rtt_p50_ms", "(b) API round-trip baseline: authenticated GET of the VM, p50 of 25", "ms", False),
     ("create_ready_s", "(b) create -> exec-ready", "s", False),
     ("exec_rtt_p50_ms", "(b) exec round trip `true`, p50 of 50", "ms", False),
     ("exec_rtt_p95_ms", "(b) exec round trip `true`, p95 of 50", "ms", False),
@@ -33,6 +34,13 @@ METRICS = [
     ("npm_ci_s", "(f) cold `npm ci` of pinned project", "s", False),
 ]
 
+# Lifecycle metrics also reported net of the API round trip (boatbench.add_net).
+NET_KEYS = ("exec_rtt_p50_ms", "create_ready_s", "fork_ready_s", "stop_s", "resume_ready_s", "snapshot_s",
+            "from_snapshot_ready_s", "concurrent10_wall_s")
+_BASE = {k: (label, unit, hib) for k, label, unit, hib in METRICS}
+METRICS = METRICS + [(k + "_net", _BASE[k][0] + ", NET of API round trips (raw - k x baseline p50)", _BASE[k][1],
+                      _BASE[k][2]) for k in NET_KEYS]
+
 CAVEATS = [
     "The PandaOS numbers from CI come from a GitHub-hosted runner, NOT a dedicated server: shared 4 vCPU, "
     "KVM exposed to the runner VM (Firecracker runs nested inside Azure's hypervisor), US region. "
@@ -46,8 +54,11 @@ CAVEATS = [
     "Snapshot: PandaOS `POST /v1/vms/{id}/snapshots` vs boat.dev saved snapshot (`POST /saved-snapshots`, polled "
     "to `ready`). New-from-snapshot uses each one's create-from-snapshot.",
     "Network numbers mix the VM's egress path with the distance from each provider's region to the CDN edge.",
-    "Lifecycle latencies include the API round trip from the harness host to the provider: the CI PandaOS job "
-    "talks to localhost, the boat.dev job talks to boat.dev over the internet from a US runner.",
+    "Raw lifecycle latencies include the API round trip from the harness host to the provider: the CI PandaOS job "
+    "talks to localhost, the boat.dev job talks to boat.dev over the internet from a US runner. The NET rows "
+    "subtract k x that side's measured API round-trip p50, k = the fewest sequential API calls the timing contains "
+    "(drivers.py ROUND_TRIPS: 2 for create/fork/resume/from-snapshot, stop and snapshot 1 on PandaOS and 2 on "
+    "boat.dev, which polls them).",
     "Disk numbers on the runner come from a btrfs loop file on a shared cloud disk. They cannot speak for NVMe, "
     "including boat.dev's published numbers, even when the fio job is the same.",
     "Small samples (default 5 fresh VMs per side). The table shows median and IQR; overlapping IQRs mean "
@@ -119,6 +130,8 @@ def load_prices(path):
         if isinstance(p, dict) and isinstance(p.get("usd_per_hour"), (int, float)) and p["usd_per_hour"] >= 0:
             prices[side] = {"usd_per_hour": float(p["usd_per_hour"]), "source": p.get("source", ""),
                             "cpu": p.get("cpu", "")}
+            if isinstance(p.get("density_model"), dict):
+                prices[side]["density_model"] = p["density_model"]
     return prices or None
 
 
@@ -142,7 +155,10 @@ def cost_section(summ, prices, res, published):
     rows = cost_rows(summ, prices)
     if not rows:
         return out + ["No `prices.json` with `usd_per_hour` per side: cost not computed, runs/s only."]
-    out += ["Cost = side's price per hour (prices.json) x time. A per-run cost only means something when the "
+    out += ["**These rows use ONE uncontended VM's speed**, while the PandaOS price assumes a fully packed host. "
+            "Workload (g) measures the packed case; where it ran, its projection above is the fairer PandaOS "
+            "figure.", "",
+            "Cost = side's price per hour (prices.json) x time. A per-run cost only means something when the "
             "price and the speed come from the same CPU. **Rows marked MIXED CPUs are arithmetic, not a cost "
             "of any real machine.**", "",
             "| Side | USD/hour | The price buys | Speed measured on | USD per 1000 Node loop runs | USD per cold npm ci |",
@@ -324,7 +340,7 @@ def normalization(host_results, vm, published):
     return out
 
 
-PRESET_METRICS = ("node_runs_s", "create_ready_s", "exec_rtt_p50_ms", "fork_ready_s", "stop_s", "resume_ready_s",
+PRESET_METRICS = ("node_runs_s", "api_rtt_p50_ms", "create_ready_s", "exec_rtt_p50_ms", "fork_ready_s", "stop_s", "resume_ready_s",
                   "snapshot_s", "from_snapshot_ready_s", "concurrent10_wall_s", "seq_write_mbps", "seq_read_mbps",
                   "rand_write_iops", "rand_read_iops", "pts_rand_write_iops", "pts_rand_read_iops",
                   "dl_go_tarball_googlecdn_mbit", "npm_ci_s")
@@ -402,6 +418,7 @@ def render(results, prices=None, published=None):
             out += [f"| {r['provider']} | {r['runs_s']} | {r['cpu']} |" for r in published["rows"]]
     if host_results and "pandaos" in res:
         out += normalization(host_results, res["pandaos"], published)
+    out += density_section(res, prices)
     out += cost_section(summ, prices, res, published)
     out += ["", "## Caveats", ""] + [f"- {c}" for c in CAVEATS + auto_caveats(res)]
     return "\n".join(out) + "\n"
@@ -410,3 +427,100 @@ def render(results, prices=None, published=None):
 def load_published(path=os.path.join(HERE, "published.json")):
     with open(path) as f:
         return json.load(f)
+
+
+# ---- workload (g): density under load -------------------------------------------------------
+
+DENSITY_FIELDS = ("per_vm_runs_s", "host_runs_s", "efficiency", "cpu_per_loop", "loops_per_cpu", "host_cpus")
+
+
+def density_levels(result):
+    """{n: {field: summary}} pooled over the repeats of one result."""
+    by_n = {}
+    for rep in result.get("repeats", []):
+        for lv in (rep.get("density") or {}).get("levels", []):
+            for f in DENSITY_FIELDS:
+                if lv.get(f) is not None:
+                    by_n.setdefault(lv["n"], {}).setdefault(f, []).append(lv[f])
+    return {n: {f: summarize(v) for f, v in fs.items()} for n, fs in sorted(by_n.items())}
+
+
+def interpolate(points, x):
+    """Linear in (x, y) points sorted by x; (y, inside_measured_range). Clamps outside the range."""
+    pts = sorted(points)
+    if not pts:
+        return None, False
+    if x <= pts[0][0]:
+        return pts[0][1], x >= pts[0][0]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x0 <= x <= x1:
+            return (y0 + (y1 - y0) * (x - x0) / (x1 - x0) if x1 > x0 else y1), True
+    return pts[-1][1], False
+
+
+def density_projection(levels, model):
+    """(VMs, CPUs, load, efficiency, inside_range) for a server from measured efficiency vs loops/CPU."""
+    solo = levels.get(1, {})
+    cpu = (solo.get("cpu_per_loop") or {}).get("median")
+    pts = [(lv["loops_per_cpu"]["median"], lv["efficiency"]["median"]) for lv in levels.values()
+           if lv.get("loops_per_cpu") and lv.get("efficiency")]
+    if not cpu or not pts:
+        return None
+    load = model["vms"] * cpu / model["cpus"]
+    eff, inside = interpolate(pts, load)
+    return model["vms"], model["cpus"], load, eff, inside
+
+
+def density_section(res, prices):
+    out = []
+    for side, r in res.items():
+        lv = density_levels(r)
+        if not lv:
+            continue
+        pan = side == "pandaos"
+        out += ["", f"## (g) Density under load: {side} (MEASURED)", "",
+                "N VMs run the Node loop at the same time from one barrier, "
+                f"{'all on this one host' if pan else 'placed by the provider (per-VM numbers only)'}. "
+                "Efficiency = per-VM runs/s at N / at N=1. CPU per loop = (user+sys)/real of node in the guest. "
+                "median [IQR] n=samples.", "",
+                "| N | per-VM runs/s | host runs/s (sum) | efficiency | CPU per loop | loops per host CPU | host CPUs |",
+                "|---|---|---|---|---|---|---|"]
+        for n, f in lv.items():
+            host = cell(f.get("host_runs_s")) if pan else "n/a (fleet)"
+            out.append(f"| {n} | {cell(f.get('per_vm_runs_s'))} | {host} | {cell(f.get('efficiency'))} | "
+                       f"{cell(f.get('cpu_per_loop'))} | {cell(f.get('loops_per_cpu'))} | "
+                       f"{fmt((f.get('host_cpus') or {}).get('median'))} |")
+        p = (prices or {}).get(side)
+        if p and not pan:
+            v = (lv[max(lv)].get("per_vm_runs_s") or {}).get("median")
+            if v:
+                out += ["", f"Cost per 1000 Node runs at N={max(lv)} concurrent sandboxes (what each one delivers "
+                        f"under load, price ${p['usd_per_hour']}/h per sandbox): "
+                        f"**{p['usd_per_hour'] / 3600 * 1000 / v:.6f} USD** (MIXED CPUs unless measured on "
+                        f"{p.get('cpu') or '-'})."]
+        model = (p or {}).get("density_model") if pan else None
+        if model:
+            mode = "untrusted" if "untrusted" in str(r.get("preset", "")) else "trusted"
+            out += density_projection_lines(lv, model, mode)
+    return out
+
+
+def density_projection_lines(lv, model, mode):
+    m = model[mode]
+    proj = density_projection(lv, m)
+    if not proj:
+        return []
+    vms, cpus, load, eff, inside = proj
+    solo = lv[1]["per_vm_runs_s"]["median"]
+    host_usd = model["host_usd_per_hour"]
+    rng = "inside the measured range" if inside else "OUTSIDE the measured range: the nearest measured point is used"
+    per_k = host_usd / 3600 * 1000 / (vms * solo * eff)
+    return ["", f"### PROJECTION: {model['name']}, {mode} ({vms} VMs on {cpus} CPUs), NOT A MEASUREMENT", "",
+            f"Load = {vms} VMs x {lv[1]['cpu_per_loop']['median']:.2f} CPU per loop / {cpus} CPUs = "
+            f"**{load:.2f} loops per CPU** ({rng}). Measured efficiency there: **{eff:.3f}**, so a packed host "
+            f"delivers {vms} x {eff:.3f} = {vms * eff:.1f} solo-VM equivalents, and cost per run is "
+            f"**{1 / eff:.2f}x** the uncontended figure.",
+            f"With this runner's solo speed ({solo:.2f} runs/s, a different CPU) as the per-VM speed: "
+            f"${host_usd:.4f}/h / ({vms} x {solo:.2f} x {eff:.3f}) = **{per_k:.6f} USD per 1000 runs (MIXED CPUs)**. "
+            "Nobody ran PandaOS on that server; the efficiency curve comes from this runner, whose CPU, SMT "
+            "layout and memory bandwidth differ."]

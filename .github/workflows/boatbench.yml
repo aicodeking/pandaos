@@ -6,7 +6,7 @@ name: boatbench
 # EU. Numbers are indicative until bench/boatbench/run-on-server.sh runs on the
 # owner's server. The boatdev job runs only when the BOATDEV_API_KEY secret
 # exists; otherwise it prints SKIPPED. One pandaos job per boatd preset
-# (bench/boatbench/presets.json: trusted, trusted-warm, untrusted).
+# (bench/boatbench/presets.json: trusted, trusted-warm, trusted-writeback, untrusted).
 on:
   workflow_dispatch:
     inputs:
@@ -15,9 +15,13 @@ on:
         type: number
         default: 5
       only:
-        description: "Workloads: a node loop, b lifecycle, c 10x create, d disk, e network, f npm cold"
+        description: "Workloads: a node loop, b lifecycle, c 10x create, d disk, e network, f npm cold, g density"
         type: string
-        default: "abcdef"
+        default: "abcdefg"
+      density_repeats:
+        description: "Repeats of g (density sweep, BOATBENCH_DENSITY_LEVELS 1,2,4,6 VMs at once)"
+        type: number
+        default: 2
       sides:
         description: "pandaos, boatdev or both"
         type: choice
@@ -26,7 +30,7 @@ on:
       presets:
         description: "boatd presets (bench/boatbench/presets.json), comma-separated: one pandaos job each"
         type: string
-        default: "trusted,trusted-warm,untrusted"
+        default: "trusted,trusted-warm,trusted-writeback,untrusted"
       boatd_options:
         description: 'JSON merged over the bench boatd.json and the preset, e.g. {"diskCache":"Writeback"}. Printed in the report'
         type: string
@@ -156,10 +160,20 @@ jobs:
           ONLY: ${{ inputs.only }}
           BOATBENCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          rest=${ONLY//[ad]/}
-          [ -n "$rest" ] || { echo "only a and d requested"; exit 0; }
+          rest=${ONLY//[adg]/}
           set -a; . /mnt/boatbench/env; set +a
-          python3 bench/boatbench/boatbench.py run --driver pandaos --repeats "$REPEATS" --only "$rest" --out results
+          if [ -n "$rest" ]; then
+            python3 bench/boatbench/boatbench.py run --driver pandaos --repeats "$REPEATS" --only "$rest" --out results
+          fi
+      # All VMs of a level run on this one runner at once: host throughput, not one VM alone.
+      - name: Density under load (workload g)
+        if: contains(inputs.only, 'g')
+        env:
+          DENSITY_REPEATS: ${{ inputs.density_repeats }}
+          BOATBENCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -a; . /mnt/boatbench/env; set +a
+          python3 bench/boatbench/boatbench.py run --driver pandaos --repeats "$DENSITY_REPEATS" --only g --out results
       - name: Stack logs
         if: always()
         run: |
@@ -189,6 +203,7 @@ jobs:
         env:
           BOATDEV_API_KEY: ${{ secrets.BOATDEV_API_KEY }}
           REPEATS: ${{ inputs.repeats }}
+          DENSITY_REPEATS: ${{ inputs.density_repeats }}
           ONLY: ${{ inputs.only }}
           BOATBENCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           BOATBENCH_HOST_DESC: "boat.dev managed fleet, EU (Germany/Finland/France per boat.dev); harness on a US GitHub runner"
@@ -199,7 +214,9 @@ jobs:
             echo "### boatdev: SKIPPED (no BOATDEV_API_KEY secret)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          python3 bench/boatbench/boatbench.py run --driver boatdev --repeats "$REPEATS" --only "$ONLY" --out results
+          rest=${ONLY//g/}
+          [ -z "$rest" ] || python3 bench/boatbench/boatbench.py run --driver boatdev --repeats "$REPEATS" --only "$rest" --out results
+          case "$ONLY" in *g*) python3 bench/boatbench/boatbench.py run --driver boatdev --repeats "$DENSITY_REPEATS" --only g --out results ;; esac
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

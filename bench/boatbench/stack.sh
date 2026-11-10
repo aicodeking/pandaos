@@ -6,7 +6,7 @@
 # a 16 GiB runner.
 #
 #   stack.sh up GUEST_DIR   # GUEST_DIR has vmlinux, rootfs-slim.ext4; writes $WORK/env (BOAT_URL, BOAT_KEY)
-#   BOATBENCH_PRESET=untrusted stack.sh up ...   # presets.json: trusted (default), trusted-warm, untrusted
+#   BOATBENCH_PRESET=untrusted stack.sh up ...   # presets.json: trusted (default), trusted-warm, trusted-writeback, untrusted
 #   BOATBENCH_BOATD_OPTIONS='{"warmPool":true}' stack.sh up ...   # JSON merged over boatd.json and the preset
 #   stack.sh down
 #
@@ -105,11 +105,18 @@ up() {
   sudo sync
   sudo mkdir -p /sys/fs/cgroup/boat-bench
 
+  # cpuOvercommit: room for BENCH_VMS (12) x 4 vCPU on the CPUs online NOW, i.e. after SMT
+  # went off (untrusted leaves a 4-vCPU runner 2 CPUs: 12 x 2 = 24 vCPUs refused workload c's 10 VMs).
+  local cpus cpu_oc
+  cpus=$(nproc)
+  cpu_oc=${BENCH_CPU_OVERCOMMIT:-$(( (${BENCH_VMS:-12} * 4 + cpus - 1) / cpus ))}
+  [ "${BENCH_CPU_OVERCOMMIT:-}" ] || [ "$cpu_oc" -ge 12 ] || cpu_oc=12
+  echo "cpuOvercommit $cpu_oc on $cpus online CPUs" | tee -a "$WORK/smt.txt" >&2
   log "boatd (production defaults; overcommit raised for 10 x 8 GiB on the runner): $merged"
   jq --argjson options "$merged" '. * $options' >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":"$WORK/dl/jailer","cgroupParent":"boat-bench","reflink":"always",
- "bootTimeoutS":120,"defaultImage":"slim","memOvercommit":${BENCH_MEM_OVERCOMMIT:-8},"cpuOvercommit":${BENCH_CPU_OVERCOMMIT:-12},
+ "bootTimeoutS":120,"defaultImage":"slim","memOvercommit":${BENCH_MEM_OVERCOMMIT:-8},"cpuOvercommit":$cpu_oc,
  "defaultTeam":{"maxVMs":16}}
 JSON
   # ioCost needs the state disk's model (untrustedTenants refuses to start without one):

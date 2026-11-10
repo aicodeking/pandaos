@@ -11,11 +11,19 @@
 # throttles the exec round-trip loop; throttled calls are retried and not counted,
 # but a key on an instance started with -rate 0 gives cleaner numbers.
 # The server must offer size "default" = 4 vCPU / 8 GiB (boatd's default) and fit
-# 10 of them at once for workload c, or run with WORKLOADS=abdef.
+# 10 of them at once for workload c, or run with WORKLOADS=abdefg.
+#
+# Workload g (density under load) runs BOATBENCH_DENSITY_LEVELS VMs (default 1,2,4,6)
+# through the Node loop at once and takes the host's CPU count from the machine it
+# runs on: run it ON the server (or set BOATBENCH_HOST_CPUS). On an AX102 in untrusted
+# mode, BOATBENCH_DENSITY_LEVELS=1,4,8,15 measures the packed host the price assumes.
+#
+# Both drivers first record an API round-trip baseline (25 authenticated GETs of the VM)
+# and report lifecycle times raw and net of it; the medians are printed at the end.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPEATS=${1:-5}
-ONLY=${2:-abcdef}
+ONLY=${2:-abcdefg}
 OUTDIR=${BOATBENCH_OUT:-boatbench-results/$(date -u +%Y%m%dT%H%M%SZ)}
 : "${BOAT_URL:?set BOAT_URL}" "${BOAT_KEY:?set BOAT_KEY}"
 if [ -z "${BOATBENCH_HOST_DESC:-}" ]; then
@@ -31,4 +39,12 @@ else
   echo "boatdev: SKIPPED (BOATDEV_API_KEY not set)" >&2
 fi
 python3 "$HERE/boatbench.py" report "$OUTDIR"/results-*.json --out "$OUTDIR/report.md" >/dev/null
+echo "API round-trip baseline (p50 of 25 GETs, median over repeats):"
+python3 - "$OUTDIR"/results-*.json <<'PY'
+import json, statistics, sys
+for p in sys.argv[1:]:
+    r = json.load(open(p))
+    v = [rep["metrics"]["api_rtt_p50_ms"] for rep in r["repeats"] if "api_rtt_p50_ms" in rep.get("metrics", {})]
+    print(f"  {r['driver']}: {statistics.median(v):.1f} ms over {len(v)} repeats" if v else f"  {r['driver']}: not measured")
+PY
 echo "report: $OUTDIR/report.md"

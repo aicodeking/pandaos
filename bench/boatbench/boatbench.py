@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """boatbench: the same workloads on PandaOS boat and on boat.dev.
 
-  boatbench.py run --driver pandaos|boatdev [--repeats 5] [--only a,b,c,d,e,f] [--out DIR]
+  boatbench.py run --driver pandaos|boatdev [--repeats 5] [--only a,b,c,d,e,f,g] [--out DIR]
   boatbench.py run --driver host --only ad [--repeats 5] [--out DIR]   # same scripts, no VM
   boatbench.py report RESULTS.json... [--prices prices.json] [--out report.md]
   boatbench.py presets RESULTS.json... [--out presets.md]   # PandaOS per boatd preset
@@ -10,7 +10,13 @@ pandaos needs BOAT_URL + BOAT_KEY; boatdev needs BOATDEV_API_KEY. Each repeat is
 fresh 4 vCPU / 8 GiB VM. Raw per-repeat data goes to DIR/results-<driver>-<ts>.json.
 Optional env: BOATBENCH_HOST_DESC (hardware/location of the provider host, printed
 in the report), BOATBENCH_RUN_URL, BOATBENCH_BOATD_OPTIONS and BOATBENCH_PRESET
-(printed in the report).
+(printed in the report), BOATBENCH_DENSITY_LEVELS (workload g, default 1,2,4,6),
+BOATBENCH_HOST_CPUS (workload g: CPUs of the PandaOS host if the harness runs elsewhere).
+
+Every repeat that runs b or c first records the API round-trip baseline: API_RTT_CALLS
+cheap authenticated GETs of the VM (api_rtt_p50_ms). Lifecycle metrics then also get
+a `<metric>_net` value: raw minus the driver's ROUND_TRIPS x that p50, so a localhost
+API and one across the WAN are compared on equal footing.
 """
 import argparse
 import concurrent.futures
@@ -27,6 +33,7 @@ import traceback
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import density  # noqa: E402
 import drivers  # noqa: E402
 import report  # noqa: E402
 import workloads as W  # noqa: E402
@@ -34,8 +41,9 @@ import workloads as W  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 READY_TIMEOUT_S = 600
 RTT_CALLS = 50
+API_RTT_CALLS = 25
 CONCURRENT_N = 10
-ALL_PARTS = "abcdef"
+ALL_PARTS = "abcdefg"
 
 
 def log(msg):
@@ -101,6 +109,8 @@ class Repeat:
             self.cleanup()
             return self.rec
         self.step("probe", lambda: self.rec.update(probe=W.parse_bb_json(gexec(self.d, a, W.PROBE))))
+        if "b" in self.parts or "c" in self.parts:
+            self.step("api_rtt", lambda: self.api_rtt(a))
         if "b" in self.parts:
             self.step("exec_rtt", lambda: self.rtt(a))
         if "a" in self.parts or "f" in self.parts:
@@ -140,6 +150,15 @@ class Repeat:
         self.rec["exec_rtt_throttled"] = throttled
         self.rec["exec_rtt_ms"] = v
         self.rec["metrics"].update(exec_rtt_p50_ms=report.percentile(v, 50), exec_rtt_p95_ms=report.percentile(v, 95))
+
+    def api_rtt(self, vm):
+        v = []
+        for _ in range(API_RTT_CALLS):
+            t = time.monotonic()
+            self.d.ping(vm)
+            v.append((time.monotonic() - t) * 1000)
+        self.rec["api_rtt_ms"] = v
+        self.rec["metrics"].update(api_rtt_p50_ms=report.percentile(v, 50), api_rtt_p95_ms=report.percentile(v, 95))
 
     def disk(self, vm):
         r = W.parse_bb_json(gexec(self.d, vm, W.DISK, 900))
@@ -224,6 +243,18 @@ def concurrent_create(d, run_id, index, n=CONCURRENT_N):
     return wall, sorted(s for _, s in out)
 
 
+def add_net(metrics, round_trips):
+    """New dict: metrics plus `<k>_net` = raw minus round_trips[k] x the API round-trip p50."""
+    rtt = metrics.get("api_rtt_p50_ms")
+    if rtt is None:
+        return dict(metrics)
+    out = dict(metrics)
+    for k, n in round_trips.items():
+        if out.get(k) is not None:
+            out[k + "_net"] = out[k] - n * (rtt if k.endswith("_ms") else rtt / 1000)
+    return out
+
+
 def fc_cache_type(options=None, boatd_dir=os.path.join(HERE, "..", "..", "components", "boat", "boatd")):
     """Firecracker cache_type of the root drive: boatd.json's diskCache, else boatd's
     default, else Firecracker's own default (Unsafe: guest flushes are not passed on)."""
@@ -283,6 +314,16 @@ def cmd_run(a):
                 rec["metrics"]["concurrent10_wall_s"], rec["concurrent_each_s"] = concurrent_create(d, run_id, i)
             except Exception as e:
                 rec["errors"]["concurrent"] = f"{type(e).__name__}: {e}"
+        if "g" in parts:
+            log(f"r{i} density {density.levels_from_env()}")
+            try:
+                rec["density"], dm = density.Density(d, f"bb-{run_id}-{i}", density.levels_from_env(), log,
+                                                     gexec, ready).run()
+                rec["metrics"].update(dm)
+            except Exception as e:
+                rec["errors"]["density"] = f"{type(e).__name__}: {e}"
+                traceback.print_exc(file=sys.stderr)
+        rec["metrics"] = add_net(rec["metrics"], getattr(d, "ROUND_TRIPS", {}))
         res["repeats"].append(rec)
         with open(path, "w") as f:  # rewrite after every repeat: a crash keeps what was measured
             json.dump(res, f, indent=1)
@@ -324,7 +365,7 @@ def main(argv=None):
     r = sub.add_parser("run")
     r.add_argument("--driver", choices=sorted(drivers.DRIVERS), required=True)
     r.add_argument("--repeats", type=int, default=5)
-    r.add_argument("--only", default=ALL_PARTS, help="workload letters, e.g. 'a,b' (default all: abcdef)")
+    r.add_argument("--only", default=ALL_PARTS, help="workload letters, e.g. 'a,b' (default all: abcdefg)")
     r.add_argument("--out", default="boatbench-results")
     g = sub.add_parser("report")
     g.add_argument("results", nargs="+")
@@ -335,7 +376,7 @@ def main(argv=None):
     q.add_argument("--out")
     a = p.parse_args(argv)
     if a.cmd == "run" and (a.repeats < 1 or not set(a.only.replace(",", "")) <= set(ALL_PARTS)):
-        p.error("--repeats must be >= 1 and --only a subset of abcdef")
+        p.error("--repeats must be >= 1 and --only a subset of abcdefg")
     if a.cmd == "run" and a.driver == "host" and not set(a.only.replace(",", "")) <= drivers.Host.PARTS:
         p.error("--driver host only runs workloads a and d")
     return {"run": cmd_run, "report": cmd_report, "presets": cmd_presets}[a.cmd](a)
