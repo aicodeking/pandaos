@@ -5,7 +5,8 @@
 #   ./test-in-vm.sh [out/vmlinux] [out/rootfs-full.ext4]
 #
 # Env: FIRECRACKER (path; otherwise the pinned release is downloaded),
-#      VARIANT=full|slim (default: from the rootfs file name), DISK_GB=8.
+#      VARIANT=full|slim (default: from the rootfs file name),
+#      DISK_GB (default: 8, or the image size + 3 GiB if that is more).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -41,8 +42,10 @@ if [[ -z ${FIRECRACKER:-} ]]; then
 fi
 
 # ---- disk: a sparse copy, bigger than the image, to exercise resize2fs
+img_gib=$(( ($(stat -c %s "$ROOTFS") + (1 << 30) - 1) >> 30 ))
+DISK_GB=${DISK_GB:-$(( img_gib + 3 > 8 ? img_gib + 3 : 8 ))}
 cp --sparse=always "$ROOTFS" "$W/disk.ext4"
-truncate -s "${DISK_GB:-8}G" "$W/disk.ext4"
+truncate -s "${DISK_GB}G" "$W/disk.ext4"
 
 # ---- network: tap + NAT so docker can pull hello-world
 sudo ip tuntap add "$TAP" mode tap user "$(id -u)"
@@ -126,7 +129,7 @@ pass "exec (user, exit code, timeout)"
 
 # ---- 3. root disk grown
 size_gb=$(vexec 30 root sh -c "df -BG --output=size / | tail -1 | tr -dc 0-9")
-(( size_gb >= ${DISK_GB:-8} - 1 )) || fail "rootfs not grown (${size_gb}G)"
+(( size_gb >= DISK_GB - 1 )) || fail "rootfs not grown (${size_gb}G)"
 pass "rootfs grown to ${size_gb}G"
 
 # ---- 4. put/get file (3 MiB, chunked)
@@ -203,6 +206,30 @@ if [[ $VARIANT == full ]]; then
     [[ -n $v ]] || fail "$c printed nothing"
     pass "$c: $v"
   done
+  # The languages and tools boat.dev lists as pre-installed (machines/tools).
+  # sbt: --script-version, since `sbt --version` fetches sbt itself on first run.
+  for c in "deno --version" "pnpm --version" "uv --version" "go version" "java -version" \
+           "javac -version" "mvn --version" "gradle --version" "kotlin -version" "kotlinc -version" \
+           "scala -version" "scalac -version" "sbt --script-version" "ruby --version" "gem --version" \
+           "bundle --version" "php --version" "composer --version" "elixir --version" \
+           "erl -noshell -eval 'io:format(\"OTP ~s~n\", [erlang:system_info(otp_release)]), halt().'" \
+           "dotnet --version" "R --version" "gcc --version" "g++ --version" "clang --version" \
+           "cmake --version" "ninja --version" "ffmpeg -version" "dpkg-query -W wmctrl xdotool" \
+           "google-chrome-stable --version" "python3 --version" "pip --version" "nvm --version"; do
+    v=$(vexec 300 dev bash -lc "o=\$($c 2>&1) && grep -m1 . <<<\"\$o\"" 2>/dev/null) || fail "$c"
+    [[ -n $v ]] || fail "$c printed nothing"
+    pass "$c: $v"
+  done
+  v=$(vexec 60 dev bash -lc 'java -version 2>&1 | grep -m1 .') || fail "java"
+  [[ $v == *'"11.'* ]] || fail "java is not OpenJDK 11: $v"
+  v=$(vexec 120 dev bash -lc 'nvm exec 22 node --version 2>/dev/null | tail -1; node --version') || fail "nvm node 22"
+  [[ $v == v22.*$'\n'v* && ${v#*$'\n'} != v22.* ]] || fail "nvm Node 22 / default node: $v"
+  pass "nvm has Node 22; the default node stays $(tail -1 <<<"$v")"
+  # `user` (boat.dev's name) is uid 1000 with /home/user -> /home/dev.
+  [[ $(vexec 30 user sh -c 'id -u; cd ~ && pwd; pwd -P') == $'1000\n/home/user\n/home/dev' ]] || fail "user alias"
+  [[ $("${SSH[@]}" "user@$GUEST_IP" 'sudo -n whoami; id -u; echo $HOME') == $'root\n1000\n/home/user' ]] \
+    || fail "ssh as user + sudo"
+  pass "user alias: uid 1000, /home/user -> /home/dev, ssh + sudo"
 fi
 
 # ---- 8b. detached commands: survive an agent restart; signal; logs

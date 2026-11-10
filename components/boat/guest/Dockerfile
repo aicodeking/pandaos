@@ -9,6 +9,21 @@ FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d8
 COPY --from=cli . /src
 RUN cd /src && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '-s -w' -o /boat .
 
+# Ruby for the full image, built from the release tarball (no official binary
+# for Linux; Ubuntu 24.04 ships 3.2). Only /opt/ruby is copied into `full`.
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS ruby-build
+ARG RUBY_VERSION=4.0.1
+ARG RUBY_SHA256=3924be2d05db30f4e35f859bf028be85f4b7dd01714142fd823e4af5de2faf9d
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl build-essential libssl-dev libyaml-dev zlib1g-dev libffi-dev libgmp-dev \
+ && curl -fsSLo /tmp/ruby.tgz "https://cache.ruby-lang.org/pub/ruby/${RUBY_VERSION%.*}/ruby-${RUBY_VERSION}.tar.gz" \
+ && echo "${RUBY_SHA256}  /tmp/ruby.tgz" | sha256sum -c - \
+ && mkdir /tmp/ruby && tar -xzf /tmp/ruby.tgz -C /tmp/ruby --strip-components=1 \
+ && cd /tmp/ruby && ./configure --prefix=/opt/ruby --disable-install-doc --enable-shared \
+ && make -j"$(nproc)" && make install \
+ && /opt/ruby/bin/ruby -ropenssl -rpsych -rzlib -e 'puts RUBY_DESCRIPTION'
+
 FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS slim
 
 ARG NODE_VERSION=26.13.0
@@ -172,5 +187,104 @@ RUN H=/opt/boat-harness \
  && export HOME=/tmp/harness-home && mkdir "$HOME" \
  && pi --version && kimi --version && prime-agent --version && vibe --version \
  && rm -rf /tmp/harness-home /tmp/prime-agent.tgz /root/.npm /root/.cache
+# ---- Languages boat.dev documents as pre-installed (docs.boat.dev/machines/tools).
+# Ubuntu packages where Ubuntu 24.04 has the documented version (OpenJDK 11,
+# Maven 3.8.7, .NET SDK 8.0.1xx, Erlang/OTP 25, Elixir 1.14, Clang 18, ninja,
+# ffmpeg 6.1, wmctrl); every other one is a release artifact pinned by sha256.
+# OpenJDK 11 goes in first so maven's `default-jre-headless | java7-runtime-headless`
+# is already met and apt does not add OpenJDK 21 (which would win `java`).
+ARG GO_VERSION=1.23.4
+ARG GO_SHA256=6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971
+ARG DENO_VERSION=2.9.4
+ARG DENO_SHA256=c24f955d9fbfe0ea5ae2b501c8e71ae76e31e4c9782390a54a284b3364fda725
+ARG UV_VERSION=0.12.0
+ARG UV_SHA256=eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9
+ARG PNPM_VERSION=10.34.5
+ARG NVM_VERSION=0.41.0
+ARG NVM_SHA256=532560c9ecc6ef484279fcc1c600e9346537bc7913b891ffd0ec0caca5072694
+ARG NVM_NODE_VERSION=22.23.4
+ARG NVM_NODE_SHA256=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
+ARG GRADLE_VERSION=8.12
+ARG GRADLE_SHA256=7a00d51fb93147819aab76024feece20b6b84e420694101f276be952e08bef03
+ARG KOTLIN_VERSION=2.1.0
+ARG KOTLIN_SHA256=b6698d5728ad8f9edcdd01617d638073191d8a03139cc538a391b4e3759ad297
+ARG SCALA_VERSION=3.3.8
+ARG SCALA_SHA256=17a03dd9c2a790b4230a7d03b741cdedca6514096e50e7189bc5e2d299db250a
+ARG SBT_VERSION=1.13.0
+ARG SBT_SHA256=06806805ffd26232727326216766ed4793b549f8c1e6ffeef2e610db7245b698
+ARG CMAKE_VERSION=3.31.3
+ARG CMAKE_SHA256=442b93b3db0f6c6501a74add587acca5ea6b8c1526ccca7bc8d89fc592036971
+# boat.dev documents PHP 8.4.24; static-php-cli's newest 8.4 build is 8.4.23.
+ARG PHP_VERSION=8.4.23
+ARG PHP_SHA256=1aeed5bc7967977ca5b1da7163acd91bf9ba3ac56037045d4e91ee2ff2712bb7
+ARG COMPOSER_VERSION=2.11.2
+ARG COMPOSER_SHA256=dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028
+ARG R_DEB=r-base-core_4.6.1-9.2404.0_amd64.deb
+ARG R_SHA256=e74382f25055a44ad529f6f744c5f394a330c8deee5c2d271ff45fdb4eaa748a
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openjdk-11-jdk-headless \
+ && apt-get install -y --no-install-recommends maven dotnet-sdk-8.0 elixir \
+      clang ninja-build ffmpeg wmctrl libyaml-0-2 \
+ && curl -fsSLo "/tmp/${R_DEB}" "https://cloud.r-project.org/bin/linux/ubuntu/noble-cran40/${R_DEB}" \
+ && echo "${R_SHA256}  /tmp/${R_DEB}" | sha256sum -c - \
+ && apt-get install -y --no-install-recommends "/tmp/${R_DEB}" \
+ && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/*.deb \
+ && java -version 2>&1 | grep '"11\.' \
+ && mvn --version && dotnet --version && elixir --version && clang --version && R --version | sed -n 1p
+
+COPY --from=ruby-build /opt/ruby /opt/ruby
+
+RUN fetch() { curl -fsSLo "$1" "$2" && echo "$3  $1" | sha256sum -c -; } \
+ && fetch /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" "$GO_SHA256" \
+ && tar -xzf /tmp/go.tgz -C /usr/local && ln -s /usr/local/go/bin/go /usr/local/go/bin/gofmt /usr/local/bin/ \
+ && fetch /tmp/deno.zip "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" "$DENO_SHA256" \
+ && unzip -q /tmp/deno.zip deno -d /usr/local/bin \
+ && fetch /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" "$UV_SHA256" \
+ && tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 --no-same-owner uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx \
+ && fetch /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" "$GRADLE_SHA256" \
+ && unzip -q /tmp/gradle.zip -d /opt && ln -s "/opt/gradle-${GRADLE_VERSION}/bin/gradle" /usr/local/bin/gradle \
+ && fetch /tmp/kotlin.zip "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip" "$KOTLIN_SHA256" \
+ && unzip -q /tmp/kotlin.zip -d /opt && ln -s /opt/kotlinc/bin/kotlin /opt/kotlinc/bin/kotlinc /usr/local/bin/ \
+ && fetch /tmp/scala.tgz "https://github.com/scala/scala3/releases/download/${SCALA_VERSION}/scala3-${SCALA_VERSION}.tar.gz" "$SCALA_SHA256" \
+ && install -d /opt/scala3 && tar -xzf /tmp/scala.tgz -C /opt/scala3 --strip-components=1 --no-same-owner \
+ && ln -s /opt/scala3/bin/scala /opt/scala3/bin/scalac /opt/scala3/bin/scaladoc /usr/local/bin/ \
+ && fetch /tmp/sbt.tgz "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" "$SBT_SHA256" \
+ && tar -xzf /tmp/sbt.tgz -C /opt --no-same-owner && ln -s /opt/sbt/bin/sbt /usr/local/bin/sbt \
+ && fetch /tmp/cmake.tgz "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" "$CMAKE_SHA256" \
+ && install -d /opt/cmake && tar -xzf /tmp/cmake.tgz -C /opt/cmake --strip-components=1 --no-same-owner \
+      --exclude='*/doc' --exclude='*/man' \
+ && ln -s /opt/cmake/bin/cmake /opt/cmake/bin/ctest /opt/cmake/bin/cpack /usr/local/bin/ \
+ && fetch /tmp/php.tgz "https://dl.static-php.dev/static-php-cli/common/php-${PHP_VERSION}-cli-linux-x86_64.tar.gz" "$PHP_SHA256" \
+ && tar -xzf /tmp/php.tgz -C /usr/local/bin --no-same-owner php \
+ && fetch /usr/local/bin/composer "https://getcomposer.org/download/${COMPOSER_VERSION}/composer.phar" "$COMPOSER_SHA256" \
+ && chmod 755 /usr/local/bin/composer \
+ && for b in ruby gem bundle bundler irb erb rake rdoc ri; do ln -s "/opt/ruby/bin/$b" /usr/local/bin/; done \
+ && npm install -g --no-fund --no-audit "pnpm@${PNPM_VERSION}" && npm cache clean --force \
+ && fetch /tmp/nvm.tgz "https://github.com/nvm-sh/nvm/archive/refs/tags/v${NVM_VERSION}.tar.gz" "$NVM_SHA256" \
+ && install -d /usr/local/nvm && tar -xzf /tmp/nvm.tgz -C /usr/local/nvm --strip-components=1 --no-same-owner \
+ && fetch /tmp/node22.txz "https://nodejs.org/dist/v${NVM_NODE_VERSION}/node-v${NVM_NODE_VERSION}-linux-x64.tar.xz" "$NVM_NODE_SHA256" \
+ && install -d "/usr/local/nvm/versions/node/v${NVM_NODE_VERSION}" \
+ && tar -xJf /tmp/node22.txz -C "/usr/local/nvm/versions/node/v${NVM_NODE_VERSION}" --strip-components=1 --no-same-owner \
+ && chown -R dev:dev /usr/local/nvm \
+ && printf '\n[ -r /etc/profile.d/boat-nvm.sh ] && . /etc/profile.d/boat-nvm.sh\n' >> /etc/bash.bashrc \
+ && rm -rf /tmp/* /root/.npm /root/.cache \
+ && export HOME=/tmp/lang-home && mkdir "$HOME" \
+ && go version && deno --version && uv --version && pnpm --version && gradle --version >/dev/null \
+ && kotlinc -version && scala -version && sbt --script-version && cmake --version && ninja --version \
+ && php --version && COMPOSER_ALLOW_SUPERUSER=1 composer --version --no-interaction && ruby --version && bundle --version \
+ && bash -c '. /etc/profile.d/boat-nvm.sh && nvm --version && nvm ls' \
+ && [ "$(node --version)" != "v${NVM_NODE_VERSION}" ] \
+ && rm -rf /tmp/lang-home
+
+# boat.dev's guest user is `user` (/home/user); ours is `dev`. `user` is a second
+# name for uid 1000 (listed after dev, so uid lookups still say dev) and
+# /home/user is a symlink to /home/dev: every /home/dev path keeps working.
+RUN useradd -o -u 1000 -g dev -G sudo,docker -M -d /home/user -s /bin/bash user \
+ && usermod -p '*' user && ln -s dev /home/user \
+ && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user && chmod 0440 /etc/sudoers.d/user \
+ && visudo -cf /etc/sudoers.d/user \
+ && [ "$(id -un 1000)" = dev ] && [ "$(id -u user)" = 1000 ] && [ "$(getent passwd 1000 | cut -d: -f1)" = dev ]
+
 RUN chmod 755 /usr/local/bin/boat-desktop-session /usr/local/bin/boat-desktop-animate \
  && rm -rf /var/cache/* /var/log/*.log /tmp/*
