@@ -91,10 +91,11 @@ func readRoutes(path string) (map[string]vm, error) {
 }
 
 type gateway struct {
-	domain        string // api.<domain> (for the ask check)
-	vmDomain      string // <port>-<vmid>.<vmDomain>
-	desktopDomain string // <vmid>.<desktopDomain>
-	key           []byte // HMAC key shared with boat-api
+	domain        string    // api.<domain> (for the ask check)
+	vmDomain      string    // <port>-<vmid>.<vmDomain>
+	desktopDomain string    // <vmid>.<desktopDomain>
+	key           []byte    // master HMAC key shared with boat-api; tokens use purposeKey(key, …)
+	legacyUntil   time.Time // master-key (pre-split) tokens verify until then; zero = never
 	routes        *routes
 	gens          *routeGens // nil = no revocation (no -api)
 	now           func() time.Time
@@ -176,7 +177,7 @@ func (g *gateway) desktop(w http.ResponseWriter, r *http.Request, vmid string) {
 		return
 	}
 	check := func(tok string) error {
-		_, err := checkToken(tok, g.now(), func(exp int64) string { return signDesktop(g.key, vmid, exp) })
+		_, err := g.verify(tok, purposeDesktopLink, func(k []byte, exp int64) string { return signDesktop(k, vmid, exp) })
 		return err
 	}
 	// The desktop page is not embeddable, and only its own origin may use it.
@@ -188,7 +189,7 @@ func (g *gateway) desktop(w http.ResponseWriter, r *http.Request, vmid string) {
 	}
 	if q := r.URL.Query(); q.Has("sig") {
 		tok := q.Get("exp") + "." + q.Get("sig")
-		exp, err := checkToken(tok, g.now(), func(exp int64) string { return signDesktop(g.key, vmid, exp) })
+		exp, err := g.verify(tok, purposeDesktopLink, func(k []byte, exp int64) string { return signDesktop(k, vmid, exp) })
 		if err != nil {
 			http.Error(w, "desktop link invalid: "+err.Error(), http.StatusForbidden)
 			return
@@ -210,7 +211,7 @@ func (g *gateway) desktop(w http.ResponseWriter, r *http.Request, vmid string) {
 	if port == 0 {
 		port = defaultDesktopPort
 	}
-	proxy(v.IP, port, guestCookie+"="+guestToken(g.key, vmid)).ServeHTTP(w, r)
+	proxy(v.IP, port, g.guestCookies(vmid)).ServeHTTP(w, r)
 }
 
 func (g *gateway) portRoute(w http.ResponseWriter, r *http.Request, port int, vmid string) {
@@ -225,11 +226,11 @@ func (g *gateway) portRoute(w http.ResponseWriter, r *http.Request, port int, vm
 			http.Error(w, "private port: token revocations are unavailable, retry shortly", http.StatusServiceUnavailable)
 			return
 		}
-		sign := func(exp int64) string { return signRoute(g.key, port, vmid, gen, exp) }
-		check := func(tok string) error { _, err := checkToken(tok, g.now(), sign); return err }
+		sign := func(k []byte, exp int64) string { return signRoute(k, port, vmid, gen, exp) }
+		check := func(tok string) error { _, err := g.verify(tok, purposePortRoute, sign); return err }
 		if q := r.URL.Query(); q.Has("boat_sig") {
 			tok := q.Get("boat_exp") + "." + q.Get("boat_sig")
-			exp, err := checkToken(tok, g.now(), sign)
+			exp, err := g.verify(tok, purposePortRoute, sign)
 			if err != nil {
 				http.Error(w, "route link invalid: "+err.Error(), http.StatusForbidden)
 				return
@@ -357,6 +358,7 @@ func main() {
 	routesPath := flag.String("routes", "/run/boat/routes.json", "boatd route table")
 	keyPath := flag.String("desktop-key", "/var/lib/boat/secrets/desktop.key", "HMAC key shared with boat-api")
 	api := flag.String("api", "", "boat-api base URL (http://127.0.0.1:8740), for port token revocations; empty disables them")
+	legacy := flag.Int64("legacy-hmac-until", 0, "accept tokens signed with the master key (from before per-purpose keys) that expire by this unix time; 0 = start + 8 days, -1 = never")
 	flag.Parse()
 	if *domain == "" {
 		log.Fatal("-domain is required")
@@ -369,6 +371,12 @@ func main() {
 	g := &gateway{
 		domain: d, vmDomain: strings.ToLower(*vmDomain), desktopDomain: strings.ToLower(*desktopDomain),
 		key: key, routes: &routes{path: *routesPath}, now: time.Now,
+	}
+	switch {
+	case *legacy == 0:
+		g.legacyUntil = time.Now().Add(legacyWindow)
+	case *legacy > 0:
+		g.legacyUntil = time.Unix(*legacy, 0)
 	}
 	if *api != "" {
 		g.gens = newRouteGens(strings.TrimRight(*api, "/"))

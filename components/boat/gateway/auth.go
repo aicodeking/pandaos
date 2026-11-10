@@ -26,6 +26,29 @@ const (
 	guestCookie   = "boat_desktop" // the guest agent's desktop proxy (:6080)
 )
 
+// Per-purpose keys: boat-api's PurposeKey. The shared key file is a master
+// key; each kind of token is signed with HMAC-SHA256(master,
+// "boat-hmac-v2/<purpose>"), so a desktop link, a port route token and the
+// guest desktop token can never stand in for each other, whatever their
+// payloads. Before this split all three were signed with the master key and
+// told apart by payload prefixes only; such legacy tokens still verify until
+// legacyUntil (they all carry an expiry), never after.
+const (
+	purposeDesktopLink  = "desktop-link"
+	purposePortRoute    = "port-route"
+	purposeGuestDesktop = "guest-desktop"
+)
+
+func purposeKey(master []byte, purpose string) []byte {
+	m := hmac.New(sha256.New, master)
+	m.Write([]byte("boat-hmac-v2/" + purpose))
+	return m.Sum(nil)
+}
+
+// legacyWindow: how long after start a gateway accepts tokens signed with
+// the master key: the longest token boat-api mints (a 7-day port URL) plus a day.
+const legacyWindow = 8 * 24 * time.Hour
+
 func mac(key []byte, payload string) string {
 	m := hmac.New(sha256.New, key)
 	m.Write([]byte(payload))
@@ -67,6 +90,34 @@ func checkToken(token string, now time.Time, sign func(exp int64) string) (time.
 		return time.Time{}, errors.New("token expired")
 	}
 	return t, nil
+}
+
+// verify checks a "<exp>.<sig>" token of one purpose: signed with that
+// purpose's key, or, until legacyUntil, a legacy token signed with the master
+// key whose expiry is no later than legacyUntil. sign is the payload signer.
+func (g *gateway) verify(token, purpose string, sign func(key []byte, exp int64) string) (time.Time, error) {
+	exp, err := checkToken(token, g.now(), func(e int64) string { return sign(g.k(purpose), e) })
+	if err == nil || g.legacyUntil.IsZero() || !g.now().Before(g.legacyUntil) || err.Error() != "bad signature" {
+		return exp, err
+	}
+	exp, lerr := checkToken(token, g.now(), func(e int64) string { return sign(g.key, e) })
+	if lerr != nil || exp.After(g.legacyUntil) {
+		return time.Time{}, err
+	}
+	return exp, nil
+}
+
+func (g *gateway) k(purpose string) []byte { return purposeKey(g.key, purpose) }
+
+// guestCookies is the Cookie pair the guest desktop proxy checks: the token
+// boat-api starts it with now, and during the legacy window also the master-key
+// token a guest started before the split still holds (it takes any match).
+func (g *gateway) guestCookies(vmid string) string {
+	c := guestCookie + "=" + guestToken(g.k(purposeGuestDesktop), vmid)
+	if !g.legacyUntil.IsZero() && g.now().Before(g.legacyUntil) {
+		c += "; " + guestCookie + "=" + guestToken(g.key, vmid)
+	}
+	return c
 }
 
 // anyCookie reports whether one of the request's cookies called name passes
