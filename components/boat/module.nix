@@ -176,6 +176,9 @@ let
     defaultTeam = cfg.quotas;
   }
   // lib.optionalAttrs (imageIds != [ ]) { defaultImage = lib.head imageIds; }
+  # BOAT_URL (api.<domain>) resolves to this host: let guests reach Caddy's 443
+  # on the host's own addresses, nothing else on the host.
+  // lib.optionalAttrs (cfg.vmApiUrl != null) { hostHttpsPort = 443; }
   // lib.optionalAttrs cfg.untrustedTenants untrustedSettings
   // lib.optionalAttrs (cfg.ioCostModel != null) { inherit (cfg) ioCostModel; }
   // cfg.boatdSettings;
@@ -401,7 +404,9 @@ in
       description = ''
         boat-api as guests reach it (`-vm-api-url`): injected into each VM as
         `BOAT_URL` together with a per-VM token, so code in a VM can call the API
-        about itself. Null: guests get only `BOAT_ID`.
+        about itself. Set, boatd lets guests reach tcp/443 on the host's own
+        addresses (`hostHttpsPort`), as `api.<domain>` resolves to this host;
+        nothing else on the host opens to guests. Null: guests get only `BOAT_ID`.
       '';
     };
     apiMemoryMax = mkOption {

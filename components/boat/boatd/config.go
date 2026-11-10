@@ -94,6 +94,10 @@ type Config struct {
 	AllowSMTP   bool `json:"allowSMTP"`   // else tcp 25/465/587 out is dropped
 	AIProxyPort int  `json:"aiProxyPort"` // gateway port VMs may reach (boat-api's AI proxy); 0 = closed
 	EgressMbit  int  `json:"egressMbit"`  // per-VM egress cap (bridge policer); 0 = none
+	// HostHTTPSPort: tcp port VMs may reach on any host-local address (Caddy's
+	// 443, so boat-api at its public URL, BOAT_URL, works from a guest on a
+	// single-host install); 0 = closed. Nothing else on the host is opened.
+	HostHTTPSPort int `json:"hostHttpsPort"`
 
 	// Per-VM limits. 0 = none. Firecracker limiters apply from the next cold boot
 	// (a restored VM keeps those saved in its snapshot).
@@ -283,6 +287,9 @@ func (c Config) validate() error {
 	}
 	if c.HostDirtyRatio < 0 || c.HostDirtyRatio > 90 {
 		return fmt.Errorf("hostDirtyRatio must be 0-90")
+	}
+	if c.HostHTTPSPort < 0 || c.HostHTTPSPort > 65535 || (c.HostHTTPSPort >= c.PortMin && c.HostHTTPSPort <= c.PortMax) {
+		return fmt.Errorf("hostHttpsPort must be 0-65535 and outside portMin-portMax")
 	}
 	for _, n := range []int{c.AIProxyPort, c.EgressMbit, c.IngressMbit, c.DiskMBps, c.DiskIOPS, c.IOMaxMBps, c.IOMaxIOPS, c.CtPerVM, c.MaxPortsPerVM, c.VMOverheadMiB, c.VMPageCacheMiB, c.IndexQuarantineS} {
 		if n < 0 {

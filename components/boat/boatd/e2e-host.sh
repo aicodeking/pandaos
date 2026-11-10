@@ -14,6 +14,8 @@
 #   ipv6      host<->VM ping6; from outside only published ports
 #   idle      idle auto-stop
 #   restart   boatd SIGKILLed mid-run: running VMs re-adopted
+#   self api  a guest calls boat-api at the host's address, tcp/443, with its
+#             self token (boatd/e2e-selfapi.sh)
 #   floor     free-space floor: create/snapshot refused (507), stop falls back cold
 #   docker    docker run hello-world in the full image
 #   perf 4/8  disk, snapshot, fork, density, warm creates (boatd/e2e-perf.sh)
@@ -193,6 +195,9 @@ restart_boatd "$WORK/boatd.json"
 [ "$(vmf "$p1" state) $(vmf "$p1" pid)" = "running $pid_before" ] || fail "p1 not re-adopted: $(bd GET "/v1/vms/$p1")"
 [ "$(bx "$p1" 'curl -fsS http://localhost:8081/')" = "$tok" ] || fail "p1 unusable after the boatd restart"
 [ "$(bx "$c1" hostname)" = c1 ] || fail "c1 unusable after the boatd restart"
+
+# shellcheck source=boatd/e2e-selfapi.sh
+. "$HERE/boatd/e2e-selfapi.sh"
 
 log "host e2e: free-space floor"
 free_gib=$(($(df -B1G --output=avail "$STATE" | tail -1)))

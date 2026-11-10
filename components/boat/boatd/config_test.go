@@ -21,7 +21,7 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatalf("%+v %v", c, err)
 	}
 	for _, bad := range []string{`{"subnet":"10.200.0.0/24"}`, `{"ipv6Prefix":"10.0.0.0/8"}`, `{"dns":["x"]}`,
-		`{"portMin":100}`, `{"reflink":"never"}`, `{"defaultSize":"nope"}`, `{"stateDir":"rel"}`, `{`} {
+		`{"portMin":100}`, `{"hostHttpsPort":30000}`, `{"hostHttpsPort":-1}`, `{"reflink":"never"}`, `{"defaultSize":"nope"}`, `{"stateDir":"rel"}`, `{`} {
 		os.WriteFile(p, []byte(bad), 0o600)
 		if _, err := loadConfig(p); err == nil {
 			t.Errorf("%s: accepted", bad)
