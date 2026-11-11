@@ -103,6 +103,38 @@ old slim image.
 | pi 1.5.0, Kimi Code 2.4.1, Prime Agent 0.10.2, Mistral Vibe 3.0.4 (`/opt/boat-harness`) | no | yes |
 | XFCE 4.18 + xfce4-terminal, Ghostty 1.3.1, KasmVNC 1.5.2, libav (H.264), Mesa llvmpipe, glxgears, xdotool | no | yes |
 | Google Chrome stable, code-server 4.144.0 | no | yes |
+| Languages boat.dev lists as pre-installed (below) | no | yes |
+| `user` as a second name for uid 1000, `/home/user -> /home/dev` | no | yes |
+
+Languages and tools in `full`, matching docs.boat.dev/machines/tools (measured there
+2026-10-13). Ubuntu packages where noble has the documented version, otherwise a
+release artifact pinned by sha256 in the Dockerfile:
+
+| Tool | Version | Source |
+|---|---|---|
+| `deno` | 2.9.4 | GitHub release zip |
+| `pnpm` | 10.34.5 | npm (global) |
+| `nvm` + Node 22 | nvm 0.41.0, Node 22.23.4 in `/usr/local/nvm` | tarballs; `nvm use 22`, the default `node` stays 26.13.0 |
+| `uv` / `uvx` | 0.12.0 | GitHub release tarball |
+| `go` / `gofmt` | 1.23.4 | go.dev tarball, `/usr/local/go` |
+| `java` / `javac` | OpenJDK 11 | Ubuntu `openjdk-11-jdk-headless` (OpenJDK 21 is kept out) |
+| `mvn` | 3.8.7 | Ubuntu `maven` |
+| `gradle` | 8.12 | services.gradle.org zip, `/opt/gradle-8.12` |
+| `kotlin` / `kotlinc` | 2.1.0 | GitHub release zip, `/opt/kotlinc` |
+| `scala` / `scalac` / `sbt` | Scala 3.3.8, sbt 1.13.0 | GitHub release tarballs, `/opt/scala3`, `/opt/sbt` |
+| `ruby` / `gem` / `bundle` | 4.0.1 | built from the ruby-lang.org tarball in the `ruby-build` stage, `/opt/ruby` |
+| `php` / `composer` | PHP 8.4.23, Composer 2.11.2 | static-php-cli `common` build; composer.phar |
+| `erl` / `elixir` | Erlang/OTP 25, Elixir 1.14.0 | Ubuntu `elixir` |
+| `dotnet` | .NET SDK 8.0.1xx | Ubuntu `dotnet-sdk-8.0` |
+| `R` | 4.6.1 | CRAN's noble `r-base-core` .deb |
+| `clang` / `cmake` / `ninja` | Clang 18, CMake 3.31.3, ninja 1.11.1 | Ubuntu; CMake is Kitware's tarball, `/opt/cmake` |
+| `ffmpeg`, `wmctrl` | 6.1.1, 1.07 | Ubuntu |
+
+Not matched: PHP is 8.4.23, not 8.4.24 (static-php-cli has no 8.4.24 build).
+.NET and OpenJDK 11 follow Ubuntu's security updates, so their patch versions move.
+boat.dev's default Node is 24 and it keeps apt's Node 20; ours stays Node 26 (slim
+is unchanged), with Node 22 under nvm. The coding agents boat.dev lists beyond the
+seven harnesses (hermes, openclaw, cursor-agent, lux) are not in the image.
 
 Exact versions of everything land in `out/manifest-<variant>.txt`; sizes in
 `out/size-<variant>.txt` (`content_mib`, `image_mib`, `zst_mib`).
@@ -116,7 +148,8 @@ Sizes (MiB, CI build):
 | slim, before the boat CLI | 2821 | 3065 | 842 |
 | full, before the four extra harnesses | 4508 | 4803 | 1348 |
 | slim, now (boat CLI) | 2828 | 3072 | 844 |
-| full, now (boat CLI, pi, Kimi Code, Prime Agent, Mistral Vibe) | 5189 | 5504 | 1486 |
+| full, before the boat.dev languages | 5189 | 5510 | 1489 |
+| full, now (+ the boat.dev languages and tools above) | 7659 | 8048 | 2439 |
 
 Trimming: tight ext4 packing (above); dpkg excludes for docs/man/info/locales;
 opencode's unused `x64-baseline` and musl binaries (npm installs both CPU variants,
@@ -152,6 +185,14 @@ Choices:
 User `dev` (uid 1000): passwordless sudo, `docker` group, no password (`*`), ssh
 keys only (`PasswordAuthentication no`, `PermitRootLogin no`, `AllowUsers dev`).
 Keys go in with `put_file /home/dev/.ssh/authorized_keys`.
+
+`user` (full only): boat.dev's guest user is `user` in `/home/user`. In `full`,
+`user` is a second passwd entry for uid 1000 (`useradd -o`, group `dev`, same groups)
+whose home is `/home/user`, a symlink to `/home/dev`. Everything stays dev's: files,
+`whoami` and `id -un` (uid lookups find `dev` first), the agent's default exec user,
+and every `/home/dev` path. `ssh user@...` works with dev's keys
+(`rootfs-full/etc/ssh/sshd_config.d/boat-user.conf` adds `AllowUsers user`),
+`exec` with `"user": "user"` runs with `HOME=/home/user`, and both have sudo.
 
 ## Desktop: KasmVNC
 
@@ -325,12 +366,14 @@ Additions to the PROTOCOL.md contract (all optional):
   Desktop. Needs Chrome or Chromium; `$CURL_OPTS` becomes Chrome's resolver rules.
 - `./test-in-vm.sh [vmlinux] [rootfs.ext4]`: needs `/dev/kvm` and sudo (tap + NAT).
   Downloads Firecracker v1.17.0 (sha-pinned) unless `FIRECRACKER` is set, boots the
-  image with an 8 GB disk, and checks health, exec (user, exit code, timeout),
+  image with an 8 GB disk (or the image size + 3 GB, if more; `DISK_GB` overrides), and checks health, exec (user, exit code, timeout),
   disk growth, a 3 MiB put/get, ssh key login + sudo and sshd's password/root
   settings, set_env in exec and login shells, vmgenid bound, set_identity refused
   without a reseed and with a used-up one, then hostname, machine-id, every host key
   type, DNS and ssh afterwards, sync, `docker run hello-world`, the agent CLIs and
-  tool versions, idle_s, the desktop (403 without the token, 302 + cookie, page
+  tool versions (full: every language and tool in the table above, OpenJDK 11 as
+  `java`, Node 22 under nvm with Node 26 still the default, and the `user` alias over
+  exec and ssh), idle_s, the desktop (403 without the token, 302 + cookie, page
   served, 6081 not reachable from the host, `desktop-check.sh` fps with glxgears,
   the Ghostty llvmpipe check, code-server on 127.0.0.1:8080; slim: refused), and
   shutdown.
