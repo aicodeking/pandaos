@@ -341,6 +341,7 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 			err = fmt.Errorf("vm left paused: resume after snapshot: %w", rerr)
 		}
 	}
+	m.resets.fire(v.ID) // the snapshot reset the guest's vsock connections, now it runs again
 	if err != nil {
 		m.setMemLimits(v)
 		return false, err

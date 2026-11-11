@@ -235,12 +235,133 @@ def kill_group(proc, sig):
         pass
 
 
-def op_exec(req, send):
-    timeout = float(req.get("timeout_s") or DEFAULT_TIMEOUT_S)
+# ---------------------------------------------------------------- exec sessions
+#
+# Firecracker resets the vsock transport on every snapshot, so a fork (or a
+# snapshot) of a running VM drops each connection in the guest; the host never
+# hears of it. An exec with a "session" id keeps its reply lines, and
+# exec_attach replays them from where the host got to and takes the stream over.
+
+SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SESSION_LOG_MAX = 16 << 20   # bytes of reply lines kept for a reattach
+SESSION_LINGER_S = 300.0     # a finished session stays attachable this long
+SESSIONS = {}
+_sessions_lock = threading.Lock()
+
+
+class Session:
+    def __init__(self, send):
+        self.cond = threading.Condition()
+        self.target = send       # where lines go; None once a send failed
+        self.lines = []          # encoded reply objects, the oldest dropped past SESSION_LOG_MAX
+        self.base = 0            # index of lines[0]
+        self.size = 0
+        self.done_at = None      # monotonic time of the final line
+
+    def emit(self, obj):
+        with self.cond:
+            self.lines.append(obj)
+            self.size += len(json.dumps(obj))
+            while self.size > SESSION_LOG_MAX and len(self.lines) > 1:
+                self.size -= len(json.dumps(self.lines.pop(0)))
+                self.base += 1
+            if self.target is not None:
+                try:
+                    self.target(obj)
+                except OSError:  # the connection is gone (vsock reset): park until a reattach
+                    self.target = None
+            if "exit" in obj or "error" in obj:  # the final line
+                self.done_at = time.monotonic()
+            self.cond.notify_all()
+
+    def attach(self, seen, send):
+        """Replay lines[seen:] to send, then stream to it until the end or another attach."""
+        with self.cond:
+            if seen < self.base or seen > self.base + len(self.lines):
+                raise OpError("exec session output lost: have lines %d-%d, asked from %d"
+                              % (self.base, self.base + len(self.lines), seen))
+            self.target = send
+            for obj in self.lines[seen - self.base:]:
+                send(obj)  # an OSError ends this attach; the session stays parked
+            while self.target is send and self.done_at is None:
+                self.cond.wait(1.0)
+
+
+def check_session_id(sid):
+    if not isinstance(sid, str) or not SESSION_ID.match(sid):
+        raise OpError("bad session id")
+
+
+def new_session(sid, send):
+    now = time.monotonic()
+    with _sessions_lock:
+        for k in [k for k, v in SESSIONS.items() if v.done_at is not None and now - v.done_at > SESSION_LINGER_S]:
+            del SESSIONS[k]
+        if sid in SESSIONS:
+            raise OpError("session exists: %s" % sid)
+        s = SESSIONS[sid] = Session(send)
+    return s
+
+
+def op_exec_attach(req, send):
+    """Take over exec session req.session from line req.seen, after an {"attached": id} line.
+
+    With seen 0 and req.exec, a session the agent never got (the exec request was
+    lost in the reset) is started here instead; ids are single use, so it runs once.
+    """
+    sid, seen = req.get("session"), req.get("seen", 0)
+    check_session_id(sid)
+    if not isinstance(seen, int) or isinstance(seen, bool) or seen < 0:
+        raise OpError("seen must be a non-negative integer")
+    with _sessions_lock:
+        s = SESSIONS.get(sid)
+    if s is None and seen == 0 and isinstance(req.get("exec"), dict):
+        send({"attached": sid, "started": True})
+        try:
+            op_exec(dict(req["exec"], op="exec", session=sid), send)
+            return
+        except OpError as e:
+            if not str(e).startswith("session exists"):
+                raise
+        with _sessions_lock:
+            s = SESSIONS.get(sid)
+    elif s is not None:
+        send({"attached": sid})
+    if s is None:
+        raise OpError("no such exec session")
+    s.attach(seen, send)
+
+
+def spawn_checked(req):
     try:
-        proc, fds, sink = spawn(req)
+        return spawn(req)
     except (OSError, ValueError) as e:
         raise OpError("spawn: %s" % e)
+
+
+def op_exec(req, send):
+    timeout = float(req.get("timeout_s") or DEFAULT_TIMEOUT_S)
+    sid = req.get("session")
+    if sid is None:
+        exec_child(req, send, *spawn_checked(req), timeout)
+        return
+    # Registered before the spawn, and ids are single use: a host that finds no
+    # session after a reset knows the exec never started and may send it again.
+    check_session_id(sid)
+    sess = new_session(sid, send)
+    try:
+        try:
+            spawned = spawn_checked(req)
+        except OpError as e:
+            sess.emit({"error": str(e)})
+            return
+        exec_child(req, sess.emit, *spawned, timeout)
+    finally:
+        if sess.done_at is None:  # never leave an attach waiting on a dead exec
+            sess.emit({"exit": 255, "error": "exec failed in the agent"})
+
+
+def exec_child(req, send, proc, fds, sink, timeout):
     touch(+1)
     try:
         feed_stdin(sink, b64d(req.get("stdin_b64")))
@@ -689,7 +810,7 @@ OPS = {"cmd_start": op_cmd_start, "cmd_list": boat_ops.op_cmd_list,
        "cmd_status": boat_ops.op_cmd_status, "cmd_logs": boat_ops.op_cmd_logs,
        "cmd_signal": boat_ops.op_cmd_signal, "file_list": boat_ops.op_file_list,
        "file_delete": boat_ops.op_file_delete, "file_move": boat_ops.op_file_move,
-       "file_search": boat_ops.op_file_search, "health": op_health, "exec": op_exec, "put_file": op_put_file,
+       "file_search": boat_ops.op_file_search, "health": op_health, "exec": op_exec, "exec_attach": op_exec_attach, "put_file": op_put_file,
        "get_file": boat_ops.op_get_file, "set_identity": op_set_identity, "set_env": op_set_env,
        "desktop": op_desktop, "shutdown": op_shutdown, "reseed": op_reseed, "sync": op_sync,
        "set_clock": op_set_clock}

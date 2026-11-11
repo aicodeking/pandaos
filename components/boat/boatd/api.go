@@ -301,41 +301,38 @@ func (m *Manager) execHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(e.TimeoutS+30)*time.Second)
 	defer cancel()
+	id := r.PathValue("id")
+	reset := m.resets.watch(id) // before the dial: a reset after it must not be missed
 	a, err := dialAgent(ctx, sock)
 	if err != nil {
 		writeErr(w, errf(http.StatusBadGateway, "guest agent: %v", err))
 		return
 	}
-	defer a.Close()
 	req := map[string]any{"op": "exec", "argv": e.Argv, "env": e.Env, "cwd": e.Cwd, "stdin_b64": e.StdinB64,
-		"timeout_s": e.TimeoutS, "tty": e.TTY}
+		"timeout_s": e.TimeoutS, "tty": e.TTY, "session": newID("x-")}
 	if e.User != "" {
 		req["user"] = e.User
 	}
 	if err := a.send(req); err != nil {
+		a.Close()
 		writeErr(w, errf(http.StatusBadGateway, "guest agent: %v", err))
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
 	fl, _ := w.(http.Flusher)
-	for {
-		raw, rep, err := a.recv()
-		if err != nil {
-			b, _ := json.Marshal(map[string]string{"error": "guest agent: " + err.Error()})
-			raw, rep = b, reply{Error: "x"}
-		}
-		if _, werr := w.Write(append(raw, '\n')); werr != nil {
-			return
+	m.relayExec(ctx, id, sock, a, reset, req, func(raw []byte, final bool) error {
+		if _, err := w.Write(append(raw, '\n')); err != nil {
+			return err
 		}
 		if fl != nil {
 			fl.Flush()
 		}
-		if rep.final() {
-			m.touch(r.PathValue("id"))
-			return
+		if final {
+			m.touch(id)
 		}
-	}
+		return nil
+	})
 }
 
 func (m *Manager) getFileHandler(w http.ResponseWriter, r *http.Request) {

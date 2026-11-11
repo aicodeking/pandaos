@@ -36,6 +36,7 @@ type Manager struct {
 	dones  map[string]<-chan struct{}
 	active map[string]time.Time // last exec/file/desktop seen by boatd
 	freed  map[int]time.Time    // quarantined VM indexes -> end of quarantine (quarantine.go)
+	resets resetHub             // vsock resets, for exec streams to reattach (execstream.go)
 	netMu  sync.Mutex
 	// snapDirMu: syncSaved rewrites snap.json behind CreateSnapshot; a delete of
 	// the snapshot meanwhile must not race it (RemoveAll fails with ENOTEMPTY when

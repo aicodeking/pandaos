@@ -42,6 +42,9 @@ class Client:
 
     def exec(self, **req):
         self.send(dict(op="exec", **req))
+        return self.exec_reply()
+
+    def exec_reply(self):
         out, err = b"", b""
         while True:
             m = self.recv()
@@ -86,6 +89,67 @@ class AgentTest(unittest.TestCase):
         out, err, end = self.c.exec(argv=["sh", "-c", "echo out; echo err >&2; exit 3"],
                                     timeout_s=10)
         self.assertEqual((out, err, end["exit"]), (b"out\n", b"err\n", 3))
+
+    def test_exec_session_survives_a_dropped_connection(self):
+        # A vsock transport reset (every Firecracker snapshot) drops the guest's side.
+        sid = "s-%d" % time.monotonic_ns()
+        self.c.send({"op": "exec", "session": sid, "timeout_s": 20,
+                     "argv": ["sh", "-c", "echo begin; sleep 1; echo end; exit 7"]})
+        first = self.c.recv()
+        self.assertEqual(base64.b64decode(first["data_b64"]), b"begin\n")
+        self.c.close()
+        time.sleep(1.5)  # the exit is sent to the dead connection and parked
+        c2 = Client()
+        try:
+            self.assertEqual(c2.call({"op": "exec_attach", "session": sid, "seen": 1}), {"attached": sid})
+            out, _, end = c2.exec_reply()
+            self.assertEqual((out, end["exit"]), (b"end\n", 7))
+            c2.call({"op": "exec_attach", "session": sid, "seen": 0})  # a full replay, while it lingers
+            out, _, end = c2.exec_reply()
+            self.assertEqual((out, end["exit"]), (b"begin\nend\n", 7))
+        finally:
+            c2.close()
+        self.c = Client()
+
+    def test_exec_attach_takes_over_a_running_session(self):
+        sid = "t-%d" % time.monotonic_ns()
+        self.c.send({"op": "exec", "session": sid, "timeout_s": 20,
+                     "argv": ["sh", "-c", "echo begin; sleep 1.5; echo end"]})
+        self.c.recv()
+        c2 = Client()  # the old connection is still open: the attach takes the stream anyway
+        try:
+            self.assertEqual(c2.call({"op": "exec_attach", "session": sid, "seen": 1}), {"attached": sid})
+            out, _, end = c2.exec_reply()
+            self.assertEqual((out, end["exit"]), (b"end\n", 0))
+        finally:
+            c2.close()
+
+    def test_exec_attach_starts_a_lost_exec_once(self):
+        sid = "v-%d" % time.monotonic_ns()
+        req = {"op": "exec_attach", "session": sid, "seen": 0, "exec": {"argv": ["sh", "-c", "echo once"]}}
+        self.assertEqual(self.c.call(req), {"attached": sid, "started": True})
+        out, _, end = self.c.exec_reply()
+        self.assertEqual((out, end["exit"]), (b"once\n", 0))
+        self.assertEqual(self.c.call(req), {"attached": sid})  # now a replay, not a second run
+        out, _, end = self.c.exec_reply()
+        self.assertEqual((out, end["exit"]), (b"once\n", 0))
+
+    def test_exec_session_spawn_error_is_final(self):
+        sid = "w-%d" % time.monotonic_ns()
+        self.assertIn("spawn", self.c.call({"op": "exec", "session": sid, "argv": ["/nonexistent/x"]})["error"])
+        self.assertEqual(self.c.call({"op": "exec_attach", "session": sid, "seen": 0}), {"attached": sid})
+        self.assertIn("spawn", self.c.recv()["error"])
+
+    def test_exec_attach_errors(self):
+        self.assertIn("no such", self.c.call({"op": "exec_attach", "session": "nope", "seen": 0})["error"])
+        self.assertIn("bad session", self.c.call({"op": "exec", "session": "a b", "argv": ["true"]})["error"])
+        sid = "u-%d" % time.monotonic_ns()
+        _, _, end = self.c.exec(argv=["true"], session=sid)
+        self.assertEqual(end["exit"], 0)
+        self.assertIn("seen", self.c.call({"op": "exec_attach", "session": sid, "seen": -1})["error"])
+        self.assertEqual(self.c.call({"op": "exec_attach", "session": sid, "seen": 5}), {"attached": sid})
+        self.assertIn("lost", self.c.recv()["error"])
+        self.assertIn("exists", self.c.call({"op": "exec", "session": sid, "argv": ["true"]})["error"])
 
     def test_exec_stdin_env_cwd(self):
         out, _, end = self.c.exec(argv=["sh", "-c", "cat; echo \"$FOO\"; pwd"],

@@ -35,6 +35,8 @@ type reply struct {
 	EOF    bool     `json:"eof,omitempty"`
 	Error  string   `json:"error,omitempty"`
 	IdleS  *float64 `json:"idle_s,omitempty"`
+	// Attached: exec_attach took the session over (execstream.go).
+	Attached string `json:"attached,omitempty"`
 }
 
 // final: the last line of a reply (exec ends on exit, get_file on eof).

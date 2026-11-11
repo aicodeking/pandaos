@@ -6,7 +6,8 @@
 # must end with their own exit status in about their own run time. boatbench
 # 42818758694: boatd leaked an API connection per call, the 5th fork's resume
 # got 503 "Too many open connections", the source stayed paused and its next
-# exec hung until timeout_s+30.
+# exec hung until timeout_s+30. boat-e2e 42985309146: the exec running across
+# the forks lost its exit in the first reset (now: exec sessions + exec_attach).
 FSRC_FORKS=7 # past Firecracker's 10 API connections at the old 2 per fork
 fsrc_exec() { # ID CMD TIMEOUT_S OUT -> OUT (NDJSON), OUT.code (HTTP status); curl gives up at TIMEOUT_S+40
   curl -sS -m "$(($3 + 40))" -o "$4" -w '%{http_code}' --unix-socket "$SOCK" -X POST "http://boatd/v1/vms/$1/exec" \
@@ -17,7 +18,7 @@ fsrc_exec() { # ID CMD TIMEOUT_S OUT -> OUT (NDJSON), OUT.code (HTTP status); cu
 fsrc_result() { # OUT -> "http=… exit=… out=…"
   printf 'http=%s exit=%s out=%s' "$(cat "$1.code")" \
     "$(jq -rs 'map(select(has("exit")))[0].exit // "none"' "$1" 2>/dev/null || echo none)" \
-    "$(jq -rs 'map(select(.stream == "stdout").data_b64 | @base64d) | join("")' "$1" 2>/dev/null | tr '\n' ' ')"
+    "$(jq -rs 'map(select(.stream == "stdout").data_b64 | @base64d) | join("")' "$1" 2>/dev/null | xargs)"
 }
 fsrc_fail() { # MSG: boatd's lines for the source, what the guest saw, then fail
   grep -E "$fs" "$WORK/boatd.log" | tail -n 30 || true
@@ -53,9 +54,9 @@ fsrc_exec "$fs" 'echo begin; sleep 40; echo end; exit 5' 150 "$WORK/tmp/fsrc2"
 e2_s=$(secs "$t1" "$(now)")
 r2=$(fsrc_result "$WORK/tmp/fsrc2")
 echo "fork source: exec after the forks ${e2_s}s: $r2"
-[ "$r2" = "http=200 exit=5 out=begin end " ] || fsrc_fail "exec on a fork source after $FSRC_FORKS forks: $r2"
+[ "$r2" = "http=200 exit=5 out=begin end" ] || fsrc_fail "exec on a fork source after $FSRC_FORKS forks: $r2"
 within "$e2_s" 70 || fsrc_fail "exec on a fork source after $FSRC_FORKS forks took ${e2_s}s for a 40 s run"
-[ "$r1" = "http=200 exit=7 out=begin end " ] || fsrc_fail "exec across $FSRC_FORKS forks of its VM: $r1"
+[ "$r1" = "http=200 exit=7 out=begin end" ] || fsrc_fail "exec across $FSRC_FORKS forks of its VM: $r1"
 within "$e1_s" 80 || fsrc_fail "exec across $FSRC_FORKS forks of its VM took ${e1_s}s for a 50 s run"
 [ "$during" = yes ] || fsrc_fail "the $FSRC_FORKS forks took ${forks_s}s, past the 50 s exec they were meant to overlap"
 bd DELETE "/v1/vms/$fs" >/dev/null
