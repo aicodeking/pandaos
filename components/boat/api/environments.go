@@ -389,7 +389,7 @@ func (s *server) envBuildSteps(ctx context.Context, env Environment, team string
 
 // envRunVars: the environment's secret selection plus its plain vars.
 func (s *server) envRunVars(env Environment, team string) (map[string]string, error) {
-	var only []string
+	only := []string{defaultSelection}
 	if env.Secrets != nil {
 		only = append([]string{}, *env.Secrets...)
 	}

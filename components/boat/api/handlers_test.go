@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -241,7 +243,18 @@ func TestSecretsAPIAndInjection(t *testing.T) {
 	if bytes.Contains(raw, []byte("sk-secret-1")) {
 		t.Error("secret stored in plaintext")
 	}
-	st, vm := e.do(e.owner, "POST", "/v1/vms", map[string]any{"name": "dev"})
+	// Not default-injected: a VM created without a selection does not get it.
+	st, vm := e.do(e.owner, "POST", "/v1/vms", map[string]any{"name": "plain"})
+	if st != 201 {
+		t.Fatalf("create: %d %v", st, vm)
+	}
+	if got, ok := e.boatd.vms[vm["id"].(string)]["env"].(map[string]any)["ANTHROPIC_API_KEY"]; ok {
+		t.Errorf("a secret nobody marked default-injected reached a VM with no selection: %v", got)
+	}
+	if st, out := e.do(e.owner, "PUT", "/v1/secrets/ANTHROPIC_API_KEY", map[string]any{"value": "sk-secret-1", "inject": true}); st != 200 || out["inject"] != true {
+		t.Fatalf("mark default-injected: %d %v", st, out)
+	}
+	st, vm = e.do(e.owner, "POST", "/v1/vms", map[string]any{"name": "dev"})
 	if st != 201 {
 		t.Fatalf("create: %d %v", st, vm)
 	}
@@ -255,6 +268,30 @@ func TestSecretsAPIAndInjection(t *testing.T) {
 	e.do(e.owner, "POST", "/v1/vms/"+id+"/start", nil)
 	if got := e.boatd.starts[0]["env"].(map[string]any)["ANTHROPIC_API_KEY"]; got != "sk-secret-1" {
 		t.Errorf("secret not injected at start: %v", got)
+	}
+	// A rotation keeps the mark; a member key may not select a secret that is not default-injected.
+	e.do(e.owner, "PUT", "/v1/secrets/GITHUB_TOKEN", map[string]any{"value": "ghp_x"})
+	if _, out := e.do(e.owner, "PUT", "/v1/secrets/ANTHROPIC_API_KEY", map[string]any{"value": "sk-secret-2"}); out["inject"] != true {
+		t.Errorf("rotation dropped the mark: %v", out)
+	}
+	member := e.newKey("vms:read", "vms:write", "exec")
+	if st, out := e.do(member, "POST", "/v1/vms", map[string]any{"name": "m1", "secrets": []string{"GITHUB_TOKEN"}}); st != 403 {
+		t.Errorf("member selecting a secret that is not default-injected: %d %v", st, out)
+	}
+	if st, out := e.do(member, "POST", "/v1/vms", map[string]any{"name": "m2", "secrets": []string{"ANTHROPIC_API_KEY"}}); st != 201 {
+		t.Errorf("member selecting a default-injected secret: %d %v", st, out)
+	}
+	if st, out := e.do(e.owner, "POST", "/v1/vms", map[string]any{"name": "a1", "secrets": []string{"GITHUB_TOKEN"}}); st != 201 {
+		t.Errorf("admin selecting any secret: %d %v", st, out)
+	}
+	// A VM from before default injection (no selection record, no label) keeps every team secret.
+	legacy := e.createVM()
+	e.srv.store.Update(func(st *State) error { delete(st.VMSecrets, legacy); return nil })
+	delete(e.boatd.vms[legacy]["labels"].(map[string]any), secretsLabel)
+	n := len(e.boatd.starts)
+	e.do(e.owner, "POST", "/v1/vms/"+legacy+"/start", nil)
+	if env := e.boatd.starts[n]["env"].(map[string]any); env["GITHUB_TOKEN"] != "ghp_x" || env["ANTHROPIC_API_KEY"] != "sk-secret-2" {
+		t.Errorf("legacy VM lost its secrets: %v", env)
 	}
 	if st, _ := e.do(e.owner, "DELETE", "/v1/secrets/ANTHROPIC_API_KEY", nil); st != 200 {
 		t.Errorf("delete: %d", st)
@@ -317,7 +354,7 @@ func TestExecAndPrompt(t *testing.T) {
 	if st != 200 || len(lines) != 2 || !strings.Contains(lines[1], `"exit":0`) {
 		t.Fatalf("exec stream: %d %q", st, b)
 	}
-	e.do(e.owner, "PUT", "/v1/secrets/OPENAI_API_KEY", map[string]any{"value": "sk-o"})
+	e.do(e.owner, "PUT", "/v1/secrets/OPENAI_API_KEY", map[string]any{"value": "sk-o", "inject": true})
 	if st, _ := e.do(e.owner, "POST", "/v1/vms/"+id+"/prompt", map[string]any{"prompt": "hi", "agent": "gpt"}); st != 400 {
 		t.Errorf("unknown agent: %d", st)
 	}
@@ -371,11 +408,26 @@ func TestFilesSSHDesktop(t *testing.T) {
 	if st != 200 || !strings.HasPrefix(d["url"].(string), "https://boat.example/desktop/"+id+"?exp=") {
 		t.Fatalf("desktop: %d %v", st, d)
 	}
-	if len(e.boatd.desk) != 1 || e.boatd.desk[0]["action"] != "start" || e.boatd.desk[0]["token"] != SignGuestDesktop([]byte("desktop-key"), id) || len(SignGuestDesktop([]byte("k"), id)) != 64 {
+	if len(e.boatd.desk) != 1 || e.boatd.desk[0]["action"] != "start" || e.boatd.desk[0]["token"] != SignGuestDesktop(PurposeKey([]byte("desktop-key"), purposeGuestDesktop), id) || len(SignGuestDesktop([]byte("k"), id)) != 64 {
 		t.Errorf("guest desktop not started with token: %v", e.boatd.desk)
 	}
 	if SignDesktop([]byte("k"), "vm1", 100) == SignDesktop([]byte("k"), "vm1", 101) {
 		t.Error("signature must cover exp")
+	}
+	// Each kind of token has its own key derived from the shared one: the link is
+	// signed with the desktop-link key, not the master key or another purpose's.
+	du, _ := url.Parse(d["url"].(string))
+	exp, _ := strconv.ParseInt(du.Query().Get("exp"), 10, 64)
+	master := []byte("desktop-key")
+	if du.Query().Get("sig") != SignDesktop(PurposeKey(master, purposeDesktopLink), id, exp) || du.Query().Get("sig") == SignDesktop(master, id, exp) {
+		t.Errorf("desktop link not signed with the desktop-link key: %s", du)
+	}
+	keys := map[string]bool{string(master): true}
+	for _, p := range []string{purposeDesktopLink, purposePortRoute, purposeGuestDesktop} {
+		keys[string(PurposeKey(master, p))] = true
+	}
+	if len(keys) != 4 {
+		t.Error("purpose keys must differ from each other and from the master key")
 	}
 }
 

@@ -120,9 +120,10 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 
 - **One origin per VM.** Each desktop is `<id>.desktop.D` and each port route is `<port>-<id>.<vmDomain>`. Session cookies are `__Host-` prefixed: host-only, `Secure`, `Path=/`, `HttpOnly`. Browsers refuse a `__Host-` cookie that carries a `Domain`, so a page on another VM's origin can neither read nor plant one. Desktop cookies are `SameSite=Strict`. A browser withholds a Strict cookie on the redirects of a navigation that began on another site, so for `Sec-Fetch-Site: cross-site` the gateway answers with a small same-origin page that starts a fresh navigation; everything else gets a 302. Every VM's credential is bound to its id by the HMAC: VM A's cookie or link gets 401/403 on VM B's origin. This is checked in the e2e.
 - **Origin checks.** All VM origins are same-site with each other, so `SameSite` does not stop a page on VM A from sending B's cookie along, for example on `wss://<B>.desktop.D/`. The gateway therefore refuses (403) a desktop request whose `Origin` is not exactly its own origin, any desktop request marked `Sec-Fetch-Site: same-site` or `cross-site` unless it carries a signed link, and framing (`frame-ancestors 'self'`). A private port route accepts its cookie only from its own origin or another port of the same VM, and from top-level navigations; a program sending `X-Boat-Route-Token` is not limited, since it holds the token itself. Consequence: `<img>` or `<script>` from one private port of a VM to another is refused, so use relative paths or a public port. Desktops cannot be embedded in an iframe on another origin.
-- **Dashboard.** Static files from `components/boat/dashboard/web`, served from the read-only Nix store at `https://api.D/`, on the same origin as the API, with a strict CSP (`default-src 'self'`, no framing). `/v1/*` and `/healthz` go to boat-api; `/internal/*` is 404. It holds the user's API key in the browser, which is why it is never on a tenant-controlled origin.
-- **Desktop links.** `GET /v1/vms/<id>/desktop` returns `https://desktop.D/<id>?exp&sig` (sig = `hex(HMAC-SHA256(key, "<id>.<exp>"))`, 5 min by default). The gateway 302s it to `https://<id>.desktop.D/?exp&sig`, which checks the signature, sets `__Host-boat_gw` and drops the signature from the URL. Toward the guest, the gateway removes the client's `boat_*`/`__Host-boat_*` cookies and sends `boat_desktop=hex(HMAC(key, "guest-desktop.<id>"))`. boat-api starts the guest desktop with that same token.
-- **Port routes are private by default.** A route needs a token: `token = <exp>.hex(HMAC(key, "route.<port>-<id>.<exp>"))`, minted by `GET /v1/vms/<id>/ports/<port>/url` (`boat ports url VM PORT`). Programs send it as `X-Boat-Route-Token`; browsers open `…/?boat_exp&boat_sig` once, which sets the host-only `__Host-boat_route` (SameSite=Lax). A port is reachable without a token only if added with `--public`, which boatd lists in routes.json `"public"`. When the list is missing, routes stay private (fail-closed). Tokens and cookies never reach the VM.
+- **Dashboard.** Static files from `components/boat/dashboard/web`, served from the read-only Nix store at `https://api.D/`, on the same origin as the API, with a strict CSP (`default-src 'self'`, no framing). `/v1/*`, `/api/v1/*` (boat.dev-compatible, for its official SDKs) and `/healthz` go to boat-api; `/internal/*` is 404. It holds the user's API key in the browser, which is why it is never on a tenant-controlled origin.
+- **Desktop links.** `GET /v1/vms/<id>/desktop` returns `https://desktop.D/<id>?exp&sig` (sig = `hex(HMAC-SHA256(Kdesktop, "<id>.<exp>"))`, 5 min by default). The gateway 302s it to `https://<id>.desktop.D/?exp&sig`, which checks the signature, sets `__Host-boat_gw` and drops the signature from the URL. Toward the guest, the gateway removes the client's `boat_*`/`__Host-boat_*` cookies and sends `boat_desktop=hex(HMAC(Kguest, "guest-desktop.<id>"))`. boat-api starts the guest desktop with that same token.
+- **Port routes are private by default.** A route needs a token: `token = <exp>.hex(HMAC(Kroute, "route.<port>-<id>.<exp>"))`, minted by `GET /v1/vms/<id>/ports/<port>/url` (`boat ports url VM PORT`). Programs send it as `X-Boat-Route-Token`; browsers open `…/?boat_exp&boat_sig` once, which sets the host-only `__Host-boat_route` (SameSite=Lax). A port is reachable without a token only if added with `--public`, which boatd lists in routes.json `"public"`. When the list is missing, routes stay private (fail-closed). Tokens and cookies never reach the VM.
+- **One HMAC key per purpose.** The shared key file (`-desktop-key-file` / `-desktop-key`) is a master key that signs nothing itself: `Kdesktop`, `Kroute` and `Kguest` are `HMAC-SHA256(master, "boat-hmac-v2/desktop-link" | "…/port-route" | "…/guest-desktop")`, derived the same way by boat-api (`PurposeKey`) and boat-gateway, so a token of one kind never verifies as another, whatever its payload. **Migration:** before this, all three were signed with the master key, told apart by payload prefixes. After the upgrade boat-api mints only per-purpose tokens; the gateway still accepts a master-key token that expires within its legacy window (`-legacy-hmac-until`: unix time; default its start + 8 days, longer than any token boat-api mints; `-1` turns it off), and during that window also sends the guest desktop both cookies, so a desktop started before the upgrade keeps working until its next `GET …/desktop` restarts it with the new token. After the window, master-key tokens are refused. Nothing needs to be done by hand. CI: `TestPurposeKeysAndLegacyWindow` (gateway), `TestFilesSSHDesktop` (boat-api), and `gateway/e2e-edge.sh` (a desktop-link-key token is refused as a route token, a pre-split token still works inside the window).
 - **Revoking port tokens.** A token lives up to 7 days. `POST /v1/vms/<id>/port-tokens/revoke` ends every token, link and cookie of that VM's private ports, and so does removing a port; a token minted afterwards signs `route.<port>-<id>.g<gen>.<exp>`. boat-gateway polls boat-api's loopback-only `/internal/route-gens` every 2 s, so it takes effect within about 2 s, and a token minted in that window can also get 401 until the next poll. If boat-api goes down the gateway keeps its last table. If the gateway starts while boat-api is down, private routes answer 503 until boat-api answers, because a revoked token cannot be told from a good one; public routes are not affected.
 - **Tenant cookies.** The gateway removes the `Domain` attribute from each `Set-Cookie` in a guest's response, so the cookie stays on that VM's own host. See checklist item 2 for what it cannot remove.
 - **Live routes.** boat-gateway (Go stdlib, websockets included) re-reads `/run/boat/routes.json` whenever its mtime or size changes, so new VMs and ports never reload Caddy.
@@ -155,7 +156,36 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 - **Keys.** A key can list, rotate, delete or read usage of a key only if that key's scopes are within its own. Another user's key also needs the `admin` scope and a role no higher than the caller's, and only the operator can touch the operator's keys. Anything else is 404.
 - **Deleting a team** also deletes its snapshots, imported ones included.
 - A team sees and reaches only its own VMs: API objects are filtered by team, nftables blocks other teams' VMs, jump grants list only the team's VM IPs, and every desktop link and route token is bound to one VM.
+- **Secrets reach VMs only when chosen.** See [Secrets](#secrets).
 - **Quotas** (`services.boat.quotas`, per-team overrides with `boatdSettings.teams`) cap running and total VMs, vCPU, memory, disk, snapshots and routes, all finite by default. Metering (`/v1/usage`) records VM-seconds per size and snapshot-days per team. There is no billing.
+
+### Secrets
+
+Writing a team secret needs `admin`, and a VM's env is readable by anyone with `exec` on it, so a VM gets a secret only if:
+
+- the request that creates it names the secret (`"secrets": [...]`, `boat new --secrets A,B`), and either the key is `admin` or the secret is default-injected (a member key naming any other secret is refused with 403), or
+- its environment selects it (environments are written by admins), or
+- the request names nothing and an admin marked the secret **default-injected**: `PUT /v1/secrets/{name}` with `"inject": true`, `boat secrets set NAME VALUE` (the CLI marks it, as boat.dev's CLI secrets go to every sandbox; `--no-inject` does not), or boat.dev's `POST /api/v1/secrets`.
+
+A new secret set through the API is not default-injected; a rotation keeps the mark. `GET /v1/secrets` shows `inject`.
+
+**Migration.** Before this, a VM created without a selection got every team secret at each start. VMs created from now on record the marker `@default` (in `state.json` and the `boat.secrets` label, which forks copy) and get only the default-injected secrets, read at each start. VMs created before the upgrade carry no selection record and keep their old behaviour (every team secret) until deleted; to stop that, recreate or fork them with an explicit selection, or delete the secrets they must not see. Environments without a selection now give their VMs and builds the default-injected secrets, not all. To keep today's behaviour for a secret, mark it: `boat secrets set NAME VALUE` (or `PUT /v1/secrets/NAME {"value":…, "inject":true}`). Tests: `TestSecretsAPIAndInjection`, `TestPerVMSecretSelection`.
+
+### AI credentials proxy: forwarded endpoints
+
+The proxy forwards only inference endpoints; anything else is 403 before the team's key is read, so a VM token cannot reach a provider's files, batches, fine-tuning, assistants, admin or organization APIs. Paths are relative to the provider's upstream, `*` is one path segment; `.`/`..`/empty segments and encoded `/` or `.` are refused. Source: `components/boat/api/aiallow.go`; test: `TestAIProxyAllowlist`.
+
+| Provider | Allowed |
+|---|---|
+| anthropic | `POST v1/messages`, `POST v1/messages/count_tokens`, `POST v1/complete`, `GET v1/models`, `GET v1/models/*` |
+| openai | `POST v1/chat/completions`, `POST v1/completions`, `POST v1/embeddings`, `POST v1/responses`, `GET`/`DELETE v1/responses/*`, `POST v1/responses/*/cancel`, `GET v1/responses/*/input_items`, `POST v1/responses/input_tokens`, `POST v1/responses/compact`, `GET v1/models`, `GET v1/models/*` |
+| openrouter | `POST api/v1/chat/completions`, `POST api/v1/completions`, `POST api/v1/responses`, `POST api/v1/messages`, `POST api/v1/embeddings`, `GET api/v1/models`, `GET api/v1/models/*/endpoints`, `GET api/v1/generation` |
+| deepseek | `POST chat/completions`, `POST v1/chat/completions`, `POST beta/completions`, `POST completions`, `GET models`, `GET v1/models`, `POST anthropic/v1/messages`, `POST anthropic/v1/messages/count_tokens` |
+| mistral | `POST v1/chat/completions`, `POST v1/fim/completions`, `POST v1/agents/completions`, `POST v1/embeddings`, `GET v1/models`, `GET v1/models/*` |
+| moonshot | `POST v1/chat/completions`, `POST v1/embeddings`, `GET v1/models`, `GET v1/models/*`, `POST v1/tokenizers/estimate-token-count`, `POST anthropic/v1/messages`, `POST anthropic/v1/messages/count_tokens` |
+| xai | `POST v1/chat/completions`, `POST v1/completions`, `POST v1/responses`, `GET v1/responses/*`, `POST v1/messages`, `POST v1/embeddings`, `GET v1/models`, `GET v1/models/*`, `GET v1/language-models`, `GET v1/language-models/*` |
+
+These cover what the providers' SDKs and the harnesses `boat prompt` drives (Claude Code, Codex, OpenCode, kimi, vibe) call to run a model. A harness that needs another endpoint gets a 403 naming this list.
 
 ## Upgrades and reboots
 
@@ -184,12 +214,13 @@ Test a restore before you need one.
 
 Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list, read on 2026-11-01. **yes** = works and is exercised by the `boat-e2e` workflow on real VMs. **unit** = implemented, tested only against a fake boatd or a stub. **partial** = a smaller version. **no** = missing. **n/a** = does not apply to self-hosting. Features that boat.dev documents and this table omits should be read as **no**.
 
-**Drop-in for boat.dev's SDKs, not for its whole API.** The native API is `/v1/vms` and this project has its own SDKs. A compatibility layer under `/api/v1` serves 54 of boat.dev's 122 operations with boat.dev's ids, envelope, cursor pagination and `Idempotency-Key` (see [boat.dev API compatibility](#boatdev-api-compatibility-apiv1)). boat.dev's official Python SDK (`boat-sdk`) and TypeScript SDK (`@boatdev/sdk`) work against it with only the base URL changed: `boat-e2e` drives both on real VMs. Code that uses the operations listed as not mapped must be ported to `/v1`.
+**Drop-in for the boat.dev SDK paths CI proves, not for its whole API.** The native API is `/v1/vms` and this project has its own SDKs. A compatibility layer under `/api/v1` serves 76 of boat.dev's 122 operations with boat.dev's ids, envelope, cursor pagination and `Idempotency-Key` (see [boat.dev API compatibility](#boatdev-api-compatibility-apiv1)). boat.dev's official Python SDK (`boat-sdk`) and TypeScript SDK (`@boatdev/sdk`) run, with only the base URL changed, through Caddy and TLS on real VMs in `boat-e2e`, over the calls listed under [What proves it](#boatdev-api-compatibility-apiv1). Mapped operations those drivers do not call are tested against a fake boatd only; code that uses the operations listed as not mapped must be ported to `/v1`.
 
 | boat.dev area | Feature | Here | Notes |
 |---|---|---|---|
 | Sandboxes | create, list, get, delete | yes | `boat new/list/rm` |
-| | update (PATCH), recover, share/unshare | no | |
+| | update (PATCH): rename, auto-stop | yes | the official SDKs' `update` and `PATCH /v1/vms/{id}` in `sdk/e2e-live.sh` |
+| | recover, share/unshare | no | |
 | | stop, resume | yes | `boat stop`, `boat start` or `resume`; memory restored (same `boot_id`) |
 | | force stop | unit | `boat stop --force`: no snapshot, the next start cold-boots from disk |
 | | fork | yes | new hostname, IP, machine-id, host keys, entropy |
@@ -198,22 +229,25 @@ Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list
 | | `boat self` / `host` inside the VM | unit | `BOAT_ID`, `BOAT_URL` and a key for that VM only, with `-vm-api-url` |
 | Commands | exec with output | yes | |
 | | detached commands, follow, signal, logs, history (also on a stopped VM) | yes | `boat cmd`; driven through the SDKs in `sdk/e2e-live.sh` |
+| | boat.dev's attach stream (`commands/{id}/stream`, `stdoutOffset`/`nextOffset`) | yes | the official SDKs' `run_command`/`follow_command` (`runCommand`/`followCommand`) in `boat-e2e`; one combined log, served as stdout |
 | | `ps` | yes | `boat ps`, through `sdk/e2e-live.sh` |
 | Files | read, write | yes | `boat scp` |
 | | list, search, move, delete, folder, info | yes | `boat files`, through `sdk/e2e-live.sh` |
 | | permissions | unit | |
-| | find in files, replace, upload/download URLs, artifacts | no | |
-| Connect | ssh | yes | through the jump host; IP target; no `boat ssh-config` for editors |
-| | VS Code, Cursor | partial | works with a hand-written `ProxyJump`; not automated |
-| | desktop in the browser | partial | KasmVNC over a websocket (`full` image), no WebRTC. 1080p through the TLS edge in CI, software rendering: 34-40 fps shown, 47-55 decoded; 60 not reached. See [frame rate](#what-the-tests-prove) |
+| | find in files, download URLs | yes | `/api/v1` only: `files/find` (ripgrep), `files/download-url` (signed, bound to team, VM and path, ≤ 1 h); the official SDKs in `boat-e2e` |
+| | replace, upload URLs, artifacts | no | |
+| Connect | ssh | yes | through the jump host; IP target; `boat ssh-config` writes the `ProxyJump` entry (in `sdk/e2e-live.sh`); boat.dev's `sshkey` through the official SDKs |
+| | VS Code, Cursor | partial | `boat ssh-config` gives them a host entry; the editors themselves never ran in CI |
+| | desktop in the browser | partial | boat.dev's `desktop` / `wait_for_desktop` through the official SDKs (vnc mode, signed link, no `publicAccess`). KasmVNC over a websocket (`full` image), no WebRTC. 1080p through the TLS edge in CI, software rendering: 34-40 fps shown, 47-55 decoded; 60 not reached. See [frame rate](#what-the-tests-prove) |
 | | browser-only view, record to MP4, custom wallpaper | no | |
 | | embed desktop in an iframe | no | refused on purpose, see Origin checks |
-| Public URLs | HTTPS port URL, token protection | yes | private by default |
+| Public URLs | HTTPS port URL, token protection | yes | private by default; boat.dev's `host` through the official SDKs, `hostedPorts` on create tested against a fake boatd |
 | | raw TCP | yes | `--public` host port |
 | | raw UDP, rename subdomain, stable names across forks | no | |
 | | firewall rules per sandbox | no | SMTP blocked, `egressMbit` cap, operator-wide only |
 | Long-running | TTL and idle auto-stop | yes | |
-| | extend the deadline, prompts pushing it out | no | |
+| | extend the deadline | yes | `boat extend --hours/--by/--no-auto-stop`, PATCH `ttlSeconds`, in `sdk/e2e-live.sh` |
+| | prompts pushing it out | unit | an `/api/v1` prompt gives the VM a fresh full TTL |
 | | systemd services across stop/resume | yes | memory restore keeps all processes; boat.dev restarts services instead |
 | Environments | image, setup script, env vars, secret selection, prebuilt snapshot | yes | `boat env`; setup and build run in `sdk/e2e-live.sh` |
 | | versions | unit | a counter; no upgrade of running VMs |
@@ -221,6 +255,7 @@ Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list
 | Snapshots | create, list, delete, new from snapshot | yes | memory + disk |
 | | share code, import | yes | through `sdk/e2e-live.sh` |
 | | download | yes | through `sdk/e2e-live.sh` |
+| | boat.dev listings (UUID ids), latest, delete captures, delete one, named snapshots, share codes | yes | `/api/v1`, through the official SDKs in `boat-e2e` |
 | | browse file tree, retention rules | no | |
 | Machines | sizes | yes | operator-defined |
 | | resize | unit | `boat resize` |
@@ -232,12 +267,12 @@ Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list
 | | harnesses | partial | `boat prompt` drives Claude Code, Codex, OpenCode, pi, prime, kimi and mistral (vibe); the last four were written from their `--help` and never run, see [Agents](#agents) |
 | | async prompts, steer, conversations | yes | with a stub agent, through `sdk/e2e-live.sh` |
 | | interrupt | yes | with a stub agent, through `sdk/e2e-live.sh` |
-| | AI credentials, keep-keys-out proxy, usage | yes | proxy token in the VM, real key not, through `sdk/e2e-live.sh`; one credential per provider and team, no profiles or backup accounts |
+| | AI credentials, keep-keys-out proxy, usage | yes | proxy token in the VM, real key not, through `sdk/e2e-live.sh`; only inference endpoints are forwarded ([list](#ai-credentials-proxy-forwarded-endpoints)); one credential per provider and team, no profiles or backup accounts |
 | | block a VM's AI access | unit | |
 | | computer use, MCP server, skills, llms.txt | no | not integrated in boat (PandaOS has `panda-cu` separately) |
 | API and SDKs | REST + OpenAPI, Python, TypeScript | yes | own schema, see above |
-| | CLI with `--json` | partial | the common verbs; no `current`, `extend`, `ssh-config` or `api-key` presets |
-| | boat.dev's `/api/v1` API and official SDKs | partial | 54 of 122 operations, see [boat.dev API compatibility](#boatdev-api-compatibility-apiv1). The official Python and TypeScript SDKs (pinned 1.13.0) create, rename, run commands (sync and detached), move files, stop, resume, fork, save snapshots, manage webhooks and delete on real VMs in `boat-e2e`; prompts, events and the file listing calls are tested against a fake boatd only |
+| | CLI with `--json` | partial | the common verbs plus `current`, `extend`, `ssh-config`, `push`, `host`, `run` (all in `sdk/e2e-live.sh`); no `api-key` presets |
+| | boat.dev's `/api/v1` API and official SDKs | partial | 76 of 122 operations, see [boat.dev API compatibility](#boatdev-api-compatibility-apiv1). The official Python and TypeScript SDKs (pinned 1.13.0) run on real VMs through Caddy in `boat-e2e` over the calls listed there; prompts, events, `hostedPorts`, folder/move/permissions and the webhook/key/environment calls of the TypeScript SDK are tested against a fake boatd only |
 | Keys | create, list, revoke, scopes | yes | |
 | | rotate | yes | through `sdk/e2e-live.sh` |
 | | per-key usage | unit | |
@@ -291,7 +326,9 @@ api = BoatApi(ApiClient(Configuration(host="https://api.boat.example/api/v1", ac
 const api = new BoatApi(new Configuration({ basePath: "https://api.boat.example/api/v1", accessToken: KEY }));
 ```
 
-**What proves it.** `openapi.json` documents every `/api/v1` operation with boat.dev's own schemas, copied from [boat-v1.yaml](https://docs.boat.dev/openapi/boat-v1.yaml) (read 2026-11-09) by `components/boat/api/tools/compat_openapi.py`, so the OpenAPI drift test checks each answer the Go tests get against boat.dev's spec: required fields, enums, id patterns. `components/boat/sdk/compat/` holds drivers for boat.dev's official SDKs, `boat-sdk` 1.13.0 from PyPI (hash-pinned with its dependencies) and `@boatdev/sdk` 1.13.0 from npm (lockfile integrity); `sdk/e2e-live.sh` installs them and runs create, get, list, rename, commands (sync and detached), files, stop, the stop operation, resume, fork, saved snapshots, webhooks, API keys, environments, limits and delete on real VMs in `boat-e2e`, and against the fake boatd in `go test` (`TestLiveScripts`, `TestOfficialSDKDrivers`). Code: `components/boat/api/compat*.go`.
+**Through the gateway.** Caddy sends `https://api.<domain>/api/v1/*` to boat-api like `/v1/*` (`gateway/module.nix`); before, it fell through to the dashboard's `index.html`.
+
+**What proves it.** `openapi.json` documents every `/api/v1` operation with boat.dev's own schemas, copied from [boat-v1.yaml](https://docs.boat.dev/openapi/boat-v1.yaml) (read 2026-11-09) by `components/boat/api/tools/compat_openapi.py`, so the OpenAPI drift test checks each answer the Go tests get against boat.dev's spec: required fields, enums, id patterns. `components/boat/sdk/compat/` holds drivers for boat.dev's official SDKs, `boat-sdk` 1.13.0 from PyPI (hash-pinned with its dependencies) and `@boatdev/sdk` 1.13.0 from npm (lockfile integrity); `sdk/e2e-live.sh` installs them and, in `boat-e2e`, runs them on real VMs **through Caddy over TLS** (`gateway/e2e-edge.sh` sets `BOAT_COMPAT_URL=https://api.boat.test`; a skipped step fails the run): create, get, list, rename (PATCH), sync commands, long commands through the SDKs' own `run_command`/`follow_command` (`runCommand`/`followCommand`) on the attach stream, command status, history and stop, files, file info, `files/find`, `files/download-url` (then a GET of the URL with no key), `host`, `sshkey`, `wait_for_desktop`/`waitForDesktop` on a `full` VM, stop, the stop operation, resume, fork, saved snapshots, share codes (create, list, revoke), named snapshots, per-sandbox, latest and team snapshot listings, delete one snapshot, delete a sandbox's snapshots, `/secrets` (set, read back without values, restore), the AI proxy switch, webhooks, API keys (Python), environments (Python), limits and delete. The same drivers run against the fake boatd in `go test` (`TestLiveScripts`, `TestOfficialSDKDrivers`). Code: `components/boat/api/compat*.go`.
 
 **Ids.** boat.dev's SDKs refuse a sandbox id that is not `bx_` + 8 characters of `23456789abcdefghjkmnpqrstuvwxyz`. Each VM gets one the first time `/api/v1` shows it: drawn at random, checked against every id in use, kept in `state.json` for the VM's life and dropped when it is deleted. Another team's id is 404. A native `vm-…` id also works in `/api/v1` paths.
 
@@ -301,7 +338,7 @@ const api = new BoatApi(new Configuration({ basePath: "https://api.boat.example/
 
 | boat.dev operation | Mapped to | Differences |
 |---|---|---|
-| `POST /sandboxes` | `POST /v1/vms` | 202 `sandbox.created`, `status` always `ready` (this server answers when the VM is up). `type`, `ttlSeconds` (absent = 3600, `null`/`"infinite"` = none), `labels`, `env`, `environment` (`base` = the team default), `noEnv`, `failFast`, `count` (1-16), `from` (saved snapshot name or id, or `bsh_` code). `snapshots`, `monitoring`, `visibility`, `org`, `teamId` are ignored; `setupScript`, `hostedPorts`, `files` are refused with 400 |
+| `POST /sandboxes` | `POST /v1/vms` | 202 `sandbox.created`, `status` always `ready` (this server answers when the VM is up). `type`, `ttlSeconds` (absent = 3600, `null`/`"infinite"` = none), `labels`, `env`, `environment` (`base` = the team default), `noEnv`, `failFast`, `count` (1-16), `from` (saved snapshot name or id, or `bsh_` code). `snapshots`, `monitoring`, `visibility`, `org`, `teamId` are ignored; `hostedPorts` hosts each port as `POST …/host` does and answers `hostedPorts` (an entry with `error` for a port that failed; 400 `invalid_hosted_ports`, `count_with_hosted_ports`, `fail_fast_with_hosted_ports` as on boat.dev). `setupScript`, `files` are refused with 400 |
 | `GET /sandboxes` | `GET /v1/vms` | `pageInfo {nextCursor, hasMore, limit}`; `limit` 1-200, `cursor`, `sort`, `state`, `name`, `namePrefix`, `label=k=v`; `org`, `include` ignored; anything else 400 `invalid_query` (`stoppedBefore`, `dataExpired` included) |
 | `GET /sandboxes/{id}` | `GET /v1/vms/{id}` | `archiveAfter` is boatd's auto-stop deadline, `stop` the last stop operation, `stoppedAt` the last state change of a stopped VM. No `url`, `desktopUrl`, `cost`, `subdomain`, `hydrated`, `health` |
 | `PATCH /sandboxes/{id}` | `PATCH /v1/vms/{id}` | `name`, `ttlSeconds` (sets the deadline to now + ttl; `null` = none). `subdomain` refused. Needs boatd's `PATCH /v1/vms/{id}`: an older boatd gives 501 `not_supported` |
@@ -312,6 +349,7 @@ const api = new BoatApi(new Configuration({ basePath: "https://api.boat.example/
 | `POST /sandboxes/{id}/resume` | `POST /v1/vms/{id}/start` | `failFast`; `ttlSeconds` ignored (the VM keeps its TTL, counted from each start); `type`, `env`, `environment`, `noEnv` refused with 400 (use `/v1/vms/{id}/resize`) |
 | `POST /sandboxes/{id}/fork` | `POST /v1/vms/{id}/fork` | `name`, `failFast`, `Idempotency-Key`; `ttlSeconds`, `monitoring` ignored; `labels`, `env`, `environment`, `noEnv`, `type` refused with 400 |
 | `POST /sandboxes/{id}/commands` | `POST /v1/vms/{id}/exec`, or `POST /v1/vms/{id}/commands` with `detached` | `command` runs as `bash -lc`, `cwd` relative to the guest home (`/home/user` maps to it), `timeoutSeconds` 1-600 (default 30). Sync: `command.finished`, stdout/stderr capped at 1 MiB each (`*Truncated`), `oomKilled` always false. `stream:true`: NDJSON frames `{type, …}`, `started`, then `stdout`/`stderr` with `data`, then `exit` or `error` (the frame fields `type` and `data` are the ones docs.boat.dev's examples read; `nextOffset` is not sent). `detached`: `command.started` with an integer `processId` per VM |
+| `GET /sandboxes/{id}/commands/{processId}/stream` | guest `cmd_logs`, polled | boat.dev's `CommandAttachFrame` NDJSON: `attached`, `stdout` with `data` and `nextOffset`, `heartbeat` after 15 s of silence, then `exit` (`status` exited or lost, `exitCode`, `signal`), `reconnect` after 10 min, or `error`; every last line carries `stdoutOffset`/`stderrOffset` to reopen at with no gap or repeat. One combined log, served as stdout: stderr has no data and its offset is echoed |
 | `GET /sandboxes/{id}/commands/{processId}` | guest `cmd_status` + logs | output is one combined log, returned as `stdout` (`stderr` empty), up to 1 MiB; offsets and `tailBytes` ignored |
 | `DELETE /sandboxes/{id}/commands/{processId}` | `DELETE /v1/vms/{id}/commands/{cid}` | SIGTERM |
 | `GET /sandboxes/{id}/command-history` | `GET /v1/vms/{id}/command-history` | detached commands, prompts and setup scripts this server started (not sync `exec`), newest first, no paging; `stdoutBytes`/`stderrBytes` are 0 |
@@ -324,7 +362,18 @@ const api = new BoatApi(new Configuration({ basePath: "https://api.boat.example/
 | `GET /sandboxes/{id}/events` | prompt runs | one `prompt` event per turn and a `response` event when it ends, with up to 64 KiB of the agent's output as `data.text` while the VM runs. `limit`, `cursor` (the SDKs' `<timestamp>:<id>`), `sort`, `type`, `conversation`. No partial or tool-call events, no `ETag` |
 | `GET /sandboxes/{id}/conversations` | `GET /v1/vms/{id}/conversations` | conversation ids are UUIDs made from the native `conv_` ids |
 | `POST /sandboxes/{id}/steer`, `/interrupt` | `POST /v1/vms/{id}/prompts/{pid}/steer`, `/interrupt` | on the running turn of `conversation` (or the most recent one); steering interrupts and resumes the session (`native: false`, `mode: fallback`) |
-| `GET /saved-snapshots`, `POST`, `GET`/`DELETE /saved-snapshots/{name}` | team snapshots | a saved snapshot is a team snapshot with a name boat.dev accepts (`^[a-z0-9][a-z0-9-]{0,62}$`). Saving is synchronous (`snapshot.status` is `ready`) and replaces an older snapshot of that name. No allowance, no shares here (use `/v1`) |
+| `GET /saved-snapshots`, `POST`, `GET`/`DELETE /saved-snapshots/{name}` | team snapshots | a saved snapshot is a team snapshot with a name boat.dev accepts (`^[a-z0-9][a-z0-9-]{0,62}$`). Saving is synchronous (`snapshot.status` is `ready`) and replaces an older snapshot of that name. No allowance |
+| `GET`/`POST /named-snapshots`, `GET`/`DELETE /named-snapshots/{name}` | the saved-snapshot routes | the same snapshots with `snapshot.named.*` types |
+| `GET`/`POST /saved-snapshots/{name}/shares`, `DELETE …/shares/{shareId}` | `/v1/vms/{id}/snapshots/{sid}/shares` | needs `admin` (boat.dev: `snapshot.write`). A code (`bsh_…`) is valid 30 days here; `shr_` + the native share id; `codePrefix` is `bsh_<share id>`; `lastUsedAt` is null. Team grants made through `/v1` are not listed. An imported snapshot cannot be shared (409) |
+| `GET /snapshots`, `GET /sandboxes/{id}/snapshots`, `GET …/snapshots/latest` | `GET /v1/snapshots`, `GET /v1/vms/{id}/snapshots` | ids are UUIDs made from the native ids (stable, no state). Every snapshot is full: `kind`, `generation`, `chainId`, `fileCount` null, `status` completed, `origin` captured. `limit` (1-200), `sort`; one page (`nextCursor` null). A deleted VM's snapshots keep its native id as `sandboxId` |
+| `DELETE /snapshots/{snapshotId}`, `DELETE /sandboxes/{id}/snapshots` | `DELETE /v1/snapshots/{sid}` | `X-Ascii-Confirm-Delete` required (409). The sandbox form deletes its unnamed snapshots and keeps its saved ones. 202 with operations already `completed` |
+| `POST /sandboxes/{id}/host` | `POST /v1/vms/{id}/ports` + `GET …/ports/{port}/url` | `port`, `public`; `localhost` refused (400). A private URL carries `boat_exp`/`boat_sig` (not `_token`), lasts 7 days, and a new one is minted on each call; `isProtected`, `access` |
+| `POST /sandboxes/{id}/desktop` | `GET /v1/vms/{id}/desktop` | `desktop.url`, `mode: vnc`, never `provisioning` (the call waits for the guest desktop); `publicAccess` refused (400); `theme` ignored. Needs a guest with a desktop (`full`) |
+| `POST /sandboxes/{id}/sshkey` | `POST /v1/vms/{id}/ssh` | `machineIp` is the VM's IP (reach it through the jump host); `sshEndpoint` names the jump host when there is one |
+| `GET /sandboxes/{id}/files/find` | `GET /v1/vms/{id}/files/search?content=1` | ripgrep in the guest: `pattern` (plain, or `regex=true`), `path` (default home); at most 1000 matches |
+| `POST /sandboxes/{id}/files/download-url` | signed URL served by boat-api | `GET <api>/api/v1/file-downloads/<token>` with no key streams the file, any size. The token is HMAC-signed with a key derived only for this, bound to the team, VM and path, expires after `ttlSeconds` (default 900, at most 3600), and is redacted from the audit log. The file must exist when the URL is made |
+| `GET`/`POST /secrets` | team secrets | the [default-injected](#secrets) secrets: GET lists `NAME=` lines, values are never returned; POST `envContents` sets each `NAME=value` and marks it, `NAME=` marks an existing one, a marked secret left out is unmarked (not deleted). `secretFiles` refused. Needs `admin`. `pushed` reports 0: secrets reach VMs at their next start |
+| `GET`/`PUT /ai-proxy` | `GET`/`PUT /v1/ai/proxy` | `enabled`; `accountId` is the team id, `org: true`, `pricing` zero, `proxyUrl` the proxy VMs use. PUT needs `admin` |
 | `GET`/`POST /webhooks`, `GET`/`PATCH`/`DELETE /webhooks/{id}`, `POST …/rotate` | webhooks of this server | boat.dev's six event names; deliveries carry boat.dev's payload (`{id, type, createdAt, data: {sandbox: {id, name}, previousState, state}}`) and `X-Ascii-Event`, `-Delivery`, `-Timestamp`, `-Signature: v1=hex(HMAC(secret, id.ts.body))`, `-Attempt`. Sent: `sandbox.ready`, `sandbox.archived`, `sandbox.error`; never `hydrated`, `degraded`, `recovered`. Rotation has no overlap. Webhooks made through `/v1` keep native events and are not listed here |
 | `GET /api-keys`, `POST /api-keys/scoped`, `DELETE /api-keys/{id}`, `POST …/rotate`, `GET …/usage` | `/v1/keys` | boat.dev's actions are this server's scopes (`vms:read`, `vms:write`, `exec`, `admin`); presets `read-only`, `full-sandbox`, `ci`, `admin`. No `ttl` (keys do not expire), no `sandboxIds`/`environmentIds` (400). Rotation has no overlap. `keyLastFour` is `****` (the secret is not stored); usage counts requests since boat-api started |
 | `GET`/`POST /environments`, `PUT`/`DELETE /environments/{id}` | `/v1/environments` | the id is a UUID made from the native id (the native id and the name work too). `envContents` is the variables as `KEY=value` lines; `passSecrets: false` selects no team secrets; `name`, `isDefault`. Image, size and setup script are `/v1` only; boat.dev's credential, GitHub, secret-file, repository and access settings are refused (400) |
@@ -333,7 +382,7 @@ const api = new BoatApi(new Configuration({ basePath: "https://api.boat.example/
 | `GET /sandboxes/{id}/usage` | `GET /v1/vms/{id}/usage` | `seconds` since the VM was created, `dollars: 0` |
 | `Idempotency-Key` | in memory | create and fork, per team, 24 h, ≤ 255 chars; same body replays (`Idempotent-Replayed: true`), another body 409 `idempotency_key_reused`, running 409 `idempotency_in_progress`, a failure frees the key. Lost on restart |
 
-**Not mapped** (404; use `/v1` where it exists): orgs, data retention, repos, telemetry, CI, credential profiles, AI proxy and usage, secrets, environment upgrades, variables and secret files one by one and repositories, `share`/`unshare`, `recover`, `files/find`, `files/replace`, upload and download URLs, `commands/{id}/stream`, artifacts, `desktop`, `host` and hosted ports, `sshkey`, named snapshots, snapshot shares, `/snapshots` and per-sandbox snapshot listings (boat.dev wants UUID snapshot ids), snapshot trees and files, `RateLimit` headers, `X-Boat-Org`.
+**Not mapped** (404; use `/v1` where it exists): orgs, data retention, repos, telemetry, CI, credential profiles, AI usage and per-sandbox AI access, environment upgrades, variables and secret files one by one and repositories, `share`/`unshare`, `recover`, `files/replace`, upload URLs, artifacts, snapshot trees, files and download, `RateLimit` headers, `X-Boat-Org`.
 
 **CLI.** `boat` takes boat.dev's verbs next to its own: `boat extend <vm> --hours N | --ttl S | --no-auto-stop` (sets the time left, as boat.dev's) or `--by 2h` (pushes the deadline out), `boat limits`, `boat snapshot <vm> NAME` and `boat snapshot rm NAME`, `boat history <vm> [command-id] [-f]`, `boat webhook create URL --event ready … | list | rotate ID | remove ID`.
 

@@ -112,7 +112,7 @@ func importArchive(t *testing.T, e *env, tok, sid string) string {
 
 func TestForeignDiskGetsNoSecrets(t *testing.T) {
 	e := setup(t)
-	e.do(e.owner, "PUT", "/v1/secrets/TOKEN", map[string]any{"value": "s3cret"})
+	e.do(e.owner, "PUT", "/v1/secrets/TOKEN", map[string]any{"value": "s3cret", "inject": true})
 	src := e.createVM()
 	own := e.snapshotOf(src)
 	imported := importArchive(t, e, e.owner, own)
@@ -641,7 +641,7 @@ func TestPortTokenRevocation(t *testing.T) {
 	var sig string
 	fmt.Sscanf(strings.Replace(u["token"].(string), ".", " ", 1), "%d %s", &exp, &sig)
 	label := "8080-" + id
-	if sig != signHex([]byte("desktop-key"), fmt.Sprintf("route.%s.%d", label, exp)) {
+	if sig != signHex(PurposeKey([]byte("desktop-key"), purposePortRoute), fmt.Sprintf("route.%s.%d", label, exp)) {
 		t.Error("generation 0 must keep the original payload (the gateway's)")
 	}
 	if st, _ := e.do(other, "POST", "/v1/vms/"+id+"/port-tokens/revoke", nil); st != 404 {
@@ -652,7 +652,7 @@ func TestPortTokenRevocation(t *testing.T) {
 	}
 	_, u = e.do(e.owner, "GET", urlPath, nil)
 	fmt.Sscanf(strings.Replace(u["token"].(string), ".", " ", 1), "%d %s", &exp, &sig)
-	if sig != signHex([]byte("desktop-key"), fmt.Sprintf("route.%s.g1.%d", label, exp)) {
+	if sig != signHex(PurposeKey([]byte("desktop-key"), purposePortRoute), fmt.Sprintf("route.%s.g1.%d", label, exp)) {
 		t.Error("a new token must carry the new generation (the gateway's payload)")
 	}
 	// What the gateway polls: loopback only, never through Caddy.

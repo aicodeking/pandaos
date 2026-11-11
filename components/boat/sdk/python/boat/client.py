@@ -646,8 +646,14 @@ class Boat:
     def secrets(self) -> List[Dict[str, Any]]:
         return self._call("GET", "/v1/secrets")["secrets"]
 
-    def set_secret(self, name: str, value: str) -> None:
-        self._call("PUT", f"/v1/secrets/{_q(name)}", {"value": value})
+    def set_secret(self, name: str, value: str, inject: Optional[bool] = None) -> None:
+        """Set a team secret (admin). inject=True marks it default-injected: VMs
+        created without a secrets selection get it. None keeps the current mark
+        (a new secret is not injected)."""
+        body: Dict[str, Any] = {"value": value}
+        if inject is not None:
+            body["inject"] = inject
+        self._call("PUT", f"/v1/secrets/{_q(name)}", body)
 
     def delete_secret(self, name: str) -> None:
         self._call("DELETE", f"/v1/secrets/{_q(name)}")

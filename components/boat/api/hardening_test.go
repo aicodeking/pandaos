@@ -247,9 +247,14 @@ func TestPerVMSecretSelection(t *testing.T) {
 	if env := withoutGuestIdentity(envOf(e.boatd.starts[len(e.boatd.starts)-1])); len(env) != 0 {
 		t.Errorf("start of a no-secrets VM: %v", env)
 	}
-	_, all := e.do(e.owner, "POST", "/v1/vms", map[string]any{})
-	if env := envOf(e.boatd.vms[all["id"].(string)]); env["A"] != "a" || env["B"] != "b" {
-		t.Errorf("default must stay all secrets: %v", env)
+	_, dflt := e.do(e.owner, "POST", "/v1/vms", map[string]any{})
+	if env := withoutGuestIdentity(envOf(e.boatd.vms[dflt["id"].(string)])); len(env) != 0 {
+		t.Errorf("no selection and nothing default-injected must inject nothing: %v", env)
+	}
+	e.do(e.owner, "PUT", "/v1/secrets/A", map[string]any{"value": "a", "inject": true})
+	_, dflt = e.do(e.owner, "POST", "/v1/vms", map[string]any{})
+	if env := envOf(e.boatd.vms[dflt["id"].(string)]); env["A"] != "a" || env["B"] != nil {
+		t.Errorf("no selection must inject only the default-injected secrets: %v", env)
 	}
 	e.do(e.owner, "DELETE", "/v1/vms/"+id, nil)
 	if _, ok := e.srv.store.Snapshot().VMSecrets[id]; ok {
@@ -283,7 +288,7 @@ func TestPrivatePortRoutes(t *testing.T) {
 	var expN int64
 	fmt.Sscan(exp, &expN)
 	// gateway contract: hex(HMAC-SHA256(desktopKey, "route.<port>-<vmid>.<exp>"))
-	if want := signHex([]byte("desktop-key"), "route.8080-"+id+"."+exp); pu.Query().Get("boat_sig") != want || u["token"] != exp+"."+want {
+	if want := signHex(PurposeKey([]byte("desktop-key"), purposePortRoute), "route.8080-"+id+"."+exp); pu.Query().Get("boat_sig") != want || u["token"] != exp+"."+want {
 		t.Errorf("signature does not verify: %v", u)
 	}
 	if d := time.Until(time.Unix(expN, 0)); d < 59*time.Minute || d > time.Hour+time.Minute {

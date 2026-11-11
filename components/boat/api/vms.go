@@ -74,12 +74,19 @@ func (s *server) ownVM(w http.ResponseWriter, r *http.Request, p *principal) (VM
 	return vm, true
 }
 
+// defaultSelection in a VM's selection stands for the team secrets an admin
+// marked default-injected (Secret.Inject), read at each start. A VM created
+// without a selection gets just this. VMs from before it have no selection at
+// all (nil), which still means every team secret; docs/boat.md, "Secrets".
+const defaultSelection = "@default"
+
 // teamEnv decrypts the team secrets injected as env vars: all of them, or
 // only the names in only when it is non-nil (per-VM selection).
 func (s *server) teamEnv(teamID string, only []string) (map[string]string, error) {
 	env := map[string]string{}
 	for _, sec := range s.store.Snapshot().Secrets {
-		if sec.TeamID != teamID || (only != nil && !slices.Contains(only, sec.Name)) {
+		picked := only == nil || slices.Contains(only, sec.Name) || (sec.Inject && slices.Contains(only, defaultSelection))
+		if sec.TeamID != teamID || !picked {
 			continue
 		}
 		v, err := s.keys.Open(sec.Sealed, secretKey(sec.TeamID, sec.Name))
@@ -317,11 +324,23 @@ func (s *server) validateCreate(c *createReq) string {
 	return ""
 }
 
+// undefaultSecret is the first of names that is not default-injected: a
+// member may not pull such a secret into a VM it can exec in.
+func (s *server) undefaultSecret(team string, names []string) string {
+	st := s.store.Snapshot()
+	for _, n := range names {
+		if sec := st.Secrets[secretKey(team, n)]; n != defaultSelection && (sec == nil || !sec.Inject) {
+			return n
+		}
+	}
+	return ""
+}
+
 // checkSecretNames reports the first selected name the team does not have.
 func (s *server) checkSecretNames(team string, names []string) string {
 	st := s.store.Snapshot()
 	for _, n := range names {
-		if st.Secrets[secretKey(team, n)] == nil {
+		if n != defaultSelection && st.Secrets[secretKey(team, n)] == nil {
 			return "unknown secret " + n
 		}
 	}
@@ -401,12 +420,18 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 			return
 		}
 	}
-	var only []string
+	only := []string{defaultSelection}
 	if c.Secrets != nil {
 		only = append([]string{}, *c.Secrets...)
 		if msg := s.checkSecretNames(p.Team.ID, only); msg != "" {
 			writeErr(w, r, 400, "invalid_request", msg)
 			return
+		}
+		if explicit != nil && !p.has("admin") {
+			if n := s.undefaultSecret(p.Team.ID, *explicit); n != "" {
+				writeErr(w, r, 403, "forbidden", "secret "+n+" is not default-injected: only an admin key may select it (or an admin's environment)")
+				return
+			}
 		}
 	}
 	vars, ok := s.envOrFail(w, r, p, only)
@@ -1198,11 +1223,11 @@ func (s *server) desktopVM(w http.ResponseWriter, r *http.Request, p *principal)
 	id := r.PathValue("id")
 	// Start the guest desktop proxy with the token the gateway presents as
 	// Cookie boat_desktop=<token> (see SignGuestDesktop).
-	if err := s.boatd.call(r.Context(), "POST", vmPath(id, "desktop"), map[string]string{"action": "start", "token": SignGuestDesktop(s.cfg.DesktopKey, id)}, nil); err != nil {
+	if err := s.boatd.call(r.Context(), "POST", vmPath(id, "desktop"), map[string]string{"action": "start", "token": SignGuestDesktop(PurposeKey(s.cfg.DesktopKey, purposeGuestDesktop), id)}, nil); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
 	exp := time.Now().Add(s.cfg.DesktopTTL).Unix()
-	u := fmt.Sprintf("%s/%s?exp=%d&sig=%s", strings.TrimRight(s.cfg.DesktopURL, "/"), url.PathEscape(id), exp, SignDesktop(s.cfg.DesktopKey, id, exp))
+	u := fmt.Sprintf("%s/%s?exp=%d&sig=%s", strings.TrimRight(s.cfg.DesktopURL, "/"), url.PathEscape(id), exp, SignDesktop(PurposeKey(s.cfg.DesktopKey, purposeDesktopLink), id, exp))
 	writeJSON(w, 200, map[string]any{"url": u, "expires_at": time.Unix(exp, 0).UTC()})
 }

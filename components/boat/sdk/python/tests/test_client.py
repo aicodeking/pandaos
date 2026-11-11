@@ -184,6 +184,8 @@ class ClientTest(unittest.TestCase):
         self.assertEqual([v.name for v in self.b.list_vms()], ["dev"])
         self.b.set_secret("ANTHROPIC_API_KEY", "sk")
         self.assertEqual(json.loads(Mock.log[-1][2]), {"value": "sk"})
+        self.b.set_secret("ANTHROPIC_API_KEY", "sk", inject=True)
+        self.assertEqual(json.loads(Mock.log[-1][2]), {"value": "sk", "inject": True})
         self.b.delete("vm1")
 
     def test_ports_and_secret_selection(self):

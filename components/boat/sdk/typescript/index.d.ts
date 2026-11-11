@@ -223,7 +223,8 @@ export declare class Boat {
   keyUsage(id: string): Promise<{ id: string; requests: number; last_used?: string }>;
   deleteKey(id: string): Promise<void>;
   secrets(): Promise<{ name: string; updated: string }[]>;
-  setSecret(name: string, value: string): Promise<void>;
+  /** inject: true marks it default-injected (VMs created without a selection get it); absent keeps the mark. */
+  setSecret(name: string, value: string, opts?: { inject?: boolean }): Promise<void>;
   deleteSecret(name: string): Promise<void>;
   webhooks(): Promise<Webhook[]>;
   createWebhook(url: string, opts?: { events?: string[] }): Promise<Webhook>;

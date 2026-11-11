@@ -1177,3 +1177,65 @@ func TestRemainingRoutes(t *testing.T) {
 		t.Errorf("delete webhook: %d", st)
 	}
 }
+
+// The proxy forwards only each provider's inference endpoints (aiAllowed): a
+// VM token must not reach a provider's file, fine-tuning, batch, admin or
+// organization APIs with the team's real key.
+func TestAIProxyAllowlist(t *testing.T) {
+	e, up, proxy := aiSetup(t)
+	e.do(e.owner, "PUT", "/v1/ai/credentials/anthropic", map[string]any{"value": "sk-ant-REAL-KEY-123456"})
+	e.do(e.owner, "PUT", "/v1/ai/credentials/openai", map[string]any{"value": "sk-REAL-OPENAI-KEY-1234"})
+	id := e.createVM()
+	vars := e.boatd.envOps[len(e.boatd.envOps)-1]["vars"].(map[string]any)
+	ant, oai := vars["ANTHROPIC_API_KEY"].(string), vars["OPENAI_API_KEY"].(string)
+	if ant == "" || oai == "" {
+		t.Fatalf("tokens for %s: %v", id, vars)
+	}
+	call := func(method, path, tok string) int {
+		req, _ := http.NewRequest(method, proxy.URL+path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("X-Api-Key", tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for _, c := range []struct{ method, path, tok string }{
+		{"POST", "/anthropic/v1/messages", ant},
+		{"POST", "/anthropic/v1/messages/count_tokens", ant},
+		{"GET", "/anthropic/v1/models", ant},
+		{"GET", "/anthropic/v1/models/claude-x", ant},
+		{"POST", "/openai/v1/chat/completions", oai},
+		{"POST", "/openai/v1/responses", oai},
+		{"GET", "/openai/v1/responses/resp_123", oai},
+		{"POST", "/openai/v1/completions", oai},
+		{"GET", "/openai/v1/models", oai},
+	} {
+		if st := call(c.method, c.path, c.tok); st != 200 {
+			t.Errorf("%s %s: %d, want it forwarded", c.method, c.path, st)
+		}
+	}
+	n := len(up.paths)
+	for _, c := range []struct{ method, path, tok string }{
+		{"GET", "/anthropic/v1/organizations/me", ant},
+		{"POST", "/anthropic/v1/messages/batches", ant},
+		{"GET", "/anthropic/v1/files", ant},
+		{"POST", "/openai/v1/files", oai},
+		{"POST", "/openai/v1/fine_tuning/jobs", oai},
+		{"GET", "/openai/v1/organization/api_keys", oai},
+		{"POST", "/openai/v1/batches", oai},
+		{"DELETE", "/openai/v1/models/ft-mine", oai},
+		{"POST", "/openai/v1/chat/completions/../../files", oai},
+		{"POST", "/openai/v1/chat/completions/%2e%2e/%2e%2e/files", oai},
+		{"GET", "/openai/", oai},
+	} {
+		if st := call(c.method, c.path, c.tok); st != 403 && st != 404 && st != 405 {
+			t.Errorf("%s %s: %d, want it refused", c.method, c.path, st)
+		}
+	}
+	if len(up.paths) != n {
+		t.Errorf("refused requests reached the provider: %v", up.paths[n:])
+	}
+}

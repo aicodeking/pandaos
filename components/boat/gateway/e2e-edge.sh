@@ -164,6 +164,9 @@ api.$D {
 		handle /v1/* {
 			reverse_proxy 127.0.0.1:8740
 		}
+		handle /api/v1/* {
+			reverse_proxy 127.0.0.1:8740
+		}
 		handle /healthz {
 			reverse_proxy 127.0.0.1:8740
 		}
@@ -194,6 +197,9 @@ hc() { local u=$1; shift; curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443"
 for _ in $(seq 50); do [ "$(hc "https://api.$D/healthz" || true)" = 200 ] && break; sleep 0.2; done
 [ "$(hc "https://api.$D/healthz")" = 200 ] || fail "api over TLS"
 [ "$(hc "https://api.$D/internal/x")" = 404 ] || fail "/internal/* reachable"
+# boat.dev's SDKs use https://api.<domain>/api/v1: the API must answer, not the dashboard.
+me=$(curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443" -H "Authorization: Bearer $KEY" "https://api.$D/api/v1/me")
+jq -e '.ok == true' <<<"$me" >/dev/null || fail "/api/v1 through Caddy: $me"
 
 log "ssh jump host on 127.0.0.1:2222 (module settings + jump-keys filter)"
 id jump >/dev/null 2>&1 || sudo useradd -r -M -s /usr/sbin/nologin jump
@@ -241,7 +247,16 @@ export BOAT_CONFIG=$WORK/cli.json
 boat login --url "$API" --key "$KEY" >/dev/null
 field() { boat list --json | jq -r --arg n "$1" "select(.name == \$n) | .$2"; }
 run() { boat exec "$1" -- bash -c "$2"; }
-hmac_hex() { python3 -c 'import hmac,hashlib,sys; print(hmac.new(open(sys.argv[1],"rb").read(), sys.argv[2].encode(), hashlib.sha256).hexdigest())' "$KEYF" "$1"; }
+# hmac_hex PAYLOAD [PURPOSE]: a port route signature with the port-route key
+# (HMAC(master, "boat-hmac-v2/port-route"), as boat-api signs); PURPOSE "legacy"
+# signs with the master key itself, as boat-api did before per-purpose keys.
+hmac_hex() {
+  python3 -c 'import hmac,hashlib,sys
+k = open(sys.argv[1],"rb").read()
+if len(k) != 32: k = bytes.fromhex(k.decode().strip())
+if sys.argv[3] != "legacy": k = hmac.new(k, b"boat-hmac-v2/" + sys.argv[3].encode(), hashlib.sha256).digest()
+print(hmac.new(k, sys.argv[2].encode(), hashlib.sha256).hexdigest())' "$KEYF" "$1" "${2:-port-route}"
+}
 
 log "VM A (slim): http on 8080 (private) and 8081 (public)"
 boat new --name edge-a --json >/dev/null
@@ -261,6 +276,10 @@ rt="$exp.$(hmac_hex "route.8080-$id_a.$exp")"
 [ "$(curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443" -H "X-Boat-Route-Token: $rt" "$priv")" = edge-ok ] || fail "private route with a header token"
 wrong="$exp.$(hmac_hex "route.8081-$id_a.$exp")"
 [ "$(hc "$priv" -H "X-Boat-Route-Token: $wrong")" = 401 ] || fail "token for another port accepted"
+other="$exp.$(hmac_hex "route.8080-$id_a.$exp" desktop-link)"
+[ "$(hc "$priv" -H "X-Boat-Route-Token: $other")" = 401 ] || fail "token signed with the desktop-link key accepted as a route token"
+legacy="$exp.$(hmac_hex "route.8080-$id_a.$exp" legacy)"
+[ "$(hc "$priv" -H "X-Boat-Route-Token: $legacy")" = 200 ] || fail "a pre-split (master-key) token no longer works during the migration window"
 # Link -> host-only cookie -> plain requests.
 jar=$WORK/tmp/route.jar
 hc "${priv}?boat_exp=$exp&boat_sig=${rt#*.}" -c "$jar" >/dev/null
@@ -360,6 +379,11 @@ rt_new="$rt_new_exp.$(hmac_hex "route.8080-$id_a.$rt_new_exp")"
 if [ -x "$HERE/sdk/e2e-live.sh" ] || [ -x "$HERE/api/e2e-auth.sh" ]; then
   export BOAT_URL=$API BOAT_API_KEY=$KEY BOAT_API_DATA=$WORK/api BOAT_VM_DOMAIN=$VMD E2E_TMP=$WORK/tmp
   export BOAT_GATEWAY_ADDR=127.0.0.1:8742
+  # boat.dev's official SDKs go through Caddy (TLS, the api.<domain> routes), as a user's would.
+  grep -q "api.$D" /etc/hosts || echo "127.0.0.1 api.$D" | sudo tee -a /etc/hosts >/dev/null
+  export BOAT_COMPAT_URL=https://api.$D BOAT_CA_FILE=$CA
+  # edge-d (full image) has a desktop: the official SDKs' wait_for_desktop runs against it.
+  export BOAT_LIVE_DESKTOP_NAME=edge-d BOAT_LIVE_NO_SKIP=1
 fi
 for s in sdk/e2e-live.sh api/e2e-auth.sh sdk/e2e-agent-from-env.sh; do
   if [ -x "$HERE/$s" ]; then

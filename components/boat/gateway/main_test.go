@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/hex"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -72,16 +74,16 @@ func TestPortRoutesPrivateByDefault(t *testing.T) {
 	if w := req(g, priv, "/x"); w.Code != 401 {
 		t.Fatalf("private route without token: %d", w.Code)
 	}
-	good, exp := tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 0, e) }, time.Hour)
+	good, exp := tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port, "abc-1", 0, e) }, time.Hour)
 	w := req(g, priv, "/x", header(routeHeader, good), cookie("app", "1"))
 	if b := w.Body.String(); w.Code != 200 || strings.Contains(b, good) || !strings.Contains(b, "cookie=app=1") {
 		t.Fatalf("header token: %d %s", w.Code, b)
 	}
 	bad := map[string]string{
-		"expired":    first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 0, e) }, -time.Second)),
-		"other vm":   first(tok(func(e int64) string { return signRoute(g.key, port, "xyz-2", 0, e) }, time.Hour)),
-		"other port": first(tok(func(e int64) string { return signRoute(g.key, port+1, "abc-1", 0, e) }, time.Hour)),
-		"desktop":    first(tok(func(e int64) string { return signDesktop(g.key, "abc-1", e) }, time.Hour)),
+		"expired":    first(tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port, "abc-1", 0, e) }, -time.Second)),
+		"other vm":   first(tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port, "xyz-2", 0, e) }, time.Hour)),
+		"other port": first(tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port+1, "abc-1", 0, e) }, time.Hour)),
+		"desktop":    first(tok(func(e int64) string { return signDesktop(g.k(purposeDesktopLink), "abc-1", e) }, time.Hour)),
 		"garbage":    "1.00",
 	}
 	for name, b := range bad {
@@ -123,7 +125,7 @@ func TestDesktopPerVMOrigin(t *testing.T) {
 	g, _, _ := setup(t)
 	link := func(vmid string, d time.Duration) string {
 		exp := time.Now().Add(d).Unix()
-		return "exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.key, vmid, exp)
+		return "exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.k(purposeDesktopLink), vmid, exp)
 	}
 	a, b := "abc-1.desktop.boat.test", "xyz-2.desktop.boat.test"
 
@@ -166,7 +168,7 @@ func TestDesktopPerVMOrigin(t *testing.T) {
 	body := w.Body.String()
 	if w.Code != 200 || !strings.Contains(body, "path=/vnc.html") || strings.Contains(body, desktopCookie) ||
 		!strings.Contains(body, "app=1") || strings.Contains(body, "client-chosen") ||
-		!strings.Contains(body, guestCookie+"="+guestToken(g.key, "abc-1")) {
+		!strings.Contains(body, guestCookie+"="+guestToken(g.k(purposeGuestDesktop), "abc-1")) {
 		t.Fatalf("proxied desktop: %d %s", w.Code, body)
 	}
 	// A's session cookie is worthless on B's origin (and vice versa).
@@ -184,7 +186,7 @@ func TestCrossOriginRefused(t *testing.T) {
 	g, _, port := setup(t)
 	p := strconv.Itoa(port)
 	dA, dB := "abc-1.desktop.boat.test", "xyz-2.desktop.boat.test"
-	cB := cookie(desktopCookie, first(tok(func(e int64) string { return signDesktop(g.key, "xyz-2", e) }, time.Hour)))
+	cB := cookie(desktopCookie, first(tok(func(e int64) string { return signDesktop(g.k(purposeDesktopLink), "xyz-2", e) }, time.Hour)))
 	https := header("X-Forwarded-Proto", "https")
 	ws := func(r *http.Request) {
 		r.Header.Set("Connection", "Upgrade")
@@ -214,7 +216,7 @@ func TestCrossOriginRefused(t *testing.T) {
 	}
 	// A signed link may still arrive from anywhere, and ends on a same-origin page.
 	exp := time.Now().Add(time.Hour).Unix()
-	q := "/?exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.key, "xyz-2", exp)
+	q := "/?exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.k(purposeDesktopLink), "xyz-2", exp)
 	for _, site := range []string{"cross-site", "same-site"} {
 		w := req(g, dB, q, https, header("Sec-Fetch-Site", site), header("Sec-Fetch-Mode", "navigate"), header("Sec-Fetch-Dest", "document"))
 		if w.Code != 200 || !strings.Contains(w.Body.String(), "http-equiv") || len(w.Result().Cookies()) != 1 {
@@ -228,7 +230,7 @@ func TestCrossOriginRefused(t *testing.T) {
 	// Private port route: another VM is refused, another port of the same VM is
 	// allowed, and the explicit token header needs no Origin rule.
 	priv := p + "-abc-1.vm.boatvms.test"
-	rt := first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 0, e) }, time.Hour))
+	rt := first(tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port, "abc-1", 0, e) }, time.Hour))
 	cR := cookie(routeCookie, rt)
 	for name, c := range map[string]struct {
 		mods []func(*http.Request)
@@ -319,7 +321,7 @@ func TestRouteTokenRevocation(t *testing.T) {
 	defer api.Close()
 	g.gens = newRouteGens(api.URL)
 	host := strconv.Itoa(port) + "-abc-1.vm.boatvms.test"
-	old := first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 0, e) }, time.Hour))
+	old := first(tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port, "abc-1", 0, e) }, time.Hour))
 	withTok := func(tk string) int {
 		return req(g, host, "/", func(r *http.Request) { r.Header.Set(routeHeader, tk) }).Code
 	}
@@ -333,7 +335,7 @@ func TestRouteTokenRevocation(t *testing.T) {
 	if c := withTok(old); c != 401 {
 		t.Errorf("revoked token: %d", c)
 	}
-	fresh := first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 1, e) }, time.Hour))
+	fresh := first(tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port, "abc-1", 1, e) }, time.Hour))
 	if c := withTok(fresh); c != 200 {
 		t.Errorf("token of the new generation: %d", c)
 	}
@@ -356,7 +358,7 @@ func TestRouteGensFailClosedAtStart(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
 	defer api.Close()
 	g.gens = newRouteGens(api.URL)
-	good := first(tok(func(e int64) string { return signRoute(g.key, port, "abc-1", 0, e) }, time.Hour))
+	good := first(tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port, "abc-1", 0, e) }, time.Hour))
 	withTok := func(r *http.Request) { r.Header.Set(routeHeader, good) }
 	host := strconv.Itoa(port) + "-abc-1.vm.boatvms.test"
 	if c := req(g, host, "/", withTok).Code; c != 503 {
@@ -368,5 +370,84 @@ func TestRouteGensFailClosedAtStart(t *testing.T) {
 	status = 404
 	if c := req(g, host, "/", withTok).Code; c != 200 {
 		t.Errorf("API without revocation: %d", c)
+	}
+}
+
+// Each kind of token has its own key derived from the master key, and a token
+// signed with the master key itself (before the split) verifies only during
+// the legacy window and only if it expires within it.
+func TestPurposeKeysAndLegacyWindow(t *testing.T) {
+	g, _, port := setup(t)
+	priv := strconv.Itoa(port) + "-abc-1.vm.boatvms.test"
+	route := func(key []byte, d time.Duration) string {
+		return first(tok(func(e int64) string { return signRoute(key, port, "abc-1", 0, e) }, d))
+	}
+	code := func(token string) int { return req(g, priv, "/", header(routeHeader, token)).Code }
+	keys := map[string]bool{string(g.key): true}
+	for _, p := range []string{purposeDesktopLink, purposePortRoute, purposeGuestDesktop} {
+		keys[string(g.k(p))] = true
+	}
+	if len(keys) != 4 {
+		t.Fatal("purpose keys must differ from each other and from the master key")
+	}
+	// boat-api's PurposeKey for the same master (api/crypto.go): HMAC(master, "boat-hmac-v2/<purpose>").
+	if got := hex.EncodeToString(purposeKey([]byte(strings.Repeat("k", 32)), purposePortRoute)); got != mac([]byte(strings.Repeat("k", 32)), "boat-hmac-v2/port-route") {
+		t.Fatalf("derivation: %s", got)
+	}
+	for name, k := range map[string][]byte{"desktop-link key": g.k(purposeDesktopLink), "guest key": g.k(purposeGuestDesktop), "master key": g.key} {
+		if c := code(route(k, time.Hour)); c != 401 {
+			t.Errorf("route token signed with the %s, no legacy window: %d", name, c)
+		}
+	}
+	if c := code(route(g.k(purposePortRoute), time.Hour)); c != 200 {
+		t.Fatalf("route token: %d", c)
+	}
+	if strings.Count(g.guestCookies("abc-1"), guestCookie+"=") != 1 {
+		t.Errorf("guest cookies outside the window: %s", g.guestCookies("abc-1"))
+	}
+
+	g.legacyUntil = time.Now().Add(2 * time.Hour)
+	if c := code(route(g.key, time.Hour)); c != 200 {
+		t.Errorf("legacy token within the window: %d", c)
+	}
+	if c := code(route(g.key, 3*time.Hour)); c != 401 {
+		t.Errorf("legacy token expiring after the window: %d", c)
+	}
+	if c := code(route(g.k(purposeDesktopLink), time.Hour)); c != 401 {
+		t.Errorf("another purpose's key during the window: %d", c)
+	}
+	gc := g.guestCookies("abc-1")
+	if !strings.Contains(gc, guestCookie+"="+guestToken(g.k(purposeGuestDesktop), "abc-1")) ||
+		!strings.Contains(gc, guestCookie+"="+guestToken(g.key, "abc-1")) {
+		t.Errorf("guest cookies during the window: %s", gc)
+	}
+
+	g.legacyUntil = time.Now().Add(-time.Second)
+	if c := code(route(g.key, time.Minute)); c != 401 {
+		t.Errorf("legacy token after the window: %d", c)
+	}
+}
+
+// Caddy sends api.<domain> paths to boat-api and the rest to the dashboard.
+// The official boat.dev SDKs call https://api.<domain>/api/v1/...: without
+// /api/v1/* in the API's paths they get the dashboard's index.html.
+func TestCaddyProxiesCompatAPI(t *testing.T) {
+	mod, err := os.ReadFile("module.nix")
+	if os.IsNotExist(err) {
+		t.Skip("not in the source tree (the nix package builds only the Go files); ci.yml's go test runs it")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`apiPaths = \[([^\]]*)\]`).FindSubmatch(mod)
+	if m == nil || !strings.Contains(string(m[1]), `"/api/v1/*"`) || !strings.Contains(string(m[1]), `"/v1/*"`) {
+		t.Errorf("module.nix apiPaths must hold /v1/* and /api/v1/*: %q", m)
+	}
+	edge, err := os.ReadFile("e2e-edge.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`handle /api/v1/\* \{\s*reverse_proxy 127\.0\.0\.1:8740`).Match(edge) {
+		t.Error("e2e-edge.sh's Caddyfile must proxy /api/v1/* like module.nix")
 	}
 }

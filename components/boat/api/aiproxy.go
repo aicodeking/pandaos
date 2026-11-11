@@ -342,6 +342,10 @@ func (s *server) aiProxy(w http.ResponseWriter, r *http.Request) {
 		aiError(w, 404, "unknown provider")
 		return
 	}
+	if !aiPathAllowed(provider, r, r.PathValue("path")) {
+		aiError(w, 403, "not an inference endpoint: the AI proxy forwards only the paths docs/boat.md lists for "+provider)
+		return
+	}
 	tok := r.Header.Get("X-Api-Key")
 	if tok == "" {
 		tok = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")

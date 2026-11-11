@@ -74,6 +74,9 @@ type Secret struct {
 	Name    string    `json:"name"`
 	Sealed  string    `json:"sealed"`
 	Updated time.Time `json:"updated"`
+	// Inject: an admin marked it default-injected, so a VM created without a
+	// selection gets it (docs/boat.md, "Secrets"). Off for every new secret.
+	Inject bool `json:"inject,omitempty"`
 }
 
 type Webhook struct {

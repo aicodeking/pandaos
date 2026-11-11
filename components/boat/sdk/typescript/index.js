@@ -293,7 +293,12 @@ export class Boat {
   keyUsage(id) { return this.call("GET", `/v1/keys/${q(id)}/usage`); }
   async deleteKey(id) { await this.call("DELETE", `/v1/keys/${q(id)}`); }
   async secrets() { return (await this.call("GET", "/v1/secrets")).secrets; }
-  async setSecret(name, value) { await this.call("PUT", `/v1/secrets/${q(name)}`, { value }); }
+  // opts.inject: true marks it default-injected (VMs created without a selection get it); absent keeps the mark.
+  async setSecret(name, value, opts = {}) {
+    const body = { value };
+    if (opts.inject !== undefined) body.inject = !!opts.inject;
+    await this.call("PUT", `/v1/secrets/${q(name)}`, body);
+  }
   async deleteSecret(name) { await this.call("DELETE", `/v1/secrets/${q(name)}`); }
   async webhooks() { return (await this.call("GET", "/v1/webhooks")).webhooks; }
   createWebhook(url, { events } = {}) { return this.call("POST", "/v1/webhooks", clean({ url, events })); }

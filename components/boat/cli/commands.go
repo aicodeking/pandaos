@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -108,7 +109,7 @@ func cmdNew(a *app, args []string) error {
 	snap := fs.String("snapshot", "", "create from a snapshot id")
 	lab := labels{}
 	fs.Var(lab, "label", "")
-	secrets := fs.String("secrets", "", "comma-separated team secrets for this VM (default: all)")
+	secrets := fs.String("secrets", "", "comma-separated team secrets for this VM (default: the default-injected ones)")
 	noSecrets := fs.Bool("no-secrets", false, "inject no team secrets")
 	envName := fs.String("env", "", "environment name")
 	fs.StringVar(envName, "environment", "", "same as --env")
@@ -663,15 +664,24 @@ func cmdSnapshots(a *app, args []string) error {
 
 // ---- secrets / keys / teams / webhooks ----
 
+// boat secrets set marks the secret default-injected (every VM created without
+// --secrets gets it), as boat.dev's CLI secrets are; --no-inject stores it for
+// VMs and environments that select it by name. rotate keeps the mark. The API's
+// own default (PUT /v1/secrets without inject) is not injected.
 func cmdSecrets(a *app, args []string) error {
+	noInject := slices.Contains(args, "--no-inject")
+	args = slices.DeleteFunc(slices.Clone(args), func(s string) bool { return s == "--no-inject" })
 	op, pos := sub(args, "ls", "ls", "set", "rotate", "rm")
+	if noInject && op != "set" {
+		return fmt.Errorf("--no-inject is for boat secrets set: %w", errUsage)
+	}
 	switch op {
 	case "ls":
 		l, err := listCall(a, "/v1/secrets", "secrets")
 		if err != nil {
 			return err
 		}
-		return a.emitList(l, "name", "updated")
+		return a.emitList(l, "name", "inject", "updated")
 	case "set", "rotate":
 		if len(pos) < 1 || len(pos) > 2 {
 			return fmt.Errorf("usage: boat secrets %s NAME [VALUE|-]: %w", op, errUsage)
@@ -689,8 +699,12 @@ func cmdSecrets(a *app, args []string) error {
 			}
 			value = strings.TrimRight(string(b), "\r\n")
 		}
+		body := obj{"value": value}
+		if op == "set" {
+			body["inject"] = !noInject
+		}
 		var out obj
-		if err := a.c.call("PUT", "/v1/secrets/"+url.PathEscape(pos[0]), obj{"value": value}, &out); err != nil {
+		if err := a.c.call("PUT", "/v1/secrets/"+url.PathEscape(pos[0]), body, &out); err != nil {
 			return err
 		}
 		return a.emit(out, func() {
