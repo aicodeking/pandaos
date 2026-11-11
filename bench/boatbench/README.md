@@ -133,6 +133,14 @@ stays 12; in `untrusted` (2 CPUs online) it is 24, so workload (c)'s 10 VMs fit.
 
 ## Latest measured runs
 
+**Real hardware, 2026-11-11:** a Hetzner AX42 (Ryzen 7 PRO 8700GE, Zen 4, 8c/16t, 64 GB,
+NVMe RAID1), all presets, density at 7 and 11 VMs, host vs VM. Tables, commands and
+caveats: [`docs/cost.md`](../../docs/cost.md#measured-on-a-real-dedicated-server-hetzner-ax42).
+On a server you do not want to repartition, keep everything under one directory with
+`BENCH_WORK=/opt/boatbench/work BENCH_STATE=/opt/boatbench/state stack.sh up ...`, and
+`unset BOATBENCH_BOATD_OPTIONS` before bringing up the next preset: the previous preset's
+`$WORK/env` sets it, and `stack.sh` merges it over the new preset.
+
 [42818758694](https://github.com/aicodeking/pandaos/actions/runs/42818758694) (`8cf09f8`,
 workloads a–f, 5 repeats; overall `cancelled` because a first density step timed out, a–f
 had finished) and [42860774575](https://github.com/aicodeking/pandaos/actions/runs/42860774575)
