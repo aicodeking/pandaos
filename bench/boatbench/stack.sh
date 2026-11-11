@@ -8,6 +8,7 @@
 #   stack.sh up GUEST_DIR   # GUEST_DIR has vmlinux, rootfs-slim.ext4; writes $WORK/env (BOAT_URL, BOAT_KEY)
 #   BOATBENCH_PRESET=untrusted stack.sh up ...   # presets.json: trusted (default), trusted-warm, trusted-writeback, untrusted
 #   BOATBENCH_BOATD_OPTIONS='{"warmPool":true}' stack.sh up ...   # JSON merged over boatd.json and the preset
+#   BENCH_WORK=/opt/boatbench/work BENCH_STATE=/opt/boatbench/state stack.sh up ...   # a real server: all under one dir
 #   stack.sh down
 #
 # ponytail: components/boat/e2e.sh has no "stack only" mode and is outside this
@@ -18,7 +19,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 BOAT=$(cd "$HERE/../../components/boat" && pwd)
 WORK=${BENCH_WORK:-/mnt/boatbench}
-STATE=/var/lib/boatbench
+STATE=${BENCH_STATE:-/var/lib/boatbench}   # a real server: keep it under $WORK (BENCH_STATE=$WORK/state)
 SOCK=$WORK/run/boatd.sock
 API=http://127.0.0.1:8740
 # shellcheck disable=SC2016 # literal ${...} in the sed pattern
@@ -29,6 +30,10 @@ log() { printf '\n\033[1m==> %s\033[0m\n' "$*" >&2; }
 down() {
   set +e
   sudo pkill -9 -x firecracker
+  if command -v iptables >/dev/null; then
+    while sudo iptables -C FORWARD -i boatbr0 -j ACCEPT 2>/dev/null; do sudo iptables -D FORWARD -i boatbr0 -j ACCEPT; done
+    while sudo iptables -C FORWARD -o boatbr0 -j ACCEPT 2>/dev/null; do sudo iptables -D FORWARD -o boatbr0 -j ACCEPT; done
+  fi
   [ -f "$WORK/boatd.pid" ] && sudo kill "$(cat "$WORK/boatd.pid")" 2>/dev/null
   [ -f "$WORK/api.pid" ] && kill "$(cat "$WORK/api.pid")" 2>/dev/null
   sleep 1
@@ -126,6 +131,7 @@ JSON
     log "iocost model of the state disk (boatd -measure-disk, about 25 s)"
     sudo "$WORK/bin/boatd" -measure-disk -config "$WORK/boatd.json" | tee "$WORK/iocost-model.txt"
   fi
+  sudo rm -f "$SOCK"   # a stale socket from a killed boatd would pass the wait below at once
   sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
     "$WORK/boatd.pid" "$WORK/bin/boatd" "$WORK/boatd.json" "$WORK/boatd.log" &
   for _ in $(seq 1200); do [ -S "$SOCK" ] && break; sleep 0.1; done
