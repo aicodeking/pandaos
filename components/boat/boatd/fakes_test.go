@@ -38,6 +38,7 @@ type fakeHost struct {
 	hangOps    map[string]bool // agent ops the guest never answers
 	starts     int             // processes started
 	failStart  int             // fail the failStart-th process start (1-based; 0 = never)
+	failResume int             // refuse this many resumes (PATCH /vm Resumed) with 503
 }
 
 func init() { quotaCtl = func(string) error { return nil } }
@@ -103,6 +104,7 @@ type fakeFC struct {
 	env      map[string]any
 	clockSet bool
 	lns      []net.Listener
+	apiConns int // open API connections, capped like Firecracker's server
 	done     chan struct{}
 	once     sync.Once
 }
@@ -125,7 +127,7 @@ func (h *fakeHost) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 		return 0, nil, err
 	}
 	f.lns = append(f.lns, ln)
-	go http.Serve(ln, f)
+	go (&http.Server{Handler: f, ConnState: f.connState}).Serve(ln)
 	h.mu.Lock()
 	h.next++
 	pid := h.next
@@ -198,7 +200,33 @@ func fault(w http.ResponseWriter, msg string) {
 	fmt.Fprintf(w, `{"fault_message":%q}`, msg)
 }
 
+// fcMaxConns is Firecracker's API server cap (micro_http MAX_CONNECTIONS): past it
+// a request gets 503 "Too many open connections" (boatbench 42818758694).
+const fcMaxConns = 10
+
+func (f *fakeFC) connState(_ net.Conn, st http.ConnState) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch st {
+	case http.StateNew:
+		f.apiConns++
+	case http.StateClosed, http.StateHijacked:
+		f.apiConns--
+	}
+}
+
+func (f *fakeFC) openConns() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.apiConns
+}
+
 func (f *fakeFC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if f.openConns() > fcMaxConns {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{ "error": "Too many open connections" }`)
+		return
+	}
 	var body map[string]any
 	json.NewDecoder(r.Body).Decode(&body)
 	f.record(r.Method + " " + r.URL.Path)
@@ -236,6 +264,17 @@ func (f *fakeFC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "PATCH /vm":
+		f.h.mu.Lock()
+		refuse := str("state") == "Resumed" && f.h.failResume > 0
+		if refuse {
+			f.h.failResume--
+		}
+		f.h.mu.Unlock()
+		if refuse {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{ "error": "refused" }`)
+			return
+		}
 		f.mu.Lock()
 		f.paused = str("state") == "Paused"
 		f.mu.Unlock()

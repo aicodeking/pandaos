@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -333,8 +334,12 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 		}
 	}
 	t1 := time.Now()
-	if rerr := newFC(filepath.Join(root, apiSock)).resume(context.WithoutCancel(ctx)); rerr != nil {
+	if rerr := resumeAfterSnapshot(context.WithoutCancel(ctx), newFC(filepath.Join(root, apiSock))); rerr != nil {
 		log.Printf("%s: resume after snapshot: %v", v.ID, rerr)
+		if err == nil {
+			m.failSnapshot(v)
+			err = fmt.Errorf("vm left paused: resume after snapshot: %w", rerr)
+		}
 	}
 	if err != nil {
 		m.setMemLimits(v)
@@ -355,6 +360,22 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 	go m.settleAfterDump(v)
 	log.Printf("%s: freeze disk=%dms rest=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
 	return err == nil, err
+}
+
+// resumeRetries: a paused source runs nothing and answers no exec, so a resume
+// the VMM refuses for a moment is worth a few more tries.
+var resumeRetries = []time.Duration{100 * time.Millisecond, 500 * time.Millisecond, 2 * time.Second}
+
+func resumeAfterSnapshot(ctx context.Context, fc *fcClient) error {
+	err := fc.resume(ctx)
+	for _, d := range resumeRetries {
+		if err == nil {
+			return nil
+		}
+		time.Sleep(d)
+		err = fc.resume(ctx)
+	}
+	return err
 }
 
 func (m *Manager) Snapshots(vmID string) []Snapshot {

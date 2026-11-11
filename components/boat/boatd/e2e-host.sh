@@ -22,6 +22,7 @@
 #   perf 4/8  disk, snapshot, fork, density, warm creates (boatd/e2e-perf.sh)
 #   spoofing  real ARP and NA frames from a guest, against rules and permanent entries
 #   qgroups   the default: a limited subvolume per team, enforced on a guest
+#   fork src  forks of a VM during a long exec, a long exec after them (boatd/e2e-forksrc.sh)
 
 # shellcheck disable=SC2154 # host_ip, PIDS come from e2e.sh
 # A command failing under set -e ends the run without a word; say which one, before
@@ -65,6 +66,9 @@ restart_boatd() { # CONFIG: SIGKILL boatd (no snapshot-all), start it with CONFI
   for _ in $(seq 600); do curl -fs --unix-socket "$SOCK" http://boatd/v1/health >/dev/null && return; sleep 0.1; done
   fail "boatd did not come back"
 }
+
+# shellcheck source=boatd/e2e-forksrc.sh
+. "$HERE/boatd/e2e-forksrc.sh"
 
 log "host e2e: perf (2 GiB VM, through boatd)"
 p1=$(newvm '{"name":"p1","team":"iso1"}')

@@ -33,8 +33,13 @@ const (
 // fcClient talks to one Firecracker API socket.
 type fcClient struct{ hc *http.Client }
 
+// One connection per call, closed after it: Firecracker's API server refuses
+// requests past 10 open connections (503 "Too many open connections"), and an
+// idle keep-alive connection of a client nobody reuses stays open for good.
+// With one leaked per call, the 5th fork of a running VM failed to resume it
+// (boatbench 42818758694) and left it paused.
 func newFC(sock string) *fcClient {
-	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	tr := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return dialJail(ctx, sock)
 	}}
 	return &fcClient{hc: &http.Client{Transport: tr, Timeout: 10 * time.Minute}} // mem dumps of big VMs take a while
