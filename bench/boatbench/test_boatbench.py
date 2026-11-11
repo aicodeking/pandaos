@@ -487,7 +487,13 @@ class DensityTests(unittest.TestCase):
         vms, cpus, load, eff, inside = report.density_projection(lv, {"vms": 15, "cpus": 16})
         self.assertEqual((vms, cpus, inside), (15, 16, False))
         self.assertAlmostEqual(load, 15 / 16)
-        self.assertEqual(eff, 0.8)
+        self.assertAlmostEqual(eff, 0.5 * 0.8 / (15 / 16))  # past the last point: the plateau holds
+        lv[3] = {"loops_per_cpu": {"median": 1.0}, "efficiency": {"median": 0.5}}
+        _, _, _, eff, inside = report.density_projection(lv, {"vms": 15, "cpus": 20})  # load 0.75
+        self.assertTrue(inside)
+        self.assertAlmostEqual(eff, (0.4 + (0.5 - 0.4) * 0.5) / 0.75)  # host per CPU interpolated
+        _, _, _, eff, _ = report.density_projection(lv, {"vms": 1, "cpus": 16})  # below the range
+        self.assertEqual(eff, 1.0)
 
     def test_report_renders_density_with_projection(self):
         d = FakeDriver()

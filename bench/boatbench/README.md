@@ -131,21 +131,15 @@ repo has no EPYC 7763 row. Only a run on comparable hardware can replace this es
 12 × 4 vCPUs, never below 12 (`BENCH_CPU_OVERCOMMIT` overrides). On a 4-vCPU runner that
 stays 12; in `untrusted` (2 CPUs online) it is 24, so workload (c)'s 10 VMs fit.
 
-## Latest measured run
+## Latest measured runs
 
-[42677142859](https://github.com/aicodeking/pandaos/actions/runs/42677142859) (commit
-`7358286`, 2026-11-09): workloads a–f, 5 repeats, presets `trusted`, `trusted-warm`
-and `untrusted`. `boatdev` was SKIPPED (no key). The tables, caveats and verdict are in
-[`docs/cost.md`](../../docs/cost.md#measured-boatbench-on-a-github-runner). Known gaps
-in that run:
-
-- Node loop VM / host: 0.896 (trusted), 0.847 (trusted-warm), 0.868 (untrusted).
-- GitHub gave `trusted-warm` an Intel Xeon 8370C runner and the other two an EPYC 9V74.
-  Compare `trusted-warm`'s CPU-bound rows only through its VM / host ratio.
-- `untrusted` ran with SMT off (2 CPUs online). Workload (c) failed in every repeat with
-  `503 host_capacity` (24 vCPUs = 2 CPUs × the bench's `cpuOvercommit` 12). Fixed since:
-  `stack.sh` derives `cpuOvercommit` from the online CPUs.
-- All three ran with `cache_type` `Unsafe`, so the write rows are marked †.
+[42818758694](https://github.com/aicodeking/pandaos/actions/runs/42818758694) (`8cf09f8`,
+workloads a–f, 5 repeats; overall `cancelled` because a first density step timed out, a–f
+had finished) and [42860774575](https://github.com/aicodeking/pandaos/actions/runs/42860774575)
+(`2a9f90b`, `success`: d with the flushing jobs, g density), presets `trusted`,
+`trusted-warm`, `trusted-writeback`, `untrusted`. `boatdev` was not measured (no key). GitHub
+gave each job a different CPU, so compare CPU-bound rows only through ratios on one runner.
+Tables, projections and verdict: [`docs/cost.md`](../../docs/cost.md#measured-boatbench-on-a-github-runner).
 
 ## Cost
 

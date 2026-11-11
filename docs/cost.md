@@ -8,12 +8,14 @@ One `default` VM (4 vCPU / 8 GiB), cost per VM-hour. Self-hosted figures include
 - **Conservative / untrusted** rows use `memOvercommit` 1.0. That is the setting `services.boat.untrustedTenants` forces, so **a public boat.dev alternative, which hosts strangers, runs these rows.**
 - **Default** rows use boatd's default of 1.5, which is a bet that guests stay idle (see [Load](#what-happens-under-load)). They are only for one trust domain (your own agents).
 
-No server in this table has been benchmarked. The VM counts are boatd's admission rule applied to an *estimated* `MemTotal` ([§4](#4-model)), not measurements on that hardware.
+No server in this table has been benchmarked. The VM counts are boatd's admission rule applied to an *estimated* `MemTotal` ([§4](#4-model)), not measurements on that hardware. These are prices per VM-hour, not per unit of work: a packed host's VMs run slower than one VM alone ([density](#density-under-load-run-42860774575), [cost per run](#cost-per-run-from-host-throughput-projection)).
 
 | | 10% util. | 25% | 50% | 100% | + operator time, 100% | Break-even vs boat.dev |
 |---|---|---|---|---|---|---|
 | **boat.dev** (pay per second) | $0.036 | $0.036 | $0.036 | $0.036 | n/a | n/a |
-| **Hetzner AX102**, conservative / untrusted (15 VMs) | $0.279 | $0.112 | $0.056 | **$0.028** | $0.042 | 8,492 VM-h/mo (78% full); **never** with operator time (116%) |
+| **Hetzner AX102**, conservative / untrusted (15 VMs) | $0.279 | $0.112 | $0.056 | **$0.028** | $0.042 | 8,492 VM-h/mo (78% full); **never** with operator time (116%). **Only if stopped VMs are deleted at once**: see the next two rows |
+| **Hetzner AX102**, untrusted, stopped VMs kept 14 days like boat.dev, 24 h sessions (disk-bound: 1,460 VM-h/mo) | $2.094 | $0.838 | $0.419 | **$0.209** | $0.312 | **never** (582% of capacity) |
+| **Hetzner AX102**, untrusted, stopped VMs kept 14 days, 8 h sessions (disk-bound: 509 VM-h/mo) | $6.006 | $2.402 | $1.201 | **$0.600** | $0.895 | **never** (1,667%) |
 | **Hetzner AX102**, default (22 VMs) | $0.190 | $0.076 | $0.038 | **$0.019** | $0.028 | 53% full; 79% with operator time |
 | **OVH US ADVANCE-3**, conservative / untrusted (7 VMs) | $0.552 | $0.221 | $0.110 | $0.055 | $0.085 | never (153%) |
 | **OVH US ADVANCE-3**, default (11 VMs) | $0.351 | $0.141 | $0.070 | $0.035 | $0.054 | 98% full; never with operator time (150%) |
@@ -22,6 +24,8 @@ No server in this table has been benchmarked. The VM counts are boatd's admissio
 | Hetzner AX42, conservative / untrusted (7 VMs) | $0.233 | $0.093 | $0.047 | $0.023 | $0.053 | 3,307 VM-h/mo (65% full); never with operator time (146%) |
 | Hetzner AX42, default (11 VMs) | $0.148 | $0.059 | $0.030 | $0.015 | $0.034 | 41% full; 93% with operator time |
 | E2B / Daytona / Modal / Vercel | | | | | | $0.22–$0.68/h, see below |
+
+**Disk binds before RAM in untrusted mode.** `untrustedTenants` forces `storageOvercommit` 1: every VM, running or stopped, commits its whole disk plus its memory snapshot (51 + 8 GiB ≈ 59 GiB) against the store's size ([`snapshot.go`](../components/boat/boatd/snapshot.go) `hostStorageCheck`). An AX102's 1.92 TB mirror (1,788 GiB before btrfs and the OS) holds about **30 kept VMs** *(estimate: usable size not measured)*, and RAM runs 15. boat.dev keeps a stopped sandbox's disk **14 days at no charge**. A PandaOS host that offers the same must hold each sandbox's slot for its run time plus 336 h, so its running VM-hours per month are at most 30 × 730 × H / (H + 336) for sessions of H hours: 1,460 at 24 h, 509 at 8 h. The $0.028 row assumes stopped VMs are deleted immediately. With boat.dev's retention an AX102 breaks even only if each sandbox runs at least **213 hours** before it stops (460 h with operator time). See [Stopped-VM retention](#stopped-vm-retention-what-boatdevs-free-14-days-cost-on-own-hardware).
 
 **What the table shows.** At $0.036/h for 4 vCPU / 8 GB, boat.dev costs about as much as running the hardware yourself. In untrusted mode (no RAM overcommit), self-hosting comes out cheaper only on Hetzner, only when the box is more than 65–78% full around the clock, and only if your own time is free. At the default overcommit, which is for trusted guests only, the AX102 and AX42 beat boat.dev even with operator time, at 79% and 93% full, but those VM counts hold only while guests stay mostly idle. Compared with the other sandbox providers (about $0.33–$0.48 per hour), an AX102 is about 6–9× cheaper at 50% utilization with no overcommit. You self-host for control, data locality, no per-start or plan limits, and custom images and kernels, not to undercut boat.dev. The [verdict](#verdict) says where the measurements stand.
 
@@ -116,8 +120,8 @@ Other notes:
 - At overcommit 1.5, an AX102 promises 22 × 8 = 176 GiB of guest RAM on 128 GiB. That works only while guests leave most of it unused.
 - When `MemAvailable` falls below the reserve, boatd inflates balloons, which makes guests give up page cache. A guest's own working memory stays. A compromised guest driver can ignore the balloon.
 - If that is not enough, **the host OOM killer takes VMs**. They run at `oom_score_adj` 500 so that the kernel picks a VM and not the host. A killed VM loses whatever it was doing in memory.
-- No test here measures how many VMs a host holds under load. PROTOCOL says the same. The default rows are therefore an upper bound on density, and agents that fill their RAM belong on the conservative rows.
-- CPU is shared too. 22 VMs are 88 vCPUs on an AX102's 32 threads. All of them can run, but none gets a full vCPU's throughput when they are all busy. No load test here gives a number for that either.
+- No test here measures how many VMs a host holds under *memory* load. PROTOCOL says the same. The default rows are therefore an upper bound on density, and agents that fill their RAM belong on the conservative rows.
+- CPU is shared too. 22 VMs are 88 vCPUs on an AX102's 32 threads. All of them can run, but none gets a full vCPU's throughput when they are all busy. [Density under load](#density-under-load-run-42860774575) measures that on runners: at about 1 Node loop per CPU a VM keeps roughly 57% of its solo speed (the AX102 figure is a projection).
 
 At 1× CPU (no overcommit) the AX42, AX102, ADVANCE-3 and Latitude boxes become CPU-bound at 4, 8, 6 and 8 VMs, and their cost per VM-hour roughly doubles. The AX162 is the only box with CPU to spare, but at its 128 GB base RAM it holds the same VMs as an AX102 for 2.4× the price. It only pays off with a RAM upgrade (512 GB would admit 60 VMs at 1.0 with the same MemTotal estimate; upgrade price not checked).
 
@@ -129,6 +133,7 @@ At 1× CPU (no overcommit) the AX42, AX102, ADVANCE-3 and Latitude boxes become 
 |---|---|---|---|
 | Hetzner AX42 | 3,307 h (65% / 41%) | 7,473 h (146% / 93%) | 5,110 / 8,030 h |
 | Hetzner AX102 | 8,492 h (78% / 53%) | 12,658 h (116% / 79%) | 10,950 / 16,060 h |
+| Hetzner AX102, untrusted, 14-day retention, 24 h / 8 h sessions | 8,492 h (582% / 1,667%): never | never | 1,460 / 509 h (disk-bound, not RAM) |
 | Hetzner AX162 | 19,990 h (183% / 124%) | 24,157 h (221% / 150%) | 10,950 / 16,060 h |
 | OVH US ADVANCE-3 | 7,840 h (153% / 98%) | 12,007 h (235% / 150%) | 5,110 / 8,030 h |
 | Latitude m4.metal.medium | 12,833 h (117% / 80%) | 17,000 h (155% / 106%) | 10,950 / 16,060 h |
@@ -137,6 +142,22 @@ At 1× CPU (no overcommit) the AX42, AX102, ADVANCE-3 and Latitude boxes become 
 - **Against E2B, Daytona, Modal or Vercel.** At about $0.33/h, an AX102 breaks even at 924 VM-hours/month (8% of capacity at 1.0).
 - **When guests really do stay idle.** The default rows then apply: an AX102 at 100% utilization costs $0.019/h, about half of boat.dev's rate. That is for trusted guests only: untrustedTenants forbids the overcommit. boat.dev's rate has no such condition.
 - **When you need something boat.dev doesn't sell.** That includes your own kernel or images, data on your own hardware, more than 12 starts per minute on the $20 plan, or no per-start and per-snapshot fees.
+
+### Stopped-VM retention: what boat.dev's free 14 days cost on own hardware
+
+In untrusted mode a stopped VM keeps its full ~59 GiB commitment (disk + memory snapshot), so it uses one of the host's ~30 storage slots on an AX102 (~8 on an AX42's 512 GB mirror) exactly as a running VM does, while using none of its 15 RAM slots.
+
+- **Marginal cost of keeping one stopped VM** = monthly cost / storage slots: AX102 $305.70 / 30 = **$10.19 per month, $0.014 per hour** (AX42: $119.04 / 8 = $14.88 per month, $0.020 per hour). Keeping it the 14 days boat.dev includes costs **$4.69** per stopped sandbox on an AX102.
+- **Capacity.** Running VM-hours per month ≤ min(RAM slots × 730, storage slots × 730 × H / (H + R)) for sessions of H hours kept R hours after stopping:
+
+| AX102, untrusted | R = 0 (delete on stop) | R = 1 day | R = 14 days (boat.dev) |
+|---|---|---|---|
+| H = 1 h | 10,950 (RAM-bound), $0.028/h | 876, $0.349/h | 65, $4.70/h |
+| H = 8 h | 10,950, $0.028/h | 5,475, $0.056/h | 509, $0.600/h |
+| H = 24 h | 10,950, $0.028/h | 10,950, $0.028/h | 1,460, $0.209/h |
+| H = 168 h | 10,950, $0.028/h | 10,950, $0.028/h | 7,300, $0.042/h |
+
+Cost per running VM-hour at 100% of that capacity, no operator time. **This is a model (a projection)**: it assumes every sandbox runs one session and is then kept the full R hours; a sandbox resumed within R reuses its slot and does better. Ways out, none built into boatd today: a bigger store (more NVMe; price not checked), archiving stopped VMs off the host (a Storage Box costs €3.20/TB-month, but boatd has no archive tier), or `storageOvercommit` above 1, which untrusted mode refuses because a tenant could then fill the disk. Trusted mode (`storageOvercommit` 10) does not bind here.
 
 ## 4b. Untrusted tenants (a public boat.dev alternative)
 
@@ -150,7 +171,7 @@ At 1× CPU (no overcommit) the AX42, AX102, ADVANCE-3 and Latitude boxes become 
 | VMs at 1× CPU (no CPU overcommit) | 8 | **4** |
 | Disk | `auto` engine (io_uring), no I/O cap | `Sync` engine, io_uring off; busy VMs share the disk by weight (blk-iocost with the disk's measured model and p95 latency targets), `io.max` 4,000 MB/s and 200,000 IOPS per VM as a ceiling. Until 2026-11-10: `io.max` 500 MB/s and 20,000 IOPS (the run below) |
 | Network | no cap | 1,000 Mbit/s egress and ingress per VM, 4,096 tracked connections |
-| Storage | `storageOvercommit` 10 | **1**: committed storage (51 GiB disk + 8 GiB memory + logs, about 59 GiB per VM, running or stopped, plus snapshots) must fit the disk. About 30 kept VMs on an AX102's 1.92 TB mirror and about 8 on an AX42's 512 GB mirror *(estimate: usable size after RAID 1 and btrfs not measured)* |
+| Storage | `storageOvercommit` 10 | **1**: committed storage (51 GiB disk + 8 GiB memory + logs, about 59 GiB per VM, running or stopped, plus snapshots) must fit the disk. About 30 kept VMs on an AX102's 1.92 TB mirror and about 8 on an AX42's 512 GB mirror *(estimate: usable size after RAID 1 and btrfs not measured)*. **This binds before RAM as soon as stopped VMs are kept** ([retention](#stopped-vm-retention-what-boatdevs-free-14-days-cost-on-own-hardware)) |
 | `warmPool`, `ksmTeam` | allowed (off by default) | refused |
 | Cost per VM-hour, AX102, 100% | $0.019 (22 VMs) | **$0.028** (15 VMs), 78% full to break even with boat.dev, never with operator time |
 
@@ -173,43 +194,118 @@ Same-runner disk matrix ([42769967285](https://github.com/aicodeking/pandaos/act
 
 ## Measured: boatbench on a GitHub runner
 
-Run [42677142859](https://github.com/aicodeking/pandaos/actions/runs/42677142859) (commit `7358286`, 2026-11-09): all workloads a–f, 5 fresh VMs per preset, one GitHub runner per preset. The `boatdev` job printed SKIPPED (no `BOATDEV_API_KEY` secret), so **this run has no boat.dev measurement**. Every boat.dev number below is boat.dev's own published figure. Reports: the run's `boatbench-report` artifact (`presets.md`, `report-<preset>.md`).
+Three runs, 2026-11-10. One GitHub runner per preset, and **GitHub gave each job a different CPU, so columns are not directly comparable on CPU-bound rows.**
 
-| Metric | trusted | trusted-warm ¹ | untrusted ² |
+- [42818758694](https://github.com/aicodeking/pandaos/actions/runs/42818758694) (commit `8cf09f8`): workloads a–f, 5 fresh VMs per preset. **Its overall conclusion is `cancelled`:** every job timed out later, in a first version of the density step, which is discarded here. The a–f steps had finished and their results were uploaded.
+- [42860774575](https://github.com/aicodeking/pandaos/actions/runs/42860774575) (commit `2a9f90b`, conclusion `success`): workload d with the flushing jobs (3 repeats) and workload g, density (2 repeats), all four presets.
+- [42865507357](https://github.com/aicodeking/pandaos/actions/runs/42865507357) (branch `boatd-r2` at `5f3c81c`, **not main**, conclusion `success`): untrusted, workload d only, 2 repeats, with the vCPU-cgroup fix.
+
+The `boatdev` job printed SKIPPED or was skipped (no `BOATDEV_API_KEY` secret), so **no run has a boat.dev measurement**. Every boat.dev number below is boat.dev's own published figure.
+
+### a–f, run 42818758694
+
+| Metric | trusted | trusted-warm ¹ | trusted-writeback | untrusted ² |
+|---|---|---|---|---|
+| Runner CPU, region | EPYC 7763, IAD | EPYC 9V74, SEA | **Xeon 6973P-C**, MSP | EPYC 9V74, LAX, **SMT off: 2 CPUs online** |
+| Firecracker cache | Unsafe | Unsafe | **Writeback** | Unsafe |
+| (a) Node loop, VM, runs/s | 10.49 [10.41–10.54] | 13.49 [13.28–13.74] | 16.45 [16.30–16.63] | 13.41 [13.08–13.81] |
+| (a) Node loop, same runner without a VM, runs/s | 11.88 | 15.49 | 19.98 | 15.11 |
+| (a) VM / host | **0.883** | **0.871** | **0.823** | **0.887** |
+| (b) API round trip, authenticated GET, p50 of 25, ms | 0.759 | 0.494 | 0.616 | 0.576 |
+| (b) exec `true` p50, raw / net of API, ms | 6.52 / 5.74 | 5.14 / 4.64 | 5.19 / 4.54 | 6.52 / 6.00 |
+| (b) create → exec-ready, raw / net, s | 3.06 / 3.05 | 0.860 / 0.860 | 2.22 / 2.22 | 2.75 / 2.75 |
+| (b) fork → exec-ready, raw / net, s | 1.70 / 1.70 | 1.40 / 1.40 | 1.20 / 1.20 | 1.25 / 1.24 |
+| (b) resume → exec-ready, raw / net, s | 0.588 / 0.587 | 0.548 / 0.547 | 0.475 / 0.474 | 0.507 / 0.506 |
+| (b) stop, raw / net, s | 0.780 / 0.779 | 0.597 / 0.597 | 0.398 / 0.398 | 0.764 / 0.763 |
+| (b) snapshot until usable, raw / net, s | 4.57 / 4.57 | 16.19 / 16.19 | 2.56 / 2.56 | 4.97 / 4.97 |
+| (c) 10 concurrent creates, raw / net, s | 25.52 / 25.52 | 6.63 / 6.63 | 21.77 / 21.77 | **26.69 / 26.69** ³ |
+| (d) seq write 1M, MB/s † | 610.8 | 757.7 | 652.7 | 304.1 |
+| (d) rand write 4k, IOPS † | 43,178 | 63,412 | 44,322 | 41,578 |
+| (d) PTS fio rand read 4k, IOPS | 50,176 | 68,166 | 75,114 | 116,897 |
+| (e) Go tarball download, Mbit/s | 1,453 | 1,351 | 402.2 | 1,037 |
+| (f) cold `npm ci`, s | 7.43 | 5.92 | 6.33 | 4.91 |
+
+Medians; brackets are IQR. n = 15 passes for (a), 5 for the rest. Lifecycle rows use the 5 repeats that ran (b).
+
+¹ A `warmPool` create is about 3× faster than a cold one; its snapshot and new-from-snapshot are slower.
+² `stack.sh` turned SMT off as `nosmt=force` would, so the runner had 2 CPUs online, and the VM's 4 vCPUs and the host-side runs shared those 2. `memOvercommit` stayed at the bench's 8 (see the [bench README](../bench/boatbench/README.md#boatd-presets-options-and-the-warm-pool)).
+³ Fixed: earlier runs failed here with `503 host_capacity` at `cpuOvercommit` 12. `stack.sh` now derives it from the CPUs online (24 on 2 CPUs).
+
+**API baseline.** `net` = raw − k × that side's API round trip, with k the fewest sequential API calls in the timing (`drivers.py` `ROUND_TRIPS`). On localhost the baseline is under 1 ms, so net and raw agree to within about 2 ms on every lifecycle row. It matters only for boat.dev, which is reached over the WAN, and **boat.dev's side has not been measured**, so there is still no equal-footing lifecycle comparison. The harness will produce one when a key exists.
+
+### Density under load, run 42860774575
+
+N VMs ran the Node loop at the same time, on one runner, from one barrier. Fresh VMs, all N measured, no errors in any level. Two repeats per preset agreed within 5%; the table shows their median.
+
+| N | trusted, EPYC 9V74, 4 CPUs: per-VM / host runs/s | efficiency | trusted-warm, Xeon 8573C, 4 CPUs | efficiency | trusted-writeback, EPYC 7763, 4 CPUs | efficiency | untrusted, Xeon 8370C, **2 CPUs** | efficiency |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 13.62 / 13.62 | 1.00 | 9.42 / 9.42 | 1.00 | 10.89 / 10.89 | 1.00 | 6.91 / 6.91 | 1.00 |
+| 2 | 10.31 / 20.62 | 0.757 | 4.72 / 9.44 ⁴ | 0.501 | 8.44 / 16.88 | 0.775 | 6.85 / 13.70 | 0.992 |
+| 4 | 5.55 / **22.24** | 0.408 | 5.26 / **21.00** | 0.558 | 4.37 / **17.46** | 0.401 | 2.62 / 10.47 | 0.379 |
+| 6 | 3.49 / 20.94 | 0.256 | 2.40 / 14.39 | 0.255 | 2.82 / 16.97 | 0.259 | 1.42 / 8.49 | 0.205 |
+
+Efficiency = per-VM runs/s at N / at N = 1. One loop uses 1.49–1.53 CPUs when it has them (1.23 on 2 CPUs): V8's GC and compiler threads run beside the main thread.
+
+⁴ Reproduced in both repeats and not explained.
+
+What was measured:
+- **Host throughput plateaus early and then falls.** On a 4-thread runner (2 cores with SMT) the peak is 1.6–2.2× one VM, at N = 4, and at N = 6 it is no higher. On 2 cores with SMT off the peak is at N = 2, and N = 6 gives 38% less than that peak.
+- **Per-VM speed collapses under oversubscription:** at N = 6 every VM runs at 21–26% of its solo speed.
+- The workload is one Node process per VM, mostly one thread. A workload that keeps all 4 vCPUs busy would contend sooner.
+
+### Cost per run from host throughput (PROJECTION)
+
+The earlier report multiplied a fully packed price by one uncontended VM's speed. The fair figure is the host's price over the host's throughput: **USD per 1000 runs = $0.4188/h ÷ 3.6 ÷ host runs/s** (AX102, $305.70/month, 100% busy, no operator time, no retention).
+
+**Nobody has run PandaOS on an AX102. Everything in this subsection is a projection** from runner curves, on runners whose CPU, SMT layout and memory bandwidth differ.
+
+| AX102 mode | VMs on CPUs | Load, loops per CPU | Efficiency from the curve | Host = VMs × solo × efficiency, at the runner's solo speed | USD per 1000 runs **(MIXED CPUs)** |
+|---|---|---|---|---|---|
+| trusted, default overcommit | 22 on 32 threads | 1.05 | 0.566 (0.53–0.57 across the 3 trusted-family curves) | 22 × 13.62 × 0.566 = 170 | $0.000685 |
+| untrusted | 15 on 16 cores | 1.16 | 0.992 ⁵ | 15 × 6.91 × 0.992 = 103 | $0.001131 |
+
+⁵ **Likely flattered.** On 2 CPUs a solo 4-vCPU VM is already short of CPU, so N = 1 is not an uncontended baseline. Comparing the same CPU model across runs, 6.85 runs/s here is 0.64 of the 10.70 a solo VM reached on a Xeon 8370C with SMT on (run 42677142859). On an EPYC 9V74 the same comparison shows no loss (13.41 SMT off, 13.49–13.63 SMT on). The projection therefore uses **0.64–0.99**.
+
+The runner's speed is not the AX102's, so the speed-independent number is the one to carry: **to match boat.dev's published $0.000361 per 1000 runs, an AX102 must sustain 322 host runs/s, about 20 per core** (480 and 30 with operator time). The runners measured 6.9–11.1 runs/s per physical core at their peak.
+
+If a VM on the AX102 scored what boat.dev's 9950X scores times our VM / host ratio (24.5 runs/s; a different CPU, so a projection on a projection):
+
+| AX102 mode | Host runs/s | USD per 1000 runs | vs boat.dev's published $0.000361 |
 |---|---|---|---|
-| Runner CPU, region | EPYC 9V74, IAD | **Xeon Platinum 8370C**, LAX | EPYC 9V74, ORD, **SMT off: 2 CPUs online** |
-| (a) Node loop, VM, runs/s | 14.07 [14.02–14.18] | 10.70 [10.50–10.77] | 12.90 [12.71–13.14] |
-| (a) Node loop, same runner without a VM, runs/s | 15.70 | 12.64 | 14.86 |
-| (a) VM / host | **0.896** | **0.847** | **0.868** |
-| (b) create → exec-ready, s | 2.36 | **1.04** | 2.75 |
-| (b) fork → exec-ready, s | 1.36 | 1.43 | 2.54 |
-| (b) resume → exec-ready, s | 0.499 | 0.514 | 0.984 |
-| (b) snapshot until usable, s | 5.28 | 10.13 | 5.75 |
-| (c) 10 concurrent creates, s | 18.28 | 8.41 | **failed** ³ |
-| (d) seq write 1M, MB/s † | 847.7 | 782.9 | 275.9 |
-| (d) rand write 4k, IOPS † | 65,487 | 53,746 | 28,179 |
-| (d) PTS fio rand read 4k, IOPS | 69,924 | 62,316 | 62,353 |
-| (e) Go tarball download, Mbit/s | 2,450 | 1,482 | 386.3 |
-| (f) cold `npm ci`, s | 5.18 | 8.73 | 5.14 |
-| Cost per 1000 Node runs at $0.0279/h | $0.000551 **MIXED CPUs** | $0.000724 **MIXED CPUs** | $0.000601 **MIXED CPUs** |
+| untrusted, efficiency 0.99 | 365 | $0.000319 | 12% cheaper |
+| untrusted, efficiency 0.64 | 235 | $0.000495 | 37% dearer |
+| trusted, efficiency 0.566 | 305 | $0.000381 | 5% dearer |
 
-Medians; brackets are IQR. n = 15 passes for (a), 10 creates for the first row of (b), 5 for the rest. Full tables with IQRs and the runner-vs-VM disk ratios are in the reports.
+boat.dev's figure is its own vendor-measured solo speed. How it behaves under load is unmeasured, so this table is generous to boat.dev by an unknown amount, just as the "100% busy" assumption is generous to the AX102.
 
-¹ GitHub gave the trusted-warm job an Intel runner, so its CPU-bound rows (a, f, exec round trip) cannot be compared with the other two columns. Its VM / host ratio and its lifecycle rows can: a `warmPool` create is 2.3× faster than a cold one, and its snapshot is slower.
-² `stack.sh` turned SMT off as `nosmt=force` would, so the runner had 2 CPUs online, and the untrusted VM's 4 vCPUs and the host-side runs shared those 2. `memOvercommit` stayed at the bench's 8 (see the [bench README](../bench/boatbench/README.md#boatd-presets-options-and-the-warm-pool)). The disk rows show the `Sync` engine and the old `io.max` caps (500 MB/s, 20,000 IOPS; replaced since, see [Untrusted disk](#untrusted-disk-the-old-caps-and-what-replaced-them)): seq write is a third of trusted. Random-write IOPS (28k) are above the 20,000 `ioMaxIOPS` cap, and reads (62–91k) are well above it. My guess, *not checked*, is that the host page cache absorbs or serves that I/O (`Unsafe` cache, below) before the cgroup's `io.max` counts it. The download is well under the 1,000 Mbit/s cap and on a different runner and region, so this run does not show what the cap costs.
-³ All 5 repeats: 4 of 10 creates got `503 host_capacity: 24 vCPUs already active (limit 24)`, which is 2 CPUs × the bench's `cpuOvercommit` 12. This is a harness limit (SMT off halves the runner's CPUs), not a boatd bug. `stack.sh` should raise `cpuOvercommit` for the untrusted preset. That is not fixed yet.
+### Writeback vs Unsafe, run 42860774575
+
+The older fio jobs never flush, so they cannot tell the two caches apart. Two flushing jobs now can:
+
+| Median of 3 | Runner's own disk, no VM | VM, `Unsafe` (trusted, EPYC 9V74) | Runner's own disk, no VM | VM, `Writeback` (EPYC 7763) |
+|---|---|---|---|---|
+| 4k rand write, fsync after each, IOPS | 1,157 | **10,929** | 1,534 | **439** |
+| 1M seq write, fsync at the end, MB/s | 3,437 | 1,094 | 2,497 | **430** |
+
+- **`Unsafe` drops flushes, and this shows it**: the VM's fsync'd writes are 9.4× faster than the disk underneath can fsync. Only `Writeback` numbers are durable-write numbers.
+- **Durable 4k writes cost about 25×** (439 vs 10,929 IOPS) and durable sequential writes about 2.5×. The two columns are on different runners, but their host-disk fsync rates are close.
+- `Unsafe` is still boatd's default, in untrusted mode too (fsync'd 4k in the untrusted VM: 7,412 IOPS against 2,019 on its host disk). A guest's `fsync` there does not survive a host crash.
+- The non-flushing write rows (seq write 1M, rand write 4k) show no consistent Writeback penalty across the two runs: differences are within runner-to-runner variance.
+
+### Untrusted after the vCPU-cgroup fix
+
+Run [42865507357](https://github.com/aicodeking/pandaos/actions/runs/42865507357), **on branch `boatd-r2` at `5f3c81c`, not on main.** The fix gives the vCPU threads their own cgroup, apart from the VMM thread. Workload d only, n = 2, EPYC 9V74, SMT off: seq write 1M **626.6 MB/s** (480 and 774), against **304.1** on main on the same CPU model (run 42818758694, n = 5). Other disk rows: seq read 6,088 MB/s, rand write 42,770 IOPS, rand read 94,898 IOPS. Two samples on one runner suggest the seq-write loss was VMM CPU starvation; they do not size it. This run has no density or Node numbers, so the projection above predates the fix.
 
 **Caveats for every number above:**
-- **† Unsafe cache.** All three presets ran with Firecracker's drive `cache_type` `Unsafe`, which is Firecracker's default because boatd sets none. Guest flushes stop at the host page cache, so the write rows are not durable-write numbers. They are also not the same kind of number as boat.dev's published fio results. boatd has since got `diskCache` (`Writeback` honours flushes); `Unsafe` stays the default because `Writeback` costs 5-10x on fsync-heavy writes (PROTOCOL.md "Disk: measured").
-- **Three CPUs, none of them the one priced.** boat.dev's published 27.67 runs/s is a VM on an **AMD Ryzen 9 9950X** (Zen 5). The self-hosted price above is a Hetzner AX102, a **Ryzen 9 7950X3D** (Zen 4). The speeds were measured on an EPYC 9V74 or a Xeon 8370C runner. A cost per run that multiplies one CPU's price by another's speed is no machine's cost, and the report marks it **MIXED CPUs**. The only CPU-consistent figure is boat.dev's price at boat.dev's published speed: **$0.000361 per 1000 runs**. PandaOS has none until someone runs boatbench on a 7950X3D.
-- **Projection, not measurement.** The report scales the VM / host ratio to a 9950X: 24.8–25.8 runs/s (trusted) and 24.0–25.0 (untrusted), against boat.dev's 27.67. That is arithmetic on public averages for a CPU nobody ran PandaOS on. It is also not the AX102's CPU, and boatbench has no 7950X3D projection.
+- **† Unsafe cache** on every column except trusted-writeback, as above. The write rows are also not the same kind of number as boat.dev's published fio results.
+- **None of these CPUs is the one priced.** boat.dev's published 27.67 runs/s is a VM on an **AMD Ryzen 9 9950X** (Zen 5). The self-hosted price is a Hetzner AX102, a **Ryzen 9 7950X3D** (Zen 4). The speeds come from EPYC and Xeon runners. A cost per run that multiplies one CPU's price by another's speed is no machine's cost, and is marked **MIXED CPUs**. The only CPU-consistent figure is boat.dev's price at boat.dev's published speed: **$0.000361 per 1000 runs**.
 - **Runner, not server.** These are shared 4-vCPU cloud VMs with nested KVM and a loop-file disk. Each preset ran on its own runner, so runner-to-runner variance is in the column differences too.
 
 ## 5. What self-hosting does not give you
 
 - **Multi-region and redundancy.** One box is one failure domain. A disk, PSU or network fault takes every VM down until you fix it. Backups are nightly and crash-consistent, not live replicas.
 - **Managed ops and an SLA.** You do the patching, kernel updates, reboots, monitoring and restores. Hetzner and OVH offer only hardware replacement and network SLAs, not uptime for your VMs.
-- **Measured density and speed on your server.** Every count here comes from an admission formula, and every benchmark from a shared GitHub runner. Nothing has been measured on these servers or under sustained load, so test your own workload first.
+- **Measured density and speed on your server.** Every count here comes from an admission formula, and every benchmark, density included, from a shared GitHub runner. Nothing has been measured on these servers, so test your own workload first.
 - **Elastic burst.** Capacity is fixed at 15 `default` VMs on an AX102 (22 if you accept the OOM risk above). boat.dev's $20 plan allows 100 concurrent sandboxes. A second server means another month of rent and another setup fee, plus your own scheduling across boxes, which boat does not do.
 - **Support.** Nobody answers for your VM layer but you.
 - **Abuse handling.** You are the hosting provider for whatever tenants run. Complaints go to you, and the provider can null-route your IP (see `docs/boat.md`, *Abuse policy*).
@@ -218,17 +314,19 @@ Medians; brackets are IQR. n = 15 passes for (a), 10 creates for the first row o
 
 ## Verdict
 
-As of run 42677142859 and the 2026-11-02 prices:
+As of runs 42818758694, 42860774575 and the 2026-11-02 prices. Items marked *projection* are arithmetic on runner measurements.
 
-1. **Price: a public PandaOS service is not cheaper than boat.dev.** It must run untrusted mode (no RAM overcommit). On an AX102 that is $0.028 per VM-hour at 100% utilization against boat.dev's $0.036. It is dearer than boat.dev below 78% utilization, and dearer at any utilization once operator time is counted. The default-overcommit figure ($0.019) applies only to your own trusted agents and only while they stay mostly idle.
-2. **Speed: no head-to-head measurement exists.** The boat.dev job has never run (no API key), and PandaOS has never run on the CPU it is priced on. What was measured: on the same runner, a PandaOS VM keeps 85–90% of the host's Node throughput in every preset, and untrusted mode costs about 3 points of that. Projected to a 9950X, that is 24–26 runs/s against boat.dev's published 27.67. This is a projection, not a result, and suggests at best parity per vCPU, not a win.
-3. **Untrusted mode's measured cost is mostly disk and CPU.** On the runner its old caps cut sequential writes to a third and random writes to under half; in a same-runner matrix they took 41% of a VM's sequential write, and on an NVMe server they would sit 6-14x below the disk's bandwidth and 25-50x below its IOPS. They are replaced by iocost (below), which keeps a single VM at the trusted speed. SMT off halves the threads behind each busy vCPU, and on the runner resume and fork took twice as long. All write numbers are `Unsafe`-cache numbers.
-4. **Where self-hosting does win** is unchanged: against E2B, Daytona, Modal and Vercel (6–9× cheaper at 50% utilization), for trusted workloads that tolerate overcommit, and for control (kernels, images, data locality, no start or snapshot fees).
+1. **Price per VM-hour: a public PandaOS service is not cheaper than boat.dev.** It must run untrusted mode (no RAM overcommit). On an AX102 that is $0.028 per VM-hour at 100% utilization against boat.dev's $0.036. It is dearer below 78% utilization, and dearer at any utilization once operator time is counted.
+2. **Keeping stopped VMs makes it far dearer.** At `storageOvercommit` 1 an AX102 keeps about 30 VMs *(estimate)*. Matching boat.dev's free 14-day retention limits it to 509–1,460 running VM-hours a month for 8–24 h sessions, or $0.21–$0.60 per VM-hour. It breaks even only if each sandbox runs at least 213 hours before it stops.
+3. **Cost per run, packed: parity at best, and unproven.** Measured on runners: host throughput plateaus at 1.6–2.2× one VM and per-VM speed falls to 21–26% at N = 6. *Projection:* an AX102 needs 322 host runs/s to match boat.dev's published cost per run; depending on how SMT-off contention carries over, untrusted lands between 12% cheaper and 37% dearer than boat.dev, at 100% busy, with no operator time and no retention.
+4. **Speed: no head-to-head measurement exists.** The boat.dev job has never run (no API key), so there is no boat.dev API baseline or load curve, and PandaOS has never run on the CPU it is priced on. Measured: a PandaOS VM keeps 82–89% of the host's Node throughput on the same runner.
+5. **Durability costs what it costs.** Every default-preset write number is `Unsafe`, and flushes are dropped. With `Writeback`, measured fsync'd 4k writes are 25× slower (439 vs 10,929 IOPS). A service that promises durable writes pays that.
+6. **Where self-hosting does win** is unchanged: against E2B, Daytona, Modal and Vercel (6–9× cheaper at 50% utilization, retention aside), for trusted workloads that tolerate overcommit, and for control (kernels, images, data locality, no start or snapshot fees).
 
 **What would change this verdict:**
-- A `BOATDEV_API_KEY` run (on the $100 plan, or with fewer repeats) for a measured boat.dev column.
-- `run-on-server.sh` on an AX102 for a CPU-consistent PandaOS cost per run.
-- A run after the `diskCache` change, for durable-write numbers.
+- A `BOATDEV_API_KEY` run (on the $100 plan, or with fewer repeats) for a measured boat.dev column, API baseline and load curve.
+- `run-on-server.sh` on an AX102 with `BOATBENCH_DENSITY_LEVELS=1,4,8,15`, for a measured host throughput on the CPU that is priced.
+- An archive tier for stopped VMs, or a bigger store, which would lift the retention limit.
 
 ## Reproduce
 
@@ -237,5 +335,6 @@ All derived numbers come from the inputs in `bench/boatbench/prices.json` and bo
 - VMs = `⌊(MemTotal − hostReserveMiB)·memOvercommit / (8192 + vmOverheadMiB)⌋`, capped by `⌊threads·cpuOvercommit/4⌋`, with MemTotal ≈ RAM·63/64 − 256 MiB and the constants read from `components/boat/boatd/config.go` by `bench/boatbench/admission.py`. Untrusted: overcommit 1.0, threads = cores. `bench/boatbench/test_boatbench.py` recomputes every count in `prices.json` and fails if boatd's constants or its admission formula change.
 - cost per VM-hour = cost / (VMs · 730 · utilization)
 - break-even VM-hours = cost / 0.036
+- untrusted storage slots = ⌊store GiB / 59⌋ (1,788 GiB on an AX102: 30); running VM-hours ≤ min(VMs·730, slots·730·H/(H+R)); a kept stopped VM costs cost / slots per month
 
-boatbench reads `pandaos.usd_per_hour` (AX102, 15 VMs, 100% utilization, no operator time: $0.0279, also the untrusted figure) and `boatdev.usd_per_hour` ($0.036), and computes cost per run as `usd_per_hour × seconds / 3600`. Each price carries the CPU it buys (`cpu`); the report marks a per-run cost **MIXED CPUs** when that is not the CPU the speed was measured on.
+boatbench reads `pandaos.usd_per_hour` (AX102, 15 VMs, 100% utilization, no operator time: $0.0279, also the untrusted figure) and `boatdev.usd_per_hour` ($0.036), and computes cost per run as `usd_per_hour × seconds / 3600`. Its density section uses `pandaos.density_model` ($0.4188/h per host): USD per 1000 runs = host price ÷ 3.6 ÷ (VMs × solo runs/s × efficiency), the efficiency interpolated as host throughput per CPU at load = VMs × CPU per loop ÷ CPUs. Each price carries the CPU it buys (`cpu`); the report marks a per-run cost **MIXED CPUs** when that is not the CPU the speed was measured on.

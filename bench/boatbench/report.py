@@ -436,6 +436,7 @@ def load_published(path=os.path.join(HERE, "published.json")):
 
 # ---- workload (g): density under load -------------------------------------------------------
 
+GUEST_VCPUS = 4
 DENSITY_FIELDS = ("per_vm_runs_s", "host_runs_s", "efficiency", "cpu_per_loop", "loops_per_cpu", "host_cpus")
 
 
@@ -472,7 +473,10 @@ def density_projection(levels, model):
     if not cpu or not pts:
         return None
     load = model["vms"] * cpu / model["cpus"]
-    eff, inside = interpolate(pts, load)
+    # Interpolate host throughput per CPU, not per-VM efficiency: a straight line through
+    # efficiency overshoots the measured plateau. Past the last point the plateau holds.
+    per_cpu, inside = interpolate([(x, x * e) for x, e in pts], load)
+    eff = min(pts)[1] if load <= min(pts)[0] else per_cpu / load
     return model["vms"], model["cpus"], load, eff, inside
 
 
@@ -519,6 +523,9 @@ def density_projection_lines(lv, model, mode):
     solo = lv[1]["per_vm_runs_s"]["median"]
     host_usd = model["host_usd_per_hour"]
     rng = "inside the measured range" if inside else "OUTSIDE the measured range: the nearest measured point is used"
+    short = lv[1].get("host_cpus", {}).get("median", GUEST_VCPUS) < GUEST_VCPUS
+    warn = (["", f"**This efficiency is relative to N=1 on {lv[1]['host_cpus']['median']:.0f} host CPUs, fewer than the VM's "
+             f"{GUEST_VCPUS} vCPUs, so N=1 is itself short of CPU and the efficiency may be flattered.**"] if short else [])
     per_k = host_usd / 3600 * 1000 / (vms * solo * eff)
     return ["", f"### PROJECTION: {model['name']}, {mode} ({vms} VMs on {cpus} CPUs), NOT A MEASUREMENT", "",
             f"Load = {vms} VMs x {lv[1]['cpu_per_loop']['median']:.2f} CPU per loop / {cpus} CPUs = "
@@ -528,4 +535,4 @@ def density_projection_lines(lv, model, mode):
             f"With this runner's solo speed ({solo:.2f} runs/s, a different CPU) as the per-VM speed: "
             f"${host_usd:.4f}/h / ({vms} x {solo:.2f} x {eff:.3f}) = **{per_k:.6f} USD per 1000 runs (MIXED CPUs)**. "
             "Nobody ran PandaOS on that server; the efficiency curve comes from this runner, whose CPU, SMT "
-            "layout and memory bandwidth differ."]
+            "layout and memory bandwidth differ."] + warn
