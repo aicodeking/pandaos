@@ -40,14 +40,16 @@ panda-install --disk /dev/vda --profile headless --hostname X --user panda \
 | `--hostname NAME` | no | `pandaos` | `a-z`, `0-9`, `-`; max 63 chars |
 | `--user NAME` | no | `panda` | Login user, in `wheel`, `networkmanager`, `panda-mem` |
 | `--password-hash H` | yes | | crypt(3) hash, e.g. `mkpasswd -m yescrypt` (charset `[A-Za-z0-9./$=]`) |
-| `--ssh-key K` | no | none | One public key line (`ssh-ed25519 AAAA... me@host`) |
+| `--ssh-key K` | no | none | One public key line (`ssh-ed25519 AAAA... me@host`); repeat the flag for more keys |
 | `--timezone TZ` | no | `UTC` | Must exist under `/etc/zoneinfo` |
 | `--relay URL` | no | none | PandaConnect relay for panda-agentd: `https://host[:port][/path]` |
 | `--allow-insecure-relay` | | | Accept an `http://` relay URL (sets `allowInsecure` in `local.nix`) |
 | `--domain D` | with `--profile server` (`iso-server` ISO) | | boat base domain (`api.D`, `desktop.D`, `*.desktop.D`, `ssh.D`, `*.vm.D`) → `services.boat.domain` |
-| `--acme-email E` | with `--profile server` | | Let's Encrypt account e-mail → `services.boat.acmeEmail` |
+| `--acme-email E` | no | none | Let's Encrypt account e-mail → `services.boat.acmeEmail`; without it the ACME account has no e-mail |
 | `--ipv6-prefix P` | no | none | Routed IPv6 prefix for VMs → `services.boat.ipv6Prefix` |
 | `--data-disk DEV` | no | none | Second whole disk for `/var/lib/boat`, **erased**, btrfs `PANDADATA`; pinned by UUID in `disk.nix` (required mount) and marked in `/etc/pandaos/data-disk` |
+| `--extra-config FILE` | no | none | A NixOS module, copied to `/etc/pandaos/extra.nix` and imported by `local.nix` (static networking, update mode, ...) |
+| `--build` | no | off | Build `/etc/pandaos#pandaos` now instead of copying the prebuilt system. **Needs network.** `local.nix` and `extra.nix` then apply from the first boot (required when the box has no DHCP, e.g. a hosted server with static addresses) |
 | `--yes` | | | No prompts and no typed disk confirmation |
 
 Without `--yes`, the disk is wiped only after you type its name (`vda` or `/dev/vda`).

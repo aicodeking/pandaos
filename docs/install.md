@@ -80,7 +80,7 @@ sudo panda-install \
 | `--hostname NAME` | `pandaos` | `a-z`, `0-9` and `-`, at most 63 characters |
 | `--user NAME` | `panda` | Your login user, in `wheel`, `networkmanager` and `panda-mem`. Any other name gets created, and `panda` is then locked |
 | `--password-hash H` | (required with `--yes`) | A crypt(3) hash, not the plain password |
-| `--ssh-key K` | none | One authorized ssh public key line for the user |
+| `--ssh-key K` | none | One authorized ssh public key line for the user; repeat the flag for more keys |
 | `--timezone TZ` | `UTC` | A zone under `/etc/zoneinfo`, e.g. `Europe/Berlin` |
 | `--relay URL` | none (agentd off) | Enables the optional `panda-agentd` with this `https://` relay. Written to `/var/lib/panda-agentd/relay`, which overrides `services.panda-agentd.relayUrl`. Most boxes skip it and use PandaCode Connect |
 | `--yes` | | No questions and no typed disk confirmation |

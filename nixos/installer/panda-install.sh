@@ -59,14 +59,19 @@ $UEFI_NOTE
   --hostname NAME         machine name (default: pandaos)
   --user NAME             login user, in group wheel (default: panda)
   --password-hash HASH    crypt(3) hash, e.g. from: mkpasswd -m yescrypt
-  --ssh-key KEY           optional ssh public key for the user (one line)
+  --ssh-key KEY           optional ssh public key for the user (one line; repeat for more)
   --timezone TZ           e.g. Europe/Berlin (default: UTC)
   --relay URL             enable the optional panda-agentd with this relay (https)
   --allow-insecure-relay  accept an http:// relay URL
+  --extra-config FILE     NixOS module copied to /etc/pandaos/extra.nix and imported
+                          by local.nix (e.g. static networking for a hosted server)
+  --build                 build /etc/pandaos#pandaos now (needs network) instead of
+                          copying the prebuilt system, so local.nix and extra.nix
+                          apply from the first boot
 
  server profile (boat VMs, see docs/boat.md):
   --domain D              base domain: api.D, desktop.D, *.desktop.D, ssh.D, *.vm.D
-  --acme-email E          Let's Encrypt account e-mail
+  --acme-email E          optional Let's Encrypt account e-mail (none: ACME without one)
   --ipv6-prefix P         routed IPv6 prefix for VMs, e.g. 2a01:4f8:1:2:b0a7::/80
   --data-disk DEV         second disk for VM data (/var/lib/boat), ERASED, btrfs
   --yes                   no questions; --disk and --password-hash are required
@@ -151,7 +156,11 @@ check_domain() {
 }
 
 check_email() {
-  [[ $1 =~ $EMAIL_RE ]] || bad "bad e-mail '$1'"
+  [[ -z $1 || $1 =~ $EMAIL_RE ]] || bad "bad e-mail '$1'"
+}
+
+check_extra_config() {
+  [[ -z $1 || -f $1 && -r $1 ]] || bad "--extra-config '$1' is not a readable file"
 }
 
 check_ipv6_prefix() {
@@ -195,8 +204,12 @@ parse_args() {
         allow_insecure_relay=1
         shift
         ;;
+      --build)
+        build=1
+        shift
+        ;;
       --disk | --profile | --hostname | --user | --password-hash | --ssh-key | --timezone | --relay | \
-        --domain | --acme-email | --ipv6-prefix | --data-disk)
+        --domain | --acme-email | --ipv6-prefix | --data-disk | --extra-config)
         (($# >= 2)) || die "$1 needs a value"
         case $1 in
           --disk) disk=$2 ;;
@@ -205,7 +218,7 @@ parse_args() {
           --user) user=$2 ;;
           --password-hash) password_hash=$2 ;;
           --ssh-key)
-            ssh_key=$2
+            ssh_keys+=("$2")
             ssh_key_set=1
             ;;
           --timezone) timezone=$2 ;;
@@ -217,6 +230,7 @@ parse_args() {
           --acme-email) acme_email=$2 ;;
           --ipv6-prefix) ipv6_prefix=$2 ;;
           --data-disk) data_disk=$2 ;;
+          --extra-config) extra_config=$2 ;;
         esac
         shift 2
         ;;
@@ -270,9 +284,14 @@ gather() {
   if [[ -n $timezone ]]; then check_timezone "$timezone" || exit 1; else
     ask_valid timezone check_timezone "Time zone" UTC
   fi
-  if ((ssh_key_set || yes)); then check_ssh_key "$ssh_key" || exit 1; else
-    ask_valid ssh_key check_ssh_key "ssh public key (optional, Enter to skip)"
+  local k
+  if ((ssh_key_set || yes)); then
+    for k in "${ssh_keys[@]}"; do check_ssh_key "$k" || exit 1; done
+  else
+    ask_valid k check_ssh_key "ssh public key (optional, Enter to skip)"
+    [[ -z $k ]] || ssh_keys=("$k")
   fi
+  check_extra_config "$extra_config" || exit 1
   if ((relay_set || yes)); then check_relay "$relay" || exit 1; else
     ask_valid relay check_relay "panda-agentd relay URL (optional, most boxes skip it; Enter to skip)"
   fi
@@ -296,10 +315,8 @@ gather_server() {
   else
     ask_valid domain check_domain "Base domain for boat (api.D, *.vm.D ...)"
   fi
-  if [[ -n $acme_email ]]; then check_email "$acme_email" || exit 1; elif ((yes)); then
-    die "--acme-email is required with --profile server --yes"
-  else
-    ask_valid acme_email check_email "ACME (Let's Encrypt) e-mail"
+  if [[ -n $acme_email ]] || ((yes)); then check_email "$acme_email" || exit 1; else
+    ask_valid acme_email check_email "ACME (Let's Encrypt) e-mail (optional, Enter to skip)"
   fi
   check_ipv6_prefix "$ipv6_prefix" || exit 1
   check_data_disk "$data_disk" || exit 1
@@ -404,8 +421,9 @@ write_disk_nix() {
 }
 
 write_local_nix() {
-  local keys="" extra="" agent="" boat=""
-  [[ -z $ssh_key ]] || keys=" \"$ssh_key\" "
+  local keys="" extra="" agent="" boat="" k
+  for k in "${ssh_keys[@]}"; do keys+=" \"$k\""; done
+  [[ -z $keys ]] || keys+=" "
   if [[ $user != panda ]]; then
     extra='    isNormalUser = true;
     extraGroups = [ "wheel" "networkmanager" "panda-mem" ];
@@ -420,10 +438,11 @@ write_local_nix() {
   fi
   if [[ $profile == server ]]; then
     boat="  services.boat.domain = \"$domain\";
-  services.boat.acmeEmail = \"$acme_email\";
   # No DNS API yet: per-host certificates, which a tenant can exhaust. Before
   # untrusted tenants, set gateway.dnsProvider and remove this (docs/boat.md).
   services.boat.gateway.allowOnDemandTLS = true;
+"
+    [[ -z $acme_email ]] || boat+="  services.boat.acmeEmail = \"$acme_email\";
 "
     [[ -z $ipv6_prefix ]] || boat+="  services.boat.ipv6Prefix = \"$ipv6_prefix\";
 "
@@ -434,7 +453,10 @@ write_local_nix() {
 { lib, ... }:
 {
   # agents.nix: written by panda-agents-install (agent CLIs), when present.
-  imports = [ ./disk.nix ] ++ lib.optional (builtins.pathExists ./agents.nix) ./agents.nix;
+  # extra.nix: panda-install --extra-config FILE, when given.
+  imports = [ ./disk.nix ]
+    ++ lib.optional (builtins.pathExists ./agents.nix) ./agents.nix
+    ++ lib.optional (builtins.pathExists ./extra.nix) ./extra.nix;
 
   networking.hostName = "$hostname";
   time.timeZone = "$timezone";
@@ -484,12 +506,19 @@ EOF
   printf '%s\n' "$PANDA_REVISION" >"$dir/VERSION"
   write_disk_nix "$dir"
   write_local_nix "$dir"
+  [[ -z $extra_config ]] || install -m 0644 "$extra_config" "$dir/extra.nix"
 }
 
 # Copy the prebuilt system from the ISO store. --system skips evaluation and
 # building; with substituters cleared, nothing is fetched from the network.
 install_system() {
   local system
+  if ((build)); then
+    log "Building and installing /etc/pandaos#pandaos (online)"
+    nixos-install --root "$MNT" --flake "path:$MNT/etc/pandaos#pandaos" \
+      --no-root-passwd --no-channel-copy
+    return
+  fi
   system=$(readlink -f -- "$PANDA_SYSTEMS/$profile")
   log "Installing $system"
   nixos-install --root "$MNT" --system "$system" \
@@ -522,13 +551,14 @@ personalise() {
       chown "$user:$group" "/home/$user/.ssh/authorized_keys"
       chmod 600 "/home/$user/.ssh/authorized_keys"
     fi
-  ' personalise "$SW" "$user" "$password_hash" "$ssh_key"
+  ' personalise "$SW" "$user" "$password_hash" "$(printf '%s\n' "${ssh_keys[@]}")"
 }
 
 main() {
-  disk="" profile="" hostname="" user="" password_hash="" ssh_key="" timezone="" relay=""
-  domain="" acme_email="" ipv6_prefix="" data_disk=""
-  yes=0 ssh_key_set=0 relay_set=0 allow_insecure_relay=0 boot_dev="" root_dev=""
+  disk="" profile="" hostname="" user="" password_hash="" timezone="" relay=""
+  domain="" acme_email="" ipv6_prefix="" data_disk="" extra_config=""
+  ssh_keys=()
+  yes=0 build=0 ssh_key_set=0 relay_set=0 allow_insecure_relay=0 boot_dev="" root_dev=""
   [[ -d ${PANDA_SYSTEMS:-} && -n ${PANDA_FLAKE_URL:-} && -n ${PANDA_DEFAULT_PROFILE:-} ]] ||
     die "PANDA_SYSTEMS/PANDA_FLAKE_URL/PANDA_DEFAULT_PROFILE unset; run the packaged panda-install"
   PANDA_FLAKE_LOCK=${PANDA_FLAKE_LOCK:-}
@@ -551,7 +581,7 @@ main() {
   umount -R "$MNT"
   trap - EXIT
   log "Done. Remove the install media and reboot."
-  if [[ $profile == server ]]; then
+  if [[ $profile == server ]] && ((!build)); then
     log "Server: after the first boot run 'sudo nixos-rebuild switch --flake /etc/pandaos#pandaos'"
     log "(needs network) to apply the boat domain and data disk now; the daily update does it otherwise."
   fi
