@@ -194,11 +194,11 @@ Same-runner disk matrix ([42769967285](https://github.com/aicodeking/pandaos/act
 
 ## Measured: boatbench on a GitHub runner
 
-Three runs, 2026-11-10. One GitHub runner per preset, and **GitHub gave each job a different CPU, so columns are not directly comparable on CPU-bound rows.**
+Three runs, 2026-11-10 and 2026-11-11. One GitHub runner per preset, and **GitHub gave each job a different CPU, so columns are not directly comparable on CPU-bound rows.**
 
 - [42818758694](https://github.com/aicodeking/pandaos/actions/runs/42818758694) (commit `8cf09f8`): workloads a–f, 5 fresh VMs per preset. **Its overall conclusion is `cancelled`:** every job timed out later, in a first version of the density step, which is discarded here. The a–f steps had finished and their results were uploaded.
 - [42860774575](https://github.com/aicodeking/pandaos/actions/runs/42860774575) (commit `2a9f90b`, conclusion `success`): workload d with the flushing jobs (3 repeats) and workload g, density (2 repeats), all four presets.
-- [42865507357](https://github.com/aicodeking/pandaos/actions/runs/42865507357) (branch `boatd-r2` at `5f3c81c`, **not main**, conclusion `success`): untrusted, workload d only, 2 repeats, with the vCPU-cgroup fix.
+- [42937179139](https://github.com/aicodeking/pandaos/actions/runs/42937179139) (main at `bcf0cda`, which includes the boatd-r2 vCPU-cgroup fix, conclusion `success`): untrusted only, workloads a–g (a and d alternating host / VM, 3 repeats; g 2 repeats). It replaces the branch run 42865507357 that this page cited before.
 
 The `boatdev` job printed SKIPPED or was skipped (no `BOATDEV_API_KEY` secret), so **no run has a boat.dev measurement**. Every boat.dev number below is boat.dev's own published figure.
 
@@ -292,9 +292,30 @@ The older fio jobs never flush, so they cannot tell the two caches apart. Two fl
 - `Unsafe` is still boatd's default, in untrusted mode too (fsync'd 4k in the untrusted VM: 7,412 IOPS against 2,019 on its host disk). A guest's `fsync` there does not survive a host crash.
 - The non-flushing write rows (seq write 1M, rand write 4k) show no consistent Writeback penalty across the two runs: differences are within runner-to-runner variance.
 
-### Untrusted after the vCPU-cgroup fix
+### Untrusted after the vCPU-cgroup fix, run 42937179139
 
-Run [42865507357](https://github.com/aicodeking/pandaos/actions/runs/42865507357), **on branch `boatd-r2` at `5f3c81c`, not on main.** The fix gives the vCPU threads their own cgroup, apart from the VMM thread. Workload d only, n = 2, EPYC 9V74, SMT off: seq write 1M **626.6 MB/s** (480 and 774), against **304.1** on main on the same CPU model (run 42818758694, n = 5). Other disk rows: seq read 6,088 MB/s, rand write 42,770 IOPS, rand read 94,898 IOPS. Two samples on one runner suggest the seq-write loss was VMM CPU starvation; they do not size it. This run has no density or Node numbers, so the projection above predates the fix.
+Run [42937179139](https://github.com/aicodeking/pandaos/actions/runs/42937179139), main at `bcf0cda` (the boatd-r2 merge: vCPU threads get their own cgroup, apart from the VMM thread). Untrusted preset, **EPYC 9V45 runner, SMT off: 2 CPUs online**, `Unsafe` cache. Medians, IQR in brackets.
+
+| Metric | Runner, no VM | Untrusted VM | VM / host | Old untrusted (run 42818758694, EPYC 9V74, before the fix) |
+|---|---|---|---|---|
+| (a) Node loop, runs/s (n = 9) | 18.26 | 16.54 [16.27–16.76] | **0.906** | 13.41 (VM / host 0.887) |
+| (d) seq write 1M, MB/s † | 8,514 | 297.1 [284.1–317.2] | 0.035 | 304.1 |
+| (d) PTS seq write 1M, MiB/s † | 4,884 | 757.2 | 0.155 | n/a |
+| (d) rand write 4k, IOPS † | 71,382 | 52,798 | 0.740 | 41,578 |
+| (d) PTS rand read 4k, IOPS | 180,802 | 370,331 | 2.05 | 116,897 |
+| (d) 4k rand write, fsync each, IOPS † | 1,446 | 13,661 | (Unsafe drops flushes) | n/a |
+| (b) create → exec-ready, s | | 2.34 | | 2.75 |
+| (b) fork / resume / new-from-snapshot → exec-ready, s | | 1.24 / 0.581 / 0.811 | | 1.25 / 0.507 / n/a |
+| (c) 10 concurrent creates, s | | 22.02 | | 26.69 |
+| (e) Go tarball download, Mbit/s | | 1,167 (above the 1,000 Mbit/s ingress cap; not investigated) | | 1,037 |
+| (f) cold `npm ci`, s | | 3.82 | | 4.91 |
+
+Density (g) on those 2 CPUs: per-VM / host runs/s 16.17 / 16.17 at N = 1, 10.96 / 21.92 at N = 2 (efficiency 0.678), 4.62 / 18.52 at N = 4 (0.286), 3.06 / 18.33 at N = 6 (0.189).
+
+What this run settles and what it does not:
+- **The 1M sequential write did not recover on main.** The branch run's 626.6 MB/s (n = 2, EPYC 9V74) is not reproduced: 297.1 MB/s here (n = 3, EPYC 9V45), the same as before the fix. The PTS job (iodepth 64) reaches 757 MiB/s. Different runner CPUs, so this does not prove the fix does nothing; it does mean the branch number should not be quoted.
+- **The Node loop keeps 0.906 of the host** in untrusted mode, in line with the trusted presets (0.82–0.88).
+- **The untrusted density curve no longer looks flat to N = 2.** The earlier untrusted curve (Xeon 8370C, run 42860774575) gave efficiency 0.992 at N = 2; this one gives 0.678. Footnote ⁵'s 0.64–0.99 range stands, and the [measured AX42 curve](#measured-on-a-real-dedicated-server-hetzner-ax42) replaces both for a real server.
 
 **Caveats for every number above:**
 - **† Unsafe cache** on every column except trusted-writeback, as above. The write rows are also not the same kind of number as boat.dev's published fio results.
