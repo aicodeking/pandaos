@@ -38,6 +38,9 @@ type fakeHost struct {
 	hangOps    map[string]bool // agent ops the guest never answers
 	starts     int             // processes started
 	failStart  int             // fail the failStart-th process start (1-based; 0 = never)
+	failResume int             // refuse this many resumes (PATCH /vm Resumed) with 503
+	slowGo     chan struct{}   // "slow" execs (sessions) send their end once this is closed
+	loseExec   int             // ignore this many exec requests (lost in a vsock reset)
 }
 
 func init() { quotaCtl = func(string) error { return nil } }
@@ -103,6 +106,9 @@ type fakeFC struct {
 	env      map[string]any
 	clockSet bool
 	lns      []net.Listener
+	apiConns int // open API connections, capped like Firecracker's server
+	epoch    int // vsock resets so far: one per snapshot, like Firecracker
+	sessions map[string]*fakeSession
 	done     chan struct{}
 	once     sync.Once
 }
@@ -125,7 +131,7 @@ func (h *fakeHost) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 		return 0, nil, err
 	}
 	f.lns = append(f.lns, ln)
-	go http.Serve(ln, f)
+	go (&http.Server{Handler: f, ConnState: f.connState}).Serve(ln)
 	h.mu.Lock()
 	h.next++
 	pid := h.next
@@ -198,7 +204,33 @@ func fault(w http.ResponseWriter, msg string) {
 	fmt.Fprintf(w, `{"fault_message":%q}`, msg)
 }
 
+// fcMaxConns is Firecracker's API server cap (micro_http MAX_CONNECTIONS): past it
+// a request gets 503 "Too many open connections" (boatbench 42818758694).
+const fcMaxConns = 10
+
+func (f *fakeFC) connState(_ net.Conn, st http.ConnState) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch st {
+	case http.StateNew:
+		f.apiConns++
+	case http.StateClosed, http.StateHijacked:
+		f.apiConns--
+	}
+}
+
+func (f *fakeFC) openConns() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.apiConns
+}
+
 func (f *fakeFC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if f.openConns() > fcMaxConns {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{ "error": "Too many open connections" }`)
+		return
+	}
 	var body map[string]any
 	json.NewDecoder(r.Body).Decode(&body)
 	f.record(r.Method + " " + r.URL.Path)
@@ -236,6 +268,17 @@ func (f *fakeFC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "PATCH /vm":
+		f.h.mu.Lock()
+		refuse := str("state") == "Resumed" && f.h.failResume > 0
+		if refuse {
+			f.h.failResume--
+		}
+		f.h.mu.Unlock()
+		if refuse {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{ "error": "refused" }`)
+			return
+		}
 		f.mu.Lock()
 		f.paused = str("state") == "Paused"
 		f.mu.Unlock()
@@ -247,6 +290,9 @@ func (f *fakeFC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fault(w, "not paused")
 			return
 		}
+		f.mu.Lock()
+		f.epoch++ // the guest drops its vsock connections; the host side stays open
+		f.mu.Unlock()
 		os.WriteFile(filepath.Join(f.root, str("snapshot_path")), []byte("vmstate"), 0o600)
 		os.WriteFile(filepath.Join(f.root, str("mem_file_path")), []byte("mem"), 0o600)
 	case "PUT /snapshot/load":
@@ -308,7 +354,22 @@ func (f *fakeFC) agentConn(c net.Conn) {
 		return
 	}
 	fmt.Fprint(c, "OK 1073741824\n")
-	send := func(v any) { b, _ := json.Marshal(v); c.Write(append(b, '\n')) }
+	f.mu.Lock()
+	epoch := f.epoch
+	f.mu.Unlock()
+	var wmu sync.Mutex
+	send := func(v any) {
+		f.mu.Lock()
+		alive := f.epoch == epoch
+		f.mu.Unlock()
+		if !alive {
+			return // reset in the guest: the line never reaches the host
+		}
+		b, _ := json.Marshal(v)
+		wmu.Lock()
+		c.Write(append(b, '\n'))
+		wmu.Unlock()
+	}
 	for {
 		line, err := r.ReadBytes('\n')
 		if err != nil {
@@ -330,7 +391,37 @@ func (f *fakeFC) agentConn(c net.Conn) {
 			idle := f.h.idleS
 			f.h.mu.Unlock()
 			send(map[string]any{"ok": true, "idle_s": idle, "version": "1"})
+		case "exec_attach":
+			f.mu.Lock()
+			fs := f.sessions[fmt.Sprint(q["session"])]
+			f.mu.Unlock()
+			if fs == nil && q["seen"].(float64) == 0 && q["exec"] != nil { // the exec was lost: start it here
+				send(map[string]any{"attached": q["session"], "started": true})
+				fs = f.startSlow(q["session"].(string), send)
+				continue
+			}
+			if fs == nil {
+				send(map[string]string{"error": "no such exec session"})
+				continue
+			}
+			send(map[string]any{"attached": q["session"]})
+			fs.attach(int(q["seen"].(float64)), send)
 		case "exec":
+			f.h.mu.Lock()
+			lose := f.h.loseExec > 0
+			if lose {
+				f.h.loseExec--
+			}
+			f.h.mu.Unlock()
+			if lose {
+				continue
+			}
+			if sid, ok := q["session"].(string); ok && fmt.Sprint(q["argv"].([]any)[0]) == "slow" {
+				if f.startSlow(sid, send) == nil {
+					send(map[string]string{"error": "session exists: " + sid})
+				}
+				continue
+			}
 			var argv []string
 			for _, a := range q["argv"].([]any) {
 				argv = append(argv, a.(string))
@@ -415,6 +506,57 @@ func (f *fakeFC) agentConn(c net.Conn) {
 			send(map[string]string{"error": "unknown op"})
 		}
 	}
+}
+
+// startSlow registers exec session sid ("slow": begin, then end + exit 7 once
+// slowGo is closed); nil if it exists.
+func (f *fakeFC) startSlow(sid string, send func(any)) *fakeSession {
+	f.mu.Lock()
+	if f.sessions == nil {
+		f.sessions = map[string]*fakeSession{}
+	}
+	if f.sessions[sid] != nil {
+		f.mu.Unlock()
+		return nil
+	}
+	fs := &fakeSession{target: send, done: make(chan struct{})}
+	f.sessions[sid] = fs
+	f.mu.Unlock()
+	fs.emit(map[string]any{"stream": "stdout", "data_b64": b64("begin\n")})
+	go func() {
+		<-f.h.slowGo
+		fs.emit(map[string]any{"stream": "stdout", "data_b64": b64("end\n")})
+		fs.emit(map[string]any{"exit": 7})
+	}()
+	return fs
+}
+
+// fakeSession: the agent's exec session (boat-agent.py Session).
+type fakeSession struct {
+	mu     sync.Mutex
+	lines  []any
+	target func(any)
+	done   chan struct{}
+}
+
+func (s *fakeSession) emit(v any) {
+	s.mu.Lock()
+	s.lines = append(s.lines, v)
+	s.target(v)
+	if m, ok := v.(map[string]any); ok && m["exit"] != nil {
+		close(s.done)
+	}
+	s.mu.Unlock()
+}
+
+func (s *fakeSession) attach(seen int, send func(any)) {
+	s.mu.Lock()
+	s.target = send
+	for _, v := range s.lines[seen:] {
+		send(v)
+	}
+	s.mu.Unlock()
+	<-s.done
 }
 
 // newTestManager: state under /tmp (unix socket paths must stay < 104 bytes on macOS).

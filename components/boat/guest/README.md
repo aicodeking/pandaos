@@ -273,7 +273,8 @@ and the connection stays usable.
 | op | request | reply |
 |---|---|---|
 | `health` | | `{ok, uptime, idle_s, version}` |
-| `exec` | `argv, env?, cwd?, stdin_b64?, timeout_s? (600), tty?, user? ("dev")` | `{stream, data_b64}`... then `{exit, signal?, timed_out?}` |
+| `exec` | `argv, env?, cwd?, stdin_b64?, timeout_s? (600), tty?, user? ("dev"), session?` | `{stream, data_b64}`... then `{exit, signal?, timed_out?}` |
+| `exec_attach` | `session, seen, exec?` | `{attached, started?}`, then the session's lines from `seen` on (PROTOCOL.md) |
 | `put_file` | `path, data_b64, mode? ("0644"), offset?, last? (true), owner?` | `{ok, size, complete}` |
 | `get_file` | `path` | `{offset, data_b64}` (1 MiB each)... then `{eof, size, mode}` |
 | `set_identity` | `hostname, ipv4_cidr, gw, dns, mac?, ipv6_cidr?, ipv6_gw?` | `{ok, ms: {network, secrets}}` |

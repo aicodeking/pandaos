@@ -118,6 +118,8 @@ Notes:
   - `{"stream":"stdout"|"stderr","data_b64":"…"}`, repeated
   - then one final `{"exit":N,"timed_out"?:true,"signal"?:"SIGKILL"}` or `{"error":"…"}`.
 - A transport failure in the middle of the stream ends it with `{"error":"guest agent: …"}`.
+- The stream survives forks, snapshots and warm captures of its running VM. Firecracker resets the guest's vsock transport on every snapshot, which drops the agent connection inside the guest while the host side stays open. boatd gives each exec a session id and, after each such snapshot, reconnects with `exec_attach`, so the stream carries every line once and ends with the command's own exit. An agent without sessions answers `exec_attach` with `unknown op`, which ends the stream as an error.
+- boatd waits at most 15 s for the vsock handshake, so a guest that is not running (a VM left paused) fails an exec at once, not at `timeout_s`+30.
 
 ### events (SSE)
 
@@ -170,6 +172,7 @@ Framing:
 |---|---|---|
 | `health` | `{"op":"health"}` | `{"ok":true,"uptime":s,"idle_s":s,"version":"1"}` |
 | `exec` | `{"op":"exec","argv":[…],"env"?:{},"cwd"?:"/","stdin_b64"?:"…","timeout_s"?:600,"tty"?:false,"user"?:"dev"}` | `{"stream":"stdout\|stderr","data_b64":"…"}`… then `{"exit":N,"timed_out"?:true,"signal"?:"…"}` |
+| `exec_attach` | `{"op":"exec_attach","session":"x-…","seen":N,"exec"?:{exec request}}` | `{"attached":"x-…","started"?:true}`, then the session's lines from line `seen` on, as `exec` |
 | `put_file` | `{"op":"put_file","path":"/abs","mode":"644","data_b64":"…","offset":N,"last":bool,"owner"?:"user[:group]"}`, one line per chunk | `{"ok":true,"size":N,"complete":bool}` for each chunk |
 | `get_file` | `{"op":"get_file","path":"/abs"}` | `{"offset":N,"data_b64":"…"}`… then `{"eof":true,"size":N,"mode":"644"}` |
 | `set_identity` | `{"op":"set_identity","hostname":"web","ipv4_cidr":"10.200.0.5/16","gw":"10.200.0.1","mac":"06:00:0a:c8:00:05","dns":["1.1.1.1"],"ipv6_cidr"?:"2001:db8::5/64","ipv6_gw"?:"2001:db8::1"}` | `{"ok":true,"ms":{"network":N,"secrets":N}}` |
@@ -195,6 +198,8 @@ Semantics:
   - Runs as `user` (default `dev`) in a new session.
   - If `timeout_s` passes, the agent sends SIGTERM, then SIGKILL after 2 s, and `timed_out` is set.
   - With `tty`, there is a single `stdout` stream, and stdin gets ^D after `stdin_b64`.
+  - With `session` (1-64 of `A-Za-z0-9_-`, single use: a reused id is `session exists`), the agent keeps the reply lines (the newest 16 MiB) and keeps the command running if the connection drops. The session stays attachable for 300 s after its final line.
+- **exec_attach** takes a session over. It replies `{"attached":id}`, replays the lines from index `seen` (0-based, counting every line the session sent), then streams the rest to this connection. A later attach takes the stream over again. `seen` below the kept lines is `exec session output lost`. With `seen:0` and `exec`, a session the agent never got (the request was lost in the reset) is started there instead, with `started:true`. An unknown session is `no such exec session`.
 - **put_file**
   - Chunks go to `<path>.boat-part`. `offset` must equal the bytes received so far, and `offset:0` truncates.
   - The chunk with `last:true` sets the mode (an octal string or an int), sets the owner (default: like the parent dir), and renames the file into place.

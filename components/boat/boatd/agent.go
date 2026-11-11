@@ -22,6 +22,11 @@ const (
 // on the next op, and boatd often waits for it holding the VM's lock.
 var agentCallTimeout = 30 * time.Second
 
+// agentHandshakeTimeout bounds the vsock CONNECT: the guest kernel accepts it
+// at once unless the guest is not running (a VM left paused), and an exec must
+// not wait its whole timeout_s for that.
+var agentHandshakeTimeout = 15 * time.Second
+
 type reply struct {
 	Stream string   `json:"stream,omitempty"`
 	Data   string   `json:"data_b64,omitempty"`
@@ -30,6 +35,8 @@ type reply struct {
 	EOF    bool     `json:"eof,omitempty"`
 	Error  string   `json:"error,omitempty"`
 	IdleS  *float64 `json:"idle_s,omitempty"`
+	// Attached: exec_attach took the session over (execstream.go).
+	Attached string `json:"attached,omitempty"`
 }
 
 // final: the last line of a reply (exec ends on exit, get_file on eof).
@@ -45,20 +52,35 @@ func dialAgent(ctx context.Context, sock string) (*agentConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if dl, ok := ctx.Deadline(); ok {
-		c.SetDeadline(dl)
+	dl, hasDL := ctx.Deadline()
+	hs := time.Now().Add(agentHandshakeTimeout)
+	if hasDL && dl.Before(hs) {
+		hs = dl
 	}
+	c.SetDeadline(hs)
 	a := &agentConn{c: c, r: bufio.NewReaderSize(c, 64<<10)}
-	context.AfterFunc(ctx, func() { c.SetDeadline(time.Now()) }) // unblocks reads on cancel
+	stop := context.AfterFunc(ctx, func() { c.SetDeadline(time.Now()) }) // unblocks reads on cancel
 	if _, err := fmt.Fprintf(c, "CONNECT %d\n", agentPort); err != nil {
+		stop()
 		c.Close()
 		return nil, err
 	}
 	line, err := a.line()
 	if err != nil || !bytes.HasPrefix(line, []byte("OK ")) {
+		stop()
 		c.Close()
 		return nil, fmt.Errorf("vsock handshake: %q %v", line, err)
 	}
+	if !stop() { // ctx ended meanwhile: its deadline stays
+		c.Close()
+		return nil, ctx.Err()
+	}
+	if hasDL {
+		c.SetDeadline(dl)
+	} else {
+		c.SetDeadline(time.Time{})
+	}
+	context.AfterFunc(ctx, func() { c.SetDeadline(time.Now()) })
 	return a, nil
 }
 
