@@ -8,12 +8,15 @@
 #   memory    a fork keeps the parent's processes (in-memory HTTP server) and boot_id
 #   entropy   parent, its fork and two siblings from one snapshot: distinct
 #             ssh host keys and machine-ids
-#   jail      firecracker in its own netns + pid ns, cgroup memory.max set
+#   jail      firecracker in its own netns + pid ns, cgroup memory.max set,
+#             vCPU threads apart from the VMM thread (<vm>/vcpu)
 #   isolation VM<->VM same team / cross team, RFC1918 target, host services,
 #             cloud metadata, SMTP: blocked (with positive controls)
 #   ipv6      host<->VM ping6; from outside only published ports
 #   idle      idle auto-stop
 #   restart   boatd SIGKILLed mid-run: running VMs re-adopted
+#   self api  a guest calls boat-api at the host's address, tcp/443, with its
+#             self token (boatd/e2e-selfapi.sh)
 #   floor     free-space floor: create/snapshot refused (507), stop falls back cold
 #   docker    docker run hello-world in the full image
 #   perf 4/8  disk, snapshot, fork, density, warm creates (boatd/e2e-perf.sh)
@@ -119,6 +122,14 @@ sudo ip netns list | grep -q "^boat$(vmf "$p1" index)" || fail "no netns for p1"
 [ "$(cat "/sys/fs/cgroup/boat-e2e/$p1/memory.max")" = $(((2048 + 256 + 512) * 1048576)) ] || fail "memory.max: $(cat "/sys/fs/cgroup/boat-e2e/$p1/memory.max")"
 grep -q '^max 100000$\|^300000 100000$' "/sys/fs/cgroup/boat-e2e/$p1/cpu.max" || fail "cpu.max: $(cat "/sys/fs/cgroup/boat-e2e/$p1/cpu.max")"
 [ "$(stat -c %u "/proc/$pid")" -ge 900000 ] || fail "firecracker not running as a jail uid"
+# vCPU threads in the threaded child <vm>/vcpu, the VMM thread not (vcpucg.go); p1 was restored, so this is a restore's split.
+vcg=/sys/fs/cgroup/boat-e2e/$p1
+[ "$(sudo cat "$vcg/vcpu/cgroup.type" 2>/dev/null)" = threaded ] || fail "no threaded vcpu cgroup: $(sudo cat "$vcg/vcpu/cgroup.type" 2>&1)"
+vts=$(sudo cat "$vcg/vcpu/cgroup.threads")
+[ "$(wc -w <<<"$vts")" = 2 ] || fail "vcpu cgroup threads: $vts (want the 2 vCPUs)"
+for t in $vts; do sudo grep -q '^fc_vcpu' "/proc/$pid/task/$t/comm" || fail "thread $t in the vcpu cgroup is $(sudo cat "/proc/$pid/task/$t/comm")"; done
+for t in $(sudo cat "$vcg/cgroup.threads"); do ! sudo grep -q '^fc_vcpu' "/proc/$pid/task/$t/comm" || fail "vCPU thread $t left with the VMM thread"; done
+[ "$(sudo cat "$vcg/vcpu/cpu.weight")" = 100 ] || fail "vcpu cpu.weight: $(sudo cat "$vcg/vcpu/cpu.weight")"
 [ "$(sudo cat "/proc/$pid/oom_score_adj")" = 500 ] || fail "oom_score_adj: $(sudo cat "/proc/$pid/oom_score_adj")"
 
 rules=$(sudo nft list table inet boat)
@@ -193,6 +204,9 @@ restart_boatd "$WORK/boatd.json"
 [ "$(vmf "$p1" state) $(vmf "$p1" pid)" = "running $pid_before" ] || fail "p1 not re-adopted: $(bd GET "/v1/vms/$p1")"
 [ "$(bx "$p1" 'curl -fsS http://localhost:8081/')" = "$tok" ] || fail "p1 unusable after the boatd restart"
 [ "$(bx "$c1" hostname)" = c1 ] || fail "c1 unusable after the boatd restart"
+
+# shellcheck source=boatd/e2e-selfapi.sh
+. "$HERE/boatd/e2e-selfapi.sh"
 
 log "host e2e: free-space floor"
 free_gib=$(($(df -B1G --output=avail "$STATE" | tail -1)))

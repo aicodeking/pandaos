@@ -202,7 +202,8 @@ func (m *Manager) flushPort(v VM, p Port) {
 // ruleset renders the whole boat nftables config from the VM list. It is
 // loaded atomically with `nft -f -` on every change (create/delete/port).
 //
-//	inet boat:   host input from VMs (DNS + ICMP only), forward policy,
+//	inet boat:   host input from VMs (DNS, ICMP, AI proxy and hostHttpsPort
+//	             only), forward policy,
 //	             DNAT for public ports and public IPv4, masquerade
 //	bridge boat: per-tap anti-spoofing (MAC/IPv4/IPv6/ARP) and VM<->VM
 //	             isolation, except same-team VMs when allowIntraTeam
@@ -220,6 +221,9 @@ func ruleset(c Config, vms []VM) string {
 	w("    iifname %q ip daddr %s meta l4proto { udp, tcp } th dport 53 accept", br, gw)
 	if c.AIProxyPort > 0 {
 		w("    iifname %q ip daddr %s tcp dport %d accept", br, gw, c.AIProxyPort)
+	}
+	if c.HostHTTPSPort > 0 { // the public URL resolves to the host itself: input, not forward
+		w("    iifname %q fib daddr type local tcp dport %d accept", br, c.HostHTTPSPort)
 	}
 	w("    iifname %q icmp type { echo-request, destination-unreachable, time-exceeded } accept", br)
 	w("    iifname %q icmpv6 type { nd-router-advert, nd-redirect } drop", br)

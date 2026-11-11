@@ -61,6 +61,16 @@ func TestRuleset(t *testing.T) {
 	if !strings.Contains(ruleset(c, vms), `iifname "boatbr0" ip daddr 10.200.0.1 tcp dport 8744 accept`) {
 		t.Error("AI proxy port not opened")
 	}
+	if strings.Contains(rs, "dport 443 accept") {
+		t.Error("host https port open by default")
+	}
+	c.HostHTTPSPort = 443
+	rs = ruleset(c, vms)
+	open := `iifname "boatbr0" fib daddr type local tcp dport 443 accept`
+	if i, d := strings.Index(rs, open), strings.Index(rs, `    iifname "boatbr0" drop`); i < 0 || i > d {
+		t.Errorf("host https port not opened before the input drop\n%s", rs)
+	}
+	c.HostHTTPSPort = 0
 	c.Jailer, c.AllowSMTP, c.EgressMbit = "/bin/jailer", true, 100
 	rs = ruleset(c, vms)
 	if !strings.Contains(rs, "meta skuid 900000-965534 drop") || strings.Contains(rs, "dport { 25") {

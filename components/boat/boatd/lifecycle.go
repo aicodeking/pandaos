@@ -285,6 +285,7 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 		os.Remove(filepath.Join(root, vmstate))
 		os.Remove(filepath.Join(root, memFile))
 	}
+	m.rmVCPUCgroup(v.ID) // the last run's: the jailer's cgroup goes back to a plain domain
 	pid, done, err := m.procs.Start(v, root, uid, gid)
 	if err != nil {
 		delVMNet(m.run, v)
@@ -311,6 +312,9 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 		m.killWait(v.ID, pid)
 		delVMNet(m.run, v)
 		return v, err
+	}
+	if err := m.splitVCPUs(v, pid); err != nil {
+		log.Printf("%s: vCPU threads stay with the VMM thread: %v", v.ID, err)
 	}
 	return m.update(v.ID, "", func(x *VM) {
 		x.State, x.HasSnapshot, x.Error, x.DiffOK = Running, false, "", m.cfg.DiffSnapshots
@@ -576,6 +580,7 @@ func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 	delNeighbours(m.cfg, m.run, v)
 	m.flushConntrack(v.IP, v.IPv6, v.PublicIP)
 	if m.cfg.CgroupParent != "" {
+		m.rmVCPUCgroup(id)
 		os.Remove(filepath.Join(cgroupRoot, m.cfg.CgroupParent, id)) // the jailer's (empty) cgroup
 	}
 	m.update(id, "deleted", func(x *VM) { x.State, x.PID = Stopped, 0 }) // closes the billing interval
