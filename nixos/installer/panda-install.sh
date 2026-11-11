@@ -174,7 +174,7 @@ check_data_disk() {
 }
 
 check_disk() {
-  local dev size mounts
+  local dev size mounts holders name type
   [[ -n $1 ]] || bad "no disk given" || return
   dev=$(readlink -f -- "$1")
   [[ -b $dev ]] || bad "$1 is not a block device" || return
@@ -186,7 +186,15 @@ check_disk() {
   # No pipe into grep -q here: with pipefail a SIGPIPE would read as "not mounted".
   mounts=$(lsblk -nro MOUNTPOINTS -- "$dev")
   [[ -z ${mounts//[[:space:]]/} ]] ||
-    bad "$dev is in use (mounted or swap: ${mounts//$'\n'/ }); unmount it first"
+    bad "$dev is in use (mounted or swap: ${mounts//$'\n'/ }); unmount it first" || return
+  # An assembled RAID/LVM/LUKS member holds the partitions, so the new
+  # partition table could not be re-read (e.g. a server's old mdadm RAID).
+  holders=""
+  while read -r name type; do
+    [[ $type == disk || $type == part ]] || holders+=" $name"
+  done < <(lsblk -nro NAME,TYPE -- "$dev")
+  [[ -z $holders ]] ||
+    bad "$dev is held by$holders (RAID/LVM/crypt); stop it first, e.g. mdadm --stop /dev/mdX"
 }
 
 parse_args() {
@@ -576,7 +584,8 @@ main() {
   partition
   write_config
   install_system
-  personalise
+  # --build already applied local.nix declaratively; its /etc is store-managed.
+  ((build)) || personalise
   sync
   umount -R "$MNT"
   trap - EXIT

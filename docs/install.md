@@ -141,3 +141,67 @@ sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
    [agents.md](agents.md#pandacode-connect-pandacode-host)). On the desktop, click *PandaCode* in the dock.
 3. Check the state with `panda-connect status`. The box now shows up as a computer in PandaCode.
 4. Only if you passed `--relay`: pair `panda-agentd`, see [agents.md](agents.md#pairing).
+
+## Hosted server over ssh (kexec)
+
+For a rented dedicated server with no ISO or console access: you only have ssh into the provider's
+OS (for example Hetzner's Ubuntu image or its rescue system). Tested on a Hetzner AX42 (2x NVMe,
+static IPv4 `/32` with an on-link gateway, static IPv6 `/64`). **If the network config is wrong
+the box is unreachable, and only the provider's rescue system gets it back.**
+
+1. Write `extra.nix` with the box's network, copied from `ip addr` / `ip route` on the running OS.
+   Match the uplink by MAC, not by name:
+   ```nix
+   { ... }:
+   let mac = "aa:bb:cc:dd:ee:ff"; dns = [ "DNS1" "DNS2" ]; in
+   {
+     networking.networkmanager.unmanaged = [ "mac:${mac}" ];
+     networking.nameservers = dns;
+     systemd.network.enable = true;
+     systemd.network.wait-online.anyInterface = true;
+     systemd.network.networks."10-uplink" = {
+       matchConfig.MACAddress = mac;
+       address = [ "203.0.113.10/32" "2001:db8:1:2::2/64" ];
+       routes = [
+         { Gateway = "203.0.113.1"; GatewayOnLink = true; }
+         { Gateway = "fe80::1"; }
+       ];
+       inherit dns;
+       networkConfig.IPv6AcceptRA = false;
+     };
+     # No release signing key configured yet: update by hand (sudo panda-update run).
+     pandaos.updates.mode = "manual";
+   }
+   ```
+2. kexec into a NixOS installer from the running OS. This keeps the IP addresses, the ssh host keys
+   and root's `authorized_keys`, and does not touch the disks:
+   ```sh
+   curl -fLO https://github.com/nix-community/nixos-images/releases/latest/download/nixos-kexec-installer-noninteractive-x86_64-linux.tar.gz
+   tar -xzf nixos-kexec-installer-noninteractive-x86_64-linux.tar.gz -C /root && /root/kexec/run
+   ```
+   ssh back in as root after about a minute. Check `ls /sys/firmware/efi/efivars` (needed in step 5).
+3. Stop anything holding the disks, e.g. the provider's software RAID (`panda-install` refuses held
+   disks): `mdadm --stop /dev/md*` and `mdadm --zero-superblock` on each member partition.
+4. Build `panda-install` (server system only) and install with `--build`, so `local.nix` and
+   `extra.nix` apply from the first boot:
+   ```sh
+   nix --extra-experimental-features "nix-command flakes" build --impure --out-link pi --expr '
+     let f = builtins.getFlake "github:AICodeKing/pandaos/<rev>"; in
+     f.packages.x86_64-linux.panda-install.override {
+       systems.server = f.nixosConfigurations.server.config.system.build.toplevel; }'
+   ./pi/bin/panda-install --profile server --build --yes \
+     --disk /dev/nvme0n1 --data-disk /dev/nvme1n1 \
+     --domain boat.example.com --ipv6-prefix 2001:db8:1:2:b0a7::/80 \
+     --password-hash '<mkpasswd -m yescrypt>' \
+     --ssh-key "ssh-ed25519 AAAA... one" --ssh-key "ssh-ed25519 AAAA... two" \
+     --extra-config ./extra.nix
+   ```
+   The password is for `sudo` only: ssh accepts keys only, and root cannot log in.
+5. Before rebooting, check the built network unit, and register the boot entry (PandaOS leaves EFI
+   variables alone). Keep the provider's PXE entry first so its rescue system still works:
+   ```sh
+   mount -o subvol=@ /dev/nvme0n1p2 /mnt   # also mount @nix on /mnt/nix to read the system's etc
+   efibootmgr -c -d /dev/nvme0n1 -p 1 -L PandaOS -l '\EFI\systemd\systemd-bootx64.efi'
+   efibootmgr -o <PXE>,<PandaOS>,...      # delete entries of the old OS with efibootmgr -b N -B
+   ```
+6. Reboot. The ssh host key changes: replace the `known_hosts` entry, then `ssh panda@<ip>`.

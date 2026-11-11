@@ -59,7 +59,7 @@ prebuilt system boots with the placeholder domain `boat.localhost`; run
 for the daily update) to apply `local.nix`. See [docs/boat.md](../../docs/boat.md).
 
 Checks: the installer must run as root on a UEFI boot. It refuses a disk that
-is not a whole disk, is under 8 GiB, or has anything mounted or used as swap.
+is not a whole disk, is under 8 GiB, or has anything mounted or used as swap, or is held by an assembled RAID/LVM/crypt device (stop it first).
 If `/mnt` is still mounted from an earlier failed run, it offers to unmount it.
 With `--yes` it unmounts it without asking.
 Errors go to stderr as `panda-install: error: ...` with exit code 1. A failed

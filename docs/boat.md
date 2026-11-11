@@ -47,6 +47,10 @@ Before you hand out API keys:
    ```
    `--data-disk` erases the second disk and formats it as btrfs (`PANDADATA`) for `/var/lib/boat`. It is pinned by UUID as a required mount in `/etc/pandaos/disk.nix` and recorded in `/etc/pandaos/data-disk`. If that disk is ever missing, boatd and boat-api refuse to start rather than write VM data to the system disk. Without `--data-disk`, `/var/lib/boat` is a btrfs subvolume on the system disk. VM disks are reflink copies either way, so fork and snapshot are near-free. To mirror later: `btrfs device add` + `btrfs balance start -dconvert=raid1 -mconvert=raid1`.
    Use the `iso-server` ISO: the other ISOs do not carry the server system.
+   `--acme-email` is optional: without it Caddy registers its ACME account with no e-mail.
+   No ISO or console, only ssh into the provider's OS (Hetzner's default Ubuntu, a rescue system)?
+   Install over ssh with kexec and `--build`; see [install.md](install.md#hosted-server-over-ssh-kexec).
+   On hosts without DHCP (static addresses), use `--build` so the network settings apply from the first boot.
 3. Reboot, log in, and apply your settings now (the daily update would also do it):
    ```sh
    sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
