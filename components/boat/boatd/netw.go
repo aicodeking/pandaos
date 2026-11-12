@@ -31,13 +31,15 @@ func execRunner(stdin, name string, args ...string) error {
 const maxIndex = 65534 // slots 2..65534 of the /16; .0.1 is the gateway
 
 // Egress from VMs to these is dropped: RFC 1918, CGNAT, loopback, link-local
-// (cloud metadata 169.254.169.254), benchmarking, multicast/reserved, and the
-// IPv6 equivalents (ULA covers fd00:ec2::254). Published-port hairpins are
+// (cloud metadata 169.254.169.254), benchmarking, multicast/reserved, the
+// IPv6 equivalents (ULA covers fd00:ec2::254), and the IPv6 prefixes that carry IPv4
+// (NAT64 64:ff9b::/96 and local-use 64:ff9b:1::/48, 6to4 2002::/16), which would
+// otherwise reach the ranges above. Published-port hairpins are
 // accepted earlier (ct status dnat).
 var (
 	privateV4 = []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
 		"172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/3"}
-	privateV6 = []string{"::1", "fc00::/7", "fe80::/10", "ff00::/8", "64:ff9b:1::/48"}
+	privateV6 = []string{"::1", "fc00::/7", "fe80::/10", "ff00::/8", "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16"}
 )
 
 func (c Config) gateway() netip.Addr {

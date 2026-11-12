@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -39,7 +40,7 @@ func TestRuleset(t *testing.T) {
 		`iifname "bt2" icmpv6 type nd-neighbor-advert icmpv6 taddr != { 2001:db8:1::2, fe80::/10 } counter drop`,
 		`iifname "bt3" icmpv6 type nd-neighbor-advert icmpv6 taddr != { fe80::/10 } counter drop`,
 		`iifname "boatbr0" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12,`,
-		`iifname "boatbr0" ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8, 64:ff9b:1::/48 } drop`,
+		`iifname "boatbr0" ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8, 64:ff9b::/96, 64:ff9b:1::/48, 2002::/16 } drop`,
 		`iifname "boatbr0" tcp dport { 25, 465, 587 } drop`,
 		`oifname "boatbr0" ip6 daddr 2001:db8:1::2 tcp dport 8080 accept`,
 		"ct state established,related accept",
@@ -171,5 +172,22 @@ func TestCreateSyncsNet(t *testing.T) {
 	h.mu.Unlock()
 	if !strings.Contains(nft, `iifname "`+v.Tap+`" ether saddr != `+v.MAC+` drop`) {
 		t.Fatalf("new vm not in ruleset:\n%s", nft)
+	}
+}
+
+// IPv6 forms that reach private IPv4 through a translator or tunnel: NAT64's
+// well-known prefix (RFC 6052) and 6to4 (RFC 3056) wrapping 169.254.169.254 and 10.0.0.1.
+func TestEgressBlocksV4InV6(t *testing.T) {
+	for _, a := range []string{"64:ff9b::a9fe:a9fe", "64:ff9b::a00:1", "2002:a9fe:a9fe::1", "2002:a00:1::"} {
+		addr := netip.MustParseAddr(a)
+		blocked := false
+		for _, p := range privateV6 {
+			if pf, err := netip.ParsePrefix(p); err == nil && pf.Contains(addr) {
+				blocked = true
+			}
+		}
+		if !blocked {
+			t.Errorf("%s not in privateV6", a)
+		}
 	}
 }
