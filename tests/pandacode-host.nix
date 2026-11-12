@@ -1,8 +1,8 @@
 # PandaCode Connect host on a box that is not signed in.
 #
 # Not covered (needs GitHub and the PandaCode Connect relay, neither of which
-# CI can reach or own): `panda-connect sign-in` itself (the GitHub device flow,
-# approving it in PandaCode), a signed-in host serving, and real tasks started
+# CI can reach or own): a completed `panda-connect sign-in` (the GitHub device
+# flow, approving it in PandaCode; here only its headless run failing offline), a signed-in host serving, and real tasks started
 # from another device. Those stay manual; see docs/troubleshooting.md.
 { pkgs, self, t }:
 pkgs.testers.runNixOSTest {
@@ -68,6 +68,30 @@ pkgs.testers.runNixOSTest {
           assert machine.succeed("cat /var/lib/pandacode-host/full-access").strip() == "off"
           # Still signed out, so nothing was started.
           assert status()["service"] == "inactive"
+
+      # The sign-in runs as pandacode-sign-in.service, with no terminal: here with no
+      # network, so GitHub is unreachable and it must fail cleanly, with everything
+      # PandaCode printed in the journal and at the caller.
+      with subtest("headless sign-in through systemd-run: output in the journal, clean failure offline"):
+          rc, out = machine.execute(
+              "systemd-run --quiet --pipe --wait --collect panda-connect sign-in --device-name ci-box 2>&1"
+          )
+          print(out)
+          assert rc != 0, out
+          assert 'signing in as device "ci-box"' in out and "Sign-in failed" in out, out
+          journal = machine.succeed("journalctl -o cat -u pandacode-sign-in.service")
+          assert "Sign-in failed" in journal and "GitHub" in journal, journal
+          machine.fail(f"test -e {marker}")
+          assert machine.succeed("cat /var/lib/pandacode-host/sign-in-name").strip() == "ci-box"
+          assert status()["signedIn"] is False and status()["service"] == "inactive", status()
+          # --no-wait: returns at once, the unit goes on alone (the code would be in the journal).
+          out = machine.succeed("panda-connect sign-in --no-wait 2>&1")
+          assert "journalctl -u pandacode-sign-in" in out, out
+          machine.wait_until_succeeds(
+              "test $(journalctl -o cat -u pandacode-sign-in.service | grep -c 'Sign-in failed') -ge 2", timeout=180
+          )
+          machine.wait_until_fails("systemctl is-active pandacode-sign-in.service", timeout=60)
+          machine.fail(f"test -e {marker}")
 
       # A sign-in lost outside panda-connect (marker left behind, no PandaCode
       # sign-in): `serve` exits non-zero; the unit drops the marker instead of

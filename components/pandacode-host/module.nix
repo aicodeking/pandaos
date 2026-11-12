@@ -5,6 +5,11 @@
 # The host and every agent it starts run as the dedicated, non-wheel system
 # user `agent` (home /var/lib/agent), never as the owner: an agent that could
 # write the owner's dotfiles could capture their sudo password.
+#
+# Sign-in runs headless as pandacode-sign-in.service: the same user, environment
+# and sandbox as the host, so it reaches GitHub exactly as the host does, from a
+# terminal or not (ssh without a tty, systemd-run, a script). The device code and
+# every line PandaCode prints go to the journal: `journalctl -u pandacode-sign-in`.
 { config, lib, pkgs, options, ... }:
 let
   cfg = config.services.pandacode-host;
@@ -14,6 +19,11 @@ let
   # device name; `full-access` holds "on" or "off".
   fullAccessFile = "${stateDir}/full-access";
   notSignedIn = "This server is not signed in to PandaCode Connect";
+  # Written by `panda-connect sign-in` (root, 0644): the device name to sign in as.
+  signInName = "${stateDir}/sign-in-name";
+  # PandaCode v0.3.75 prints "Signed in as <login> — this server is now hosting for your devices."
+  # ponytail: matches PandaCode's message text; recheck on version bumps.
+  signedInText = "now hosting for your devices";
   agentHome = "/var/lib/agent";
 
   enter = pkgs.writeShellApplication {
@@ -39,6 +49,7 @@ let
     runtimeEnv = {
       HOST_USER = cfg.user;
       HOST_HOME = home;
+      SIGN_IN_NAME = signInName;
       DEFAULT_NAME = cfg.deviceName;
       MARKER = cfg.signedInMarker;
       FULL_ACCESS_FILE = fullAccessFile;
@@ -69,6 +80,73 @@ let
     done
     exit "$rc"
   '';
+
+  # pandacode-sign-in's main process: `serve --sign-in` prints the GitHub device
+  # code, waits for approval, then keeps serving. Stop at the success line; the
+  # unit's stop sweeps pandacode, Xvfb and WebKit helpers from its cgroup.
+  signInRun = pkgs.writeShellScript "pandacode-sign-in" ''
+    name=$(${pkgs.coreutils}/bin/head -n 1 ${signInName} 2>/dev/null || true)
+    name=''${name:-${lib.escapeShellArg cfg.deviceName}}
+    echo "pandacode-sign-in: signing in as device \"$name\"; open the GitHub link below and enter the code"
+    while IFS= read -r line; do
+      printf '%s\n' "$line"
+      case "$line" in
+        *${lib.escapeShellArg signedInText}*) exit 0 ;;
+      esac
+    done < <(${lib.getExe pkgs.xvfb-run} -a ${lib.getExe cfg.package} serve --sign-in --device-name "$name" 2>&1)
+    echo "pandacode-sign-in: sign-in did not complete"
+    # What this sandbox sees of GitHub, for the journal: DNS, TLS and HTTP in one line.
+    ${lib.getExe pkgs.curl} -sS -o /dev/null --max-time 15 -X POST \
+      -w 'pandacode-sign-in: curl https://github.com/login/device/code from here: HTTP %{http_code}, %{remote_ip}, %{time_total}s\n' \
+      https://github.com/login/device/code 2>&1 | ${pkgs.gnused}/bin/sed 's/^curl:/pandacode-sign-in: curl:/' || true
+    exit 1
+  '';
+  # Root, after the sign-in unit stops: on success record it and start the host.
+  signInDone = pkgs.writeShellScript "pandacode-sign-in-done" ''
+    if [ "$EXIT_STATUS" = 0 ] && [ "$SERVICE_RESULT" = success ]; then
+      name=$(${pkgs.coreutils}/bin/head -n 1 ${signInName} 2>/dev/null || true)
+      printf '%s\n' "''${name:-${cfg.deviceName}}" >${cfg.signedInMarker}
+      ${config.systemd.package}/bin/systemctl start --no-block pandacode-host.service
+      echo "pandacode-sign-in: signed in; pandacode-host.service started"
+    fi
+  '';
+
+  # The host's environment and sandbox, shared with pandacode-sign-in.
+  hostUnit = {
+    # Agent CLIs the host starts find their tools through the user's PATH
+    # (per-user profile, then system packages).
+    path = [ "/etc/profiles/per-user/${cfg.user}" "/run/current-system/sw" ];
+    environment = {
+      # docs/headless.md: secrets in a 0600 file, not a Secret Service.
+      PANDACODE_SECRETS_FILE = "1";
+    };
+    serviceConfig = {
+      User = cfg.user;
+      WorkingDirectory = home;
+      # Agents need the user's home (checkouts, CLI logins), the network,
+      # and exec of anything. appimageTools runs pandacode in a bubblewrap
+      # FHS env, which needs user namespaces. Left out on purpose:
+      # ProtectHome, RestrictNamespaces, PrivateUsers, CapabilityBoundingSet,
+      # MemoryDenyWriteExecute (Node/JIT), SystemCallFilter, and
+      # ProtectKernelTunables/ProtectKernelLogs/ProtectProc: their /proc
+      # overmounts make the kernel refuse bwrap's fresh /proc mount.
+      # ProtectControlGroups: /sys/fs/cgroup must stay writable for the
+      # delegated subtree (only it is owned by the user).
+      NoNewPrivileges = true; # no sudo from agents
+      ProtectSystem = "strict";
+      ReadWritePaths = [ home ];
+      PrivateTmp = true;
+      PrivateDevices = true;
+      ProtectKernelModules = true;
+      ProtectClock = true;
+      ProtectHostname = true;
+      RestrictRealtime = true;
+      RestrictSUIDSGID = true;
+      LockPersonality = true;
+      SystemCallArchitectures = "native";
+      RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+    };
+  };
 
   # A sign-in revoked or lost outside panda-connect makes `serve` exit
   # non-zero with this message. Drop the marker so the unit stops being
@@ -166,13 +244,7 @@ in
         wantedBy = [ "multi-user.target" ];
         wants = [ "network-online.target" ];
         after = [ "network-online.target" ];
-        # Agent CLIs the host starts find their tools through the user's PATH
-        # (per-user profile, then system packages).
-        path = [ "/etc/profiles/per-user/${cfg.user}" "/run/current-system/sw" ];
-        environment = {
-          # docs/headless.md: secrets in a 0600 file, not a Secret Service.
-          PANDACODE_SECRETS_FILE = "1";
-        };
+        inherit (hostUnit) path environment;
         unitConfig = {
           # Not signed in: skipped (inactive, not failed). panda-connect sign-in
           # writes the marker and starts the unit.
@@ -180,12 +252,10 @@ in
           # Never give up; the backoff below keeps retries slow.
           StartLimitIntervalSec = 0;
         };
-        serviceConfig = {
+        serviceConfig = hostUnit.serviceConfig // {
           # Restart= skips Condition*= checks, so after forgetLostSignIn drops
           # the marker only this stops the next automatic restart.
           ExecCondition = "${pkgs.coreutils}/bin/test -e ${cfg.signedInMarker}";
-          User = cfg.user;
-          WorkingDirectory = home;
           ExecStartPre = applyFullAccess;
           # Each agent task gets its own cgroup (see cgroup-enter.sh and the
           # agent CLI shims in agent-env, memory.oom.group=1, oom_score_adj
@@ -204,29 +274,24 @@ in
           RestartSec = 5;
           RestartSteps = 6;
           RestartMaxDelaySec = "5min";
+        };
+      };
 
-          # Agents need the user's home (checkouts, CLI logins), the network,
-          # and exec of anything. appimageTools runs pandacode in a bubblewrap
-          # FHS env, which needs user namespaces. Left out on purpose:
-          # ProtectHome, RestrictNamespaces, PrivateUsers, CapabilityBoundingSet,
-          # MemoryDenyWriteExecute (Node/JIT), SystemCallFilter, and
-          # ProtectKernelTunables/ProtectKernelLogs/ProtectProc: their /proc
-          # overmounts make the kernel refuse bwrap's fresh /proc mount.
-          # ProtectControlGroups: /sys/fs/cgroup must stay writable for the
-          # delegated subtree (only it is owned by the user).
-          NoNewPrivileges = true; # no sudo from agents
-          ProtectSystem = "strict";
-          ReadWritePaths = [ home ];
-          PrivateTmp = true;
-          PrivateDevices = true;
-          ProtectKernelModules = true;
-          ProtectClock = true;
-          ProtectHostname = true;
-          RestrictRealtime = true;
-          RestrictSUIDSGID = true;
-          LockPersonality = true;
-          SystemCallArchitectures = "native";
-          RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+      # `panda-connect sign-in` starts it; also usable alone:
+      #   echo NAME >${signInName}; systemctl start pandacode-sign-in; journalctl -fu pandacode-sign-in
+      systemd.services.pandacode-sign-in = {
+        description = "PandaCode Connect sign-in (GitHub device flow; the code is in the journal)";
+        inherit (hostUnit) path environment;
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
+        # One PandaCode per data dir: starting this stops the host.
+        conflicts = [ "pandacode-host.service" ];
+        serviceConfig = hostUnit.serviceConfig // {
+          ExecStart = signInRun;
+          ExecStopPost = "+${signInDone}";
+          # GitHub's device codes expire after 15 minutes.
+          RuntimeMaxSec = "20min";
+          SyslogIdentifier = "pandacode-sign-in";
         };
       };
     }

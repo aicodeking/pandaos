@@ -1,11 +1,11 @@
 # panda-connect: sign this box in to PandaCode Connect and manage the host.
-# Set by module.nix (runtimeEnv): HOST_USER HOST_HOME DEFAULT_NAME MARKER
-# FULL_ACCESS_FILE VERSION.
+# Set by module.nix (runtimeEnv): HOST_USER HOST_HOME SIGN_IN_NAME DEFAULT_NAME
+# MARKER FULL_ACCESS_FILE VERSION.
 unit=pandacode-host.service
 
 usage() {
   cat >&2 <<'EOF'
-usage: panda-connect sign-in [--device-name NAME]
+usage: panda-connect sign-in [--device-name NAME] [--no-wait]
        panda-connect sign-out
        panda-connect full-access on|off
        panda-connect restart
@@ -29,59 +29,54 @@ as_host() {
     xvfb-run -a pandacode "$@"
 }
 
+# The sign-in runs as pandacode-sign-in.service (module.nix): the host's user,
+# environment and sandbox, no terminal or display needed, every line in the
+# journal. Here: start it and follow its journal until it ends, or with
+# --no-wait return at once (read the code with `journalctl -u pandacode-sign-in`).
+sign_in_unit=pandacode-sign-in.service
 sign_in() {
   name=$DEFAULT_NAME
+  wait=yes
   while [ $# -gt 0 ]; do
     case "$1" in
       --device-name) [ $# -ge 2 ] || usage; name=$2; shift ;;
+      --no-wait) wait=no ;;
       *) usage ;;
     esac
     shift
   done
   [ -n "$name" ] || { echo "panda-connect: --device-name needs a name" >&2; exit 2; }
+  case "$name" in
+    *$'\n'*) echo "panda-connect: --device-name must be one line" >&2; exit 2 ;;
+  esac
 
-  # One instance per data dir.
-  systemctl stop "$unit" || true
-
-  dir=$(mktemp -d)
-  pid=
-  cleanup() {
-    if [ -n "$pid" ]; then kill -TERM -- "-$pid" 2>/dev/null || true; fi
-    rm -rf "$dir"
-  }
-  trap cleanup EXIT
-  mkfifo "$dir/out"
-
-  # `serve --sign-in` signs in and then keeps serving. Its own process group,
-  # so it can be stopped as a whole once it reports success; the service
-  # takes over from there.
-  setsid runuser -u "$HOST_USER" -- env HOME="$HOST_HOME" PANDACODE_SECRETS_FILE=1 \
-    xvfb-run -a pandacode serve --sign-in --device-name "$name" >"$dir/out" 2>&1 &
-  pid=$!
-
-  ok=no
-  while IFS= read -r line; do
-    printf '%s\n' "$line"
-    # PandaCode v0.3.75 prints "Signed in as <login>; this server is now hosting for your devices."
-    case "$line" in
-      *"now hosting for your devices"*) ok=yes; break ;;
-    esac
-  done <"$dir/out"
-
-  if [ "$ok" != yes ]; then
-    rc=0
-    wait "$pid" || rc=$?
-    pid=
-    echo "panda-connect: sign-in did not complete (pandacode exited $rc)" >&2
-    exit 1
+  printf '%s\n' "$name" >"$SIGN_IN_NAME"
+  since=$(date +%s)
+  # A sign-in already waiting for approval is replaced by this one.
+  systemctl stop "$sign_in_unit" 2>/dev/null || true
+  # Conflicts= stops pandacode-host (one instance per data dir). Returns once
+  # the process runs (Type=simple), so is-active below sees it.
+  systemctl start "$sign_in_unit"
+  if [ "$wait" = no ]; then
+    echo "panda-connect: signing in as \"$name\" in the background; the code: journalctl -u $sign_in_unit -o cat"
+    return 0
   fi
 
-  kill -TERM -- "-$pid" 2>/dev/null || true
-  wait "$pid" || true
-  pid=
-  printf '%s\n' "$name" >"$MARKER"
-  systemctl start "$unit"
-  echo "panda-connect: signed in as device \"$name\"; $unit started."
+  journalctl -f -q -o cat -u "$sign_in_unit" --since "@$since" &
+  follow=$!
+  trap 'kill "$follow" 2>/dev/null || true' EXIT
+  # activating/active while it runs; inactive or failed once it ended.
+  while state=$(systemctl is-active "$sign_in_unit"); [ "$state" = active ] || [ "$state" = activating ] || [ "$state" = deactivating ]; do
+    sleep 1
+  done
+  sleep 1 # the last lines
+  kill "$follow" 2>/dev/null || true
+  if [ -e "$MARKER" ] && [ "$(systemctl show -P Result "$sign_in_unit")" = success ]; then
+    echo "panda-connect: signed in as device \"$(head -n 1 "$MARKER")\"; $unit started."
+    return 0
+  fi
+  echo "panda-connect: sign-in did not complete ($(systemctl show -P Result "$sign_in_unit")); see journalctl -u $sign_in_unit" >&2
+  exit 1
 }
 
 sign_out() {
