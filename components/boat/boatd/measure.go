@@ -55,6 +55,12 @@ func (d diskMeasure) run(dir string) (string, error) {
 		return "", fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
+	// The whole probe first, untimed: the timed write phase covers only what the disk
+	// writes in runFor, and the read phases would hit EOF past it on a slow or busy
+	// disk (boat-e2e 43295162352: right behind an 8 GiB memory dump's writeback).
+	if err := d.fill(f); err != nil {
+		return "", fmt.Errorf("fill %s: %w", path, err)
+	}
 	wbps, err := d.phase(f, d.seqQD, d.seqBS, true, false)
 	if err != nil {
 		return "", fmt.Errorf("sequential write: %w", err)
@@ -74,6 +80,24 @@ func (d diskMeasure) run(dir string) (string, error) {
 	r, w := int64(riops/float64(d.randBS)), int64(wiops/float64(d.randBS))
 	return fmt.Sprintf("rbps=%d rseqiops=%d rrandiops=%d wbps=%d wseqiops=%d wrandiops=%d",
 		int64(rbps), r, r, int64(wbps), w, w), nil
+}
+
+// fill writes the whole probe with incompressible data and syncs it.
+func (d diskMeasure) fill(f *os.File) error {
+	buf, err := alignedBuf(int(d.seqBS))
+	if err != nil {
+		return err
+	}
+	defer freeBuf(buf)
+	for i := range buf {
+		buf[i] = byte(rand.IntN(256))
+	}
+	for off := int64(0); off+d.seqBS <= d.size; off += d.seqBS {
+		if _, err := f.WriteAt(buf, off); err != nil {
+			return err
+		}
+	}
+	return f.Sync()
 }
 
 // phase runs qd workers for runFor and returns bytes/s. Writes end with an fdatasync,
@@ -150,7 +174,7 @@ func measureDisk(c Config) error {
 	if err := os.MkdirAll(c.StateDir, 0o755); err != nil {
 		return err
 	}
-	log.Printf("measure-disk: %s, about 25 s of direct I/O on a 1 GiB file", c.StateDir)
+	log.Printf("measure-disk: %s, a 1 GiB file written once, then about 20 s of direct I/O on it", c.StateDir)
 	model, err := defaultMeasure().run(c.StateDir)
 	if err != nil {
 		return err

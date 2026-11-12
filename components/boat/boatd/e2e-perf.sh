@@ -17,7 +17,13 @@
 # IOPS move by a factor of 5 between runs. Worst green value -> gate:
 PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-18}    # 5.91-9.73 s (3.8 GiB to write) -> 18 (1.85x)
 PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-5}             # 0.75-2.48 s -> 5; red runs saw 3.18 (43151531250) and 4.07: the restore reads the mem file behind the dump's 3.8 GiB writeback
-PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-3}             # right after that snapshot: 1.10-2.03 s -> 3 (1.5x)
+# Fork right after that snapshot, behind the same writeback as PERF_FROM_MAX. 3 s (1.5x
+# 1.10-2.03 s, green runs only) failed runs on unchanged code: 1.77 then 3.12 s
+# (43245323693, 43260234358: no boatd or guest change between), 1.63 then 3.20 s (two
+# attempts of 43295162352). 27 runs 2026-11-10..12, red ones too: 1.02-3.20 s, once
+# 5.18 (43180397483). Not slower since 9ab2c6f/59500a6: "fork, base clean" (dump on
+# disk first) is 1.25-2.73 s before, 1.12-2.88 s after. 3.20 s x 1.5 -> 5, as PERF_FROM_MAX.
+PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-5}
 PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-13}    # 4.93-9.44 s; 10 x 4 vCPU on 4 host CPUs -> 13 (1.4x)
 PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 527-530 MiB -> 700
 PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 259-280 MiB -> 450
@@ -189,7 +195,7 @@ perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s
   t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"f$1\"}" | jq -r .id); fork_s=$(secs "$t" "$(now)")
   [ "$(vmf "$f" agent_ready)" = true ] || fail "fork not ready"
   [ "$(bx "$f" 'ls -l /dev/shm/d/dirty | wc -l')" = 1 ] || fail "fork lost tmpfs"
-  echo "$1: fork ${fork_s}s: $(last_snap_log)"
+  echo "$1: fork ${fork_s}s: $(last_snap_log)$(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
   perf_del "$f"
   sudo sync # the same fork with the first dump on disk: what a fork costs without a flush to wait for
   t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"g$1\"}" | jq -r .id); fork2_s=$(secs "$t" "$(now)")

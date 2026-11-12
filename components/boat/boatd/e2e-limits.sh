@@ -337,7 +337,8 @@ sudo rm -f "$STATE/iocost-model"
 if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | del(.ioCostModel) | .warmPool = true" ut0)" 2>&1); then fail "untrustedTenants accepted warmPool"; fi
 grep -q "no ioCostModel, disk shared under io.max ceilings only; run \`boatd -measure-disk -config $WORK/boatd-ut0.json\`" <<<"$out" || fail "no-model fallback does not name the command: $out"
 grep -q 'warmPool' <<<"$out" || fail "no-model run refused for something else: $out"
-model=$(sudo timeout 120 "$WORK/bin/boatd" -measure-disk -config "$WORK/boatd-ut0.json" 2>/dev/null) || fail "boatd -measure-disk failed"
+model=$(sudo timeout 120 "$WORK/bin/boatd" -measure-disk -config "$WORK/boatd-ut0.json" 2>"$WORK/tmp/measure.err") ||
+  fail "boatd -measure-disk failed: $(tail -3 "$WORK/tmp/measure.err"); $(df -h "$STATE" | tail -1)"
 grep -qE '^rbps=[1-9][0-9]* rseqiops=[1-9][0-9]* rrandiops=[1-9][0-9]* wbps=[1-9][0-9]* wseqiops=[1-9][0-9]* wrandiops=[1-9][0-9]*$' <<<"$model" || fail "measured model: $model"
 [ "$(sudo cat "$STATE/iocost-model")" = "$model" ] || fail "measure-disk did not store its model"
 echo "iocost model of the state disk: $model"

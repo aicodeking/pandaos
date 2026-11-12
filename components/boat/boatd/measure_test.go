@@ -67,3 +67,15 @@ func TestUntrustedIOCostModelFromStateDir(t *testing.T) {
 		t.Fatalf("malformed stored model: %q %v", got.IOCostModel, err)
 	}
 }
+
+// A disk too slow (or too busy) to write the whole probe in the sequential-write
+// phase must not fail the read phases at EOF: boat-e2e 43295162352 attempt 1 ran
+// -measure-disk right behind an 8 GiB memory dump's writeback.
+func TestMeasureDiskSlowWrite(t *testing.T) {
+	d := defaultMeasure()
+	d.size, d.runFor, d.seqBS = 64<<20, time.Millisecond, 1<<20
+	d.openDir = func(p string) (*os.File, error) { return os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0o600) }
+	if m, err := d.run(t.TempDir()); err != nil || !reIOCostModel.MatchString(m) {
+		t.Fatalf("model %q, %v", m, err)
+	}
+}
