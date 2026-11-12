@@ -4,9 +4,9 @@
   "note": "Vendor-published (boat.dev was formerly Ascii Box; its row is 'Ascii Box (bare metal)'). Despite that label, 27.67 is NOT a bare-metal host score: run.json's observedSpecs for that row report a 4 vCPU / 7.76 GiB KVM guest (virtualization kvm, manufacturer QEMU, Q35, SeaBIOS, detectedIsolation vm) with cpuModel AMD Ryzen 9 9950X, egress OVH Lille. It is a sandbox VM on a dedicated host. The host itself was not measured. boat.dev's '1,000 runs in 36 s' is 1000 / 27.67 runs/s. Their run: PTS pts/node-web-tooling-1.0.1 with DynamicRunCount, median of 21 trials on fresh machines; the Node version is not stated.",
   "metrics": {
     "node_runs_s": {"value": 27.67, "note": "p50 of 21 trials, 95% CI 26.01-28.34; p95 28.72"},
-    "pts_rand_read_iops": {"value": 433500, "note": "pts/fio-2.1.0: 4KB rand read, O_DIRECT, libaio, 1 job, iodepth 64, 1 GiB, 60 s. Same job here, but a loop file on a shared runner cannot speak for NVMe"},
-    "pts_rand_write_iops": {"value": 412500, "note": "pts/fio-2.1.0: 4KB rand write, same job. A loop file on a shared runner cannot speak for NVMe"},
-    "pts_seq_write_mibps": {"value": 5838.5, "note": "pts/fio-2.1.0: 1MB seq write, same job. PTS labels this MB/s, but it equals their 1MB IOPS (5837), so it is MiB/s. A loop file on a shared runner cannot speak for NVMe"}
+    "pts_rand_read_iops": {"value": 433500, "note": "pts/fio-2.1.0: 4KB rand read, O_DIRECT, libaio, 1 job, iodepth 64, 1 GiB, 60 s. Same job here; PandaOS's disk, filesystem and cache mode differ (see the report's caveats), so its numbers cannot speak for boat.dev's NVMe"},
+    "pts_rand_write_iops": {"value": 412500, "note": "pts/fio-2.1.0: 4KB rand write, same job. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe"},
+    "pts_seq_write_mibps": {"value": 5838.5, "note": "pts/fio-2.1.0: 1MB seq write, same job. PTS labels this MB/s, but it equals their 1MB IOPS (5837), so it is MiB/s. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe"}
   },
   "rows": [
     {"provider": "Ascii Box (bare metal), now boat.dev", "runs_s": 27.67, "cpu": "AMD Ryzen 9 9950X 16-Core Processor"},
@@ -24,6 +24,7 @@
     "reference_cpu": "AMD Ryzen 9 9950X",
     "same_benchmark": {"runner": 10.3, "reference": 28.8, "source": "https://openbenchmarking.org/test/pts/node-web-tooling, per-CPU runs/s averages, retrieved 2026-11-03: 'AMD EPYC 7763 64-Core' 10.3 +/- 0.4 (4 public results), 'AMD Ryzen 9 9950X 16-Core' 28.8 +/- 2.6 (30 public results)"},
     "passmark_single_thread": {"runner": 2518, "reference": 4727, "source": "https://www.cpubenchmark.net/compare/4207vs6211/AMD-EPYC-7763-vs-AMD-Ryzen-9-9950X, retrieved 2026-11-03"},
-    "limits": "the vendor's repo has no EPYC 7763 row, so the CPU ratios come from public data with mixed Node versions, setups and sample sizes (the 7763 row has 4 results). The VM/host ratio was measured on a shared, nested Azure VM and may not transfer to a dedicated host. It says nothing about memory, disk or network hardware."
+    "cpu_ratio_limits": "the vendor's repo has no EPYC 7763 row, so the CPU ratios come from public data with mixed Node versions, setups and sample sizes (the 7763 row has 4 results).",
+    "limits": "None of this says anything about memory, disk or network hardware."
   }
 }

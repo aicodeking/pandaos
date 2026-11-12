@@ -21,10 +21,13 @@ Measured numbers below come from this harness (`bench/boatbench`). Published num
 | Repeats (fresh VMs) | 3 |
 | Run started (UTC) | 2026-11-11T11:00:05Z |
 | Run URL | - |
+| Source commit (boat / PandaOS) | not recorded |
 
 ## Measured results
 
 median [IQR q1-q3] n=samples; the verdict compares medians and notes overlapping IQRs.
+
+**boat.dev was not measured by this harness (no `BOATDEV_API_KEY`), so no row has a measured-vs-measured verdict.** The only boat.dev numbers are the vendor's published claims (next section), and its 27.67 runs/s is one solo VM, not a fully packed server.
 
 | Metric | Unit | Better | PandaOS (measured) | boat.dev (measured) | PandaOS / boat.dev | Verdict |
 |---|---|---|---|---|---|---|
@@ -56,9 +59,9 @@ Source: https://github.com/AnicetNgrt/hpc-sandbox-benchmarks/tree/ed8ec45a1ee0f5
 | Metric | boat.dev PUBLISHED | PandaOS MEASURED | boat.dev MEASURED (this harness) | Note |
 |---|---|---|---|---|
 | node_runs_s (runs/s) | 27.67 | - | - | p50 of 21 trials, 95% CI 26.01-28.34; p95 28.72 |
-| pts_rand_read_iops (IOPS) | 433,500 | - | - | pts/fio-2.1.0: 4KB rand read, O_DIRECT, libaio, 1 job, iodepth 64, 1 GiB, 60 s. Same job here, but a loop file on a shared runner cannot speak for NVMe |
-| pts_rand_write_iops (IOPS) | 412,500 | - | - | pts/fio-2.1.0: 4KB rand write, same job. A loop file on a shared runner cannot speak for NVMe |
-| pts_seq_write_mibps (MiB/s) | 5,838 | - | - | pts/fio-2.1.0: 1MB seq write, same job. PTS labels this MB/s, but it equals their 1MB IOPS (5837), so it is MiB/s. A loop file on a shared runner cannot speak for NVMe |
+| pts_rand_read_iops (IOPS) | 433,500 | - | - | pts/fio-2.1.0: 4KB rand read, O_DIRECT, libaio, 1 job, iodepth 64, 1 GiB, 60 s. Same job here; PandaOS's disk, filesystem and cache mode differ (see the report's caveats), so its numbers cannot speak for boat.dev's NVMe |
+| pts_rand_write_iops (IOPS) | 412,500 | - | - | pts/fio-2.1.0: 4KB rand write, same job. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe |
+| pts_seq_write_mibps (MiB/s) | 5,838 | - | - | pts/fio-2.1.0: 1MB seq write, same job. PTS labels this MB/s, but it equals their 1MB IOPS (5837), so it is MiB/s. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe |
 
 The vendor's whole table (VENDOR-MEASURED, not by this harness). The CPU is what each guest reported in the vendor's run.json, so these rows differ in hardware as well as software.
 
@@ -82,19 +85,18 @@ Cost = side's price per hour (prices.json) x time. A per-run cost only means som
 
 | Side | USD/hour | The price buys | Speed measured on | USD per 1000 Node loop runs | USD per cold npm ci |
 |---|---|---|---|---|---|
-| pandaos | 0.0279 | AMD Ryzen 9 7950X3D (Zen 4), Hetzner AX102 | AMD EPYC | - | - |
+| pandaos | 0.0233 | AMD Ryzen 7 PRO 8700GE | AMD EPYC (guest); harness host AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16 | - | - |
 | boatdev | 0.0360 | AMD Ryzen 9 9950X (Zen 5), as boat.dev's guest reported it in the vendor's benchmark run | - | - | - |
 
-CPU-consistent figure: boat.dev's price with boat.dev's own published speed on the CPU it sells (27.67 runs/s, vendor-measured, AMD Ryzen 9 9950X 16-Core Processor): **0.000361 USD per 1000 runs**. PandaOS has no CPU-consistent figure yet: its price is an AX102 (Ryzen 9 7950X3D, Zen 4), and nobody has run boatbench on one. The 9950X projection below is not that CPU either.
+CPU-consistent figure: boat.dev's price with boat.dev's own published speed on the CPU it sells (27.67 runs/s, vendor-measured, AMD Ryzen 9 9950X 16-Core Processor): **0.000361 USD per 1000 runs**. PandaOS's price here is AMD Ryzen 7 PRO 8700GE: its per-run cost is CPU-consistent only where the speed above was measured on that CPU (the density section says which).
 
 ## Caveats
 
-- The PandaOS numbers from CI come from a GitHub-hosted runner, NOT a dedicated server: shared 4 vCPU, KVM exposed to the runner VM (Firecracker runs nested inside Azure's hypervisor), US region. boat.dev runs in the EU (Germany/Finland/France). Comparisons are indicative until `run-on-server.sh` runs on the owner's dedicated server.
-- On the runner, each PandaOS VM (4 vCPU / 8 GiB) gets the whole 4-vCPU host, and the 10-VM concurrency test oversubscribes it (boatd memOvercommit/cpuOvercommit raised just so it fits). boat.dev places VMs on its fleet.
+- The PandaOS numbers come from a dedicated server, with the harness on the same box talking to its local API. The server, its disks and its store are the harness-declared host in the table above. boat.dev runs in the EU (Germany/Finland/France).
 - Lifecycle verbs differ in meaning: PandaOS stop/resume and fork keep guest memory (Firecracker snapshots); boat.dev stop archives the disk and resume/fork restore it in the background after `ready` (docs.boat.dev/readiness.md). Both are measured to the first successful `true` exec.
 - Snapshot: PandaOS `POST /v1/vms/{id}/snapshots` vs boat.dev saved snapshot (`POST /saved-snapshots`, polled to `ready`). New-from-snapshot uses each one's create-from-snapshot.
 - Network numbers mix the VM's egress path with the distance from each provider's region to the CDN edge.
-- Raw lifecycle latencies include the API round trip from the harness host to the provider: the CI PandaOS job talks to localhost, the boat.dev job talks to boat.dev over the internet from a US runner. The NET rows subtract k x that side's measured API round-trip p50, k = the fewest sequential API calls the timing contains (drivers.py ROUND_TRIPS: 2 for create/fork/resume/from-snapshot, stop and snapshot 1 on PandaOS and 2 on boat.dev, which polls them).
-- Disk numbers on the runner come from a btrfs loop file on a shared cloud disk. They cannot speak for NVMe, including boat.dev's published numbers, even when the fio job is the same.
+- Raw lifecycle latencies include the API round trip from the harness host to the provider: the PandaOS harness talks to the API on the same box, the boat.dev side (if measured) talks to boat.dev over the internet. The NET rows subtract k x that side's measured API round-trip p50, k = the fewest sequential API calls the timing contains (drivers.py ROUND_TRIPS: 2 for create/fork/resume/from-snapshot, stop and snapshot 1 on PandaOS and 2 on boat.dev, which polls them).
+- Disk numbers come from this server's boat store as declared above. boat.dev's published disk numbers come from other NVMe drives with an unpublished fio target and cache mode, so even the same fio job is not a like-for-like disk comparison.
 - Small samples (default 5 fresh VMs per side). The table shows median and IQR; overlapping IQRs mean no clear winner.
 - `warmPool` is ON in this run, and it is off by default. VMs from one template share boot-time randomness, including the ASLR offsets of already-running processes, across tenants (components/boat/PROTOCOL.md). Do not read warm numbers as the default configuration.

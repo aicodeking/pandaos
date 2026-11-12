@@ -86,7 +86,8 @@ class Render(unittest.TestCase):
         self.assertIn("PandaOS wins", md)  # create 2 s vs 6 s
         self.assertIn("boat.dev PUBLISHED", md)
         self.assertIn("27.67", md)
-        self.assertIn("NOT a dedicated server", md)
+        self.assertIn("from a dedicated server", md)  # no CI run URL / runner CPU recorded
+        self.assertNotIn("no `BOATDEV_API_KEY`", md)  # boat.dev was measured here
         self.assertIn("runs/s only", md)  # no prices
         self.assertIn("pandaos host", md)
 
@@ -179,6 +180,37 @@ class Normalization(unittest.TestCase):
         self.assertEqual(pub["rows"][0]["runs_s"], pub["metrics"]["node_runs_s"]["value"])
 
 
+class Context(unittest.TestCase):
+    def test_server_results_get_server_caveats_not_runner_ones(self):
+        r = result("pandaos", [[10]], [1])
+        r["host"]["desc"] = "Hetzner AX42, native btrfs"
+        r["source_commit"] = "abc1234"
+        md = report.render([r], None, report.load_published())
+        caveats = md.split("## Caveats")[1]
+        for wrong in ("Azure", "GitHub-hosted runner", "loop file", "US runner"):
+            self.assertNotIn(wrong, caveats)
+        self.assertIn("from a dedicated server", caveats)
+        self.assertIn("| Source commit (boat / PandaOS) | abc1234 |", md)
+        self.assertIn("no `BOATDEV_API_KEY`", md)
+
+    def test_runner_results_keep_runner_caveats(self):
+        r = result("pandaos", [[10]], [1])
+        r["run_url"] = "https://github.com/o/r/actions/runs/1"
+        self.assertIn("Azure", report.render([r]).split("## Caveats")[1])
+
+    def test_source_commit_from_env_else_unknown(self):
+        env = dict(os.environ)
+        try:
+            os.environ.pop("GITHUB_SHA", None)
+            os.environ["BOATBENCH_SOURCE_COMMIT"] = "deadbee"
+            self.assertEqual(boatbench.source_commit(), "deadbee")
+            del os.environ["BOATBENCH_SOURCE_COMMIT"]
+            self.assertTrue(boatbench.source_commit())  # nixos-version's revision, or "unknown"
+        finally:
+            os.environ.clear()
+            os.environ.update(env)
+
+
 class Options(unittest.TestCase):
     def test_warm_pool_is_labelled_with_the_aslr_cost(self):
         warm = result("pandaos", [[10]], [1])
@@ -190,7 +222,7 @@ class Options(unittest.TestCase):
 
     def test_published_disk_uses_the_pts_job_and_keeps_the_nvme_label(self):
         for key in ("pts_rand_read_iops", "pts_rand_write_iops", "pts_seq_write_mibps"):
-            self.assertIn("cannot speak for NVMe", report.load_published()["metrics"][key]["note"])
+            self.assertIn("cannot speak for boat.dev's NVMe", report.load_published()["metrics"][key]["note"])
         for flag in ("--iodepth=64", "--size=1g", "--startdelay=20", "--ramp_time=5", "--runtime=60"):
             self.assertIn(flag, W.DISK)
         r = result("pandaos", [[10]], [1])

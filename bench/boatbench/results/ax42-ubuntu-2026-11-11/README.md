@@ -61,6 +61,11 @@ with the same build and the same config.
 ```sh
 cd bench/boatbench/results/ax42-ubuntu-2026-11-11
 python3 ../../boatbench.py presets */results-pandaos-*.json                       # per-preset table
-python3 ../../boatbench.py report trusted/results-*.json --server ax42 --mode trusted
-python3 ../../boatbench.py report untrusted/results-*.json --server ax42 --mode untrusted
+for d in trusted untrusted trusted-warm trusted-writeback; do
+  python3 ../../boatbench.py report $d/results-*.json --server ax42 --out $d/report.md
+done
 ```
+
+`sh ../regen.sh` runs exactly this (and the PandaOS-install reports); `git diff` is empty afterwards. These results
+predate boatbench's `source_commit` field, so the reports print "not recorded"; the source was main at `bcf0cda`
+plus `stack.sh` changes (Code, above).

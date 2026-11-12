@@ -11,7 +11,15 @@ printed.
   `/nix/store/q5c6fb4a…-nixos-system-pandaos-26.05.20261026.718f670` until 05:39Z. At 05:39Z another worker switched to
   `drrwpj74…` (same version string). That switch restarted boat-api and boat-images but not boatd. boatd is
   `/nix/store/fx067krq…-boatd-0.1.0`, with Firecracker 1.17.0. The install records no source commit
-  (`nixos-version --configuration-revision`: unknown).
+  (`nixos-version --configuration-revision`: unknown), and these result files predate boatbench's `source_commit`
+  field, so the report prints "not recorded".
+- **Source commit range (inferred from timestamps, not recorded).** The install's state directories date from
+  2026-11-11 ~12:19Z, so boatd and the first boat-api came from PandaOS main no earlier than `228edd0` (11:43Z) and,
+  if built from a clean main checkout (not verified), no later than `4c5e0aa` (23:19Z, the next commit). The 05:39Z
+  switch built a tree at or after `8e9ac7a` (05:22Z), possibly with uncommitted work. **The system was switched
+  mid-run:** the a/d pairs (04:51–05:26Z) ran on the first generation; the lifecycle (b, c, e, f) and density (g)
+  reruns from 06:28Z used the switched boat-api with the unswitched boatd; the host density baseline started 05:39:36Z,
+  right after the switch. `nixpkgs` was `718f670` throughout.
 - **Store:** `/var/lib/boat` is btrfs (`compress=zstd:1,discard=async`) directly on **one** NVMe (nvme0n1, no RAID). The
   OS is on the other NVMe.
 - **boatd config:** `/etc/boat/boatd.json` as installed. It sets no `diskCache`, `memOvercommit`, `cpuOvercommit`,
@@ -59,7 +67,7 @@ BOATBENCH_DENSITY_LEVELS=1,4,8,11 boatbench.py run --driver host --repeats 1 --o
 | `performance/` | 2af7f9, 16dd93, 945166, 555bc1 | governor A/B: host a, VM a, VM g (1, 4, 8), host g (1, 4, 8, 11) |
 | `contaminated/` | 52f3a9 (bcef), 3ccb41 (g) | **Do not use.** See below |
 | `logs/` | `run.log`, `run2.log`, `builder-cpu.log` | harness logs; CPU use of the other VM |
-| | `report-powersave.md`, `report-performance.md` | `boatbench.py report <dir>/results-*.json --server ax42` |
+| | `report-powersave.md`, `report-performance.md` | `boatbench.py report <dir>/results-*.json --server ax42`; `sh ../regen.sh` regenerates every AX42 report byte for byte |
 
 **Why two runs are in `contaminated/`.** The server is shared. At 05:26Z another worker started an `xlarge` VM
 (16 vCPU / 32 GiB) in the same team. From 05:26 to 05:36Z it used about 2.4 CPUs on average (`logs/builder-cpu.log`).

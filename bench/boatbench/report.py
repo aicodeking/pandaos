@@ -44,29 +44,59 @@ _BASE = {k: (label, unit, hib) for k, label, unit, hib in METRICS}
 METRICS = METRICS + [(k + "_net", _BASE[k][0] + ", NET of API round trips (raw - k x baseline p50)", _BASE[k][1],
                       _BASE[k][2]) for k in NET_KEYS]
 
-CAVEATS = [
-    "The PandaOS numbers from CI come from a GitHub-hosted runner, NOT a dedicated server: shared 4 vCPU, "
-    "KVM exposed to the runner VM (Firecracker runs nested inside Azure's hypervisor), US region. "
-    "boat.dev runs in the EU (Germany/Finland/France). Comparisons are indicative until "
-    "`run-on-server.sh` runs on the owner's dedicated server.",
-    "On the runner, each PandaOS VM (4 vCPU / 8 GiB) gets the whole 4-vCPU host, and the 10-VM concurrency test "
-    "oversubscribes it (boatd memOvercommit/cpuOvercommit raised just so it fits). boat.dev places VMs on its fleet.",
+RUNNER_CPU = "EPYC 7763"  # GitHub's ubuntu-latest runners; published.json cpu_scaling.runner_cpu
+
+COMMON_CAVEATS = [
     "Lifecycle verbs differ in meaning: PandaOS stop/resume and fork keep guest memory (Firecracker snapshots); "
     "boat.dev stop archives the disk and resume/fork restore it in the background after `ready` "
     "(docs.boat.dev/readiness.md). Both are measured to the first successful `true` exec.",
     "Snapshot: PandaOS `POST /v1/vms/{id}/snapshots` vs boat.dev saved snapshot (`POST /saved-snapshots`, polled "
     "to `ready`). New-from-snapshot uses each one's create-from-snapshot.",
     "Network numbers mix the VM's egress path with the distance from each provider's region to the CDN edge.",
-    "Raw lifecycle latencies include the API round trip from the harness host to the provider: the CI PandaOS job "
-    "talks to localhost, the boat.dev job talks to boat.dev over the internet from a US runner. The NET rows "
-    "subtract k x that side's measured API round-trip p50, k = the fewest sequential API calls the timing contains "
-    "(drivers.py ROUND_TRIPS: 2 for create/fork/resume/from-snapshot, stop and snapshot 1 on PandaOS and 2 on "
-    "boat.dev, which polls them).",
+]
+NET_CAVEAT = ("Raw lifecycle latencies include the API round trip from the harness host to the provider: {where}. "
+              "The NET rows subtract k x that side's measured API round-trip p50, k = the fewest sequential API calls "
+              "the timing contains (drivers.py ROUND_TRIPS: 2 for create/fork/resume/from-snapshot, stop and snapshot "
+              "1 on PandaOS and 2 on boat.dev, which polls them).")
+SAMPLE_CAVEAT = ("Small samples (default 5 fresh VMs per side). The table shows median and IQR; overlapping IQRs mean "
+                 "no clear winner.")
+RUNNER_CAVEATS = [
+    "The PandaOS numbers from CI come from a GitHub-hosted runner, NOT a dedicated server: shared 4 vCPU, "
+    "KVM exposed to the runner VM (Firecracker runs nested inside Azure's hypervisor), US region. "
+    "boat.dev runs in the EU (Germany/Finland/France). Comparisons are indicative until "
+    "`run-on-server.sh` runs on the owner's dedicated server.",
+    "On the runner, each PandaOS VM (4 vCPU / 8 GiB) gets the whole 4-vCPU host, and the 10-VM concurrency test "
+    "oversubscribes it (boatd memOvercommit/cpuOvercommit raised just so it fits). boat.dev places VMs on its fleet.",
+] + COMMON_CAVEATS + [
+    NET_CAVEAT.format(where="the CI PandaOS job talks to localhost, the boat.dev job talks to boat.dev over the "
+                            "internet from a US runner"),
     "Disk numbers on the runner come from a btrfs loop file on a shared cloud disk. They cannot speak for NVMe, "
     "including boat.dev's published numbers, even when the fio job is the same.",
-    "Small samples (default 5 fresh VMs per side). The table shows median and IQR; overlapping IQRs mean "
-    "no clear winner.",
+    SAMPLE_CAVEAT,
 ]
+SERVER_CAVEATS = [
+    "The PandaOS numbers come from a dedicated server, with the harness on the same box talking to its local API. "
+    "The server, its disks and its store are the harness-declared host in the table above. boat.dev runs in the EU "
+    "(Germany/Finland/France).",
+] + COMMON_CAVEATS + [
+    NET_CAVEAT.format(where="the PandaOS harness talks to the API on the same box, the boat.dev side (if measured) "
+                            "talks to boat.dev over the internet"),
+    "Disk numbers come from this server's boat store as declared above. boat.dev's published disk numbers come "
+    "from other NVMe drives with an unpublished fio target and cache mode, so even the same fio job is not a "
+    "like-for-like disk comparison.",
+    SAMPLE_CAVEAT,
+]
+
+
+def on_runner(results):
+    """True when a result came from a GitHub-hosted runner (CI run URL or the runner CPU), not a dedicated server."""
+    return any("/actions/runs/" in str(r.get("run_url") or "") or RUNNER_CPU in str(r.get("client", {}).get("cpu_model"))
+               for r in results)
+
+
+def caveats(results):
+    return RUNNER_CAVEATS if on_runner(results) else SERVER_CAVEATS
+
 
 WRITE_METRICS = ("seq_write_mbps", "rand_write_iops", "pts_rand_write_iops", "pts_seq_write_mibps",
                  "fsync_rand_write_iops", "seq_write_endfsync_mbps")
@@ -275,7 +305,7 @@ def auto_caveats(res):
             if p and (p.get("nproc") != 4 or not p.get("mem_mib") or abs(p["mem_mib"] - 8192) > 0.1 * 8192):
                 out.append(f"{side}: a VM reported {p.get('nproc')} vCPU / {p.get('mem_mib')} MiB, not 4 / ~8192.")
                 break
-    tools = {s: {(rep.get("disk_tool") or "-") for rep in r.get("repeats", [])} for s, r in res.items()}
+    tools = {s: sorted({(rep.get("disk_tool") or "-") for rep in r.get("repeats", [])}) for s, r in res.items()}
     if len({t for ts in tools.values() for t in ts}) > 1:
         out.append(f"Disk tool differs between sides: {tools}. dd numbers are not comparable with fio.")
     for side, r in res.items():
@@ -312,16 +342,18 @@ def side_table(res):
         ("Repeats (fresh VMs)", lambda r: str(len(r.get("repeats", [])))),
         ("Run started (UTC)", lambda r: r.get("started", "-")),
         ("Run URL", lambda r: r.get("run_url") or "-"),
+        ("Source commit (boat / PandaOS)", lambda r: r.get("source_commit") or "not recorded"),
     ]
     for label, f in rows:
         lines.append(f"| {label} | " + " | ".join(str(f(r)) for r in res.values()) + " |")
     return lines
 
 
-def host_vs_vm(host, vm):
+def host_vs_vm(host, vm, runner=True):
     """Markdown table and the node VM / host ratio (None if not measured on both)."""
     labels = {k: (label, unit) for k, label, unit, _ in METRICS}
-    lines = ["| Metric | Unit | Runner host, no VM (measured) | PandaOS VM (measured) | VM / host |", "|---|---|---|---|---|"]
+    lines = [f"| Metric | Unit | {'Runner host' if runner else 'Host'}, no VM (measured) | PandaOS VM (measured) | VM / host |",
+             "|---|---|---|---|---|"]
     node = None
     for key in HOST_VM_METRICS:
         h, v = summarize(samples(host, key)), summarize(samples(vm, key))
@@ -349,12 +381,14 @@ def projections(host_node, overhead, runner_cpu, published):
     return rows
 
 
-def normalization(host_results, vm, published):
+def normalization(host_results, vm, published, runner=True):
     host = merged(host_results)
     desc = host.get("host", {}).get("desc", "-")
-    table, overhead = host_vs_vm(host, vm)
-    out = ["", "## Runner host vs PandaOS VM (MEASURED, same runner)", "",
-           f"Identical scripts. Host: {desc}. Disk: both sides write NOCOW files on the same btrfs loop store. "
+    table, overhead = host_vs_vm(host, vm, runner)
+    out = ["", "## Runner host vs PandaOS VM (MEASURED, same runner)" if runner else
+           "## Host vs PandaOS VM (MEASURED, same host)", "",
+           f"Identical scripts. Host: {desc}. Disk: both sides write to the same btrfs store "
+           f"({'a loop file' if runner else 'as declared'}); the host side's files are NOCOW. "
            "The VM adds its guest ext4, virtio and Firecracker's I/O engine, and its O_DIRECT stops at the "
            "host page cache, so a ratio above 1 does not mean a VM beats the host.", ""] + table
     host_node = summarize(samples(host, "node_runs_s"))
@@ -368,7 +402,10 @@ def normalization(host_results, vm, published):
             f"Estimated Node loop range: **{min(vals):.1f}-{max(vals):.1f} runs/s**.", "",
             "| Method | Projected runs/s (not measured) |", "|---|---|"]
     out += [f"| {m} | {v:.1f} |" for m, v in rows]
-    out += ["", "Limits: " + sc["limits"], "",
+    where = ("a shared, nested Azure VM (a GitHub runner), and it may not transfer to a dedicated host" if runner
+             else "this host (see the Host line above)")
+    lim = (sc["cpu_ratio_limits"] + " " if len(rows) > 2 else "") + sc["limits"]
+    out += ["", f"Limits: the VM/host ratio ({overhead:.3f}) was measured on {where}. {lim}", "",
             f"Same-benchmark source: {sc['same_benchmark']['source']}. "
             f"PassMark source: {sc['passmark_single_thread']['source']}."]
     return out
@@ -389,9 +426,11 @@ def render_presets(results):
             groups.setdefault(r.get("preset", "-"), []).append(r)
     res = {k: merged(v) for k, v in sorted(groups.items())}
     labels = {k: (label, unit, hib) for k, label, unit, hib in METRICS}
-    out = ["# boatbench: PandaOS by boatd preset (MEASURED)", "",
-           "Each column ran on its own GitHub runner (shared, nested KVM, not a dedicated server), so runner-to-"
-           "runner variance is in the differences too. median [IQR] n=samples.", "",
+    where = ("Each column ran on its own GitHub runner (shared, nested KVM, not a dedicated server), so runner-to-"
+             "runner variance is in the differences too." if on_runner(results) else
+             "Each column is a separate run on the harness-declared host(s) below, so run-to-run variance is in the "
+             "differences too.")
+    out = ["# boatbench: PandaOS by boatd preset (MEASURED)", "", where + " median [IQR] n=samples.", "",
            "| Metric | Unit | Better | " + " | ".join(res) + " |", "|---|---|---|" + "---|" * len(res)]
     for key in PRESET_METRICS:
         cells = [cell(summarize(samples(r, key))) for r in res.values()]
@@ -406,6 +445,7 @@ def render_presets(results):
                                                      if rep.get("probe")), "-")),
                     ("Failed steps", lambda r: ", ".join(f"r{rep.get('index')}:{k}" for rep in r.get("repeats", [])
                                                          for k in (rep.get("errors") or {}))[:300] or "none"),
+                    ("Host (harness-declared)", lambda r: r.get("host", {}).get("desc", "-")),
                     ("Run URL", lambda r: r.get("run_url") or "-")):
         out.append(f"| {name} | " + " | ".join(str(f(r)).replace("|", "/") for r in res.values()) + " |")
     return "\n".join(out) + "\n"
@@ -422,7 +462,12 @@ def render(results, prices=None, published=None):
            "## Sides: hardware and location", ""]
     out += side_table(res)
     out += ["", "## Measured results", "",
-            "median [IQR q1-q3] n=samples; the verdict compares medians and notes overlapping IQRs.", "",
+            "median [IQR q1-q3] n=samples; the verdict compares medians and notes overlapping IQRs.", ""]
+    if "boatdev" not in res:
+        out += ["**boat.dev was not measured by this harness (no `BOATDEV_API_KEY`), so no row has a measured-vs-"
+                "measured verdict.** The only boat.dev numbers are the vendor's published claims (next section), and "
+                "its 27.67 runs/s is one solo VM, not a fully packed server.", ""]
+    out += [
             "| Metric | Unit | Better | PandaOS (measured) | boat.dev (measured) | PandaOS / boat.dev | Verdict |",
             "|---|---|---|---|---|---|---|"]
     cache = unsafe_cache(res)
@@ -452,11 +497,11 @@ def render(results, prices=None, published=None):
                     "| Provider | runs/s | CPU the guest reported |", "|---|---|---|"]
             out += [f"| {r['provider']} | {r['runs_s']} | {r['cpu']} |" for r in published["rows"]]
     if host_results and "pandaos" in res:
-        out += normalization(host_results, res["pandaos"], published)
+        out += normalization(host_results, res["pandaos"], published, on_runner(host_results + results))
     out += density_section(res, prices, published)
     out += host_density_lines(host_results, res.get("pandaos"))
     out += cost_section(summ, prices, res, published)
-    out += ["", "## Caveats", ""] + [f"- {c}" for c in CAVEATS + auto_caveats(res)]
+    out += ["", "## Caveats", ""] + [f"- {c}" for c in caveats(host_results + results) + auto_caveats(res)]
     return "\n".join(out) + "\n"
 
 

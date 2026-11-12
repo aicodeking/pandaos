@@ -1,6 +1,6 @@
 # boatbench: PandaOS by boatd preset (MEASURED)
 
-Each column ran on its own GitHub runner (shared, nested KVM, not a dedicated server), so runner-to-runner variance is in the differences too. median [IQR] n=samples.
+Each column is a separate run on the harness-declared host(s) below, so run-to-run variance is in the differences too. median [IQR] n=samples.
 
 | Metric | Unit | Better | trusted | trusted-warm | trusted-writeback | untrusted |
 |---|---|---|---|---|---|---|
@@ -31,4 +31,5 @@ Each column ran on its own GitHub runner (shared, nested KVM, not a dedicated se
 | Firecracker cache_type | Unsafe (boatd default diskCache) | Unsafe (boatd default diskCache) | Writeback (boatd.json diskCache) | Unsafe (boatd default diskCache) |
 | VM vCPU seen | 4 | 4 | 4 | 4 |
 | Failed steps | none | none | none | none |
+| Host (harness-declared) | Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB, 2x512 GB NVMe mdadm RAID1; boat state = btrfs loop file on ext4 on RAID1; preset trusted; 16 CPUs online | Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB, 2x512 GB NVMe mdadm RAID1; boat state = btrfs loop file on ext4 on RAID1; preset trusted-warm; 16 CPUs online | Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB, 2x512 GB NVMe mdadm RAID1; boat state = btrfs loop file on ext4 on RAID1; preset trusted-writeback; 16 CPUs online | Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB, 2x512 GB NVMe mdadm RAID1; boat state = btrfs loop file on ext4 on RAID1; preset untrusted; 8 CPUs online |
 | Run URL | - | - | - | - |

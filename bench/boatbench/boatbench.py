@@ -14,7 +14,9 @@ in the report), BOATBENCH_RUN_URL, BOATBENCH_BOATD_OPTIONS and BOATBENCH_PRESET
 (printed in the report), BOATBENCH_DENSITY_LEVELS (workload g, default 1,2,4,6),
 BOATBENCH_HOST_CPUS (workload g: CPUs of the PandaOS host if the harness runs elsewhere),
 BOATBENCH_CONCURRENT_N (workload c, default 10: VMs created at once), BB_NODE_LOADER (host
-driver on NixOS: the ELF loader command that runs the pinned Node binary).
+driver on NixOS: the ELF loader command that runs the pinned Node binary),
+BOATBENCH_SOURCE_COMMIT (the boat / PandaOS commit under test; default GITHUB_SHA, then
+`nixos-version --configuration-revision`, else "unknown"; recorded as source_commit).
 
 Every repeat that runs b or c first records the API round-trip baseline: API_RTT_CALLS
 cheap authenticated GETs of the VM (api_rtt_p50_ms). Lifecycle metrics then also get
@@ -281,6 +283,21 @@ def fc_cache_type(options=None, boatd_dir=os.path.join(HERE, "..", "..", "compon
     return f"{m.group(1)} (boatd default diskCache)" if m else "unknown"
 
 
+def source_commit():
+    """The boat / PandaOS source the measured stack was built from: BOATBENCH_SOURCE_COMMIT, CI's GITHUB_SHA,
+    `nixos-version --configuration-revision` on a PandaOS host, else "unknown". boat's API has no version endpoint."""
+    for v in (os.environ.get("BOATBENCH_SOURCE_COMMIT"), os.environ.get("GITHUB_SHA")):
+        if v:
+            return v
+    try:
+        r = subprocess.run(["nixos-version", "--configuration-revision"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
 def client_info():
     model = ""
     try:
@@ -307,6 +324,7 @@ def cmd_run(a):
            "boatd_options": os.environ.get("BOATBENCH_BOATD_OPTIONS") or "-",
            "preset": os.environ.get("BOATBENCH_PRESET") or "-",
            "fc_cache_type": fc_cache_type(os.environ.get("BOATBENCH_BOATD_OPTIONS")) if a.driver == "pandaos" else "-", "run_url": os.environ.get("BOATBENCH_RUN_URL"),
+           "source_commit": source_commit() if a.driver != "boatdev" else "n/a (boat.dev)",
            "client": client_info(), "parts": "".join(sorted(parts)), "repeats": []}
     os.makedirs(a.out, exist_ok=True)
     path = os.path.join(a.out, f"results-{a.driver}-{res['started'].replace(':', '')}.json")
