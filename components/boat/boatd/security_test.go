@@ -368,7 +368,6 @@ func TestUntrustedTenantsConfig(t *testing.T) {
 		"storage 0":  func(c *Config) { c.StorageOvercommit = 0 },
 		"dirty 0":    func(c *Config) { c.HostDirtyRatio = 0 },
 		"share 101":  func(c *Config) { c.UplinkSharePct = 101 },
-		"no model":   func(c *Config) { c.IOCostModel = "" },
 		"huge pages": func(c *Config) { c.HugePages, c.Balloon, c.DiffSnapshots = true, false, false },
 	} {
 		c := ok
@@ -376,6 +375,10 @@ func TestUntrustedTenantsConfig(t *testing.T) {
 		if c.validate() == nil {
 			t.Errorf("%s accepted with untrustedTenants", name)
 		}
+	}
+	// No disk model yet: iocost stays off, the io.max ceilings (checked above) still bound each VM.
+	if c := ok; func() error { c.IOCostModel = ""; return c.validate() }() != nil {
+		t.Error("untrustedTenants without an ioCostModel refused; it falls back to io.max")
 	}
 	// Raised limits stay accepted; explicit caps replace the uplink share.
 	c := ok

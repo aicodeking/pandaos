@@ -27,8 +27,9 @@ func TestMeasureDiskModel(t *testing.T) {
 	}
 }
 
-// Untrusted with ioCost and no model: refused, naming the command that makes one;
-// with stateDir/iocost-model (what boatd -measure-disk writes) it starts.
+// Untrusted with ioCost and no model (boat-iocost-model has not run, or failed): boatd
+// still starts, iocost off and the io.max ceilings on; with stateDir/iocost-model
+// (what boatd -measure-disk writes) it uses that model.
 func TestUntrustedIOCostModelFromStateDir(t *testing.T) {
 	dir := t.TempDir()
 	c := untrustedConfig(t)
@@ -38,15 +39,15 @@ func TestUntrustedIOCostModelFromStateDir(t *testing.T) {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := loadConfig(path)
-	if err == nil || !strings.Contains(err.Error(), "boatd -measure-disk -config "+path) || !strings.Contains(err.Error(), "services.boat.ioCostModel") {
-		t.Fatalf("missing model: %v", err)
+	got, err := loadConfig(path)
+	if err != nil || got.IOCostModel != "" || got.IOMaxMBps == 0 || got.IOMaxIOPS == 0 {
+		t.Fatalf("missing model: want a start on io.max ceilings, got %q %d %d %v", got.IOCostModel, got.IOMaxMBps, got.IOMaxIOPS, err)
 	}
 	model := "rbps=3000000000 rseqiops=400000 rrandiops=400000 wbps=2000000000 wseqiops=300000 wrandiops=300000"
 	if err := os.WriteFile(filepath.Join(dir, ioCostModelFile), []byte(model+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := loadConfig(path)
+	got, err = loadConfig(path)
 	if err != nil || got.IOCostModel != model {
 		t.Fatalf("stored model not used: %q %v", got.IOCostModel, err)
 	}
@@ -57,12 +58,12 @@ func TestUntrustedIOCostModelFromStateDir(t *testing.T) {
 	if got, err := loadConfig(path); err != nil || got.IOCostModel != "rbps=1 rrandiops=2" {
 		t.Fatalf("config model: %q %v", got.IOCostModel, err)
 	}
-	// A malformed file is ignored, so the refusal comes back.
+	// A malformed file is ignored: io.max ceilings only.
 	c.IOCostModel = ""
 	b, _ = json.Marshal(c)
 	os.WriteFile(path, b, 0o600)
 	os.WriteFile(filepath.Join(dir, ioCostModelFile), []byte("rbps=x; rm -rf /\n"), 0o644)
-	if _, err := loadConfig(path); err == nil {
-		t.Fatal("malformed stored model accepted")
+	if got, err := loadConfig(path); err != nil || got.IOCostModel != "" {
+		t.Fatalf("malformed stored model: %q %v", got.IOCostModel, err)
 	}
 }

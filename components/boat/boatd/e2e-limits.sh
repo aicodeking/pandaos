@@ -16,6 +16,8 @@
 #   disk limit    Firecracker drive limiter measured; io.max set on the VM's cgroup
 #   serial log    a noisy guest cannot grow firecracker.log past its cap
 #   public IPv4   1:1 NAT in and out, with a documentation-range address
+#   ingress       Firecracker's rx limiter measured on that VM: a burst of one second's
+#                 worth (the bucket starts full), then the cap
 #   systemd       crash under KillMode=mixed: VMs outside the unit survive with
 #                 memory; VMs inside it are killed and cold-boot on restart
 #   ENOSPC        a really full small btrfs: refusals, clean stop, recovery
@@ -328,10 +330,13 @@ sudo rm -f "$WORK/tmp/victim"
 log "limits e2e: untrustedTenants refuses a weaker config or host"
 # The settings services.boat.untrustedTenants sets (module.nix imports the same file).
 ut_filter=". * $(jq -c . "$HERE/boatd/untrusted.json") | .egressMbit = 100 | .ingressMbit = 100 | .ioMaxMBps = 100 | .ioMaxIOPS = 1000 | .ioCostModel = \"rbps=500000000 rseqiops=20000 rrandiops=20000 wbps=400000000 wseqiops=10000 wrandiops=10000\" | .socket = \"$WORK/run/ut.sock\""
-# ioCost without a model: refused, naming the command; that command measures this disk.
+# ioCost without a model: not a refusal (a fresh host whose measurement failed still
+# boots, on the io.max ceilings), but logged with the command that measures this disk.
+# warmPool makes this boatd refuse right after, so it never touches the running one's bridge.
 sudo rm -f "$STATE/iocost-model"
-if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | del(.ioCostModel)" ut0)" 2>&1); then fail "untrustedTenants started without an ioCostModel"; fi
-grep -q "boatd -measure-disk -config $WORK/boatd-ut0.json" <<<"$out" || fail "no-model refusal does not name the command: $out"
+if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | del(.ioCostModel) | .warmPool = true" ut0)" 2>&1); then fail "untrustedTenants accepted warmPool"; fi
+grep -q "no ioCostModel, disk shared under io.max ceilings only; run \`boatd -measure-disk -config $WORK/boatd-ut0.json\`" <<<"$out" || fail "no-model fallback does not name the command: $out"
+grep -q 'warmPool' <<<"$out" || fail "no-model run refused for something else: $out"
 model=$(sudo timeout 120 "$WORK/bin/boatd" -measure-disk -config "$WORK/boatd-ut0.json" 2>/dev/null) || fail "boatd -measure-disk failed"
 grep -qE '^rbps=[1-9][0-9]* rseqiops=[1-9][0-9]* rrandiops=[1-9][0-9]* wbps=[1-9][0-9]* wseqiops=[1-9][0-9]* wrandiops=[1-9][0-9]*$' <<<"$model" || fail "measured model: $model"
 [ "$(sudo cat "$STATE/iocost-model")" = "$model" ] || fail "measure-disk did not store its model"
@@ -355,7 +360,7 @@ fi
 log "limits e2e: public IPv4 pool"
 sudo ip -n e2e-ext addr add 198.51.100.1/32 dev lo
 sudo ip route add 198.51.100.1/32 via 10.250.0.2
-restart_boatd "$(cfg_with '.publicIPv4 = ["192.0.2.10"]' pub)"
+restart_boatd "$(cfg_with ".publicIPv4 = [\"192.0.2.10\"] | .ingressMbit = $EGRESS_MBIT" pub)"
 p4=$(newvm '{"name":"p4","team":"lim"}')
 [ "$(vmf "$p4" public_ip)" = 192.0.2.10 ] || fail "no public address: $(bd GET "/v1/vms/$p4")"
 put_file "$p4" /tmp/srv.sh "$WORK/tmp/srv.sh"
@@ -366,6 +371,21 @@ sudo ip netns exec e2e-ext python3 -u -m http.server 8001 --bind 0.0.0.0 >>"$WOR
 sleep 1
 bx "$p4" 'curl -fsS --max-time 8 -o /dev/null http://198.51.100.1:8001/' || fail "public IPv4 outbound"
 grep -q '^192\.0\.2\.10 ' "$WORK/ext.log" || fail "outbound source is not the public IP: $(cat "$WORK/ext.log")"
+# Ingress: the rx bucket holds one second of the cap (fc.go rateLimiter) and starts
+# full, so a transfer smaller than that never meets the cap (boatbench's 59.7 MB Go
+# tarball at 1167 Mbit/s past a 1000 Mbit/s cap, run 42937179139). Past the burst,
+# back to back, the steady rate is the cap.
+ing_bytes=$((EGRESS_MBIT * 125000 * 6)) # 6 s at the cap: the refill between the two runs adds little
+head -c "$ing_bytes" /dev/urandom >"$WORK/tmp/ingress.bin"
+sudo ip netns exec e2e-ext python3 -m http.server 8003 --bind 0.0.0.0 --directory "$WORK/tmp" >/dev/null 2>&1 &
+sleep 1
+ing() { bx "$p4" "curl -fsS --max-time 60 -o /dev/null -w '%{speed_download}' http://198.51.100.1:8003/ingress.bin"; }
+ing_burst=$(mbps "$(ing)") ing_steady=$(mbps "$(ing)")
+sudo pkill -f 'http.server 8003' || true
+rm -f "$WORK/tmp/ingress.bin"
+echo "ingress: cap ${EGRESS_MBIT} Mbit/s; first transfer (bucket full) ${ing_burst} Mbit/s, back to back ${ing_steady} Mbit/s"
+[ "$ing_steady" -le $((EGRESS_MBIT * 115 / 100)) ] || fail "ingress ${ing_steady} Mbit/s over the ${EGRESS_MBIT} Mbit/s cap"
+[ "$ing_steady" -ge $((EGRESS_MBIT * 30 / 100)) ] || fail "ingress ${ing_steady} Mbit/s: the cap strangles traffic"
 sudo pkill -f 'http.server 8001' || true
 bd DELETE "/v1/vms/$p4" >/dev/null
 restart_boatd "$WORK/boatd.json"

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -226,10 +227,14 @@ func loadConfig(path string) (Config, error) {
 	if c.IOCost && c.IOCostModel == "" {
 		c.IOCostModel = storedIOCostModel(c.StateDir) // boatd -measure-disk
 	}
-	if err := c.validate(); errors.Is(err, errNoIOCostModel) {
-		return c, fmt.Errorf("%w: run `%s -config %s` once (about 25 s of direct I/O; it writes %s), or set ioCostModel (NixOS: services.boat.ioCostModel; the boat-iocost-model unit runs the measurement before boatd)",
-			err, measureCmd, path, filepath.Join(c.StateDir, ioCostModelFile))
-	} else if err != nil {
+	if c.IOCost && c.IOCostModel == "" {
+		// A fresh host before (or after a failed) boat-iocost-model: start anyway. iocost
+		// stays off and each VM is held to the io.max ceilings (ioMaxMBps/ioMaxIOPS, which
+		// untrustedTenants requires); busy VMs then share the disk first come, first served.
+		log.Printf("ioCost: no ioCostModel, disk shared under io.max ceilings only; run `%s -config %s` once (about 25 s of direct I/O; it writes %s), or set ioCostModel (NixOS: services.boat.ioCostModel; the boat-iocost-model unit measures before boatd)",
+			measureCmd, path, filepath.Join(c.StateDir, ioCostModelFile))
+	}
+	if err := c.validate(); err != nil {
 		return c, err
 	}
 	return c, nil
@@ -386,8 +391,6 @@ func (c Config) validateUntrusted() error {
 		return fmt.Errorf("untrustedTenants: needs cgroup limits")
 	case c.HugePages:
 		return fmt.Errorf("untrustedTenants: hugePages memory is outside the VMs' cgroup memory limits")
-	case c.IOCostModel == "":
-		return fmt.Errorf("untrustedTenants: %w", errNoIOCostModel)
 	}
 	return nil
 }

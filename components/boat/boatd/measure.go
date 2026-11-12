@@ -28,8 +28,6 @@ const (
 	measureCmd      = "boatd -measure-disk"
 )
 
-var errNoIOCostModel = errors.New("ioCost has no ioCostModel")
-
 type diskMeasure struct {
 	size    int64         // probe file size
 	runFor  time.Duration // per phase
