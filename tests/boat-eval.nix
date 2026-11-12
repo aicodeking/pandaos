@@ -75,7 +75,7 @@ let
     };
   };
   trusted = eval { services.boat.untrustedTenants = false; };
-  boatd = c: builtins.fromJSON c.environment.etc."boat/boatd.json".text;
+  boatd = c: builtins.fromJSON (builtins.unsafeDiscardStringContext c.environment.etc."boat/boatd.json".text);
   withMaintenance = eval {
     services.boat.maintenance.reboot = true;
     pandaos.updates.allowedSigners = [ "release@pandaos ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey" ];
