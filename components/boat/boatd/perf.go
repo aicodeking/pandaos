@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -120,31 +121,58 @@ func extentCount(f *os.File) (uint32, error) {
 	return m.mapped, nil
 }
 
-// fragmented: an image whose reflink costs O(extents) for nothing. `cp --sparse=always`
-// punched a hole at every zero block of the image: 22,567 extents in a 3 GiB rootfs,
-// a 152 ms FICLONE on every create and every disk snapshot (AX42); a copy with
-// --sparse=auto has 15 and clones in 0.1 ms.
+// fragmented: an image whose reflink costs O(extents) for nothing: a hole at every
+// zero block. 22,567 extents in a 3 GiB rootfs made a 152 ms FICLONE on every create
+// and disk snapshot (AX42); a dense copy has 4 and clones in 0.1 ms. Holes are not
+// kept even where the source has them: zstd -d writes one per zero run, and
+// `cp --sparse=auto` of that gave the runner's image a 31 ms clone (boat-e2e
+// 43264949029; 15 extents with the AX42's cp). The cost is the zeros: 0.2 GiB of 3.
 // ponytail: an image with more real holes than that is converted again at each start.
 func fragmented(extents uint32, size int64) bool {
 	return extents > 64 && int64(extents) > size/maxImageExtent
 }
 
 func isFragmented(path string) bool {
+	n, size := extentsOf(path)
+	return fragmented(n, size)
+}
+
+func extentsOf(path string) (uint32, int64) {
 	f, err := openJail(path, os.O_RDONLY)
 	if err != nil {
-		return false
+		return 0, 0
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return false
+		return 0, 0
 	}
-	n, err := extentCount(f)
-	return err == nil && fragmented(n, st.Size())
+	n, _ := extentCount(f)
+	return n, st.Size()
 }
 
-// convertImages rewrites each image's rootfs as a NOCOW file with few extents, once
-// per image (and once more for one an older boatd converted with --sparse=always).
+// copyDense writes all of src into dst, holes as zeros, through plain buffered
+// writes: no copy_file_range or splice, whose extents depend on the kernel and cp.
+func copyDense(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	// The wrappers hide ReaderFrom/WriterTo, which would take the copy_file_range path.
+	if _, err := io.CopyBuffer(struct{ io.Writer }{out}, struct{ io.Reader }{in}, make([]byte, 8<<20)); err != nil {
+		return err
+	}
+	return out.Close()
+}
+
+// convertImages rewrites each image's rootfs as a dense NOCOW file, once per image
+// (and once more for one an older boatd left fragmented, see fragmented).
 // Failure keeps the CoW image: copies of it stay CoW and still work.
 //
 // Each copy is flushed before it replaces the image, and creates wait for that
@@ -165,9 +193,10 @@ func (m *Manager) convertImages() {
 			return
 		}
 		t0 := time.Now()
+		before, _ := extentsOf(disk)
 		st, err := os.Stat(disk)
 		if err == nil {
-			err = m.run("", "cp", "--reflink=never", "--sparse=auto", disk, tmp) // the image's holes, no new ones (see fragmented)
+			err = copyDense(disk, tmp)
 		}
 		if err == nil {
 			err = os.Chmod(tmp, st.Mode().Perm())
@@ -187,7 +216,9 @@ func (m *Manager) convertImages() {
 			log.Printf("images: %s stays CoW: %v", disk, err)
 			continue
 		}
-		log.Printf("images: %s converted to NOCOW in %dms (flush %dms)", disk, time.Since(t0).Milliseconds(), time.Since(t1).Milliseconds())
+		after, _ := extentsOf(disk)
+		log.Printf("images: %s converted to NOCOW in %dms (flush %dms), extents %d -> %d", disk,
+			time.Since(t0).Milliseconds(), time.Since(t1).Milliseconds(), before, after)
 	}
 }
 

@@ -374,3 +374,26 @@ func TestNoCompressElsewhere(t *testing.T) {
 		t.Fatal("a one-byte file is not fragmented")
 	}
 }
+
+func TestCopyDense(t *testing.T) {
+	d := t.TempDir()
+	src, dst := filepath.Join(d, "src"), filepath.Join(d, "dst")
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteAt([]byte("head"), 0)
+	f.WriteAt([]byte("tail"), 20<<20) // a 20 MiB hole between, more than one buffer
+	f.Close()
+	if err := os.WriteFile(dst, []byte("stale data that is longer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyDense(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := os.ReadFile(src)
+	b, _ := os.ReadFile(dst)
+	if len(b) != (20<<20)+4 || string(a) != string(b) {
+		t.Fatalf("dst differs: %d bytes", len(b))
+	}
+}
