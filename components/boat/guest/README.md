@@ -74,7 +74,7 @@ without an LSM profile; the VM is the boundary), modules (`modprobe` warnings fr
 docker/iptables are harmless).
 
 Host kernel cmdline:
-`console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw ip=<guest>::<gw>:<mask>::eth0:off:<dns>`.
+`console=ttyS0 quiet reboot=k panic=1 pci=off root=/dev/vda rw ip=<guest>::<gw>:<mask>::eth0:off:<dns>`.
 `reboot=k` matters: Firecracker has no ACPI poweroff, so the `shutdown` op reboots
 and Firecracker exits.
 

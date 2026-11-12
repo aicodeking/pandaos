@@ -148,6 +148,12 @@ type Config struct {
 	DefaultTeam  TeamPolicy            `json:"defaultTeam"`
 }
 
+// defaultBootArgs: quiet, because every kernel line goes out through the emulated
+// 8250 at boot: the guest kernel spent 96 ms flushing its log when the console came
+// up (AX42, 4 vCPU; 420 ms kernel). Warnings, errors and panics still reach
+// firecracker.log, and the guest's own writes to /dev/ttyS0 are untouched.
+const defaultBootArgs = "console=ttyS0 quiet reboot=k panic=1 pci=off root=/dev/vda rw"
+
 var (
 	reIOCostQoS   = regexp.MustCompile(`^((rpct|rlat|wpct|wlat|min|max)=[0-9]+(\.[0-9]+)? ?)+$`)
 	reIOCostModel = regexp.MustCompile(`^((rbps|rseqiops|rrandiops|wbps|wseqiops|wrandiops)=[0-9]+ ?)+$`)
@@ -175,7 +181,7 @@ func defaultConfig() Config {
 		DesktopPort:       6080,
 		DefaultSize:       "default",
 		DefaultImage:      "ubuntu-24.04",
-		BootArgs:          "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
+		BootArgs:          defaultBootArgs,
 		BootTimeoutS:      60,
 		BtrfsQgroups:      true,
 		StorageOvercommit: 10, // disks are sparse: real space is what the floor guards

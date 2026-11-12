@@ -37,7 +37,7 @@ guest_fio() {
 BASE=$WORK/boatd.json
 [ -f "$WORK/boatd.base.json" ] || cp "$BASE" "$WORK/boatd.base.json"
 BASE=$WORK/boatd.base.json
-DEFARGS="console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
+DEFARGS="console=ttyS0 quiet reboot=k panic=1 pci=off root=/dev/vda rw"
 THP=".bootArgs = ((.bootArgs // \"$DEFARGS\") + \" transparent_hugepage=always\")"
 CONFIGS=${CONFIGS:-"base@.@1
 sync@.diskEngine = \"Sync\"@0

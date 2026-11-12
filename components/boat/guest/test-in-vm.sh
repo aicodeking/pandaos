@@ -60,7 +60,7 @@ cat > "$W/vm.json" <<EOF
 {
   "boot-source": {
     "kernel_image_path": "$KERNEL",
-    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw ip=$GUEST_IP::$HOST_IP:$MASK::eth0:off:1.1.1.1"
+    "boot_args": "console=ttyS0 quiet reboot=k panic=1 pci=off root=/dev/vda rw ip=$GUEST_IP::$HOST_IP:$MASK::eth0:off:1.1.1.1"
   },
   "drives": [{"drive_id": "root", "path_on_host": "$W/disk.ext4", "is_root_device": true, "is_read_only": false}],
   "network-interfaces": [{"iface_id": "eth0", "guest_mac": "$GUEST_MAC", "host_dev_name": "$TAP"}],

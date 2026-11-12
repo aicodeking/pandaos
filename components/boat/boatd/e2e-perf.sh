@@ -25,6 +25,14 @@ PERF_FREED_RSS_MAX=${E2E_PERF_FREED_RSS_MAX:-1000} # 3 GiB used, freed, 20 s lat
 PERF_SEQ_WRITE_MIN=${E2E_PERF_SEQ_WRITE_MIN:-250}  # MB/s: 530-911 -> 250
 PERF_RAND_READ_MIN=${E2E_PERF_RAND_READ_MIN:-15000} # IOPS: 25k-171k (all Async) -> 15000 (0.6x)
 PERF_RAND_WRITE_MIN=${E2E_PERF_RAND_WRITE_MIN:-15000} # IOPS: 34k-58k (all Async) -> 15000
+# Guest over the host's own fio on the same runner (the "ceiling" step), from 13 green
+# runs on main 41660971823-43245323693: the runner's disk drops out of the ratio. Rand
+# read is still bimodal (0.32-0.50 or 0.66-1.43: inferred, fio's job on the vCPU that
+# takes the disk IRQ or not, 59k vs 218k IOPS pinned on the AX42), so its floor stays
+# loose; it is tighter than 15000 only where the host is fast. Rand write has no
+# ratio: the host's NOCOW fio (5-21k) is slower than the guest's, which the host caches.
+PERF_RAND_READ_RATIO_MIN=${E2E_PERF_RAND_READ_RATIO_MIN:-0.15} # 0.32-1.43 -> 0.15 (0.47x)
+PERF_SEQ_WRITE_RATIO_MIN=${E2E_PERF_SEQ_WRITE_RATIO_MIN:-0.5}  # 0.98-1.68 -> 0.5 (0.51x)
 check_min() { # NAME VALUE MIN
   printf 'e2e: %-14s %s (min %s)\n' "$1" "$2" "$3"
   awk -v a="$2" -v b="$3" 'BEGIN { exit !(a >= b) }' || perf_fail+="$1 was $2 < $3; "
@@ -93,6 +101,9 @@ perf_cfg '.' base
 pv=$(perf_vm pv)
 guest_blk=$(bx "$pv" 'printf "sched=%s discard_max=%s" "$(cat /sys/block/vda/queue/scheduler)" "$(cat /sys/block/vda/queue/discard_max_bytes)"')
 echo "guest: $guest_blk"
+# Guest boot, for the record; the image's /etc/.updated keeps ldconfig off every first boot.
+bx "$pv" 'timeout 60 systemctl is-system-running --wait >/dev/null; systemd-analyze | head -n 1; systemd-analyze critical-chain boat-agent.service | tail -n +3 | head -n 8; true'
+[ "$(bx "$pv" 'systemctl show -p ConditionResult --value ldconfig.service')" = no ] || fail "guest ran ldconfig.service at boot: /etc/.updated missing from the image"
 # Random reads the host has no cache for: what a queue depth is for. (fio's other numbers read
 # back what they just wrote, from the host's page cache, where Sync's one-at-a-time is enough.)
 cold_read() {
@@ -297,6 +308,9 @@ check_mib perf_freed_rss "${back% *}" "$PERF_FREED_RSS_MAX"
 check_min perf_seq_write "$(d seq_write_mbps)" "$PERF_SEQ_WRITE_MIN"
 check_min perf_rand_read "$(d rand_read_iops)" "$PERF_RAND_READ_MIN"
 check_min perf_rand_write "$(d rand_write_iops)" "$PERF_RAND_WRITE_MIN"
+ratio() { awk -v g="$1" -v h="$2" 'BEGIN { printf "%.2f", (h > 0 ? g / h : 1) }'; } # GUEST HOST
+check_min perf_rr_vs_host "$(ratio "$(d rand_read_iops)" "$c_rr")" "$PERF_RAND_READ_RATIO_MIN"
+check_min perf_sw_vs_host "$(ratio "$(d seq_write_mbps)" "$(awk -v b="$c_sw" 'BEGIN { print b / 1e6 }')")" "$PERF_SEQ_WRITE_RATIO_MIN"
 restart_boatd "$WORK/boatd.json"
 
 echo "METRIC $(jq -nc --argjson disk "$disk" --argjson disks "$disk_sync" --argjson diskiou "$disk_iou" --arg blk "$guest_blk" \

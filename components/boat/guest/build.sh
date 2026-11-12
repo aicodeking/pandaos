@@ -110,6 +110,12 @@ build_rootfs() {
     : > /r/etc/machine-id
     rm -f /r/etc/ssh/ssh_host_*
     printf "/dev/vda / ext4 defaults,noatime 0 1\n" > /r/etc/fstab
+    # /usr is not newer than /etc and /var (ConditionNeedsUpdate): without the stamps
+    # every VM ran ldconfig.service on its first boot, 114-127 ms on the agent path
+    # (AX42), plus the journal catalog. The format systemd-update-done writes.
+    for s in /r/etc/.updated /r/var/.updated; do
+      printf "TIMESTAMP_NSEC=%s000000000\n" "$(stat -c %Y /r/usr)" > "$s"; touch -r /r/usr "$s"
+    done
     echo "--- largest dirs (MiB) ---" >&2
     du -xm -d3 /r | sort -n | tail -40 >&2
     used=$(du -sm /r | cut -f1)
