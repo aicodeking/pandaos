@@ -647,14 +647,18 @@ def density_projection_lines(lv, model, mode):
     vms, cpus, load, eff, inside = proj
     solo = lv[1]["per_vm_runs_s"]["median"]
     host_usd = model["host_usd_per_hour"]
-    rng = "inside the measured range" if inside else "OUTSIDE the measured range: the nearest measured point is used"
+    top = max(f["loops_per_cpu"]["median"] for f in lv.values() if f.get("loops_per_cpu"))
+    rng = ("inside the measured range" if inside else
+           "ABOVE the measured range: host throughput per CPU is held flat at the highest measured load's, "
+           "so efficiency = that / this load" if load > top else
+           "BELOW the measured range: the lowest measured load's efficiency is used")
     short = lv[1].get("host_cpus", {}).get("median", GUEST_VCPUS) < GUEST_VCPUS
     warn = (["", f"**This efficiency is relative to N=1 on {lv[1]['host_cpus']['median']:.0f} host CPUs, fewer than the VM's "
              f"{GUEST_VCPUS} vCPUs, so N=1 is itself short of CPU and the efficiency may be flattered.**"] if short else [])
     per_k = host_usd / 3600 * 1000 / (vms * solo * eff)
     return ["", f"### PROJECTION: {model['name']}, {mode} ({vms} VMs on {cpus} CPUs), NOT A MEASUREMENT", "",
             f"Load = {vms} VMs x {lv[1]['cpu_per_loop']['median']:.2f} CPU per loop / {cpus} CPUs = "
-            f"**{load:.2f} loops per CPU** ({rng}). Measured efficiency there: **{eff:.3f}**, so a packed host "
+            f"**{load:.2f} loops per CPU** ({rng}). {'Measured' if inside else 'Projected'} efficiency there: **{eff:.3f}**, so a packed host "
             f"delivers {vms} x {eff:.3f} = {vms * eff:.1f} solo-VM equivalents, and cost per run is "
             f"**{1 / eff:.2f}x** the uncontended figure.",
             f"With the measured solo speed ({solo:.2f} runs/s, a different CPU) as the per-VM speed: "
