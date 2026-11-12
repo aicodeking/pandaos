@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -170,31 +171,42 @@ func (m *Manager) finishCreate(ctx context.Context, v VM, p createPlan, allocT t
 	t1 := time.Now()
 	unlock := m.lock(v.ID)
 	defer unlock()
-	if err := m.materialize(v, p.src, p.restore, p.sameTeam); err != nil {
+	steps, err := m.materialize(v, p.src, p.restore, p.sameTeam)
+	if err != nil {
 		return m.fail(v.ID, err)
 	}
-	log.Printf("%s: create alloc=%dms materialize=%dms", v.ID, allocT.Milliseconds(), time.Since(t1).Milliseconds())
+	log.Printf("%s: create alloc=%dms materialize=%dms (%s)", v.ID, allocT.Milliseconds(), time.Since(t1).Milliseconds(), steps)
 	return m.bootNew(ctx, v, p.restore, p.env)
 }
 
 // materialize reflink-copies disk, kernel (+ vmstate/mem) from src into the
 // VM root, grows the disk to the size quota and hands it to the jail uid.
-// sameTeam: src belongs to v's team (see copyMem).
-func (m *Manager) materialize(v VM, src string, withMem, sameTeam bool) error {
+// sameTeam: src belongs to v's team (see copyMem). steps: each step's milliseconds,
+// for the log (a reflink costs O(extents), see fragmented).
+func (m *Manager) materialize(v VM, src string, withMem, sameTeam bool) (steps string, err error) {
 	root := m.root(v.ID)
+	t := time.Now()
+	lap := func(name string) {
+		steps += fmt.Sprintf("%s=%d ", name, time.Since(t).Milliseconds())
+		t = time.Now()
+	}
 	files := []string{diskFile, kernFile}
 	if withMem {
 		files = append(files, vmstate)
 		if err := m.copyMem(filepath.Join(src, memFile), filepath.Join(root, memFile), sameTeam); err != nil {
-			return err
+			return steps, err
 		}
+		lap(memFile)
 	}
 	for _, f := range files {
 		if err := m.cp(filepath.Join(src, f), filepath.Join(root, f)); err != nil {
-			return err
+			return steps, err
 		}
+		lap(f)
 	}
-	return m.finishDisk(v)
+	err = m.finishDisk(v)
+	lap("grow+chown")
+	return strings.TrimSpace(steps), err
 }
 
 func (m *Manager) finishDisk(v VM) error {

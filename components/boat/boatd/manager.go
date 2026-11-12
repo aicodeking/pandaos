@@ -380,14 +380,20 @@ func (m *Manager) enableQuota() error {
 func (m *Manager) makeStoreDir(kind, team, id string) error {
 	link := filepath.Join(m.cfg.StateDir, kind, id)
 	if !m.cfg.BtrfsQgroups {
-		return os.MkdirAll(link, 0o700)
+		if err := os.MkdirAll(link, 0o700); err != nil {
+			return err
+		}
+		noCompress(link) // before anything is created in it
+		return nil
 	}
 	if err := m.ensureTeamVol(team); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(m.teamVol(team), kind, id), 0o700); err != nil {
+	d := filepath.Join(m.teamVol(team), kind, id)
+	if err := os.MkdirAll(d, 0o700); err != nil {
 		return err
 	}
+	noCompress(d)
 	return os.Symlink(filepath.Join("..", "teams", "t_"+team, kind, id), link)
 }
 

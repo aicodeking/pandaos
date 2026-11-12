@@ -54,6 +54,7 @@ func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, err
 	}
 	t2 := time.Now()
 	diff := m.cfg.DiffSnapshots && v.DiffOK
+	noCompress(root) // a VM from before makeStoreDir set it
 	os.Remove(filepath.Join(root, memNew))
 	m.liftMemLimits(v)
 	var err error

@@ -339,3 +339,38 @@ func TestMemFileHardLinkedWithinTeamOnly(t *testing.T) {
 		t.Fatal("a diff must replace root/mem, never write it in place")
 	}
 }
+
+func TestFragmented(t *testing.T) {
+	const gib = int64(1) << 30
+	for _, c := range []struct {
+		extents uint32
+		size    int64
+		want    bool
+	}{
+		{22567, 3 * gib, true},   // `cp --sparse=always`: a hole at every zero block (AX42)
+		{15, 3 * gib, false},     // `cp --sparse=auto` of that image
+		{20, 8 * gib, false},     // the full image, from zstd's sparse output
+		{3072, 3 * gib, false},   // 1 MiB extents: not worth a rewrite
+		{60, 1 << 20, false},     // a tiny file
+		{100000, 64 * gib, true}, // a 64 GiB image cut into 670 KiB pieces
+	} {
+		if got := fragmented(c.extents, c.size); got != c.want {
+			t.Errorf("fragmented(%d, %d) = %v", c.extents, c.size, got)
+		}
+	}
+}
+
+// noCompress and extentCount are best effort: a filesystem without the flags (the
+// test's tmpfs/ext4/APFS) leaves the dir usable and reports no extents.
+func TestNoCompressElsewhere(t *testing.T) {
+	d := t.TempDir()
+	noCompress(d)
+	noCompress(filepath.Join(d, "missing"))
+	p := filepath.Join(d, "f")
+	if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if isFragmented(p) {
+		t.Fatal("a one-byte file is not fragmented")
+	}
+}

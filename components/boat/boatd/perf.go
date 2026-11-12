@@ -25,9 +25,12 @@ import (
 // empty file, so the image is converted once and cp() carries the flag along.
 
 const (
-	fsIocGetFlags = 0x80086601
-	fsIocSetFlags = 0x40086602
-	fsNoCowFlag   = 0x00800000
+	fsIocGetFlags  = 0x80086601
+	fsIocSetFlags  = 0x40086602
+	fsIocFiemap    = 0xc020660b
+	fsNoCowFlag    = 0x00800000
+	fsNoCompFlag   = 0x00000400
+	maxImageExtent = 1 << 20 // bytes per extent below which an image counts as fragmented
 )
 
 func fsFlags(f *os.File) (int32, error) {
@@ -48,6 +51,13 @@ func isNoCow(path string) bool {
 	return err == nil && v&fsNoCowFlag != 0
 }
 
+func setFsFlags(f *os.File, v int32) error {
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), fsIocSetFlags, uintptr(unsafe.Pointer(&v))); e != 0 {
+		return e
+	}
+	return nil
+}
+
 // createNoCow makes an empty NOCOW file at path. False where the filesystem has
 // no such flag (ext4, tmpfs, APFS): the caller then keeps plain copies.
 func createNoCow(path string) bool {
@@ -60,15 +70,81 @@ func createNoCow(path string) bool {
 	if err != nil {
 		return false
 	}
-	v |= fsNoCowFlag
-	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), fsIocSetFlags, uintptr(unsafe.Pointer(&v))); e != 0 {
+	// Inherited from a noCompress dir. btrfs refuses NOCOW next to any compression
+	// flag (EINVAL, checked against the old flags too), so it goes in its own call.
+	if v&fsNoCompFlag != 0 {
+		v &^= fsNoCompFlag
+		if setFsFlags(f, v) != nil {
+			return false
+		}
+	}
+	if setFsFlags(f, v|fsNoCowFlag) != nil {
 		return false
 	}
 	v, err = fsFlags(f)
 	return err == nil && v&fsNoCowFlag != 0
 }
 
-// convertImages rewrites each image's rootfs as a NOCOW file, once per image.
+// ---- no compression for VM and snapshot dirs ----
+//
+// A store mounted compress=zstd (the PandaOS install) compresses every memory dump
+// on writeback: 128 KiB extents (16,814 for an 8 GiB VM's mem on the AX42, 109
+// without), each one more for the next merge's reflink and the restore's reads to
+// walk. FS_NOCOMP_FL on a dir is inherited by what is created in it. Not NOCOW:
+// that drops checksums and would have to match every reflink source, while
+// NOCOMP files reflink from and to anything. Best effort: other filesystems have
+// no such flag and nothing to gain.
+func noCompress(dir string) {
+	f, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	v, err := fsFlags(f)
+	if err != nil || v&(fsNoCompFlag|fsNoCowFlag) != 0 {
+		return // done, or a NOCOW dir, which btrfs does not compress anyway
+	}
+	setFsFlags(f, v|fsNoCompFlag)
+}
+
+// extentCount: FIEMAP with no room for extents returns how many there are.
+func extentCount(f *os.File) (uint32, error) {
+	var m struct {
+		start, length            uint64
+		flags, mapped, count, rs uint32
+	}
+	m.length = ^uint64(0)
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), fsIocFiemap, uintptr(unsafe.Pointer(&m))); e != 0 {
+		return 0, e
+	}
+	return m.mapped, nil
+}
+
+// fragmented: an image whose reflink costs O(extents) for nothing. `cp --sparse=always`
+// punched a hole at every zero block of the image: 22,567 extents in a 3 GiB rootfs,
+// a 152 ms FICLONE on every create and every disk snapshot (AX42); a copy with
+// --sparse=auto has 15 and clones in 0.1 ms.
+// ponytail: an image with more real holes than that is converted again at each start.
+func fragmented(extents uint32, size int64) bool {
+	return extents > 64 && int64(extents) > size/maxImageExtent
+}
+
+func isFragmented(path string) bool {
+	f, err := openJail(path, os.O_RDONLY)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	n, err := extentCount(f)
+	return err == nil && fragmented(n, st.Size())
+}
+
+// convertImages rewrites each image's rootfs as a NOCOW file with few extents, once
+// per image (and once more for one an older boatd converted with --sparse=always).
 // Failure keeps the CoW image: copies of it stay CoW and still work.
 //
 // Each copy is flushed before it replaces the image, and creates wait for that
@@ -79,7 +155,7 @@ func createNoCow(path string) bool {
 func (m *Manager) convertImages() {
 	dirs, _ := filepath.Glob(filepath.Join(m.cfg.StateDir, "images", "*", diskFile))
 	for _, disk := range dirs {
-		if isNoCow(disk) {
+		if isNoCow(disk) && !isFragmented(disk) {
 			continue
 		}
 		tmp := disk + ".nocow"
@@ -91,7 +167,7 @@ func (m *Manager) convertImages() {
 		t0 := time.Now()
 		st, err := os.Stat(disk)
 		if err == nil {
-			err = m.run("", "cp", "--reflink=never", "--sparse=always", disk, tmp)
+			err = m.run("", "cp", "--reflink=never", "--sparse=auto", disk, tmp) // the image's holes, no new ones (see fragmented)
 		}
 		if err == nil {
 			err = os.Chmod(tmp, st.Mode().Perm())
