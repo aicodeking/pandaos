@@ -38,6 +38,7 @@ type fileGrant struct {
 	VM   string `json:"v"`
 	Path string `json:"p"`
 	Exp  int64  `json:"e"`
+	Op   string `json:"o,omitempty"` // "put": an upload URL (compat_extra.go)
 }
 
 func (s *server) signFileGrant(g fileGrant) string {
@@ -113,7 +114,7 @@ func (s *server) compatFileDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g, ok := s.openFileGrant(r.PathValue("token"), time.Now())
-	if !ok {
+	if !ok || g.Op != "" {
 		writeErr(w, r, 404, "not_found", "download URL not found or expired")
 		return
 	}

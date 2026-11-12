@@ -123,6 +123,20 @@ ROUTES = [
     ("GET", "/api/v1/sandboxes/{id}/files/find", "/sandboxes/{sandboxId}/files/find", "exec", None, "find text in files (ripgrep)"),
     ("POST", "/api/v1/sandboxes/{id}/files/download-url", "/sandboxes/{sandboxId}/files/download-url", "exec", ["path", "ttlSeconds"],
      "signed short-lived download URL (/api/v1/file-downloads/{token})"),
+    # council round 3 (compat_extra.go)
+    ("GET", "/api/v1/telemetry", "/telemetry", "admin", None, "team OTLP export (GET /v1/telemetry)"),
+    ("PUT", "/api/v1/telemetry", "/telemetry", "admin", ["endpoint", "headers"], "set OTLP export (PUT /v1/telemetry; no test export is sent)"),
+    ("DELETE", "/api/v1/telemetry", "/telemetry", "admin", None, "stop OTLP export (DELETE /v1/telemetry)"),
+    ("GET", "/api/v1/ai-usage", "/ai-usage", "vms:read", None, "AI proxy usage (GET /v1/ai/usage; rows dated by last use)"),
+    ("GET", "/api/v1/sandboxes/{id}/ai-usage", "/sandboxes/{sandboxId}/ai-usage", "vms:read", None, "AI proxy usage of one sandbox (GET /v1/vms/{id}/ai-usage)"),
+    ("PUT", "/api/v1/sandboxes/{id}/ai-access", "/sandboxes/{sandboxId}/ai-access", "admin", ["blocked"], "block AI at the proxy (PUT /v1/vms/{id}/ai-access)"),
+    ("PUT", "/api/v1/environments/{id}/vars/{key}", "/environments/{environmentId}/vars/{key}", "admin", ["value"], "set one variable (PUT /v1/environments/{id})"),
+    ("DELETE", "/api/v1/environments/{id}/vars/{key}", "/environments/{environmentId}/vars/{key}", "admin", None, "remove one variable (PUT /v1/environments/{id})"),
+    ("POST", "/api/v1/sandboxes/{id}/files/replace", "/sandboxes/{sandboxId}/files/replace", "exec", ["paths", "pattern", "newValue"], "replace text (read + write each file, up to 5 MiB)"),
+    ("POST", "/api/v1/sandboxes/{id}/files/upload-url", "/sandboxes/{sandboxId}/files/upload-url", "exec", ["path", "ttlSeconds"], "signed short-lived upload URL (/api/v1/file-uploads/{token})"),
+    ("GET", "/api/v1/sandboxes/{id}/artifacts", "/sandboxes/{sandboxId}/artifacts", "exec", None, "download a file up to 50 MiB"),
+    ("POST", "/api/v1/sandboxes/{id}/share", "/sandboxes/{sandboxId}/share", "vms:write", None, "share with the team (a no-op: team sandboxes are shared)"),
+    ("POST", "/api/v1/sandboxes/{id}/recover", "/sandboxes/{sandboxId}/recover", "vms:write", None, "power-cycle (forced stop, then start; the disk is kept)"),
 ]
 
 # Paths under /api/v1 that are this server's own, not boat.dev operations.
@@ -137,6 +151,18 @@ EXTRA = {
                         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}},
         }}},
 }
+
+EXTRA["/api/v1/file-uploads/{token}"] = {"put": {
+    "summary": "Upload a file through a signed URL from POST /api/v1/sandboxes/{id}/files/upload-url (no API key)",
+    "operationId": "compat_fileUpload", "security": [], "tags": ["boat.dev compatibility"],
+    "parameters": [{"name": "token", "in": "path", "required": True, "schema": {"type": "string"}}],
+    "requestBody": {"required": True, "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}},
+    "responses": {
+        "200": {"description": "Written", "content": {"application/json": {"schema": {"type": "object",
+            "properties": {"ok": {"type": "boolean"}, "path": {"type": "string"}, "bytes": {"type": "integer"}}}}}},
+        "default": {"description": "boat.dev error envelope",
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}},
+    }}}
 
 PARAM_RENAME = {"sandboxId": "id", "operationId": "opid", "snapshotId": "sid", "shareId": "share", "stopId": "stopid", "promptId": "pid", "processId": "pid",
                 "commandId": "cid", "webhookId": "id",

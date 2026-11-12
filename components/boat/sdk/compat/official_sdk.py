@@ -29,13 +29,17 @@ from boat_sdk.models.command_request import CommandRequest
 from boat_sdk.models.create_sandbox_environment_request import CreateSandboxEnvironmentRequest
 from boat_sdk.models.create_sandbox_request import CreateSandboxRequest
 from boat_sdk.models.create_scoped_api_key_request import CreateScopedApiKeyRequest
+from boat_sdk.models.file_replace_request import FileReplaceRequest
 from boat_sdk.models.file_url_request import FileUrlRequest
 from boat_sdk.models.file_write_request import FileWriteRequest
 from boat_sdk.models.fork_request import ForkRequest
 from boat_sdk.models.host_port_request import HostPortRequest
 from boat_sdk.models.named_snapshot_save_request import NamedSnapshotSaveRequest
 from boat_sdk.models.secrets_update_request import SecretsUpdateRequest
+from boat_sdk.models.set_environment_var_request import SetEnvironmentVarRequest
+from boat_sdk.models.set_sandbox_ai_access_request import SetSandboxAiAccessRequest
 from boat_sdk.models.ssh_key_request import SshKeyRequest
+from boat_sdk.models.telemetry_set_request import TelemetrySetRequest
 from boat_sdk.models.update_ai_proxy_request import UpdateAiProxyRequest
 from boat_sdk.models.saved_snapshot_save_request import SavedSnapshotSaveRequest
 from boat_sdk.models.update_sandbox_environment_request import UpdateSandboxEnvironmentRequest
@@ -141,6 +145,31 @@ try:
     if REAL:
         with urllib.request.urlopen(dl.url, context=ssl.create_default_context(cafile=CA), timeout=30) as resp:
             check(resp.read().decode() == payload, "the download URL serves the file with no API key")
+    rep = api.replace_in_files(sid, FileReplaceRequest(paths=["compat/a.txt"], pattern="official", new_value="OFFICIAL"))
+    check(len(rep.results) == 1 and rep.results[0].success, "replace in files")
+    if REAL:
+        payload = payload.replace("official", "OFFICIAL")
+        check(api.read_file(sid, path="compat/a.txt").content == payload, "the replace changed the file")
+    art = api.artifact(sid, path="compat/a.txt")
+    check(art is not None and (not REAL or bytes(art).decode() == payload), "artifact")
+    up = api.create_upload_url(sid, FileUrlRequest(path="compat/up.txt", ttl_seconds=120))
+    check(up.method == "PUT" and "/api/v1/file-uploads/" in up.url, "upload URL")
+    if REAL:
+        req = urllib.request.Request(up.url, data=b"uploaded", method="PUT")
+        with urllib.request.urlopen(req, context=ssl.create_default_context(cafile=CA), timeout=30) as resp:
+            check(resp.status == 200, "the upload URL takes a PUT with no API key")
+        check(api.read_file(sid, path="compat/up.txt").content == "uploaded", "the uploaded file")
+    check(api.share(sid).sandbox.id == sid, "share with the team")
+    check(api.get_sandbox_ai_usage(sid, days=7).sandbox_id == sid, "sandbox AI usage")
+    acc = api.set_sandbox_ai_access(sid, SetSandboxAiAccessRequest(blocked=False))
+    check(acc.sandbox_id == sid and acc.blocked is False, "sandbox AI access")
+    check(api.get_ai_usage(days=7).totals is not None, "account AI usage")
+    if api.get_telemetry().telemetry is None:  # never overwrite a team's real export
+        tel = api.set_telemetry(TelemetrySetRequest(endpoint="https://otel.invalid", headers={"X-Probe": "1"}))
+        check(tel.telemetry.endpoint == "https://otel.invalid", "set telemetry")
+        check(api.delete_telemetry().telemetry is None, "delete telemetry")
+    else:
+        print("SKIP - telemetry: the team has an export configured")
 
     hosted = api.host_port(sid, HostPortRequest(port=8080))
     check(hosted.access == "private" and hosted.is_protected and "8080-" in hosted.url, "host a private port")
@@ -221,6 +250,8 @@ try:
     env = next(e for e in envs if e.name == prefix + "-env")
     upd = api.update_environment(str(env.id), UpdateSandboxEnvironmentRequest(env_contents="GREETING=hi\n")).environment
     check(upd.env_contents == "GREETING=hi\n" and upd.id == env.id, "environment variables")
+    check(api.set_environment_var(env.id, "PROBE", SetEnvironmentVarRequest(value="1")).success, "set one environment variable")
+    check(api.delete_environment_var(env.id, "PROBE").success, "delete one environment variable")
     check(any(e.id == env.id for e in api.environments().environments), "list environments")
     api.delete_environment(str(env.id))
 

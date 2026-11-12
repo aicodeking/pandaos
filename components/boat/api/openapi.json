@@ -4872,6 +4872,73 @@
     }
    }
   },
+  "/v1/teams/{id}/share-allowlist": {
+   "put": {
+    "summary": "Set the teams whose snapshot grants this team accepts (recipient consent)",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Teams"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "teams": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        },
+        "required": [
+         "teams"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "teams": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          }
+         },
+         "required": [
+          "teams"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/api/v1/sandboxes": {
    "post": {
     "summary": "boat.dev create: create (POST /v1/vms)",
@@ -9252,6 +9319,675 @@
     }
    }
   },
+  "/api/v1/telemetry": {
+   "get": {
+    "summary": "boat.dev getTelemetry: team OTLP export (GET /v1/telemetry)",
+    "operationId": "compat_getTelemetry",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDTelemetryResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "put": {
+    "summary": "boat.dev setTelemetry: set OTLP export (PUT /v1/telemetry; no test export is sent)",
+    "operationId": "compat_setTelemetry",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "endpoint": {
+          "type": "string"
+         },
+         "headers": {
+          "type": "object",
+          "maxProperties": 20,
+          "additionalProperties": {
+           "type": "string",
+           "maxLength": 8192
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDTelemetrySetResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteTelemetry: stop OTLP export (DELETE /v1/telemetry)",
+    "operationId": "compat_deleteTelemetry",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDTelemetryResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/ai-usage": {
+   "get": {
+    "summary": "boat.dev getAiUsage: AI proxy usage (GET /v1/ai/usage; rows dated by last use)",
+    "operationId": "compat_getAiUsage",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "days",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 365,
+       "default": 30
+      }
+     },
+     {
+      "name": "profile",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "X-Boat-Org",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDAccountAiUsageResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/ai-usage": {
+   "get": {
+    "summary": "boat.dev getSandboxAiUsage: AI proxy usage of one sandbox (GET /v1/vms/{id}/ai-usage)",
+    "operationId": "compat_getSandboxAiUsage",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "days",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 365,
+       "default": 30
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxAiUsageResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/ai-access": {
+   "put": {
+    "summary": "boat.dev setSandboxAiAccess: block AI at the proxy (PUT /v1/vms/{id}/ai-access)",
+    "operationId": "compat_setSandboxAiAccess",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "blocked": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSandboxAiAccessResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/environments/{id}/vars/{key}": {
+   "put": {
+    "summary": "boat.dev setEnvironmentVar: set one variable (PUT /v1/environments/{id})",
+    "operationId": "compat_setEnvironmentVar",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "value": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDEnvironmentItemChangeResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteEnvironmentVar: remove one variable (PUT /v1/environments/{id})",
+    "operationId": "compat_deleteEnvironmentVar",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDEnvironmentItemChangeResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files/replace": {
+   "post": {
+    "summary": "boat.dev replaceInFiles: replace text (read + write each file, up to 5 MiB)",
+    "operationId": "compat_replaceInFiles",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "paths": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 100
+         },
+         "pattern": {
+          "type": "string"
+         },
+         "newValue": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileReplaceResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/files/upload-url": {
+   "post": {
+    "summary": "boat.dev createUploadUrl: signed short-lived upload URL (/api/v1/file-uploads/{token})",
+    "operationId": "compat_createUploadUrl",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "ttlSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 900
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDFileUrlResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/artifacts": {
+   "get": {
+    "summary": "boat.dev artifact: download a file up to 50 MiB",
+    "operationId": "compat_artifact",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/share": {
+   "post": {
+    "summary": "boat.dev share: share with the team (a no-op: team sandboxes are shared)",
+    "operationId": "compat_share",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "sandbox": {
+           "$ref": "#/components/schemas/BDSandbox"
+          },
+          "restartRequired": {
+           "type": "boolean"
+          },
+          "message": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/sandboxes/{id}/recover": {
+   "post": {
+    "summary": "boat.dev recover: power-cycle (forced stop, then start; the disk is kept)",
+    "operationId": "compat_recover",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "type": {
+           "type": "string"
+          },
+          "status": {
+           "type": "string",
+           "enum": [
+            "recovering"
+           ]
+          },
+          "message": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/v1/file-downloads/{token}": {
    "get": {
     "summary": "Download a file through a signed URL from POST /api/v1/sandboxes/{id}/files/download-url (no API key)",
@@ -9295,69 +10031,66 @@
     }
    }
   },
-  "/v1/teams/{id}/share-allowlist": {
+  "/api/v1/file-uploads/{token}": {
    "put": {
-    "summary": "Set the teams whose snapshot grants this team accepts (recipient consent)",
-    "x-boat-scope": "admin",
+    "summary": "Upload a file through a signed URL from POST /api/v1/sandboxes/{id}/files/upload-url (no API key)",
+    "operationId": "compat_fileUpload",
+    "security": [],
     "tags": [
-     "Teams"
+     "boat.dev compatibility"
     ],
     "parameters": [
      {
-      "name": "id",
+      "name": "token",
       "in": "path",
       "required": true,
       "schema": {
        "type": "string"
-      },
-      "description": ""
+      }
      }
     ],
     "requestBody": {
      "required": true,
      "content": {
-      "application/json": {
+      "application/octet-stream": {
        "schema": {
-        "type": "object",
-        "properties": {
-         "teams": {
-          "type": "array",
-          "items": {
-           "type": "string"
-          }
-         }
-        },
-        "required": [
-         "teams"
-        ]
+        "type": "string",
+        "format": "binary"
        }
       }
      }
     },
     "responses": {
      "200": {
-      "description": "OK",
+      "description": "Written",
       "content": {
        "application/json": {
         "schema": {
          "type": "object",
          "properties": {
-          "teams": {
-           "type": "array",
-           "items": {
-            "type": "string"
-           }
+          "ok": {
+           "type": "boolean"
+          },
+          "path": {
+           "type": "string"
+          },
+          "bytes": {
+           "type": "integer"
           }
-         },
-         "required": [
-          "teams"
-         ]
+         }
         }
        }
       }
      },
      "default": {
-      "$ref": "#/components/responses/Error"
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
      }
     }
    }
@@ -10767,6 +11500,61 @@
      "snapshotAvailable"
     ]
    },
+   "BDAccountAiUsageResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "accountId",
+       "profileId",
+       "since",
+       "sandboxes",
+       "usage",
+       "totals",
+       "dollars"
+      ],
+      "properties": {
+       "accountId": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "profileId": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "since": {
+        "type": "string",
+        "format": "date"
+       },
+       "sandboxes": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSandboxAiUsage"
+        }
+       },
+       "usage": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDAiUsageRow"
+        }
+       },
+       "totals": {
+        "$ref": "#/components/schemas/BDAiUsageTotals"
+       },
+       "dollars": {
+        "type": "number"
+       }
+      }
+     }
+    ]
+   },
    "BDAiProxySettings": {
     "allOf": [
      {
@@ -10825,6 +11613,64 @@
       }
      }
     ]
+   },
+   "BDAiUsageRow": {
+    "allOf": [
+     {
+      "type": "object",
+      "required": [
+       "day",
+       "credential",
+       "model"
+      ],
+      "properties": {
+       "day": {
+        "type": "string",
+        "format": "date"
+       },
+       "credential": {
+        "type": "string"
+       },
+       "model": {
+        "type": "string"
+       }
+      }
+     },
+     {
+      "$ref": "#/components/schemas/BDAiUsageTotals"
+     }
+    ]
+   },
+   "BDAiUsageTotals": {
+    "type": "object",
+    "required": [
+     "requests",
+     "errors",
+     "inputTokens",
+     "outputTokens",
+     "cacheReadTokens",
+     "cacheWriteTokens"
+    ],
+    "properties": {
+     "requests": {
+      "type": "integer"
+     },
+     "errors": {
+      "type": "integer"
+     },
+     "inputTokens": {
+      "type": "integer"
+     },
+     "outputTokens": {
+      "type": "integer"
+     },
+     "cacheReadTokens": {
+      "type": "integer"
+     },
+     "cacheWriteTokens": {
+      "type": "integer"
+     }
+    }
    },
    "BDApiKey": {
     "type": "object",
@@ -12139,6 +12985,23 @@
      }
     ]
    },
+   "BDEnvironmentItemChangeResponse": {
+    "type": "object",
+    "required": [
+     "success"
+    ],
+    "properties": {
+     "success": {
+      "type": "boolean"
+     },
+     "versionId": {
+      "type": "string"
+     },
+     "versionNumber": {
+      "type": "integer"
+     }
+    }
+   },
    "BDEventsResponse": {
     "allOf": [
      {
@@ -12414,6 +13277,52 @@
        },
        "content": {
         "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDFileReplaceResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "results"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "file.replaced"
+       },
+       "success": {
+        "type": "boolean"
+       },
+       "results": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "file",
+          "success"
+         ],
+         "properties": {
+          "file": {
+           "type": "string"
+          },
+          "success": {
+           "type": "boolean"
+          },
+          "replacements": {
+           "type": "integer"
+          },
+          "error": {
+           "type": "string"
+          }
+         }
+        }
        }
       }
      }
@@ -14259,6 +15168,125 @@
      }
     ]
    },
+   "BDSandboxAiAccessResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success",
+       "sandboxId",
+       "blocked"
+      ],
+      "properties": {
+       "success": {
+        "type": "boolean"
+       },
+       "sandboxId": {
+        "type": "string"
+       },
+       "blocked": {
+        "type": "boolean"
+       }
+      }
+     }
+    ]
+   },
+   "BDSandboxAiUsage": {
+    "type": "object",
+    "required": [
+     "sandboxId",
+     "name",
+     "blocked",
+     "usage",
+     "totals",
+     "dollars"
+    ],
+    "properties": {
+     "sandboxId": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "blocked": {
+      "type": "boolean"
+     },
+     "usage": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/BDAiUsageRow"
+      }
+     },
+     "totals": {
+      "$ref": "#/components/schemas/BDAiUsageTotals"
+     },
+     "dollars": {
+      "type": "number"
+     }
+    }
+   },
+   "BDSandboxAiUsageResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "sandboxId",
+       "blocked",
+       "proxied",
+       "credentialProfileId",
+       "since",
+       "usage",
+       "totals",
+       "dollars"
+      ],
+      "properties": {
+       "sandboxId": {
+        "type": "string"
+       },
+       "blocked": {
+        "type": "boolean"
+       },
+       "proxied": {
+        "type": "boolean"
+       },
+       "credentialProfileId": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "since": {
+        "type": "string",
+        "format": "date"
+       },
+       "usage": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDAiUsageRow"
+        }
+       },
+       "totals": {
+        "$ref": "#/components/schemas/BDAiUsageTotals"
+       },
+       "dollars": {
+        "type": "number"
+       }
+      }
+     }
+    ]
+   },
    "BDSandboxEnvironment": {
     "type": "object",
     "required": [
@@ -15235,6 +16263,137 @@
      },
      "type": {
       "type": "string"
+     }
+    }
+   },
+   "BDTelemetryConfig": {
+    "type": "object",
+    "required": [
+     "endpoint",
+     "headers",
+     "lastExportAt",
+     "lastError",
+     "createdAt"
+    ],
+    "properties": {
+     "endpoint": {
+      "type": "string",
+      "format": "uri"
+     },
+     "headers": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "lastExportAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "lastError": {
+      "oneOf": [
+       {
+        "type": "null"
+       },
+       {
+        "type": "object",
+        "required": [
+         "message",
+         "status",
+         "at"
+        ],
+        "properties": {
+         "message": {
+          "type": "string"
+         },
+         "status": {
+          "type": [
+           "integer",
+           "null"
+          ]
+         },
+         "at": {
+          "type": "string",
+          "format": "date-time"
+         }
+        }
+       }
+      ]
+     },
+     "createdAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "BDTelemetryResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "telemetry"
+      ],
+      "properties": {
+       "telemetry": {
+        "oneOf": [
+         {
+          "type": "null"
+         },
+         {
+          "$ref": "#/components/schemas/BDTelemetryConfig"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "BDTelemetrySetResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDTelemetryResponse"
+     },
+     {
+      "type": "object",
+      "required": [
+       "test"
+      ],
+      "properties": {
+       "test": {
+        "$ref": "#/components/schemas/BDTelemetryTestResult"
+       }
+      }
+     }
+    ]
+   },
+   "BDTelemetryTestResult": {
+    "type": "object",
+    "required": [
+     "ok",
+     "status",
+     "message"
+    ],
+    "properties": {
+     "ok": {
+      "type": "boolean"
+     },
+     "status": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "message": {
+      "type": [
+       "string",
+       "null"
+      ]
      }
     }
    },
