@@ -15,6 +15,7 @@
 #   own origin with a host-only cookie that does not open another VM's, and
 #   another origin's Origin header gets 403 (also on a websocket upgrade);
 #   api. proxies to boat-api with /internal/* blocked; routes re-read live;
+#   without boat-api's revocation table private ports answer 503 (fail closed);
 # - ssh jump: -W only to permitopen targets of running VMs, no shell,
 #   port 2222 jump-only.
 { pkgs, self }:
@@ -57,6 +58,11 @@ pkgs.testers.runNixOSTest {
       serviceConfig.ExecStart = "${pkgs.python3}/bin/python3 -m http.server --bind 127.0.0.1 8000 --directory /etc/boat";
     };
     users.users.tester.isNormalUser = true;
+    # The stub API's revocation table (boat-gateway refuses private tokens without one).
+    environment.etc."boat/internal/route-gens".text = builtins.toJSON {
+      gens = { };
+      desktops = [ "vm1" "vm2" ];
+    };
   };
 
   testScript = ''
@@ -168,6 +174,16 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed(code + f"-b '{ck}' {other} https://vm1.desktop.{D}/boatd.json") == "403"
         assert machine.succeed(code + f"-b '{ck}' {other} {ws} https://vm1.desktop.{D}/websockify") == "403"
         assert machine.succeed(code + f"-b '{ck}' -H 'Origin: https://vm1.desktop.{D}' https://vm1.desktop.{D}/boatd.json") == "200"
+
+    with subtest("gateway fails closed without boat-api's revocation table"):
+        rg = "/etc/boat/internal/route-gens"
+        machine.succeed(f"mv {rg} /root/route-gens && systemctl restart boat-gateway.service")
+        machine.wait_for_open_port(8742)
+        tok = f"-H 'X-Boat-Route-Token: {rt}' https://8000-vm1.vm.{D}/boatd.json"
+        assert machine.succeed(code + tok) == "503"
+        assert machine.succeed(code + f"https://8000-vm2.vm.{D}/boatd.json") == "200"
+        machine.succeed(f"mv /root/route-gens {rg}")
+        assert machine.succeed(code + tok) == "200"
 
     with subtest("dashboard: static, same origin as the API, API paths still reach the API"):
         page = machine.succeed(f"curl -sk -D - --resolve api.{D}:443:127.0.0.1 https://api.{D}/")
