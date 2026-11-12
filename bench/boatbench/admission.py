@@ -11,6 +11,7 @@ counts cannot drift from components/boat/boatd again:
 The module's untrustedTenants settings come from components/boat/module.nix.
 """
 import os
+import json
 import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -55,16 +56,8 @@ def admission_counts_overhead():
 
 
 def untrusted_settings():
-    """module.nix untrustedSettings as a dict (ints, bools, strings)."""
-    src = _read("module.nix")
-    block = src[src.index("untrustedSettings = {"):]
-    block = block[block.index("{") + 1:block.index("};")]
-    out = {}
-    for m in re.finditer(r"^\s*(\w+)\s*=\s*([^;]+);", block, re.M):
-        raw = m.group(2).strip()
-        out[m.group(1)] = (True if raw == "true" else False if raw == "false" else
-                           raw.strip('"') if raw.startswith('"') else float(raw) if "." in raw else int(raw))
-    return out
+    """What services.boat.untrustedTenants sets: boatd/untrusted.json, which module.nix imports."""
+    return json.loads(_read("boatd/untrusted.json"))
 
 
 def est_memtotal_mib(ram_gb):

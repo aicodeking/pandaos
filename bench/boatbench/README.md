@@ -92,11 +92,12 @@ input) picks one per job:
 - `trusted-writeback`: `diskCache` `Writeback`: Firecracker passes guest flushes to the
   host, so fsync and O_DIRECT writes are durable. Every other preset's write numbers
   are `Unsafe`-cache numbers.
-- `untrusted`: `components/boat/module.nix` `untrustedSettings`, key by key (the unit test
-  compares them): `Sync` disk engine, the disk shared by weight (`ioCost` with
-  `ioCostQoS` latency targets) under an `io.max` ceiling of 4,000 MB/s and 200,000 IOPS
-  (until 2026-11-10: `io.max` 500 MB/s and 20,000 IOPS, which run 42677142859 measured),
-  1 Gbit/s egress and ingress, `storageOvercommit` 1, `hostDirtyRatio` 20, no `warmPool` or KSM.
+- `untrusted`: `components/boat/boatd/untrusted.json`, the list that `module.nix` imports for
+  `untrustedTenants`, key by key (the unit test compares them). Its settings: the disk shared by weight
+  (`ioCost` with `ioCostQoS` latency targets) under an `io.max` ceiling of 4,000 MB/s and 200,000 IOPS;
+  a 25% uplink share with fair queueing; `storageOvercommit` 1; `hostDirtyRatio` 20; no SMTP; no `warmPool`
+  or KSM. Until `46507a8` the list instead had the `Sync` disk engine and 1 Gbit/s egress and ingress. The
+  AX42 Ubuntu run used that older list.
   `stack.sh` first measures the state disk once for `ioCost` (`boatd -measure-disk`,
   about 25 s, stored in the store's `iocost-model`, as the module's
   `boat-iocost-model.service` does; any config with `ioCost` and no `ioCostModel` gets it
