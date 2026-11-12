@@ -135,21 +135,24 @@ disk_iou=null
 if [ "$JAILER" = 1 ] && [ -e /proc/sys/kernel/io_uring_group ]; then
   log "perf e2e: Async engine, io_uring only for the VMMs' gid (untrustedTenants)"
   iou_was="$(cat /proc/sys/kernel/io_uring_disabled) $(cat /proc/sys/kernel/io_uring_group)"
+  iou_restore() { local d g; read -r d g <<<"$iou_was"; sudo sysctl -qw kernel.io_uring_disabled="$d" kernel.io_uring_group="$g"; }
+  iou_fail() { iou_restore; fail "$1"; } # later steps (e2e-edge) run on this host too
   sudo sysctl -qw kernel.io_uring_disabled=1 kernel.io_uring_group=899999
-  iou_fio() { sudo -u nobody "$@" fio --name=u --filename=/tmp/iou-probe --size=4M --ioengine=io_uring --rw=write --bs=1M >/dev/null 2>&1; }
-  ! iou_fio || fail "io_uring open to a process outside kernel.io_uring_group"
-  iou_fio -g '#899999' || fail "io_uring refused to kernel.io_uring_group"
-  sudo rm -f /tmp/iou-probe
+  # uid nobody with gid GID (setpriv: sudo -g needs a runas-group grant the runner lacks).
+  # shellcheck disable=SC2024 # the log is the runner's own file
+  iou_fio() { sudo setpriv --reuid=65534 --regid="$1" --clear-groups fio --name=u --filename="/tmp/iou-probe-$1" --size=4M --ioengine=io_uring --rw=write --bs=1M >"$WORK/tmp/iou-$1.log" 2>&1; }
+  ! iou_fio 65534 || iou_fail "io_uring open to a process outside kernel.io_uring_group"
+  iou_fio 899999 || iou_fail "io_uring refused to kernel.io_uring_group: $(tail -n 5 "$WORK/tmp/iou-899999.log")"
+  sudo rm -f /tmp/iou-probe-*
   perf_cfg '.jailGid = 899999 | .diskEngine = "Async"' iou # Async refused would fail the create
   pv=$(perf_vm pv)
-  [ "$(sudo awk '/^Gid:/ {print $2}' "/proc/$(vmf "$pv" pid)/status")" = 899999 ] || fail "the VMM does not run with jailGid"
+  [ "$(sudo awk '/^Gid:/ {print $2}' "/proc/$(vmf "$pv" pid)/status")" = 899999 ] || iou_fail "the VMM does not run with jailGid"
   put_disk "$pv"
-  disk_iou=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p') || disk_stuck "fio on Async with io_uring_group"
+  disk_iou=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p') || { iou_restore; disk_stuck "fio on Async with io_uring_group"; }
   echo "disk (Async, io_uring for the VMMs only): $disk_iou"
   echo "untrusted seq write: Sync (before) $(jq -r .seq_write_mbps <<<"$disk_sync") MB/s, Async with io_uring_group (after) $(jq -r .seq_write_mbps <<<"$disk_iou") MB/s"
   perf_del "$pv"
-  read -r iou_d iou_g <<<"$iou_was"
-  sudo sysctl -qw kernel.io_uring_disabled="$iou_d" kernel.io_uring_group="$iou_g"
+  iou_restore
 else
   echo "perf e2e: no jailer or no kernel.io_uring_group (Linux < 6.6): Async with io_uring_group not measured"
 fi
