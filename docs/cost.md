@@ -201,8 +201,8 @@ Every table assumes each sandbox runs one session and is then kept the full R ho
 | SMT | on | **off** (`nosmt=force`): an AX102 has 16 threads, not 32 |
 | VMs by CPU at `cpuOvercommit` 4 | 32 on an AX102 | **16**: RAM (15) still binds first, but 15 VMs are 60 vCPUs on 16 cores, 3.75 per core instead of 1.9 per thread |
 | VMs at 1× CPU (no CPU overcommit) | 8 | **4** |
-| Disk | `auto` engine (io_uring), no I/O cap | `Sync` engine, io_uring off; busy VMs share the disk by weight (blk-iocost with the disk's measured model and p95 latency targets), `io.max` 4,000 MB/s and 200,000 IOPS per VM as a ceiling. Until 2026-11-10: `io.max` 500 MB/s and 20,000 IOPS (the run below) |
-| Network | no cap | 1,000 Mbit/s egress and ingress per VM, 4,096 tracked connections |
+| Disk | `auto` engine (io_uring), no I/O cap | io_uring only for the VMMs' shared group (`io_uring_disabled` 1; until `46507a8`: `Sync` engine, io_uring off); busy VMs share the disk by weight (blk-iocost with the disk's measured model and p95 latency targets), `io.max` 4,000 MB/s and 200,000 IOPS per VM as a ceiling. Until 2026-11-10: `io.max` 500 MB/s and 20,000 IOPS (the run below) |
+| Network | no cap | 25% uplink share per VM with fair queueing, 4,096 tracked connections, no SMTP (until `46507a8`: 1,000 Mbit/s egress and ingress per VM, which the AX42 Ubuntu run used) |
 | Storage | `storageOvercommit` 10 | **1**: committed storage (51 GiB disk + 8 GiB memory + logs, about 59 GiB per VM, running or stopped, plus snapshots) must fit the disk. About 30 kept VMs on an AX102's 1.92 TB mirror and about 8 on an AX42's 512 GB mirror *(estimate: usable size after RAID 1 and btrfs not measured)*. **This binds before RAM as soon as stopped VMs are kept** ([retention](#stopped-vm-retention-what-boatdevs-free-14-days-cost-on-own-hardware)) |
 | `warmPool`, `ksmTeam` | allowed (off by default) | refused |
 | Cost per VM-hour, AX102, 100% | $0.019 (22 VMs) | **$0.028** (15 VMs), 78% full to break even with boat.dev, never with operator time |
