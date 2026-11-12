@@ -55,9 +55,13 @@ func mac(key []byte, payload string) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// signDesktop is boat-api's SignDesktop: hex(HMAC(key, "<vmid>.<exp>")).
-func signDesktop(key []byte, vmid string, exp int64) string {
-	return mac(key, fmt.Sprintf("%s.%d", vmid, exp))
+// signDesktop is boat-api's SignDesktop: hex(HMAC(key, "<vmid>.<exp>")), with
+// ".g<gen>" before the expiry once the VM's links have been revoked.
+func signDesktop(key []byte, vmid string, gen int, exp int64) string {
+	if gen == 0 {
+		return mac(key, fmt.Sprintf("%s.%d", vmid, exp))
+	}
+	return mac(key, fmt.Sprintf("%s.g%d.%d", vmid, gen, exp))
 }
 
 // signRoute: hex(HMAC(key, "route.<port>-<vmid>.<exp>")) (boat-api mints it),

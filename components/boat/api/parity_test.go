@@ -921,15 +921,23 @@ func TestAIProxy(t *testing.T) {
 		t.Errorf("new token: %d", resp.StatusCode)
 	}
 
-	// a fork gets its own token, pushed to its env
+	// a fork gets its own token, pushed to its env; the parent's is rotated
 	before := len(e.boatd.envOps)
 	_, ch := e.do(e.owner, "POST", "/v1/vms/"+id+"/fork", nil)
-	if len(e.boatd.envOps) != before+1 {
+	var forkTok string
+	for _, op := range e.boatd.envOps[before:] {
+		if op["vm"] == ch["id"] {
+			forkTok, _ = op["vars"].(map[string]any)["ANTHROPIC_API_KEY"].(string)
+		}
+	}
+	if forkTok == "" {
 		t.Fatal("fork did not get its own env")
 	}
-	forkTok := e.boatd.envOps[before]["vars"].(map[string]any)["ANTHROPIC_API_KEY"].(string)
 	if forkTok == newTok || !strings.Contains(forkTok, ch["id"].(string)) {
 		t.Errorf("fork token: %s", forkTok)
+	}
+	if resp, _ := aiCall(t, proxy.URL, "/anthropic/v1/messages", "x-api-key", newTok); resp.StatusCode != 401 {
+		t.Errorf("parent's token on the forked disk still works: %d", resp.StatusCode)
 	}
 
 	// another team's VM cannot use this team's key; it has no credential

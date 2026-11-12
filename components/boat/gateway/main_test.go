@@ -83,7 +83,7 @@ func TestPortRoutesPrivateByDefault(t *testing.T) {
 		"expired":    first(tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port, "abc-1", 0, e) }, -time.Second)),
 		"other vm":   first(tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port, "xyz-2", 0, e) }, time.Hour)),
 		"other port": first(tok(func(e int64) string { return signRoute(g.k(purposePortRoute), port+1, "abc-1", 0, e) }, time.Hour)),
-		"desktop":    first(tok(func(e int64) string { return signDesktop(g.k(purposeDesktopLink), "abc-1", e) }, time.Hour)),
+		"desktop":    first(tok(func(e int64) string { return signDesktop(g.k(purposeDesktopLink), "abc-1", 0, e) }, time.Hour)),
 		"garbage":    "1.00",
 	}
 	for name, b := range bad {
@@ -125,7 +125,7 @@ func TestDesktopPerVMOrigin(t *testing.T) {
 	g, _, _ := setup(t)
 	link := func(vmid string, d time.Duration) string {
 		exp := time.Now().Add(d).Unix()
-		return "exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.k(purposeDesktopLink), vmid, exp)
+		return "exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.k(purposeDesktopLink), vmid, 0, exp)
 	}
 	a, b := "abc-1.desktop.boat.test", "xyz-2.desktop.boat.test"
 
@@ -186,7 +186,7 @@ func TestCrossOriginRefused(t *testing.T) {
 	g, _, port := setup(t)
 	p := strconv.Itoa(port)
 	dA, dB := "abc-1.desktop.boat.test", "xyz-2.desktop.boat.test"
-	cB := cookie(desktopCookie, first(tok(func(e int64) string { return signDesktop(g.k(purposeDesktopLink), "xyz-2", e) }, time.Hour)))
+	cB := cookie(desktopCookie, first(tok(func(e int64) string { return signDesktop(g.k(purposeDesktopLink), "xyz-2", 0, e) }, time.Hour)))
 	https := header("X-Forwarded-Proto", "https")
 	ws := func(r *http.Request) {
 		r.Header.Set("Connection", "Upgrade")
@@ -216,7 +216,7 @@ func TestCrossOriginRefused(t *testing.T) {
 	}
 	// A signed link may still arrive from anywhere, and ends on a same-origin page.
 	exp := time.Now().Add(time.Hour).Unix()
-	q := "/?exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.k(purposeDesktopLink), "xyz-2", exp)
+	q := "/?exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.k(purposeDesktopLink), "xyz-2", 0, exp)
 	for _, site := range []string{"cross-site", "same-site"} {
 		w := req(g, dB, q, https, header("Sec-Fetch-Site", site), header("Sec-Fetch-Mode", "navigate"), header("Sec-Fetch-Dest", "document"))
 		if w.Code != 200 || !strings.Contains(w.Body.String(), "http-equiv") || len(w.Result().Cookies()) != 1 {
@@ -367,9 +367,83 @@ func TestRouteGensFailClosedAtStart(t *testing.T) {
 	if c := req(g, strconv.Itoa(port)+"-xyz-2.vm.boatvms.test", "/").Code; c != 200 {
 		t.Errorf("public route without a table: %d", c)
 	}
+	// A 404 (an API without the route, or a misrouted -api) fails closed too.
 	status = 404
-	if c := req(g, host, "/", withTok).Code; c != 200 {
-		t.Errorf("API without revocation: %d", c)
+	if c := req(g, host, "/", withTok).Code; c != 503 {
+		t.Errorf("route-gens 404: %d, want 503", c)
+	}
+}
+
+// Desktop links follow the same generations: a revoked VM's old link and
+// cookie stop working, the new generation's work.
+func TestDesktopLinkRevocation(t *testing.T) {
+	g, _, _ := setup(t)
+	gens := `{"gens":{},"desktops":["abc-1"]}`
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(gens)) }))
+	defer api.Close()
+	g.gens = newRouteGens(api.URL)
+	link := func(gen int) string {
+		exp := time.Now().Add(time.Hour).Unix()
+		return "/?exp=" + strconv.FormatInt(exp, 10) + "&sig=" + signDesktop(g.k(purposeDesktopLink), "abc-1", gen, exp)
+	}
+	host := "abc-1.desktop.boat.test"
+	old := link(0)
+	if c := req(g, host, old).Code; c != 302 {
+		t.Fatalf("link before revocation: %d", c)
+	}
+	gens = `{"gens":{"abc-1":1},"desktops":["abc-1"]}`
+	if err := g.gens.refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if c := req(g, host, old).Code; c != 403 {
+		t.Errorf("revoked desktop link: %d", c)
+	}
+	if c := req(g, host, link(1)).Code; c != 302 {
+		t.Errorf("new generation's link: %d", c)
+	}
+}
+
+// ask approves a desktop host only once a link was minted for it, and only so
+// many new hostnames per team per window; known hostnames always pass.
+func TestAskDesktopNeedsLinkAndTeamQuota(t *testing.T) {
+	g, rp, port := setup(t)
+	p := strconv.Itoa(port)
+	writeRoutes(t, rp, `{"vms":{"abc-1":{"ip":"127.0.0.1","ports":[`+p+`,81,82],"team":"t1"},
+		"xyz-2":{"ip":"127.0.0.1","ports":[`+p+`],"team":"t1"},"other":{"ip":"127.0.0.1","ports":[`+p+`],"team":"t2"}}}`)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"gens":{},"desktops":["abc-1"]}`))
+	}))
+	defer api.Close()
+	g.gens = newRouteGens(api.URL)
+	now := time.Now()
+	g.now = func() time.Time { return now }
+	g.certs = newCertQuota(2, 24*time.Hour)
+	ask := func(host string) int {
+		w := httptest.NewRecorder()
+		g.ask(w, httptest.NewRequest("GET", "/ask?domain="+host, nil))
+		return w.Code
+	}
+	steps := []struct {
+		host string
+		want int
+	}{
+		{"xyz-2.desktop.boat.test", 404}, // no link minted
+		{"abc-1.desktop.boat.test", 200},
+		{p + "-abc-1.vm.boatvms.test", 200},
+		{"81-abc-1.vm.boatvms.test", 429}, // t1's quota (2) is used up
+		{p + "-xyz-2.vm.boatvms.test", 429},
+		{"abc-1.desktop.boat.test", 200},    // already approved: renewals pass
+		{p + "-other.vm.boatvms.test", 200}, // another team has its own quota
+		{"api.boat.test", 200},
+	}
+	for _, s := range steps {
+		if c := ask(s.host); c != s.want {
+			t.Errorf("ask %s: %d, want %d", s.host, c, s.want)
+		}
+	}
+	now = now.Add(25 * time.Hour)
+	if c := ask("81-abc-1.vm.boatvms.test"); c != 200 {
+		t.Errorf("after the window: %d", c)
 	}
 }
 

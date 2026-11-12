@@ -411,7 +411,7 @@ func TestFilesSSHDesktop(t *testing.T) {
 	if len(e.boatd.desk) != 1 || e.boatd.desk[0]["action"] != "start" || e.boatd.desk[0]["token"] != SignGuestDesktop(PurposeKey([]byte("desktop-key"), purposeGuestDesktop), id) || len(SignGuestDesktop([]byte("k"), id)) != 64 {
 		t.Errorf("guest desktop not started with token: %v", e.boatd.desk)
 	}
-	if SignDesktop([]byte("k"), "vm1", 100) == SignDesktop([]byte("k"), "vm1", 101) {
+	if SignDesktop([]byte("k"), "vm1", 0, 100) == SignDesktop([]byte("k"), "vm1", 0, 101) {
 		t.Error("signature must cover exp")
 	}
 	// Each kind of token has its own key derived from the shared one: the link is
@@ -419,7 +419,7 @@ func TestFilesSSHDesktop(t *testing.T) {
 	du, _ := url.Parse(d["url"].(string))
 	exp, _ := strconv.ParseInt(du.Query().Get("exp"), 10, 64)
 	master := []byte("desktop-key")
-	if du.Query().Get("sig") != SignDesktop(PurposeKey(master, purposeDesktopLink), id, exp) || du.Query().Get("sig") == SignDesktop(master, id, exp) {
+	if du.Query().Get("sig") != SignDesktop(PurposeKey(master, purposeDesktopLink), id, 0, exp) || du.Query().Get("sig") == SignDesktop(master, id, 0, exp) {
 		t.Errorf("desktop link not signed with the desktop-link key: %s", du)
 	}
 	keys := map[string]bool{string(master): true}

@@ -143,6 +143,9 @@ type State struct {
 	// PortMinters: per VM, the API keys that minted its private port links;
 	// deleting one (or removing its member) bumps the VM's RouteGens.
 	PortMinters map[string][]string `json:"port_minters,omitempty"`
+	// DesktopVMs: VMs with a minted desktop link; the gateway approves a TLS
+	// certificate for <vmid>.<desktop domain> only for these.
+	DesktopVMs map[string]bool `json:"desktop_vms,omitempty"`
 	// boat.dev operations kept across restarts (compat_stops.go, compat.go,
 	// compat_idem.go). Op maps keep their team (and VM) under "_" keys.
 	StopOps     map[string]map[string]any `json:"stop_ops,omitempty"`     // stop id -> op
@@ -366,6 +369,9 @@ func (st *State) init() {
 	}
 	if st.PortMinters == nil {
 		st.PortMinters = map[string][]string{}
+	}
+	if st.DesktopVMs == nil {
+		st.DesktopVMs = map[string]bool{}
 	}
 	if st.StopOps == nil {
 		st.StopOps = map[string]map[string]any{}

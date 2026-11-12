@@ -170,10 +170,16 @@ func PurposeKey(master []byte, purpose string) []byte {
 }
 
 // SignDesktop: sig = hex(HMAC-SHA256(key, vmID + "." + exp)). The desktop
-// gateway verifies with the same shared key file and rejects exp < now.
-func SignDesktop(key []byte, vmID string, exp int64) string {
+// gateway verifies with the same shared key file and rejects exp < now. Once
+// the VM's links were revoked (gen > 0, the port routes' RouteGens) the payload
+// is vmID + ".g<gen>." + exp, which kills every earlier link and cookie.
+func SignDesktop(key []byte, vmID string, gen int, exp int64) string {
 	m := hmac.New(sha256.New, key)
-	fmt.Fprintf(m, "%s.%d", vmID, exp)
+	if gen == 0 {
+		fmt.Fprintf(m, "%s.%d", vmID, exp)
+	} else {
+		fmt.Fprintf(m, "%s.g%d.%d", vmID, gen, exp)
+	}
 	return hex.EncodeToString(m.Sum(nil))
 }
 

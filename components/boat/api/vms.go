@@ -724,6 +724,10 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	// agent sessions came along too, so its conversations do as well.
 	// Its own VM token too, and the parent's token on the copied disk dies.
 	s.rotateSelf(parent)
+	// Its AI proxy token too: the copy is the child's now, and may be shared.
+	if err := s.rotateAIToken(r, parent, p.Team.ID); err != nil {
+		log.Printf("%s: rotate AI token of %s after fork: %v", info(r).id, parent, err)
+	}
 	if vars, err := s.teamEnv(p.Team.ID, s.vmSecrets(childID)); err != nil {
 		log.Printf("%s: env for fork %s: %v", info(r).id, childID, err)
 	} else {
@@ -773,6 +777,7 @@ func (s *server) forgetVM(id string) {
 		delete(st.ForeignVMs, id)
 		delete(st.RouteGens, id)
 		delete(st.PortMinters, id)
+		delete(st.DesktopVMs, id)
 		forgetStops(st, id)
 		delete(st.VMTokens, id)
 		forgetCompatID(st, id)
@@ -1123,6 +1128,10 @@ func (s *server) proxySnapshots(w http.ResponseWriter, r *http.Request, p *princ
 	if r.Method == "POST" {
 		status = 201
 		s.rotateSelf(r.PathValue("id")) // the snapshot holds the VM's token
+		// and its AI proxy token: a later share or import must not carry a live one.
+		if err := s.rotateAIToken(r, r.PathValue("id"), p.Team.ID); err != nil {
+			log.Printf("%s: rotate AI token of %s after snapshot: %v", info(r).id, r.PathValue("id"), err)
+		}
 	}
 	if out == nil {
 		out = map[string]any{"ok": true}
@@ -1229,7 +1238,24 @@ func (s *server) desktopVM(w http.ResponseWriter, r *http.Request, p *principal)
 		writeUpstream(w, r, err)
 		return
 	}
-	exp := time.Now().Add(s.cfg.DesktopTTL).Unix()
-	u := fmt.Sprintf("%s/%s?exp=%d&sig=%s", strings.TrimRight(s.cfg.DesktopURL, "/"), url.PathEscape(id), exp, SignDesktop(PurposeKey(s.cfg.DesktopKey, purposeDesktopLink), id, exp))
+	// Like a private port link: revoked with its key or member (revokeLinksOf),
+	// and never outliving the key.
+	if err := s.recordPortMinter(id, p.Key.ID); err != nil {
+		s.storeErr(w, r, err)
+		return
+	}
+	if !s.store.Snapshot().DesktopVMs[id] {
+		if err := s.store.Update(func(st *State) error { st.DesktopVMs[id] = true; return nil }); err != nil {
+			s.storeErr(w, r, err)
+			return
+		}
+	}
+	expAt := time.Now().Add(s.cfg.DesktopTTL)
+	if p.Key.Expires != nil && p.Key.Expires.Before(expAt) {
+		expAt = *p.Key.Expires
+	}
+	exp := expAt.Unix()
+	sig := SignDesktop(PurposeKey(s.cfg.DesktopKey, purposeDesktopLink), id, s.store.Snapshot().RouteGens[id], exp)
+	u := fmt.Sprintf("%s/%s?exp=%d&sig=%s", strings.TrimRight(s.cfg.DesktopURL, "/"), url.PathEscape(id), exp, sig)
 	writeJSON(w, 200, map[string]any{"url": u, "expires_at": time.Unix(exp, 0).UTC()})
 }

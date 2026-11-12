@@ -144,7 +144,8 @@ func (s *server) bumpRouteGen(vmID string) (int, error) {
 	return gen, err
 }
 
-// revokePortTokens ends every token, link and cookie of the VM's private ports.
+// revokePortTokens ends every token, link and cookie of the VM's private ports
+// and desktop.
 func (s *server) revokePortTokens(w http.ResponseWriter, r *http.Request, p *principal) {
 	if _, ok := s.ownVM(w, r, p); !ok {
 		return
@@ -166,7 +167,13 @@ func (s *server) routeGens(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, 404, "not_found", "no such endpoint")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"gens": s.store.Snapshot().RouteGens})
+	st := s.store.Snapshot()
+	desktops := []string{}
+	for id := range st.DesktopVMs {
+		desktops = append(desktops, id)
+	}
+	slices.Sort(desktops)
+	writeJSON(w, 200, map[string]any{"gens": st.RouteGens, "desktops": desktops})
 }
 
 // vmDomainURL turns -vm-domain into a base URL: "vm.example.com" means
@@ -259,7 +266,7 @@ func (s *server) recordPortMinter(vmID, keyID string) error {
 	})
 }
 
-// revokeLinksOf bumps the route generation of every VM whose private port
+// revokeLinksOf bumps the route generation of every VM whose private port (or desktop)
 // links one of gone minted (inside Store.Update). The gateway then refuses
 // them; signed file URLs check their key at use (keyAlive) instead.
 func revokeLinksOf(st *State, gone func(keyID string) bool) {

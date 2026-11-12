@@ -41,6 +41,7 @@ type vm struct {
 	Ports       []int  `json:"ports"`
 	Public      []int  `json:"public"`
 	DesktopPort int    `json:"desktopPort"`
+	Team        string `json:"team"`
 }
 
 type routeFile struct {
@@ -98,6 +99,7 @@ type gateway struct {
 	legacyUntil   time.Time // master-key (pre-split) tokens verify until then; zero = never
 	routes        *routes
 	gens          *routeGens // nil = no revocation (no -api)
+	certs         *certQuota // nil = no per-team limit on new certificates
 	now           func() time.Time
 }
 
@@ -176,10 +178,13 @@ func (g *gateway) desktop(w http.ResponseWriter, r *http.Request, vmid string) {
 		http.NotFound(w, r)
 		return
 	}
-	check := func(tok string) error {
-		_, err := g.verify(tok, purposeDesktopLink, func(k []byte, exp int64) string { return signDesktop(k, vmid, exp) })
-		return err
+	gen, ready := g.gens.gen(r.Context(), vmid)
+	if !ready {
+		http.Error(w, "desktop: link revocations are unavailable, retry shortly", http.StatusServiceUnavailable)
+		return
 	}
+	sign := func(k []byte, exp int64) string { return signDesktop(k, vmid, gen, exp) }
+	check := func(tok string) error { _, err := g.verify(tok, purposeDesktopLink, sign); return err }
 	// The desktop page is not embeddable, and only its own origin may use it.
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'self'")
 	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
@@ -189,7 +194,7 @@ func (g *gateway) desktop(w http.ResponseWriter, r *http.Request, vmid string) {
 	}
 	if q := r.URL.Query(); q.Has("sig") {
 		tok := q.Get("exp") + "." + q.Get("sig")
-		exp, err := g.verify(tok, purposeDesktopLink, func(k []byte, exp int64) string { return signDesktop(k, vmid, exp) })
+		exp, err := g.verify(tok, purposeDesktopLink, sign)
 		if err != nil {
 			http.Error(w, "desktop link invalid: "+err.Error(), http.StatusForbidden)
 			return
@@ -330,23 +335,69 @@ func proxy(ip string, port int, guestCookie string) http.Handler {
 }
 
 // ask answers Caddy's on_demand_tls check: 200 only for hosts we would serve,
-// so nobody can make us request certificates for random names.
+// so nobody can make us request certificates for random names: a desktop
+// host only once boat-api minted a link for it, and per team only so many new
+// hostnames per window (the CA's quota is shared by every tenant).
 func (g *gateway) ask(w http.ResponseWriter, r *http.Request) {
 	host := hostOnly(r.URL.Query().Get("domain"))
 	if host == g.desktopDomain || host == "api."+g.domain {
 		return
 	}
+	var v vm
+	known := false
 	if vmid, ok := label(host, g.desktopDomain); ok {
-		if _, ok := g.routes.lookup(vmid); ok {
-			return
-		}
+		v, known = g.routes.lookup(vmid)
+		known = known && g.gens.hasDesktop(r.Context(), vmid)
+	} else if port, vmid, ok := g.parsePortHost(host); ok {
+		v, known = g.routes.lookup(vmid)
+		known = known && slices.Contains(v.Ports, port)
 	}
-	if port, vmid, ok := g.parsePortHost(host); ok {
-		if v, ok := g.routes.lookup(vmid); ok && slices.Contains(v.Ports, port) {
-			return
-		}
+	if !known {
+		http.Error(w, "unknown host", http.StatusNotFound)
+		return
 	}
-	http.Error(w, "unknown host", http.StatusNotFound)
+	if !g.certs.allow(v.Team, host, g.now()) {
+		http.Error(w, "too many new certificates for this team, retry later", http.StatusTooManyRequests)
+	}
+}
+
+// certQuota caps the new hostnames approved per team per window; a hostname
+// approved once is always approved again (renewals).
+// ponytail: in memory, so a restart forgets approvals and opens a fresh window;
+// persist it if restarts become frequent enough to matter.
+type certQuota struct {
+	limit  int
+	window time.Duration
+
+	mu     sync.Mutex
+	issued map[string]bool
+	recent map[string][]time.Time // team -> approvals within the window
+}
+
+func newCertQuota(limit int, window time.Duration) *certQuota {
+	if limit <= 0 {
+		return nil
+	}
+	return &certQuota{limit: limit, window: window, issued: map[string]bool{}, recent: map[string][]time.Time{}}
+}
+
+func (q *certQuota) allow(team, host string, now time.Time) bool {
+	if q == nil {
+		return true
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.issued[host] {
+		return true
+	}
+	kept := slices.DeleteFunc(slices.Clone(q.recent[team]), func(t time.Time) bool { return now.Sub(t) >= q.window })
+	if len(kept) >= q.limit {
+		q.recent[team] = kept
+		return false
+	}
+	q.recent[team] = append(kept, now)
+	q.issued[host] = true
+	return true
 }
 
 func main() {
@@ -358,6 +409,8 @@ func main() {
 	routesPath := flag.String("routes", "/run/boat/routes.json", "boatd route table")
 	keyPath := flag.String("desktop-key", "/var/lib/boat/secrets/desktop.key", "HMAC key shared with boat-api")
 	api := flag.String("api", "", "boat-api base URL (http://127.0.0.1:8740), for port token revocations; empty disables them")
+	certLimit := flag.Int("ask-team-limit", 10, "new TLS hostnames approved per team per -ask-window (already approved ones always pass); 0 = unlimited")
+	certWindow := flag.Duration("ask-window", 24*time.Hour, "window of -ask-team-limit")
 	legacy := flag.Int64("legacy-hmac-until", 0, "accept tokens signed with the master key (from before per-purpose keys) that expire by this unix time; 0 = start + 8 days, -1 = never")
 	flag.Parse()
 	if *domain == "" {
@@ -371,6 +424,7 @@ func main() {
 	g := &gateway{
 		domain: d, vmDomain: strings.ToLower(*vmDomain), desktopDomain: strings.ToLower(*desktopDomain),
 		key: key, routes: &routes{path: *routesPath}, now: time.Now,
+		certs: newCertQuota(*certLimit, *certWindow),
 	}
 	switch {
 	case *legacy == 0:

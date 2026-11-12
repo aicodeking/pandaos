@@ -117,6 +117,38 @@ func mintKey(kr *Keyring, st *State, userID, teamID, name string, scopes []strin
 	return k, token
 }
 
+// childExpiry is the expiry of a key minted by parent with a requested TTL
+// (0 = never): never later than the parent's own expiry. ok is false when the
+// parent expires and no TTL was requested, so a short-lived key cannot mint an
+// immortal one.
+func childExpiry(parent *APIKey, ttlS int64, now time.Time) (exp *time.Time, ok bool) {
+	if ttlS > 0 {
+		e := now.Add(time.Duration(ttlS) * time.Second)
+		exp = &e
+	}
+	if parent == nil || parent.Expires == nil {
+		return exp, true
+	}
+	if exp == nil {
+		return nil, false
+	}
+	if parent.Expires.Before(*exp) {
+		e := *parent.Expires
+		exp = &e
+	}
+	return exp, true
+}
+
+// inheritedExpiry: keys minted on someone else's behalf (a new member's or
+// team owner's first key) expire with the minting key.
+func inheritedExpiry(p *principal) *time.Time {
+	if p.Key == nil || p.Key.Expires == nil {
+		return nil
+	}
+	e := *p.Key.Expires
+	return &e
+}
+
 // bootstrap creates the first owner, team and key. It fails if any user exists.
 func bootstrap(store *Store, kr *Keyring, userName, teamName string) (keyView, error) {
 	var out keyView
@@ -276,6 +308,7 @@ func (s *server) createTeam(w http.ResponseWriter, r *http.Request, p *principal
 			st.Users[u.ID] = u
 			ownerID = u.ID
 			k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", ownerKeyScopes(p))
+			k.Expires = inheritedExpiry(p)
 			out["owner"] = map[string]any{"user": u, "key": viewKey(k, tok)}
 		}
 		t.Members = []Member{{UserID: ownerID, Role: "owner"}}
@@ -497,6 +530,7 @@ func (s *server) addMember(w http.ResponseWriter, r *http.Request, p *principal)
 		st.Users[u.ID] = u
 		team.Members = append(slices.Clone(team.Members), Member{UserID: u.ID, Role: body.Role})
 		k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", scopes)
+		k.Expires = inheritedExpiry(p)
 		kv = viewKey(k, tok)
 		return nil
 	})
@@ -613,6 +647,16 @@ func (s *server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 		writeErr(w, r, 404, "not_found", "team not found")
 		return
 	}
+	// A key reaches only its own team; only the operator mints across teams.
+	if t.ID != p.Team.ID && !p.Operator {
+		writeErr(w, r, 403, "forbidden", "this key can only mint keys for its own team")
+		return
+	}
+	expires, ok := childExpiry(p.Key, body.ExpiresInS, time.Now().UTC())
+	if !ok {
+		writeErr(w, r, 400, "invalid_request", "this key expires, so the keys it mints must expire too: set expires_in_s")
+		return
+	}
 	scopes := body.Scopes
 	if len(scopes) == 0 {
 		scopes = p.Scopes // never broader than the minting key
@@ -638,10 +682,7 @@ func (s *server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 			return errLimit
 		}
 		k, tok := mintKey(s.keys, st, p.User.ID, t.ID, body.Name, slices.Clone(scopes))
-		if body.ExpiresInS > 0 {
-			exp := k.Created.Add(time.Duration(body.ExpiresInS) * time.Second)
-			k.Expires = &exp
-		}
+		k.Expires = expires
 		kv = viewKey(k, tok)
 		return nil
 	})
