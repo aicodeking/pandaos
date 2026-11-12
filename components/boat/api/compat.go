@@ -40,14 +40,14 @@ func writeCompat(w http.ResponseWriter, status int, typ string, fields map[strin
 
 // compatCodes renames native error codes to boat.dev's where they differ.
 var compatCodes = map[string]string{
-	"quota_exceeded":       "limit_reached",
-	"host_capacity":        "out_of_capacity",
-	"too_many_in_flight":   "rate_limited",
-	"upstream_error":       "http_500",
-	"upstream_unavailable": "http_500",
-	"store_error":          "http_500",
-	"secrets_unavailable":  "http_500",
+	"quota_exceeded":     "limit_reached",
+	"host_capacity":      "out_of_capacity",
+	"too_many_in_flight": "rate_limited",
 }
+
+// compatHTTPCodes become boat.dev's generic http_<status>, so code and status agree.
+var compatHTTPCodes = map[string]bool{"upstream_error": true, "upstream_unavailable": true,
+	"store_error": true, "secrets_unavailable": true, "guest_error": true}
 
 // compatWriter turns every native JSON error written under /api/v1 (auth,
 // rate limits, validation, boatd) into boat.dev's error envelope; anything
@@ -96,7 +96,9 @@ func (w *compatWriter) finish() {
 	}
 	json.Unmarshal(w.buf.Bytes(), &native)
 	code := orDefault(compatCodes[native.Error.Code], native.Error.Code)
-	code = orDefault(code, "http_"+strconv.Itoa(w.status))
+	if code == "" || compatHTTPCodes[code] {
+		code = "http_" + strconv.Itoa(w.status)
+	}
 	errObj := map[string]any{"code": code, "message": native.Error.Message, "status": w.status}
 	if native.Error.Details != nil {
 		errObj["details"] = native.Error.Details

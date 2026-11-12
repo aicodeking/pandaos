@@ -34,6 +34,7 @@ type fakeBoatd struct {
 	noDefaultSize bool             // refuse size "default", like a host with other size names
 	stops         []map[string]any
 	forks         []map[string]any
+	deskErr       string // non-empty: the guest agent refuses desktop with this (boatd answers 502)
 	refuse        string // non-empty: lifecycle POSTs answer 503 with this code (host full)
 	// discardPuts counts file uploads instead of keeping them (memory tests).
 	discardPuts bool
@@ -260,6 +261,10 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			writeJSON(w, 200, map[string]any{"ok": true})
 			return
 		case "desktop":
+			if f.deskErr != "" {
+				writeJSON(w, 502, map[string]string{"error": "guest agent: " + f.deskErr})
+				return
+			}
 			f.desk = append(f.desk, in)
 			writeJSON(w, 200, map[string]any{"ok": true, "port": 6080, "token": in["token"]})
 			return

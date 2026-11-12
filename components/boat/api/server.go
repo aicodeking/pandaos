@@ -516,6 +516,10 @@ func writeUpstream(w http.ResponseWriter, r *http.Request, err error) {
 			writeErr(w, r, 503, be.code(), be.message())
 		case be.Status/100 == 4:
 			writeErr(w, r, be.Status, "bad_request", be.message())
+		case strings.HasPrefix(be.message(), guestPrefix):
+			// The VM's own agent refused: its message is the caller's to see.
+			st, code := guestStatus(be.message())
+			writeErr(w, r, st, code, strings.TrimPrefix(be.message(), guestPrefix))
 		default:
 			log.Printf("%s: %v", info(r).id, err)
 			writeErr(w, r, http.StatusBadGateway, "upstream_error", "vm manager error")
@@ -524,6 +528,23 @@ func writeUpstream(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	log.Printf("%s: boatd: %v", info(r).id, err)
 	writeErr(w, r, http.StatusBadGateway, "upstream_unavailable", "vm manager unavailable")
+}
+
+// guestPrefix marks boatd's 502 for an error the guest agent answered.
+const guestPrefix = "guest agent: "
+
+// guestStatus classifies a guest agent refusal (boat-agent.py's OpError).
+func guestStatus(msg string) (int, string) {
+	m := strings.ToLower(msg)
+	switch {
+	case strings.Contains(m, "not installed in this image"):
+		return http.StatusUnprocessableEntity, "not_supported"
+	case strings.Contains(m, "session exists"):
+		return http.StatusConflict, "conflict"
+	case strings.Contains(m, " must be ") || strings.Contains(m, ": bad ") || strings.Contains(m, "unknown op"):
+		return http.StatusBadRequest, "bad_request"
+	}
+	return http.StatusBadGateway, "guest_error"
 }
 
 const maxJSONBody = 1 << 20
