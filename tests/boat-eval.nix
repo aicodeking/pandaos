@@ -10,7 +10,11 @@
 #     and a missing gateway.dnsProvider are errors, each with an escape hatch;
 #   - untrustedTenants defaults updates to `staged`; signed releases are
 #     required, and nixos-rebuild no longer bumps the input unverified;
-#   - the maintenance window unit exists only when enabled.
+#   - the maintenance window unit exists only when enabled;
+#   - the server profile defaults to untrustedTenants (its hardening, quotas and
+#     no warm pool); left at that default, an install with one domain and
+#     on-demand TLS (what panda-install writes) evaluates with warnings; opting
+#     out gives trusted density (warm pool, quotas up to host capacity).
 { pkgs, self }:
 let
   inherit (pkgs) lib;
@@ -63,6 +67,15 @@ let
       gateway.allowOnDemandTLS = true;
     };
   };
+  # What panda-install's local.nix sets, untrustedTenants left at the profile default.
+  installDefault = eval {
+    services.boat = {
+      domain = "boat.example.com";
+      gateway.allowOnDemandTLS = true;
+    };
+  };
+  trusted = eval { services.boat.untrustedTenants = false; };
+  boatd = c: builtins.fromJSON c.environment.etc."boat/boatd.json".text;
   withMaintenance = eval {
     services.boat.maintenance.reboot = true;
     pandaos.updates.allowedSigners = [ "release@pandaos ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey" ];
@@ -91,11 +104,37 @@ let
     "untrusted without dnsProvider is an error" = failsWith "needs services.boat.gateway.dnsProvider" untrustedSameSite;
     "untrusted: accepted risks evaluate" = boatFailures untrustedAccepted == [ ];
     "untrusted: separate domains + DNS-01 evaluate" = boatFailures untrustedClean == [ ];
-    "trusted same-site stays a warning" =
+    "profile-default same-site stays a warning" =
       boatFailures trustedSameSite == [ ]
       && lib.any (lib.hasInfix "shares a registrable domain") trustedSameSite.warnings;
+    "opted-out same-site stays a warning" =
+      let c = eval { services.boat = { untrustedTenants = false; domain = "boat.example.com"; gateway.allowOnDemandTLS = true; }; };
+      in boatFailures c == [ ] && lib.any (lib.hasInfix "shares a registrable domain") c.warnings;
 
-    "updates: automatic by default" = base.pandaos.updates.mode == "automatic";
+    "server profile: untrustedTenants by default" =
+      base.services.boat.untrustedTenants
+      && (boatd base).untrustedTenants
+      && !(boatd base).warmPool
+      && (boatd base).memOvercommit == 1
+      && lib.elem "nosmt=force" base.boot.kernelParams;
+    "server profile: untrusted per-team quota" =
+      (boatd base).defaultTeam.maxVMs == 10 && (boatd base).defaultTeam.maxVCPU == 32;
+    "server profile: panda-install's local.nix evaluates, warning about the domains" =
+      boatFailures installDefault == [ ]
+      && installDefault.services.boat.untrustedTenants
+      && lib.any (lib.hasInfix "on by the server profile's default") installDefault.warnings;
+    "untrustedTenants = false: trusted density" =
+      !trusted.services.boat.untrustedTenants
+      && (boatd trusted).warmPool
+      && !((boatd trusted) ? memOvercommit) # boatd's default, 1.5
+      && (boatd trusted).defaultTeam.maxVMs == 0
+      && (boatd trusted).defaultTeam.maxVCPU == 0
+      && (boatd trusted).defaultTeam.maxMemMiB == 0
+      && !(lib.elem "nosmt=force" trusted.boot.kernelParams);
+    "hugePages turns the warm pool off" =
+      !(boatd (eval { services.boat = { untrustedTenants = false; hugePages = true; }; })).warmPool;
+
+    "updates: automatic by default (untrustedTenants only by the profile)" = base.pandaos.updates.mode == "automatic";
     "updates: untrustedTenants defaults to staged" = untrustedClean.pandaos.updates.mode == "staged";
     "updates: staged mode has no auto-switch timer" =
       untrustedClean.systemd.timers.nixos-upgrade.wantedBy == [ ]

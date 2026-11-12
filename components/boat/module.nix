@@ -8,7 +8,7 @@
 #
 # boatd reads /etc/boat/boatd.json (its Config in boatd/config.go); boat-api
 # gets flags. Off unless services.boat.enable.
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, options, ... }:
 let
   cfg = config.services.boat;
   inherit (lib) mkOption types;
@@ -88,6 +88,11 @@ let
   isLocal = lib.hasSuffix ".localhost" cfg.domain;
   sameSite = name: !isLocal && regDomain name == regDomain cfg.domain;
   accepts = risk: lib.elem risk cfg.untrustedTenantsAcceptRisks;
+  # untrustedTenants set by the operator (priority above mkDefault), not only by the
+  # server profile's `mkDefault true`. Only then do the domain checks refuse to
+  # evaluate and updates default to `staged`: an existing install with one domain and
+  # on-demand TLS (what panda-install writes) keeps evaluating, with warnings.
+  untrustedExplicit = cfg.untrustedTenants && options.services.boat.untrustedTenants.highestPrio < 1000;
   sameSiteMsg = what: name: ''
     services.boat.${what} (${name}) shares a registrable domain with ${cfg.domain}: tenant content
     there is same-site with api.${cfg.domain} and can set cookies for ${regDomain cfg.domain}. Use a separate
@@ -177,6 +182,10 @@ let
   # BOAT_URL (api.<domain>) resolves to this host: let guests reach Caddy's 443
   # on the host's own addresses, nothing else on the host.
   // lib.optionalAttrs (cfg.vmApiUrl != null) { hostHttpsPort = 443; }
+  # Trusted: creates restore a booted template (0.32 s instead of 1.58 s cold, boat-e2e).
+  # One template per image + size in use, kept on disk, not in RAM. untrusted.json and
+  # hugePages turn it off again below.
+  // { warmPool = true; }
   // lib.optionalAttrs cfg.untrustedTenants untrustedSettings
   # Firecracker supports none of these with huge pages (boatd checks).
   // lib.optionalAttrs cfg.hugePages { hugePages = true; balloon = false; diffSnapshots = false; warmPool = false; }
@@ -267,13 +276,32 @@ in
       description = "Size used when a create request names none; must be in {option}`sizes`.";
     };
     quotas = mkOption {
-      description = "Default per-team limits (boatd `defaultTeam`); 0 = unlimited.";
+      description = ''
+        Default per-team limits (boatd `defaultTeam`); 0 = unlimited. With trusted tenants
+        (one trust domain) running VMs, vCPUs and RAM default to 0: the host's own admission
+        (`memOvercommit`, `cpuOvercommit`, the disk floor) is the limit, so the owner's team
+        can fill the host. With {option}`untrustedTenants` they default to 10 VMs, 32 vCPUs
+        and 64 GiB per team, so no single tenant takes the host; raise one team with
+        `boatdSettings.teams.<team> = { maxVMs = ...; maxVCPU = ...; maxMemMiB = ...; }`.
+      '';
       default = { };
       type = types.submodule {
         options = {
-          maxVMs = mkOption { type = types.ints.unsigned; default = 10; };
-          maxVCPU = mkOption { type = types.ints.unsigned; default = 32; };
-          maxMemMiB = mkOption { type = types.ints.unsigned; default = 65536; };
+          maxVMs = mkOption {
+            type = types.ints.unsigned;
+            default = if cfg.untrustedTenants then 10 else 0;
+            defaultText = lib.literalExpression "if untrustedTenants then 10 else 0";
+          };
+          maxVCPU = mkOption {
+            type = types.ints.unsigned;
+            default = if cfg.untrustedTenants then 32 else 0;
+            defaultText = lib.literalExpression "if untrustedTenants then 32 else 0";
+          };
+          maxMemMiB = mkOption {
+            type = types.ints.unsigned;
+            default = if cfg.untrustedTenants then 65536 else 0;
+            defaultText = lib.literalExpression "if untrustedTenants then 65536 else 0";
+          };
           maxTotalVMs = mkOption {
             type = types.ints.unsigned;
             default = 50;
@@ -392,7 +420,8 @@ in
         null: `boat-iocost-model.service` measures the disk once before boatd starts
         (`boatd -measure-disk`, about 25 s of direct I/O) and keeps the result in
         `dataDir/iocost-model`; delete that file to measure again (new disk). Without
-        either, boatd refuses to start under {option}`untrustedTenants` and names the command.
+        either (the measurement failed), boatd still starts: iocost stays off and each
+        VM is held to the `ioMaxMBps`/`ioMaxIOPS` ceilings; it logs the command to run.
       '';
     };
     untrustedTenants = lib.mkEnableOption ''
@@ -405,7 +434,15 @@ in
       jailed VMMs' shared gid), each VM's bandwidth capped at a quarter of the uplink's speed
       and the uplink fair-queued between VMs (cake), SMTP out blocked, no swap, and refuses
       KSM, `warmPool` and {option}`hugePages`. The list is boatd/untrusted.json. Needs a reboot to take effect; until then boatd refuses to start.
-      Each limit can be raised in {option}`boatdSettings`, not removed
+      Each limit can be raised in {option}`boatdSettings`, not removed.
+
+      The server profile turns this on by default (`lib.mkDefault true`); opt out on a host
+      whose tenants you trust with `services.boat.untrustedTenants = false;`. Off, the host
+      runs at trusted density: `memOvercommit` 1.5 with the balloon's free page reporting
+      (an idle `default` VM uses about 528 MiB of its 8 GiB), the warm pool, SMT, and
+      per-team quotas bounded by host capacity. Left at the profile default, the domain
+      checks ({option}`untrustedTenantsAcceptRisks`) are warnings and updates stay
+      `automatic`; set it to `true` explicitly to make them errors and updates `staged`
     '';
     stopTimeoutSec = mkOption {
       type = types.ints.positive;
@@ -447,7 +484,9 @@ in
     };
     untrustedTenantsAcceptRisks = mkOption {
       type = types.listOf (types.enum [ "shared-registrable-domain" "on-demand-tls" ]);
-      default = [ ];
+      # Both, while untrustedTenants is only the server profile's default (see there).
+      default = lib.optionals (cfg.untrustedTenants && !untrustedExplicit) [ "shared-registrable-domain" "on-demand-tls" ];
+      defaultText = lib.literalMD "both, while `untrustedTenants` comes only from the server profile's default; else `[ ]`";
       example = [ "shared-registrable-domain" ];
       description = ''
         Escape hatch for checks that {option}`untrustedTenants` turns from warnings
@@ -474,7 +513,12 @@ in
     warnings = lib.optionals (!cfg.untrustedTenants || accepts "shared-registrable-domain") (
       lib.optional (sameSite cfg.vmDomain) (sameSiteMsg "vmDomain" cfg.vmDomain)
       ++ lib.optional (sameSite cfg.desktopDomain) (sameSiteMsg "desktopDomain" cfg.desktopDomain)
-    );
+    )
+    ++ lib.optional (cfg.untrustedTenants && !untrustedExplicit && (sameSite cfg.vmDomain || sameSite cfg.desktopDomain || (!isLocal && cfg.gateway.dnsProvider == null))) ''
+      services.boat.untrustedTenants is on by the server profile's default, which accepts the domain
+      risks above (untrustedTenantsAcceptRisks). For strangers' code: give vmDomain/desktopDomain their
+      own registrable domains, set gateway.dnsProvider, then services.boat.untrustedTenants = true. A host
+      whose tenants you trust: services.boat.untrustedTenants = false. See docs/boat.md.'';
 
     assertions = [
       {

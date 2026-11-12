@@ -281,7 +281,7 @@ in
         `staged`: the daily timer fetches, verifies and builds the next release
         but does not switch; `sudo panda-update run` applies it.
         `manual`: no timer; only `sudo panda-update run` updates.
-        Hosts with `services.boat.untrustedTenants` default to `staged`.
+        Hosts that set `services.boat.untrustedTenants = true` themselves (not only the server profile's default) default to `staged`.
       '';
     };
     requireSignedRelease = lib.mkOption {

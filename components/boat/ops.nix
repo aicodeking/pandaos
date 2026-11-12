@@ -2,7 +2,7 @@
 # backups. Imported by ./module.nix.
 #
 # Updates never restart boatd (persistent VMs), so a new kernel, boatd or
-# Firecracker only takes effect on the next reboot. boat-reboot-check notices
+# Firecracker (or kernel command line) only takes effect on the next reboot. boat-reboot-check notices
 # that, logs it, and exports boat_reboot_pending for node-exporter's textfile
 # collector. The opt-in maintenance window (services.boat.maintenance.reboot)
 # applies what is pending: a boatd restart when only boatd/firecracker changed
@@ -59,6 +59,9 @@ let
     for f in kernel initrd kernel-modules; do
       [ "$(readlink -f /run/booted-system/$f)" = "$(readlink -f /run/current-system/$f)" ] || reasons+=("$f")
     done
+    # The command line too (untrustedTenants' nosmt=force and mitigations): boatd refuses
+    # untrustedTenants until they are live, so a boatd restart cannot apply that change.
+    cmp -s /run/booted-system/kernel-params /run/current-system/kernel-params || reasons+=(kernel-params)
     # This unit is replaced on every switch, so the fingerprint script here is the installed one.
     if systemctl -q is-active boatd.service && [ -r ${startedWith} ] &&
       ! ${fingerprint} | cmp -s - ${startedWith}; then

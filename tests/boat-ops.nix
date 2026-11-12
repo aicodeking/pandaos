@@ -66,6 +66,8 @@ pkgs.testers.runNixOSTest {
         boatdPackage = lib.mkDefault (stubBoatd "v1");
         apiPackage = lib.mkDefault (stubApi "v1");
         cliPackage = stubCli;
+        # The stub cannot measure the disk (boatd -measure-disk) for the profile's untrustedTenants.
+        ioCostModel = "rbps=1000000000 rrandiops=100000";
         # The test starts the window's unit itself; the timer never fires.
         maintenance = {
           reboot = true;

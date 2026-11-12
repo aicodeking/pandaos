@@ -47,6 +47,8 @@ pkgs.testers.runNixOSTest {
       boatdPackage = stubBoatd;
       apiPackage = stubApi;
       cliPackage = stubCli;
+      # The stub cannot measure the disk (boatd -measure-disk) for the profile's untrustedTenants.
+      ioCostModel = "rbps=1000000000 rrandiops=100000";
       gateway.dashboardDir = pkgs.writeTextDir "index.html" "<html>boat-dashboard-marker</html>";
     };
     # The "VM": an HTTP service the routes point at.

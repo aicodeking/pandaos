@@ -87,6 +87,11 @@ let
             disk_gib = 6;
           };
           defaultSize = "t";
+          # Trusted mode, as before the server profile defaulted to untrustedTenants: that
+          # needs SMT off (the guest-test runner's kernel has it on), and the warm pool's
+          # template VM would show up in fc_pids().
+          untrustedTenants = false;
+          boatdSettings.warmPool = false;
           # The guest does not come up at this nesting depth (see above): don't wait.
           boatdSettings.bootTimeoutS = 60;
         };
@@ -202,6 +207,8 @@ let
             disk_gib = 6;
           };
           defaultSize = "t";
+          untrustedTenants = false; # as in vmTest above
+          boatdSettings.warmPool = false;
         };
         # The test framework's options without --keep-unit/--register=no, which
         # assume the Nix sandbox: here nspawn gets its own scope, so systemd

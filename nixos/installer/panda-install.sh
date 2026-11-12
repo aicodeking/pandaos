@@ -460,6 +460,9 @@ write_local_nix() {
   # No DNS API yet: per-host certificates, which a tenant can exhaust. Before
   # untrusted tenants, set gateway.dnsProvider and remove this (docs/boat.md).
   services.boat.gateway.allowOnDemandTLS = true;
+  # The server profile hardens for untrusted tenants by default (needs nothing
+  # here). All tenants trusted: untrustedTenants = false. Strangers: set
+  # dnsProvider and separate vmDomain/desktopDomain, then untrustedTenants = true.
 "
     [[ -z $acme_email ]] || boat+="  services.boat.acmeEmail = \"$acme_email\";
 "

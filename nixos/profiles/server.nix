@@ -7,23 +7,35 @@
 # Until then the domain is boat.localhost, which Caddy serves with its own
 # local CA (no ACME requests for a name nobody owns).
 #
-# Hosting tenants you do not trust? Also set services.boat.untrustedTenants = true,
-# and reboot: SMT off, abuse limits on, KSM and warmPool refused (PROTOCOL.md).
-# Updates then default to `staged` (fetched, verified and built daily, applied
-# by `sudo panda-update run`); set pandaos.updates.mode = "automatic" to undo.
+# Safe by default: services.boat.untrustedTenants is on (SMT off, CPU mitigations,
+# per-VM abuse limits, memOvercommit 1, KSM and warmPool refused; PROTOCOL.md).
+# Opt out on a host whose tenants you all trust (trusted density: SMT, memory
+# overcommit 1.5 with the balloon, the warm pool, quotas up to host capacity):
+#   services.boat.untrustedTenants = false;
+# Turning it on needs a reboot (kernel command line); until then boatd refuses
+# to start, and boat-reboot-check reports `kernel-params` as pending.
+# Hosting strangers? Set it to `true` explicitly too: the domain checks
+# (separate vmDomain/desktopDomain, gateway.dnsProvider) then refuse to
+# evaluate instead of warning, and updates default to `staged` (fetched,
+# verified and built daily, applied by `sudo panda-update run`); set
+# pandaos.updates.mode = "automatic" to undo that.
 #
 # Already on via the base modules: nftables firewall, key-only ssh, sshguard,
 # daily signed-release updates with rollback (updates.nix).
-{ config, lib, ... }:
+{ config, lib, options, ... }:
 {
   imports = [ ./headless.nix ];
 
   services.boat = {
     enable = true;
     domain = lib.mkDefault "boat.localhost";
+    untrustedTenants = lib.mkDefault true;
   };
-  # An untrusted-tenant host changes only when its operator says so.
-  pandaos.updates.mode = lib.mkIf config.services.boat.untrustedTenants (lib.mkDefault "staged");
+  # A host the operator declared untrusted-tenant (explicitly, not this profile's
+  # default) changes only when its operator says so.
+  pandaos.updates.mode = lib.mkIf (
+    config.services.boat.untrustedTenants && options.services.boat.untrustedTenants.highestPrio < 1000
+  ) (lib.mkDefault "staged");
   # Firewall: the gateway opens 80/443 (tcp) + 443 (udp, HTTP/3); the openssh
   # module opens 22 and the jump port 2222 (services.boat.sshGateway.port).
 
