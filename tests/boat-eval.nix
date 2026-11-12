@@ -96,6 +96,11 @@ let
     "boat-api gets -vm-api-url from the public URL" =
       lib.hasInfix "-vm-api-url" (api base).ExecStart
       && lib.hasInfix "https://api.boat.localhost" (api base).ExecStart;
+    "boat-api gets -provider-models from providerModels" =
+      lib.hasInfix "-provider-models" (api base).ExecStart
+      && lib.hasInfix "claude=sonnet,opus,haiku" (api base).ExecStart
+      && lib.hasInfix "claude=opus;codex=gpt-5-codex" (api (eval { services.boat.providerModels = { claude = [ "opus" ]; codex = [ "gpt-5-codex" ]; pi = [ ]; }; })).ExecStart
+      && !(lib.hasInfix "-provider-models" (api (eval { services.boat.providerModels = { }; })).ExecStart);
     "vmApiUrl = null drops -vm-api-url" = !(lib.hasInfix "-vm-api-url" (api custom).ExecStart);
     "node_exporter binds 127.0.0.1" = base.services.prometheus.exporters.node.listenAddress == "127.0.0.1";
 

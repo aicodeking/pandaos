@@ -212,7 +212,12 @@ let
   ]
   ++ lib.optionals (cfg.vmApiUrl != null) [ "-vm-api-url" cfg.vmApiUrl ]
   ++ lib.optionals cfg.sshGateway.enable [ "-ssh-jump" "jump@ssh.${cfg.domain}:${toString cfg.sshGateway.port}" ]
-  ++ lib.optionals (imageIds != [ ]) [ "-images" (lib.concatStringsSep "," imageIds) ];
+  ++ lib.optionals (imageIds != [ ]) [ "-images" (lib.concatStringsSep "," imageIds) ]
+  ++ lib.optionals (providerModels != "") [ "-provider-models" providerModels ];
+  # "claude=sonnet,opus;codex=..." for boat-api's -provider-models.
+  providerModels = lib.concatStringsSep ";" (
+    lib.mapAttrsToList (agent: ms: "${agent}=${lib.concatStringsSep "," ms}") (lib.filterAttrs (_: ms: ms != [ ]) cfg.providerModels)
+  );
 in
 {
   imports = [ ./gateway/module.nix ./ops.nix ];
@@ -480,6 +485,18 @@ in
         kills boat-api inside its own cgroup (and systemd restarts it) instead of
         the host OOM killer picking tenant VMs. Imports stream to disk, so this
         bounds the API's own state, not archive sizes.
+      '';
+    };
+    providerModels = mkOption {
+      type = types.attrsOf (types.listOf types.str);
+      default = { claude = [ "sonnet" "opus" "haiku" ]; };
+      example = { claude = [ "sonnet" "opus" ]; codex = [ "gpt-5-codex" ]; };
+      description = ''
+        Models boat-api lists per agent harness of the guest image (`GET /api/v1/provider-models`,
+        boat-api's `-provider-models`). Agents: claude, codex, opencode, pi, prime, kimi, mistral;
+        boat-api refuses to start on any other name. The default lists the Claude Code aliases,
+        which do not go stale with model releases; an agent left out is still listed, with no
+        models, and a prompt without `model` uses that harness's own default.
       '';
     };
     untrustedTenantsAcceptRisks = mkOption {
