@@ -29,7 +29,9 @@ approve agent tasks on it.
   switch, webhooks, API keys, environments and limits, plus telemetry, AI usage and access,
   environment vars, file replace, upload URLs, artifacts, share and recover. 100 of boat.dev's 122
   operations are mapped (credential profiles as one `default` profile per team, snapshot download
-  as the archive itself); prompts, events and `hostedPorts` are tested against a fake boatd only.
+  as the archive itself); the official SDKs also run prompt, steer, interrupt, events and
+  conversations on real VMs (a stub agent without `ANTHROPIC_API_KEY`); `hostedPorts` is tested
+  against a fake boatd only.
   The other 22 (orgs, repos, CI, data retention, more credential profiles and custom APIs,
   environment upgrades/repos/secret files, snapshot trees/files) answer 501 `not_supported`, as
   does `unshare` (no private sandboxes here)

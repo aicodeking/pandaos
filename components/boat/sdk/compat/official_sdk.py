@@ -14,6 +14,10 @@ BOAT_LIVE_DESKTOP_NAME: name of a running sandbox with a desktop (a full
 image) for wait_for_desktop; without it that step prints SKIP.
 BOAT_LIVE_FAKE=1: the fake boatd of api/livescripts_test.go answers every
 command with "hello", so command output is not compared.
+ANTHROPIC_API_KEY (real runs only): the agent steps (prompt, prompt run,
+events, conversations, steer, interrupt) run Claude Code with that key, set
+through the credential-profile calls; without it they run a stub `claude` on
+the sandbox's PATH, so CI needs no key.
 """
 import os
 import secrets
@@ -42,6 +46,10 @@ from boat_sdk.models.ssh_key_request import SshKeyRequest
 from boat_sdk.models.telemetry_set_request import TelemetrySetRequest
 from boat_sdk.models.update_ai_proxy_request import UpdateAiProxyRequest
 from boat_sdk.models.saved_snapshot_save_request import SavedSnapshotSaveRequest
+from boat_sdk.models.file_permissions_request import FilePermissionsRequest
+from boat_sdk.models.prompt_request import PromptRequest
+from boat_sdk.models.set_credential_key_request import SetCredentialKeyRequest
+from boat_sdk.models.steer_request import SteerRequest
 from boat_sdk.models.update_sandbox_environment_request import UpdateSandboxEnvironmentRequest
 from boat_sdk.models.update_sandbox_request import UpdateSandboxRequest
 from boat_sdk.models.webhook_create_request import WebhookCreateRequest
@@ -87,6 +95,65 @@ def delete(sid):
     return api.delete_sandbox(x_ascii_confirm_delete=sid, sandbox_id=sid).operation
 
 
+LLM_KEY = os.environ.get("ANTHROPIC_API_KEY") if REAL else None
+# A stand-in for Claude Code: a prompt with sleep-forever keeps running (to
+# steer and interrupt); any other answers at once (as the fake boatd does).
+STUB_AGENT = """#!/bin/bash
+case "$*" in *sleep-forever*) exec sleep 300 ;; esac
+echo '{"type":"result","result":"pong","session_id":"stub-session"}'
+"""
+
+
+def prompt_done(sid, pid):
+    for _ in range(300 if LLM_KEY else 60):
+        run_ = api.prompt_run_status(sid, pid).prompt_run
+        if run_.done:
+            return run_
+        time.sleep(1)
+    check(False, "prompt %s finished" % pid)
+
+
+def agent_steps(sid):
+    """prompt, prompt run, events, conversations, steer, interrupt; and the
+    credential-profile calls that hold the key."""
+    prof = api.list_credential_profiles().profiles
+    check(len(prof) == 1 and prof[0].name == "default" and prof[0].is_default, "credential profiles: the team's default")
+    if LLM_KEY:
+        p = api.set_credential_profile_key("default", "anthropic-api-key", SetCredentialKeyRequest(value=LLM_KEY)).profile
+        check("anthropic-api-key" in p.connected, "credential profile key set")
+        acc = api.list_credential_accounts("default", "anthropic-api-key").accounts
+        check(len(acc) == 1 and acc[0].active and acc[0].label.endswith(LLM_KEY[-4:]), "credential accounts")
+        print("agent steps: Claude Code with ANTHROPIC_API_KEY")
+    else:
+        api.write_file(sid, FileWriteRequest(path=".local/bin/claude", content=STUB_AGENT))
+        api.set_file_permissions(sid, FilePermissionsRequest(path=".local/bin/claude", mode="755"))
+        print("agent steps: stub claude (no ANTHROPIC_API_KEY)")
+    try:
+        first = api.prompt(sid, PromptRequest(provider="claude-code", prompt="Reply with the single word pong.", new=True))
+        check(first.prompt_id and first.conversation_id, "prompt (%s)" % first.status)
+        done = prompt_done(sid, first.prompt_id)
+        check(done.status == "finished" or not REAL, "prompt run finishes (%s)" % done.status)
+        evs = api.events(sid, conversation=first.conversation_id).events
+        kinds = [e.type for e in evs]
+        check("prompt" in kinds and "response" in kinds, "events: prompt and response (%s)" % kinds)
+        slow_text = "Run the shell command `sleep 300` and wait for it." if LLM_KEY else "sleep-forever on it"
+        slow = api.prompt(sid, PromptRequest(provider="claude-code", prompt=slow_text, new=True))
+        time.sleep(8 if LLM_KEY else 1)
+        st = api.steer(sid, SteerRequest(message="Stop and reply with the word done.", conversation=slow.conversation_id))
+        check(st.conversation_id == slow.conversation_id, "steer (%s, %s)" % (st.status, st.mode))
+        victim = api.prompt(sid, PromptRequest(provider="claude-code", prompt=slow_text, new=True))
+        time.sleep(8 if LLM_KEY else 1)
+        intr = api.interrupt(sid, conversation=victim.conversation_id)
+        check(intr.conversation_id == victim.conversation_id, "interrupt (%s)" % intr.status)
+        convs = api.conversations(sid).conversations
+        ids = {c.id for c in convs}
+        check({first.conversation_id, slow.conversation_id, victim.conversation_id} <= ids, "conversations (%d)" % len(convs))
+    finally:
+        if LLM_KEY:
+            p = api.delete_credential_profile_key("default", "anthropic-api-key").profile
+            check("anthropic-api-key" not in p.connected, "credential profile key removed")
+
+
 try:
     created = api.create(create_sandbox_request=CreateSandboxRequest(name=prefix, ttl_seconds=3600, labels={"suite": "official"}),
                          idempotency_key=secrets.token_hex(8))
@@ -130,6 +197,8 @@ try:
     hist = api.command_history(sid).commands
     check(any(c.process_id == det["processId"] for c in hist), "command history")
     check(api.stop_command(sid, det["processId"]).signaled, "stop a detached command")
+
+    agent_steps(sid)
 
     payload = "hello from the official SDK " + secrets.token_hex(4)
     api.write_file(sid, FileWriteRequest(path="compat/a.txt", content=payload))

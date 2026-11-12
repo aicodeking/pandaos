@@ -10,6 +10,10 @@
 //   BOAT_URL=https://api.example BOAT_API_KEY=boat_… NODE_PATH=…/node_modules node official_sdk.cjs
 //
 // BOAT_LIVE_FAKE=1: the fake boatd answers every command with "hello".
+// ANTHROPIC_API_KEY (real runs only): prompt, prompt run, events,
+// conversations, steer and interrupt run Claude Code with that key, set through
+// the credential-profile calls; without it a stub `claude` answers, so CI
+// needs no key.
 "use strict";
 const crypto = require("node:crypto");
 const { BoatApi, Configuration, ResponseError, runCommand, followCommand, waitForDesktop } = require("@boatdev/sdk");
@@ -43,6 +47,67 @@ async function ready(sandboxId) {
 
 const del = (sandboxId) => api.deleteSandbox({ sandboxId, xAsciiConfirmDelete: sandboxId });
 
+const LLM_KEY = REAL ? process.env.ANTHROPIC_API_KEY : undefined;
+// A stand-in for Claude Code: sleep-forever keeps running, anything else answers at once.
+const STUB_AGENT = `#!/bin/bash
+case "$*" in *sleep-forever*) exec sleep 300 ;; esac
+echo '{"type":"result","result":"pong","session_id":"stub-session"}'
+`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function promptDone(sandboxId, promptId) {
+  for (let i = 0; i < (LLM_KEY ? 300 : 60); i++) {
+    const run = (await api.promptRunStatus({ sandboxId, promptId })).promptRun;
+    if (run.done) return run;
+    await sleep(1000);
+  }
+  check(false, "prompt " + promptId + " finished");
+}
+
+// prompt, prompt run, events, conversations, steer, interrupt; and the
+// credential-profile calls that hold the key.
+async function agentSteps(sandboxId) {
+  const prof = (await api.listCredentialProfiles()).profiles;
+  check(prof.length === 1 && prof[0].name === "default" && prof[0].isDefault, "credential profiles: the team's default");
+  const cred = { profile: "default", credential: "anthropic-api-key" };
+  if (LLM_KEY) {
+    const p = (await api.setCredentialProfileKey({ ...cred, setCredentialKeyRequest: { value: LLM_KEY } })).profile;
+    check(p.connected.includes("anthropic-api-key"), "credential profile key set");
+    const acc = (await api.listCredentialAccounts(cred)).accounts;
+    check(acc.length === 1 && acc[0].active, "credential accounts");
+    console.log("agent steps: Claude Code with ANTHROPIC_API_KEY");
+  } else {
+    await api.writeFile({ sandboxId, fileWriteRequest: { path: ".local/bin/claude", content: STUB_AGENT } });
+    await api.setFilePermissions({ sandboxId, filePermissionsRequest: { path: ".local/bin/claude", mode: "755" } });
+    console.log("agent steps: stub claude (no ANTHROPIC_API_KEY)");
+  }
+  try {
+    const ask = (prompt) => api.prompt({ sandboxId, promptRequest: { provider: "claude-code", prompt, _new: true } });
+    const first = await ask("Reply with the single word pong.");
+    check(Boolean(first.promptId && first.conversationId), "prompt (" + first.status + ")");
+    const done = await promptDone(sandboxId, first.promptId);
+    check(done.status === "finished" || !REAL, "prompt run finishes (" + done.status + ")");
+    const kinds = (await api.events({ sandboxId, conversation: first.conversationId })).events.map((e) => e.type);
+    check(kinds.includes("prompt") && kinds.includes("response"), "events: prompt and response (" + kinds + ")");
+    const slowText = LLM_KEY ? "Run the shell command `sleep 300` and wait for it." : "sleep-forever on it";
+    const slow = await ask(slowText);
+    await sleep(LLM_KEY ? 8000 : 1000);
+    const st = await api.steer({ sandboxId, steerRequest: { message: "Stop and reply with the word done.", conversation: slow.conversationId } });
+    check(st.conversationId === slow.conversationId, "steer (" + st.status + ", " + st.mode + ")");
+    const victim = await ask(slowText);
+    await sleep(LLM_KEY ? 8000 : 1000);
+    const intr = await api.interrupt({ sandboxId, conversation: victim.conversationId });
+    check(intr.conversationId === victim.conversationId, "interrupt (" + intr.status + ")");
+    const ids = new Set((await api.conversations({ sandboxId })).conversations.map((c) => c.id));
+    check([first, slow, victim].every((x) => ids.has(x.conversationId)), "conversations (" + ids.size + ")");
+  } finally {
+    if (LLM_KEY) {
+      const p = (await api.deleteCredentialProfileKey(cred)).profile;
+      check(!p.connected.includes("anthropic-api-key"), "credential profile key removed");
+    }
+  }
+}
+
 async function collect(gen) {
   const frames = [];
   for await (const f of gen) frames.push(f);
@@ -74,6 +139,7 @@ async function main() {
   check(last.type === "exit" && (!REAL || (out === "ts-1\nts-2\n" && last.exitCode === 5)), "runCommand output and exit (" + JSON.stringify(last) + ")");
   const again = await collect(followCommand(api, sandboxId, frames[0].processId));
   check(again.map((f) => f.data || "").join("") === out && again[again.length - 1].type === "exit", "followCommand replays the output");
+  await agentSteps(sandboxId);
   const payload = "ts " + crypto.randomBytes(4).toString("hex");
   await api.writeFile({ sandboxId, fileWriteRequest: { path: "compat/ts.txt", content: payload } });
   const got = await api.readFile({ sandboxId, path: "compat/ts.txt" });
