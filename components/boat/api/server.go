@@ -39,6 +39,7 @@ type Config struct {
 	PortURLTTL       time.Duration
 	BodyTimeout      time.Duration  // request body read deadline on non-stream routes (0 = default)
 	HookDeny         []netip.Prefix // more webhook targets to refuse (the VM pool's prefixes)
+	ProviderModels   map[string][]string // agent -> models listed by GET /api/v1/provider-models
 }
 
 type server struct {

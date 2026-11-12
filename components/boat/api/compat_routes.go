@@ -104,4 +104,6 @@ func (s *server) compatRoutes() {
 	s.route("GET /api/v1/sandboxes/{id}/artifacts", "exec", s.compatArtifact)
 	s.route("POST /api/v1/sandboxes/{id}/share", "vms:write", s.compatShare)
 	s.route("POST /api/v1/sandboxes/{id}/recover", "vms:write", s.compatRecover)
+	s.route("POST /api/v1/sandboxes/{id}/unshare", "vms:write", s.compatUnshare)
+	s.route("GET /api/v1/provider-models", "", s.compatProviderModels)
 }

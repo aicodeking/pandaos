@@ -136,6 +136,7 @@ ROUTES = [
     ("POST", "/api/v1/sandboxes/{id}/files/upload-url", "/sandboxes/{sandboxId}/files/upload-url", "exec", ["path", "ttlSeconds"], "signed short-lived upload URL (/api/v1/file-uploads/{token})"),
     ("GET", "/api/v1/sandboxes/{id}/artifacts", "/sandboxes/{sandboxId}/artifacts", "exec", None, "download a file up to 50 MiB"),
     ("POST", "/api/v1/sandboxes/{id}/share", "/sandboxes/{sandboxId}/share", "vms:write", None, "share with the team (a no-op: team sandboxes are shared)"),
+    ("POST", "/api/v1/sandboxes/{id}/unshare", "/sandboxes/{sandboxId}/unshare", "vms:write", None, "make private: 501 not_supported (no private sandboxes here)"),
     ("POST", "/api/v1/sandboxes/{id}/recover", "/sandboxes/{sandboxId}/recover", "vms:write", None, "power-cycle (forced stop, then start; the disk is kept)"),
 ]
 
@@ -160,6 +161,23 @@ EXTRA["/api/v1/file-uploads/{token}"] = {"put": {
     "responses": {
         "200": {"description": "Written", "content": {"application/json": {"schema": {"type": "object",
             "properties": {"ok": {"type": "boolean"}, "path": {"type": "string"}, "bytes": {"type": "integer"}}}}}},
+        "default": {"description": "boat.dev error envelope",
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}},
+    }}}
+
+EXTRA["/api/v1/provider-models"] = {"get": {
+    "summary": "Agent harnesses and the models the operator listed for each (-provider-models); boat.dev documents this path for prompt model and reasoningEffort choices",
+    "operationId": "compat_providerModels", "tags": ["boat.dev compatibility"],
+    "responses": {
+        "200": {"description": "Providers", "content": {"application/json": {"schema": {"type": "object",
+            "required": ["ok", "type", "providers"],
+            "properties": {"ok": {"type": "boolean"}, "type": {"type": "string"}, "providers": {"type": "array", "items": {
+                "type": "object", "required": ["provider", "harness", "models"],
+                "properties": {"provider": {"type": "string"}, "harness": {"type": "string"}, "models": {"type": "array", "items": {
+                    "type": "object", "required": ["id"],
+                    "properties": {"id": {"type": "string"}, "name": {"type": "string"},
+                                   "reasoningEfforts": {"type": "array", "items": {"type": "string"}},
+                                   "fastMode": {"type": "boolean"}}}}}}}}}}}},
         "default": {"description": "boat.dev error envelope",
                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}},
     }}}

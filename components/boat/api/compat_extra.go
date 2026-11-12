@@ -418,13 +418,22 @@ func (s *server) compatArtifact(w http.ResponseWriter, r *http.Request, p *princ
 
 // compatShare: every sandbox here is already usable by all of its team, so
 // sharing with the organization is a no-op that answers the sandbox. Making
-// one private (unshare) has no equivalent and is not mapped.
+// one private (unshare) has no equivalent: compatUnshare refuses it.
 func (s *server) compatShare(w http.ResponseWriter, r *http.Request, p *principal) {
 	vm, ok := s.ownVM(w, r, p)
 	if !ok {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"sandbox": s.sandbox(vm)})
+}
+
+// compatUnshare: there are no private sandboxes on a self-hosted server, so
+// unshare answers 501 not_supported (after the usual 404 for a foreign id).
+func (s *server) compatUnshare(w http.ResponseWriter, r *http.Request, p *principal) {
+	if _, ok := s.ownVM(w, r, p); ok {
+		writeErr(w, r, http.StatusNotImplemented, "not_supported",
+			"unshare is not supported on self-hosted boat: every sandbox is usable by its whole team")
+	}
 }
 
 // compatRecover power-cycles a running VM: a forced stop (no snapshot; the

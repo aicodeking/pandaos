@@ -9928,6 +9928,57 @@
     }
    }
   },
+  "/api/v1/sandboxes/{id}/unshare": {
+   "post": {
+    "summary": "boat.dev unshare: make private: 501 not_supported (no private sandboxes here)",
+    "operationId": "compat_unshare",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "sandbox": {
+           "$ref": "#/components/schemas/BDSandbox"
+          },
+          "message": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/v1/sandboxes/{id}/recover": {
    "post": {
     "summary": "boat.dev recover: power-cycle (forced stop, then start; the disk is kept)",
@@ -10076,6 +10127,95 @@
           },
           "bytes": {
            "type": "integer"
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/provider-models": {
+   "get": {
+    "summary": "Agent harnesses and the models the operator listed for each (-provider-models); boat.dev documents this path for prompt model and reasoningEffort choices",
+    "operationId": "compat_providerModels",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "Providers",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "ok",
+          "type",
+          "providers"
+         ],
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "type": {
+           "type": "string"
+          },
+          "providers": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "required": [
+             "provider",
+             "harness",
+             "models"
+            ],
+            "properties": {
+             "provider": {
+              "type": "string"
+             },
+             "harness": {
+              "type": "string"
+             },
+             "models": {
+              "type": "array",
+              "items": {
+               "type": "object",
+               "required": [
+                "id"
+               ],
+               "properties": {
+                "id": {
+                 "type": "string"
+                },
+                "name": {
+                 "type": "string"
+                },
+                "reasoningEfforts": {
+                 "type": "array",
+                 "items": {
+                  "type": "string"
+                 }
+                },
+                "fastMode": {
+                 "type": "boolean"
+                }
+               }
+              }
+             }
+            }
+           }
           }
          }
         }

@@ -189,6 +189,7 @@ func serve(args []string) int {
 	var hookDeny prefixFlag
 	fs.Var(&hookDeny, "webhook-deny", "CIDR webhooks may never reach, besides private nets and this host's own addresses, e.g. the VM pool's public prefix (repeatable)")
 	aiInflight := fs.Int("ai-vm-inflight", defaultAIVMInflight, "AI proxy requests in flight per VM (0 = unlimited)")
+	providerModels := fs.String("provider-models", "", "models listed per agent harness by GET /api/v1/provider-models, e.g. claude=sonnet,opus;codex=gpt-5")
 	fs.Parse(args)
 
 	store, kr, err := c.open()
@@ -200,6 +201,10 @@ func serve(args []string) int {
 		AllowPrivateHook: *allowPrivate, MaxFileBytes: *maxFile, JumpKeysFile: *jumpKeys,
 		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, VMDomain: *vmDomain, PortURLTTL: *portTTL, AIProxyURL: *aiURL, PublicURL: *publicURL, VMAPIURL: *vmAPIURL, MaxImportBytes: *maxImport,
 		BodyTimeout: *bodyTimeout, HookDeny: hookDeny}
+	if cfg.ProviderModels, err = parseProviderModels(*providerModels); err != nil {
+		log.Printf("boat-api: %v", err)
+		return 1
+	}
 	if cfg.AIProxyURL == "" && *aiListen != "" {
 		cfg.AIProxyURL = "http://" + *aiListen
 	}
