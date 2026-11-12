@@ -225,7 +225,7 @@ func (s *server) createTeam(w http.ResponseWriter, r *http.Request, p *principal
 			u := &User{ID: "usr_" + randHex(6), Name: body.Owner, Created: now}
 			st.Users[u.ID] = u
 			ownerID = u.ID
-			k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", nil)
+			k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", ownerKeyScopes(p))
 			out["owner"] = map[string]any{"user": u, "key": viewKey(k, tok)}
 		}
 		t.Members = []Member{{UserID: ownerID, Role: "owner"}}
@@ -373,11 +373,21 @@ func pruneOrphanUsers(st *State) {
 	}
 }
 
-// teamAdmin checks the caller is owner/admin of the team in the path.
+// ownerKeyScopes: a new team owner's first key is no wider than the operator's
+// minting key (nil = full scopes, only when the minting key has them all).
+func ownerKeyScopes(p *principal) []string {
+	if len(p.Scopes) == len(allScopes) {
+		return nil
+	}
+	return slices.Clone(p.Scopes)
+}
+
+// teamAdmin checks the caller is owner/admin of the team in the path, through
+// a key of that team: only the instance operator reaches other teams.
 func (s *server) teamAdmin(w http.ResponseWriter, r *http.Request, p *principal) (*Team, string, bool) {
 	t := s.store.Snapshot().Teams[r.PathValue("id")]
 	role := ""
-	if t != nil {
+	if t != nil && (t.ID == p.Team.ID || p.Operator) {
 		role = t.role(p.User.ID)
 	}
 	if role == "" {
@@ -415,6 +425,15 @@ func (s *server) addMember(w http.ResponseWriter, r *http.Request, p *principal)
 		writeErr(w, r, 403, "forbidden", "only owners can add owners")
 		return
 	}
+	// The first key is never wider than the minting key: p.Scopes ∩ role.
+	scopes := effectiveScopes(p.Scopes, body.Role)
+	if len(scopes) == 0 { // stored empty, it would mean the role's full scopes
+		writeErr(w, r, 403, "forbidden", "this key has no scopes to grant for role "+body.Role)
+		return
+	}
+	if len(scopes) == len(roleScopes(body.Role)) {
+		scopes = nil // the role's full scopes, as before
+	}
 	u := &User{ID: "usr_" + randHex(6), Name: body.Name, Created: time.Now().UTC()}
 	var kv keyView
 	err := s.store.Update(func(st *State) error {
@@ -427,7 +446,7 @@ func (s *server) addMember(w http.ResponseWriter, r *http.Request, p *principal)
 		}
 		st.Users[u.ID] = u
 		team.Members = append(slices.Clone(team.Members), Member{UserID: u.ID, Role: body.Role})
-		k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", nil)
+		k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", scopes)
 		kv = viewKey(k, tok)
 		return nil
 	})
