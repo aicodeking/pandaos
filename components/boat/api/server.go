@@ -439,7 +439,7 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 		info(r).audit = audit
 		info(r).pattern = pattern
 		p := s.authenticate(r.Header.Get("Authorization"))
-		if p != nil && strings.Contains(pattern, " "+compatPrefix) && !s.compatResolve(w, r, p) {
+		if p != nil && (strings.Contains(pattern, " "+compatPrefix) || strings.Contains(pattern, " /v1/vms/{id}")) && !s.compatResolve(w, r, p) {
 			return // bx_ id of no VM of this team: 404 (before the VM token check, which needs the VM id)
 		}
 		if p != nil && p.VMID != "" && !selfAllowed(pattern, r, p.VMID) {

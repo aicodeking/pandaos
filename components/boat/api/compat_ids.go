@@ -101,7 +101,7 @@ func (s *server) compatIDs(team string, vms []string) map[string]string {
 
 func (s *server) compatID(team, vm string) string { return s.compatIDs(team, []string{vm})[vm] }
 
-// compatResolve turns the bx_ id in an /api/v1 path into the VM id the native
+// compatResolve turns the bx_ id in an /api/v1 or /v1/vms/{id} path into the VM id the native
 // handlers use. Another team's id and an unknown one are both 404. A native
 // vm- id passes through, so ids from /v1 work here too.
 func (s *server) compatResolve(w http.ResponseWriter, r *http.Request, p *principal) bool {
