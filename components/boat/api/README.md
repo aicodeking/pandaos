@@ -6,7 +6,7 @@ auth, teams, secrets, webhooks, rate limits and audit, and forwards VM work to
 `boatd` over `/run/boat/boatd.sock`.
 
 ```
-boat-api admin init -data /var/lib/boat-api [-user alice] [-team acme]   # prints the operator key once
+boat-api admin init -data /var/lib/boat-api [-user alice] [-team acme] [-json]   # prints the operator key once (bare token on a terminal, JSON otherwise)
 boat-api admin gen-master-key                                            # 64 hex chars for systemd-creds
 boat-api serve -data /var/lib/boat-api -boatd /run/boat/boatd.sock \
   [-rate 10 -burst 40] [-team-rate 30 -team-burst 120] \

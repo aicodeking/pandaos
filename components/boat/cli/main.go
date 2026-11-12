@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strings"
 	"text/tabwriter"
-	"time"
 )
 
 // version is set at release build time with -ldflags "-X main.version=vX.Y.Z".
@@ -23,7 +22,8 @@ var version = "0.1.0"
 
 const usage = `boat - persistent Ubuntu VMs for AI agents
 
-  boat login --url URL --key KEY       save credentials (~/.config/boat/config.json)
+  boat login --url URL [KEY | --key KEY | --key-stdin]   save credentials (~/.config/boat/config.json);
+                                       KEY may be the JSON boat-api admin init prints     boat logout
   boat whoami | images | usage
   boat new [--name N] [--size|--type S] [--image I] [--ttl 2h] [--idle-stop 30m|never] [--snapshot SID] [--label k=v] [-e K=V]
                 [--secrets A,B | --no-secrets] [--env NAME | --no-env] [--from SNAPSHOT|CODE] [--count N] [--fail-fast] [--wait-setup]
@@ -40,6 +40,7 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat prompts ls|status|logs [-f] <vm> [id]    boat conversations <vm>
   boat steer <vm> "text" [--prompt-id ID]       boat interrupt <vm> [--prompt-id ID]
   boat env ls | new NAME | show E | set E | default E | build E | rm E   [--image I] [--size S] [--setup TEXT|--setup-file F] [--var K=V] [--secrets A,B]
+  boat rename <vm> NAME                boat api-key create NAME [--preset read-only|full-sandbox|ci|admin | --actions a,b] | list | usage ID | rotate ID | revoke ID
   boat fork <vm> [--name N] [--fail-fast]   boat stop <vm> [--force]   boat rm|delete <vm>
   boat extend <vm> --hours N | --ttl SECS | --no-auto-stop | --by 2h   auto-stop: set the time left, or push it out
   boat limits                          sandboxes active and whether one can start
@@ -58,7 +59,8 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat secrets ls | set NAME [VALUE|-] [--no-inject] | rotate NAME [VALUE|-] | rm NAME
   boat keys [ls | create [--name N] [--scopes a,b] [--team T] | rm ID | rotate ID [--overlap 24h] | usage ID]
   boat teams [ls | create NAME [--owner U] | show ID | rm ID | add-member TEAM NAME [--role R] | rm-member TEAM USER]
-  boat upgrade [--version vX.Y.Z]       replace this binary with a release build (checksum-verified)
+  boat upgrade|self-update [--version vX.Y.Z]   replace this binary with a release build (checksum-verified)
+  boat completions bash|zsh|fish|powershell     print a shell completion script
   boat webhooks [ls | create URL [--events a,b] | show ID | update ID [--url U] [--events a,b] | rm ID | deliveries ID | test ID | rotate ID [--overlap 24h]]
 
 A <vm> can be an id, a unique name, current (last created or forked in this shell) or self (inside a VM).
@@ -155,8 +157,13 @@ func (a *app) dispatch(cmd string, args []string) error {
 	if cmd == "login" {
 		return a.login(args)
 	}
-	if cmd == "upgrade" {
+	switch cmd {
+	case "upgrade", "self-update":
 		return a.upgrade(args)
+	case "logout":
+		return a.logout(args)
+	case "completions":
+		return a.completions(args)
 	}
 	if cmd == "version" {
 		return a.emit(obj{"version": version}, func() { fmt.Fprintln(a.out, "boat", version) })
@@ -230,37 +237,6 @@ func (a *app) emitList(items []obj, cols ...string) error {
 		fmt.Fprintln(tw, strings.Join(row, "\t"))
 	}
 	return tw.Flush()
-}
-
-func (a *app) login(args []string) error {
-	fs := flag.NewFlagSet("login", flag.ContinueOnError)
-	u := fs.String("url", "", "API base URL")
-	k := fs.String("key", "", "API key (boat_...)")
-	if _, _, err := parse(fs, args); err != nil {
-		return err
-	}
-	if *u == "" || *k == "" {
-		return fmt.Errorf("login needs --url and --key: %w", errUsage)
-	}
-	if *k == "-" {
-		b, err := io.ReadAll(io.LimitReader(a.in, 4096))
-		if err != nil {
-			return err
-		}
-		*k = strings.TrimSpace(string(b))
-	}
-	c := &client{base: *u, key: *k, hc: &http.Client{Timeout: 30 * time.Second}}
-	var me obj
-	if err := c.call("GET", "/v1/me", nil, &me); err != nil {
-		return err
-	}
-	if err := saveConfig(a.getenv, Config{URL: strings.TrimRight(*u, "/"), Key: *k}); err != nil {
-		return err
-	}
-	team, _ := me["team"].(map[string]any)
-	return a.emit(obj{"ok": true, "url": strings.TrimRight(*u, "/"), "team": team, "role": me["role"]}, func() {
-		fmt.Fprintf(a.out, "Logged in to %s (team %v, role %v)\n", *u, team["name"], me["role"])
-	})
 }
 
 func need(pos []string, n int, what string) error {

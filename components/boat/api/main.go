@@ -97,6 +97,7 @@ func adminInit(args []string) int {
 	c.register(fs)
 	user := fs.String("user", "owner", "owner user name")
 	team := fs.String("team", "default", "first team name")
+	asJSON := fs.Bool("json", false, "print the key record as JSON (the default when stdout is not a terminal)")
 	fs.Parse(args)
 	store, kr, err := c.open()
 	if err != nil {
@@ -108,9 +109,23 @@ func adminInit(args []string) int {
 		fmt.Fprintln(os.Stderr, "boat-api:", err)
 		return 1
 	}
-	json.NewEncoder(os.Stdout).Encode(k)
+	st, _ := os.Stdout.Stat()
+	tty := st != nil && st.Mode()&os.ModeCharDevice != 0
+	printInitKey(os.Stdout, k, *asJSON || !tty) // scripts read .token from the JSON
 	fmt.Fprintln(os.Stderr, "Store this key now; it is not shown again. Restart boat-api if it is running.")
 	return 0
+}
+
+// printInitKey: JSON for scripts, or the bare token on its own labelled line,
+// so nobody pastes the whole record as the key.
+func printInitKey(w io.Writer, k keyView, asJSON bool) {
+	if asJSON {
+		json.NewEncoder(w).Encode(k)
+		return
+	}
+	fmt.Fprintf(w, "Owner API key (shown once; the key is the next line only):\n%s\n\n", k.Token)
+	fmt.Fprintf(w, "Log in:  boat login --url https://<your API host> --key %s\n", k.Token)
+	fmt.Fprintln(w, "(-json prints the full key record instead)")
 }
 
 // headerFlag collects repeated k=v flags.
