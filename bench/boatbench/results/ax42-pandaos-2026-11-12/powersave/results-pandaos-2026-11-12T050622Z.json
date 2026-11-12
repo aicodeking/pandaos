@@ -1,0 +1,60 @@
+{
+ "driver": "pandaos",
+ "run_id": "cb2137",
+ "size": "default",
+ "started": "2026-11-12T05:06:22Z",
+ "host": {
+  "desc": "Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB; PandaOS 26.05 install (NixOS, kernel 6.18.57); boat store = native btrfs (compress=zstd:1) on one NVMe, Samsung MZVL2512HCJQ; boatd defaults (trusted, memOvercommit 1.5), owner team quota 8 default VMs; governor powersave, EPP balance_performance; 16 CPUs online"
+ },
+ "boatd_options": "{\"_installed\":\"/etc/boat/boatd.json sets no diskCache, memOvercommit, cpuOvercommit, warmPool or untrustedTenants: boatd defaults\",\"defaultTeam\":{\"maxVMs\":10,\"maxVCPU\":32,\"maxMemMiB\":65536}}",
+ "preset": "pandaos-install",
+ "fc_cache_type": "Unsafe (boatd default diskCache)",
+ "run_url": null,
+ "client": {
+  "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16",
+  "os": "Linux-6.18.57-x86_64-with-glibc2.42",
+  "egress": "HEL DE"
+ },
+ "parts": "ad",
+ "repeats": [
+  {
+   "index": 0,
+   "metrics": {
+    "create_ready_s": 1.5978832310001962,
+    "node_runs_s": [
+     21.39,
+     21.03,
+     21.25
+    ],
+    "seq_write_mbps": 1460.2,
+    "seq_read_mbps": 7619.2,
+    "rand_write_iops": 227075.0,
+    "rand_read_iops": 58524.0,
+    "pts_rand_read_iops": 56693.0,
+    "pts_rand_write_iops": 260411.0,
+    "pts_seq_write_mibps": 1650.7,
+    "fsync_rand_write_iops": 26008.0,
+    "seq_write_endfsync_mbps": 1589.3
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "node": "v22.22.3",
+   "disk_tool": "fio",
+   "disk_errors": null
+  }
+ ]
+}

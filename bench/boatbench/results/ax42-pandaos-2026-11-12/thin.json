@@ -1,0 +1,12 @@
+{
+ "fresh": {
+  "du_mib": 3336,
+  "btrfs_du": "3493900288   502784000  2964459520  /var/lib/boat/vms/vm-20dfd6963a24/",
+  "files": "total 1\n0 drwx------ 1 root root 1 Nov 12 06:55 firecracker\n1 -rw------- 1 root root 1 Nov 12 06:55 firecracker.log\n1 -rw------- 1 root root 1 Nov 12 06:55 vm.json\n"
+ },
+ "nodesetup": {
+  "du_mib": 6279,
+  "btrfs_du": "6582984704  3592081408  2964246528  /var/lib/boat/vms/vm-b1efdeaf8a4f/",
+  "files": "total 1\n0 drwx------ 1 root root 1 Nov 12 06:55 firecracker\n1 -rw------- 1 root root 1 Nov 12 06:56 firecracker.log\n1 -rw------- 1 root root 1 Nov 12 06:56 vm.json\n"
+ }
+}

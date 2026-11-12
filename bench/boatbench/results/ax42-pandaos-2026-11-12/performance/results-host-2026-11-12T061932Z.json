@@ -1,0 +1,148 @@
+{
+ "driver": "host",
+ "run_id": "555bc1",
+ "size": "host",
+ "started": "2026-11-12T06:19:32Z",
+ "host": {
+  "desc": "Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB; PandaOS 26.05 install (NixOS, kernel 6.18.57); boat store = native btrfs (compress=zstd:1) on one NVMe, Samsung MZVL2512HCJQ; boatd defaults (trusted, memOvercommit 1.5), owner team quota 8 default VMs; governor performance, EPP performance; 16 CPUs online"
+ },
+ "boatd_options": "{\"_installed\":\"/etc/boat/boatd.json sets no diskCache, memOvercommit, cpuOvercommit, warmPool or untrustedTenants: boatd defaults\",\"defaultTeam\":{\"maxVMs\":10,\"maxVCPU\":32,\"maxMemMiB\":65536}}",
+ "preset": "pandaos-install",
+ "fc_cache_type": "-",
+ "run_url": null,
+ "client": {
+  "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16",
+  "os": "Linux-6.18.57-x86_64-with-glibc2.42",
+  "egress": "HEL DE"
+ },
+ "parts": "g",
+ "repeats": [
+  {
+   "index": 0,
+   "metrics": {
+    "create_ready_s": 2.7999994927085936e-06,
+    "density_host_runs_s_n1": 23.1,
+    "density_per_vm_runs_s_n1": 23.1,
+    "density_efficiency_n1": 1.0,
+    "density_cpu_per_loop_n1": 1.5123715244318268,
+    "density_host_runs_s_n4": 70.655,
+    "density_per_vm_runs_s_n4": 17.7075,
+    "density_efficiency_n4": 0.7665584415584414,
+    "density_cpu_per_loop_n4": 1.5284649245054291,
+    "density_host_runs_s_n8": 93.08,
+    "density_per_vm_runs_s_n8": 11.6475,
+    "density_efficiency_n8": 0.5042207792207792,
+    "density_cpu_per_loop_n8": 1.4657488155341252,
+    "density_host_runs_s_n11": 98.645,
+    "density_per_vm_runs_s_n11": 8.96,
+    "density_efficiency_n11": 0.3878787878787879,
+    "density_cpu_per_loop_n11": 1.2705957686594795
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 16,
+    "cpu_count": 16,
+    "mem_mib": 63383,
+    "disk_gib": 476.4,
+    "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics",
+    "kernel": "6.18.57",
+    "os": "PandaOS 26.05 (Yarara)",
+    "virt": "none",
+    "system_node": "",
+    "user": "panda",
+    "home_fs": "btrfs",
+    "egress_colo": "HEL",
+    "egress_country": "DE"
+   },
+   "density": {
+    "levels": [
+     {
+      "n": 1,
+      "vms_measured": 1,
+      "per_vm_runs_s": 23.1,
+      "per_vm_each": [
+       23.1
+      ],
+      "host_runs_s": 23.1,
+      "cpu_per_loop": 1.5123715244318268,
+      "host_cpus": 16,
+      "wall_s": 97.91281451699979,
+      "efficiency": 1.0,
+      "loops_per_cpu": 0.09452322027698917
+     },
+     {
+      "n": 4,
+      "vms_measured": 4,
+      "per_vm_runs_s": 17.7075,
+      "per_vm_each": [
+       17.7,
+       17.715,
+       17.509999999999998,
+       17.73
+      ],
+      "host_runs_s": 70.655,
+      "cpu_per_loop": 1.5284649245054291,
+      "host_cpus": 16,
+      "wall_s": 111.26321781700062,
+      "efficiency": 0.7665584415584414,
+      "loops_per_cpu": 0.3780928811079567
+     },
+     {
+      "n": 8,
+      "vms_measured": 8,
+      "per_vm_runs_s": 11.6475,
+      "per_vm_each": [
+       11.66,
+       11.605,
+       11.65,
+       11.645,
+       11.655000000000001,
+       11.575,
+       11.605,
+       11.684999999999999
+      ],
+      "host_runs_s": 93.08,
+      "cpu_per_loop": 1.4657488155341252,
+      "host_cpus": 16,
+      "wall_s": 146.6081892759994,
+      "efficiency": 0.5042207792207792,
+      "loops_per_cpu": 0.7561857622159134
+     },
+     {
+      "n": 11,
+      "vms_measured": 11,
+      "per_vm_runs_s": 8.96,
+      "per_vm_each": [
+       9.059999999999999,
+       8.895,
+       8.985,
+       8.965,
+       9.02,
+       8.91,
+       8.95,
+       8.91,
+       8.96,
+       9.059999999999999,
+       8.93
+      ],
+      "host_runs_s": 98.645,
+      "cpu_per_loop": 1.2705957686594795,
+      "host_cpus": 16,
+      "wall_s": 188.8127573590009,
+      "efficiency": 0.3878787878787879,
+      "loops_per_cpu": 1.0397554230468808
+     }
+    ],
+    "max_vms": 11,
+    "requested": [
+     1,
+     4,
+     8,
+     11
+    ],
+    "passes": 2,
+    "errors": []
+   }
+  }
+ ]
+}

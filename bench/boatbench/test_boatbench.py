@@ -260,7 +260,7 @@ class Prices(unittest.TestCase):
         md = cost_tables.render(self.p)
         self.assertIn("| Hetzner AX102, conservative / untrusted (15) | $0.279 | $0.112 | $0.056 | $0.028 | $0.042 |", md)
         self.assertIn("509, $0.600/h", md)  # AX102, 8 h sessions kept 14 days, shipped policy
-        self.assertIn("MODEL, thin provisioning", md)
+        self.assertIn("MODEL, thin: 3.4 GiB", md)
         self.assertEqual(cost_tables.capacity(15, 30, 24, 336, 730), 30 * 730 * 24 / 360)
 
 

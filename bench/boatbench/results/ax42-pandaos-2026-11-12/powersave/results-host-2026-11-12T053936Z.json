@@ -1,0 +1,365 @@
+{
+ "driver": "host",
+ "run_id": "28a141",
+ "size": "host",
+ "started": "2026-11-12T05:39:36Z",
+ "host": {
+  "desc": "Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB; PandaOS 26.05 install (NixOS, kernel 6.18.57); boat store = native btrfs (compress=zstd:1) on one NVMe, Samsung MZVL2512HCJQ; boatd defaults (trusted, memOvercommit 1.5), owner team quota 8 default VMs; governor powersave, EPP balance_performance; 16 CPUs online"
+ },
+ "boatd_options": "{\"_installed\":\"/etc/boat/boatd.json sets no diskCache, memOvercommit, cpuOvercommit, warmPool or untrustedTenants: boatd defaults\",\"defaultTeam\":{\"maxVMs\":10,\"maxVCPU\":32,\"maxMemMiB\":65536}}",
+ "preset": "pandaos-install",
+ "fc_cache_type": "-",
+ "run_url": null,
+ "client": {
+  "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16",
+  "os": "Linux-6.18.57-x86_64-with-glibc2.42",
+  "egress": "HEL DE"
+ },
+ "parts": "g",
+ "repeats": [
+  {
+   "index": 0,
+   "metrics": {
+    "create_ready_s": 3.3999995139311068e-06,
+    "density_host_runs_s_n1": 21.380000000000003,
+    "density_per_vm_runs_s_n1": 21.380000000000003,
+    "density_efficiency_n1": 1.0,
+    "density_cpu_per_loop_n1": 1.5251114866677775,
+    "density_host_runs_s_n2": 42.08,
+    "density_per_vm_runs_s_n2": 21.04,
+    "density_efficiency_n2": 0.9840972871842842,
+    "density_cpu_per_loop_n2": 1.5573636691203383,
+    "density_host_runs_s_n4": 68.77,
+    "density_per_vm_runs_s_n4": 17.222499999999997,
+    "density_efficiency_n4": 0.8055425631431241,
+    "density_cpu_per_loop_n4": 1.528124749080972,
+    "density_host_runs_s_n7": 90.67,
+    "density_per_vm_runs_s_n7": 12.965,
+    "density_efficiency_n7": 0.6064078578110382,
+    "density_cpu_per_loop_n7": 1.4834790252916146,
+    "density_host_runs_s_n8": 93.25500000000001,
+    "density_per_vm_runs_s_n8": 11.6475,
+    "density_efficiency_n8": 0.5447848456501403,
+    "density_cpu_per_loop_n8": 1.4528531646360665,
+    "density_host_runs_s_n11": 98.555,
+    "density_per_vm_runs_s_n11": 8.955,
+    "density_efficiency_n11": 0.4188493919550982,
+    "density_cpu_per_loop_n11": 1.2695665335473956
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 16,
+    "cpu_count": 16,
+    "mem_mib": 63383,
+    "disk_gib": 476.4,
+    "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics",
+    "kernel": "6.18.57",
+    "os": "PandaOS 26.05 (Yarara)",
+    "virt": "none",
+    "system_node": "",
+    "user": "panda",
+    "home_fs": "btrfs",
+    "egress_colo": "HEL",
+    "egress_country": "DE"
+   },
+   "density": {
+    "levels": [
+     {
+      "n": 1,
+      "vms_measured": 1,
+      "per_vm_runs_s": 21.380000000000003,
+      "per_vm_each": [
+       21.380000000000003
+      ],
+      "host_runs_s": 21.380000000000003,
+      "cpu_per_loop": 1.5251114866677775,
+      "host_cpus": 16,
+      "wall_s": 101.58372541900007,
+      "efficiency": 1.0,
+      "loops_per_cpu": 0.0953194679167361
+     },
+     {
+      "n": 2,
+      "vms_measured": 2,
+      "per_vm_runs_s": 21.04,
+      "per_vm_each": [
+       20.93,
+       21.15
+      ],
+      "host_runs_s": 42.08,
+      "cpu_per_loop": 1.5573636691203383,
+      "host_cpus": 16,
+      "wall_s": 102.84806347100039,
+      "efficiency": 0.9840972871842842,
+      "loops_per_cpu": 0.1906389358334722
+     },
+     {
+      "n": 4,
+      "vms_measured": 4,
+      "per_vm_runs_s": 17.222499999999997,
+      "per_vm_each": [
+       17.064999999999998,
+       17.189999999999998,
+       17.259999999999998,
+       17.255
+      ],
+      "host_runs_s": 68.77,
+      "cpu_per_loop": 1.528124749080972,
+      "host_cpus": 16,
+      "wall_s": 113.24460546099999,
+      "efficiency": 0.8055425631431241,
+      "loops_per_cpu": 0.3812778716669444
+     },
+     {
+      "n": 7,
+      "vms_measured": 7,
+      "per_vm_runs_s": 12.965,
+      "per_vm_each": [
+       12.91,
+       12.864999999999998,
+       13.01,
+       12.98,
+       12.965,
+       12.96,
+       12.98
+      ],
+      "host_runs_s": 90.67,
+      "cpu_per_loop": 1.4834790252916146,
+      "host_cpus": 16,
+      "wall_s": 133.68806574599967,
+      "efficiency": 0.6064078578110382,
+      "loops_per_cpu": 0.6672362754171527
+     },
+     {
+      "n": 8,
+      "vms_measured": 8,
+      "per_vm_runs_s": 11.6475,
+      "per_vm_each": [
+       11.595,
+       11.71,
+       11.655000000000001,
+       11.75,
+       11.64,
+       11.605,
+       11.64,
+       11.66
+      ],
+      "host_runs_s": 93.25500000000001,
+      "cpu_per_loop": 1.4528531646360665,
+      "host_cpus": 16,
+      "wall_s": 146.5557396180002,
+      "efficiency": 0.5447848456501403,
+      "loops_per_cpu": 0.7625557433338888
+     },
+     {
+      "n": 11,
+      "vms_measured": 11,
+      "per_vm_runs_s": 8.955,
+      "per_vm_each": [
+       9.025,
+       8.975000000000001,
+       9.07,
+       8.925,
+       8.870000000000001,
+       9.005,
+       8.985,
+       8.934999999999999,
+       8.925,
+       8.885,
+       8.955
+      ],
+      "host_runs_s": 98.555,
+      "cpu_per_loop": 1.2695665335473956,
+      "host_cpus": 16,
+      "wall_s": 189.33943385600014,
+      "efficiency": 0.4188493919550982,
+      "loops_per_cpu": 1.048514147084097
+     }
+    ],
+    "max_vms": 11,
+    "requested": [
+     1,
+     2,
+     4,
+     7,
+     8,
+     11
+    ],
+    "passes": 2,
+    "errors": []
+   }
+  },
+  {
+   "index": 1,
+   "metrics": {
+    "create_ready_s": 2.349999704165384e-06,
+    "density_host_runs_s_n1": 22.54,
+    "density_per_vm_runs_s_n1": 22.54,
+    "density_efficiency_n1": 1.0,
+    "density_cpu_per_loop_n1": 1.528437670802676,
+    "density_host_runs_s_n2": 42.375,
+    "density_per_vm_runs_s_n2": 21.1875,
+    "density_efficiency_n2": 0.9399955634427685,
+    "density_cpu_per_loop_n2": 1.5636904183335858,
+    "density_host_runs_s_n4": 70.28,
+    "density_per_vm_runs_s_n4": 17.580000000000002,
+    "density_efficiency_n4": 0.779946761313221,
+    "density_cpu_per_loop_n4": 1.5299193231425576,
+    "density_host_runs_s_n7": 91.225,
+    "density_per_vm_runs_s_n7": 13.01,
+    "density_efficiency_n7": 0.5771960958296363,
+    "density_cpu_per_loop_n7": 1.4879930363672957,
+    "density_host_runs_s_n8": 94.07,
+    "density_per_vm_runs_s_n8": 11.7925,
+    "density_efficiency_n8": 0.5231810115350488,
+    "density_cpu_per_loop_n8": 1.4584877076556133,
+    "density_host_runs_s_n11": 99.645,
+    "density_per_vm_runs_s_n11": 9.08,
+    "density_efficiency_n11": 0.4028393966282165,
+    "density_cpu_per_loop_n11": 1.2676192949031588
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 16,
+    "cpu_count": 16,
+    "mem_mib": 63383,
+    "disk_gib": 476.4,
+    "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics",
+    "kernel": "6.18.57",
+    "os": "PandaOS 26.05 (Yarara)",
+    "virt": "none",
+    "system_node": "",
+    "user": "panda",
+    "home_fs": "btrfs",
+    "egress_colo": "HEL",
+    "egress_country": "DE"
+   },
+   "density": {
+    "levels": [
+     {
+      "n": 1,
+      "vms_measured": 1,
+      "per_vm_runs_s": 22.54,
+      "per_vm_each": [
+       22.54
+      ],
+      "host_runs_s": 22.54,
+      "cpu_per_loop": 1.528437670802676,
+      "host_cpus": 16,
+      "wall_s": 99.04923595199944,
+      "efficiency": 1.0,
+      "loops_per_cpu": 0.09552735442516724
+     },
+     {
+      "n": 2,
+      "vms_measured": 2,
+      "per_vm_runs_s": 21.1875,
+      "per_vm_each": [
+       21.255000000000003,
+       21.119999999999997
+      ],
+      "host_runs_s": 42.375,
+      "cpu_per_loop": 1.5636904183335858,
+      "host_cpus": 16,
+      "wall_s": 101.87846956799967,
+      "efficiency": 0.9399955634427685,
+      "loops_per_cpu": 0.1910547088503345
+     },
+     {
+      "n": 4,
+      "vms_measured": 4,
+      "per_vm_runs_s": 17.580000000000002,
+      "per_vm_each": [
+       17.5,
+       17.6,
+       17.619999999999997,
+       17.560000000000002
+      ],
+      "host_runs_s": 70.28,
+      "cpu_per_loop": 1.5299193231425576,
+      "host_cpus": 16,
+      "wall_s": 112.18966048099992,
+      "efficiency": 0.779946761313221,
+      "loops_per_cpu": 0.382109417700669
+     },
+     {
+      "n": 7,
+      "vms_measured": 7,
+      "per_vm_runs_s": 13.01,
+      "per_vm_each": [
+       13.03,
+       13.004999999999999,
+       13.059999999999999,
+       12.99,
+       13.16,
+       13.01,
+       12.97
+      ],
+      "host_runs_s": 91.225,
+      "cpu_per_loop": 1.4879930363672957,
+      "host_cpus": 16,
+      "wall_s": 133.50451089099988,
+      "efficiency": 0.5771960958296363,
+      "loops_per_cpu": 0.6686914809761707
+     },
+     {
+      "n": 8,
+      "vms_measured": 8,
+      "per_vm_runs_s": 11.7925,
+      "per_vm_each": [
+       11.79,
+       11.809999999999999,
+       11.705,
+       11.635000000000002,
+       11.83,
+       11.795,
+       11.705,
+       11.8
+      ],
+      "host_runs_s": 94.07,
+      "cpu_per_loop": 1.4584877076556133,
+      "host_cpus": 16,
+      "wall_s": 145.88117110799976,
+      "efficiency": 0.5231810115350488,
+      "loops_per_cpu": 0.764218835401338
+     },
+     {
+      "n": 11,
+      "vms_measured": 11,
+      "per_vm_runs_s": 9.08,
+      "per_vm_each": [
+       9.035,
+       9.059999999999999,
+       9.015,
+       9.085,
+       9.120000000000001,
+       9.105,
+       8.985,
+       9.08,
+       9.11,
+       8.965,
+       9.085
+      ],
+      "host_runs_s": 99.645,
+      "cpu_per_loop": 1.2676192949031588,
+      "host_cpus": 16,
+      "wall_s": 187.3390171129995,
+      "efficiency": 0.4028393966282165,
+      "loops_per_cpu": 1.0508008986768398
+     }
+    ],
+    "max_vms": 11,
+    "requested": [
+     1,
+     2,
+     4,
+     7,
+     8,
+     11
+    ],
+    "passes": 2,
+    "errors": []
+   }
+  }
+ ]
+}

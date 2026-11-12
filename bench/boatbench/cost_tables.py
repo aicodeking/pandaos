@@ -45,10 +45,10 @@ def retention_table(p, s):
     a, ret = p["assumptions"], p["assumptions"]["retention"]
     hours, m = a["hours_per_month"], monthly(s, a)
     ram_vms = s["vms_untrusted"]
-    policies = [(f"storageOvercommit 1 (shipped): {ret['nominal_gib_per_vm']} GiB per VM, running or stopped",
+    policies = [(f"storageOvercommit 1 (shipped): {ret['nominal_gib_per_vm']} GiB per VM",
                  ret["nominal_gib_per_vm"])]
-    policies += [(f"MODEL, thin provisioning: {g} GiB actual use per VM ({why})", g)
-                 for g, why in ret["thin_gib_per_vm"]]
+    thin = ret["thin_gib_per_vm"]
+    policies += [(f"MODEL, thin: {g} GiB actual use per VM ({chr(97 + i)})", g) for i, (g, _) in enumerate(thin)]
     out = [f"{s['name']}, untrusted ({ram_vms} RAM slots), store {s['store_gib']:,} GiB ({s['store_source']}). "
            "Cells: running VM-hours per month, and $ per running VM-hour at 100% of that capacity.", "",
            "| Storage policy | Storage slots | Session H | " + " | ".join(
@@ -62,7 +62,7 @@ def retention_table(p, s):
                 c = capacity(ram_vms, slots, h, r, hours)
                 cells.append(f"{c:,.0f}{' (RAM-bound)' if c == ram_vms * hours else ''}, ${m / c:.3f}/h")
             out.append(f"| {label} | {slots} | {h} h | " + " | ".join(cells) + " |")
-    return out
+    return out + [""] + [f"({chr(97 + i)}) {why}." for i, (_, why) in enumerate(thin)]
 
 
 def render(p):

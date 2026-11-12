@@ -182,14 +182,15 @@
       "nominal_source": "51 GiB disk + 8 GiB memory snapshot (+ logs) per default VM, charged running or stopped under storageOvercommit 1 (components/boat/boatd/snapshot.go hostStorageCheck); untrustedTenants forces storageOvercommit 1",
       "thin_gib_per_vm": [
         [
-          10,
-          "illustrative"
+          3.4,
+          "measured: a stopped default VM after the Node loop setup, btrfs exclusive bytes incl. memory snapshot, 3.35 GiB; PandaOS AX42 2026-11-12, results/ax42-pandaos-2026-11-12/thin.json"
         ],
         [
-          20,
-          "illustrative"
+          10,
+          "illustrative: a heavier session"
         ]
-      ]
+      ],
+      "thin_measured_note": "A fresh stopped default VM held 0.47 GiB exclusive; the 2.76 GiB guest image is shared by reflinks and counted once per host, not per VM. Thin provisioning is a MODEL: boatd ships no such setting for untrusted mode."
     }
   }
 }

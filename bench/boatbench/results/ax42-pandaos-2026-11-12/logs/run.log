@@ -1,0 +1,130 @@
+start: governor powersave, EPP balance_performance
+== 2026-11-12T04:51:54Z --driver host --repeats 1 --only a --out out/powersave
+[04:51:55] r0 probe
+[04:51:55] r0 node_setup
+[04:52:12] r0 node_loop
+[04:54:39] r0 done: {"create_ready_s": 2.600000243546674e-06, "node_runs_s": [23.04, 23.12, 23.08]}
+out/powersave/results-host-2026-11-12T045155Z.json
+== 2026-11-12T04:54:39Z --driver pandaos --repeats 1 --only ad --out out/powersave
+[04:54:41] r0 probe
+[04:54:41] r0 node_setup
+[04:55:11] r0 node_loop
+[04:57:45] r0 disk
+[05:03:37] r0 done: {"create_ready_s": 1.6074373450001076, "node_runs_s": [20.89, 21.14, 21.35], "seq_write_mbps": 1523.3, "seq_read_mbps": 7546.0, "rand_write_iops": 229193.0, "rand_read_iops": 218156.0, "pts_rand_read_iops": 56154.0, "pts_rand_write_iops": 260009.0, "pts_seq_write_mibps": 1690.8, "fsync_rand_write_iops": 26040.0, "seq_write_endfsync_mbps": 1847.5}
+out/powersave/results-pandaos-2026-11-12T045439Z.json
+== 2026-11-12T05:03:37Z --driver host --repeats 1 --only a --out out/powersave
+[05:03:37] r0 probe
+[05:03:37] r0 node_setup
+[05:03:55] r0 node_loop
+[05:06:22] r0 done: {"create_ready_s": 2.6100001377926674e-06, "node_runs_s": [23.01, 22.86, 23.32]}
+out/powersave/results-host-2026-11-12T050337Z.json
+== 2026-11-12T05:06:22Z --driver pandaos --repeats 1 --only ad --out out/powersave
+[05:06:23] r0 probe
+[05:06:23] r0 node_setup
+[05:06:49] r0 node_loop
+[05:09:22] r0 disk
+[05:15:15] r0 done: {"create_ready_s": 1.5978832310001962, "node_runs_s": [21.39, 21.03, 21.25], "seq_write_mbps": 1460.2, "seq_read_mbps": 7619.2, "rand_write_iops": 227075.0, "rand_read_iops": 58524.0, "pts_rand_read_iops": 56693.0, "pts_rand_write_iops": 260411.0, "pts_seq_write_mibps": 1650.7, "fsync_rand_write_iops": 26008.0, "seq_write_endfsync_mbps": 1589.3}
+out/powersave/results-pandaos-2026-11-12T050622Z.json
+== 2026-11-12T05:15:15Z --driver host --repeats 1 --only a --out out/powersave
+[05:15:15] r0 probe
+[05:15:15] r0 node_setup
+[05:15:33] r0 node_loop
+[05:18:00] r0 done: {"create_ready_s": 2.6799998522619717e-06, "node_runs_s": [23.12, 23.0, 23.18]}
+out/powersave/results-host-2026-11-12T051515Z.json
+== 2026-11-12T05:18:00Z --driver pandaos --repeats 1 --only ad --out out/powersave
+[05:18:02] r0 probe
+[05:18:02] r0 node_setup
+[05:18:31] r0 node_loop
+[05:21:01] r0 disk
+[05:26:54] r0 done: {"create_ready_s": 1.5536078819995964, "node_runs_s": [21.43, 21.24, 21.32], "seq_write_mbps": 1514.5, "seq_read_mbps": 6569.2, "rand_write_iops": 225788.0, "rand_read_iops": 221203.0, "pts_rand_read_iops": 221635.0, "pts_rand_write_iops": 260659.0, "pts_seq_write_mibps": 1604.6, "fsync_rand_write_iops": 25686.0, "seq_write_endfsync_mbps": 1574.3}
+out/powersave/results-pandaos-2026-11-12T051800Z.json
+== 2026-11-12T05:26:54Z --driver pandaos --repeats 3 --only bcef --out out/powersave
+[05:26:55] r0 probe
+[05:26:56] r0 api_rtt
+[05:26:56] r0 exec_rtt
+[05:27:00] r0 node_setup
+[05:27:37] r0 net
+[05:27:40] r0 npm_cold
+[05:27:43] r0 snapshot
+[05:27:47] r0 fork
+[05:27:48] r0 stop_resume
+[05:27:50] delete snapshot snap-7be0d23ee1d9: DELETE http://127.0.0.1:8740/v1/snapshots/snap-7be0d23ee1d9: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_bc58fd7830c943c9"}}
+
+[05:27:50] r0 concurrent
+[05:27:54] r0 done: {"create_ready_s": 1.5654704700000366, "api_rtt_p50_ms": 0.3135110000584973, "api_rtt_p95_ms": 0.47433720046683453, "exec_rtt_p50_ms": 2.424163500108989, "exec_rtt_p95_ms": 4.20876919974944, "dl_go_tarball_googlecdn_mbit": 838.6, "dl_nodejs_tarball_mbit": 832.4, "tcp_connect_cloudflare_1.1.1.1_ms": 1.42, "tcp_connect_github.com_ms": 23.69, "npm_ci_s": 2.822, "snapshot_s": 2.671124641999995, "from_snapshot_ready_s": 0.6169092430000092, "fork_ready_s": 0.8922800830005144, "stop_s": 0.769956734000516, "resume_ready_s": 0.2437573249999332, "create_ready_s_net": 1.5648434479999196, "fork_ready_s_net": 0.8916530610003974, "resume_ready_s_net": 0.2431303029998162, "from_snapshot_ready_s_net": 0.6162822209998922, "stop_s_net": 0.7696432230004575, "snapshot_s_net": 2.6708111309999367, "exec_rtt_p50_ms_net": 2.1106525000504917}
+[05:27:56] r1 probe
+[05:27:56] r1 api_rtt
+[05:27:56] r1 exec_rtt
+[05:28:00] r1 node_setup
+[05:28:36] r1 net
+[05:28:39] r1 npm_cold
+[05:28:46] r1 snapshot
+[05:28:50] r1 fork
+[05:28:51] r1 stop_resume
+[05:28:53] delete snapshot snap-a8a38b0eb946: DELETE http://127.0.0.1:8740/v1/snapshots/snap-a8a38b0eb946: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_f34418c3254bb05e"}}
+
+[05:28:53] r1 concurrent
+[05:28:57] r1 done: {"create_ready_s": 1.862638653000431, "api_rtt_p50_ms": 0.37507400065805996, "api_rtt_p95_ms": 0.5486726004164667, "exec_rtt_p50_ms": 3.7702064996665285, "exec_rtt_p95_ms": 10.83651864996682, "dl_go_tarball_googlecdn_mbit": 603.8, "dl_nodejs_tarball_mbit": 829.5, "tcp_connect_cloudflare_1.1.1.1_ms": 1.73, "tcp_connect_github.com_ms": 24.21, "npm_ci_s": 5.917, "snapshot_s": 2.9456881029991564, "from_snapshot_ready_s": 0.5924461600006907, "fork_ready_s": 0.8676049240002612, "stop_s": 0.7245714919999955, "resume_ready_s": 0.23964131999946403, "create_ready_s_net": 1.861888504999115, "fork_ready_s_net": 0.8668547759989451, "resume_ready_s_net": 0.2388911719981479, "from_snapshot_ready_s_net": 0.5916960119993746, "stop_s_net": 0.7241964179993374, "snapshot_s_net": 2.9453130289984983, "exec_rtt_p50_ms_net": 3.3951324990084686}
+[05:28:58] r2 probe
+[05:28:59] r2 api_rtt
+[05:28:59] r2 exec_rtt
+[05:29:03] r2 node_setup
+[05:29:28] r2 net
+[05:29:31] r2 npm_cold
+[05:29:34] r2 snapshot
+[05:29:38] r2 fork
+[05:29:39] r2 stop_resume
+[05:29:41] delete snapshot snap-6de1c05203ad: DELETE http://127.0.0.1:8740/v1/snapshots/snap-6de1c05203ad: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_b5b0f6929ea1b554"}}
+
+[05:29:41] r2 concurrent
+[05:29:45] r2 done: {"create_ready_s": 1.5285395419996348, "api_rtt_p50_ms": 0.35707999995793216, "api_rtt_p95_ms": 0.4662245997678838, "exec_rtt_p50_ms": 2.4678990002939827, "exec_rtt_p95_ms": 3.620631200237767, "dl_go_tarball_googlecdn_mbit": 854.0, "dl_nodejs_tarball_mbit": 838.8, "tcp_connect_cloudflare_1.1.1.1_ms": 1.41, "tcp_connect_github.com_ms": 23.57, "npm_ci_s": 2.655, "snapshot_s": 3.043314798999745, "from_snapshot_ready_s": 0.5289001699993605, "fork_ready_s": 0.826276706000499, "stop_s": 0.674601679999796, "resume_ready_s": 0.21751041400057147, "create_ready_s_net": 1.527825381999719, "fork_ready_s_net": 0.8255625460005831, "resume_ready_s_net": 0.2167962540006556, "from_snapshot_ready_s_net": 0.5281860099994447, "stop_s_net": 0.6742445999998381, "snapshot_s_net": 3.042957718999787, "exec_rtt_p50_ms_net": 2.1108190003360505}
+out/powersave/results-pandaos-2026-11-12T052654Z.json
+== 2026-11-12T05:29:45Z --driver pandaos --repeats 2 --only g --out out/powersave
+[05:29:47] r0 probe
+[05:29:47] r0 density (1, 2, 4, 7, 8, 11)
+[05:30:24] density: 4 of 11 VMs set up
+[05:36:18] r0 done: {"create_ready_s": 1.622510352000063, "density_host_runs_s_n1": 18.42, "density_per_vm_runs_s_n1": 18.42, "density_efficiency_n1": 1.0, "density_cpu_per_loop_n1": 1.4724812924066812, "density_host_runs_s_n2": 32.480000000000004, "density_per_vm_runs_s_n2": 16.240000000000002, "density_efficiency_n2": 0.8816503800217156, "density_cpu_per_loop_n2": 1.47427279049902, "density_host_runs_s_n4": 62.015, "density_per_vm_runs_s_n4": 15.504999999999999, "density_efficiency_n4": 0.8417480998914222, "density_cpu_per_loop_n4": 1.4800356481129595}
+[05:36:20] r1 probe
+[05:36:20] r1 density (1, 2, 4, 7, 8, 11)
+[05:37:00] density: 4 of 11 VMs set up
+[05:39:36] delete vm-70993d717e5c: <urlopen error [Errno 111] Connection refused>
+[05:39:36] delete vm-543ff17ca385: <urlopen error [Errno 111] Connection refused>
+[05:39:36] delete vm-d0eab81073ad: <urlopen error [Errno 111] Connection refused>
+[05:39:36] delete vm-53bec401bdf3: <urlopen error [Errno 111] Connection refused>
+[05:39:36] r1 done: {"create_ready_s": 1.64705789799973, "density_host_runs_s_n1": 20.490000000000002, "density_per_vm_runs_s_n1": 20.490000000000002, "density_efficiency_n1": 1.0, "density_cpu_per_loop_n1": 1.4892310001901752}
+out/powersave/results-pandaos-2026-11-12T052945Z.json
+== 2026-11-12T05:39:36Z --driver host --repeats 2 --only g --out out/powersave
+[05:39:37] r0 probe
+[05:39:37] r0 density (1, 2, 4, 7, 8, 11)
+[05:53:04] r0 done: {"create_ready_s": 3.3999995139311068e-06, "density_host_runs_s_n1": 21.380000000000003, "density_per_vm_runs_s_n1": 21.380000000000003, "density_efficiency_n1": 1.0, "density_cpu_per_loop_n1": 1.5251114866677775, "density_host_runs_s_n2": 42.08, "density_per_vm_runs_s_n2": 21.04, "density_efficiency_n2": 0.9840972871842842, "density_cpu_per_loop_n2": 1.5573636691203383, "density_host_runs_s_n4": 68.77, "density_per_vm_runs_s_n4": 17.222499999999997, "density_efficiency_n4": 0.8055425631431241, "density_cpu_per_loop_n4": 1.528124749080972, "density_host_runs_s_n7": 90.67, "density_per_vm_runs_s_n7": 12.965, "density_efficiency_n7": 0.6064078578110382, "density_cpu_per_loop_n7": 1.4834790252916146, "density_host_runs_s_n8": 93.25500000000001, "density_per_vm_runs_s_n8": 11.6475, "density_efficiency_n8": 0.5447848456501403, "density_cpu_per_loop_n8": 1.4528531646360665, "density_host_runs_s_n11": 98.555, "density_per_vm_runs_s_n11": 8.955, "density_efficiency_n11": 0.4188493919550982, "density_cpu_per_loop_n11": 1.2695665335473956}
+[05:53:04] r1 probe
+[05:53:04] r1 density (1, 2, 4, 7, 8, 11)
+[06:06:23] r1 done: {"create_ready_s": 2.349999704165384e-06, "density_host_runs_s_n1": 22.54, "density_per_vm_runs_s_n1": 22.54, "density_efficiency_n1": 1.0, "density_cpu_per_loop_n1": 1.528437670802676, "density_host_runs_s_n2": 42.375, "density_per_vm_runs_s_n2": 21.1875, "density_efficiency_n2": 0.9399955634427685, "density_cpu_per_loop_n2": 1.5636904183335858, "density_host_runs_s_n4": 70.28, "density_per_vm_runs_s_n4": 17.580000000000002, "density_efficiency_n4": 0.779946761313221, "density_cpu_per_loop_n4": 1.5299193231425576, "density_host_runs_s_n7": 91.225, "density_per_vm_runs_s_n7": 13.01, "density_efficiency_n7": 0.5771960958296363, "density_cpu_per_loop_n7": 1.4879930363672957, "density_host_runs_s_n8": 94.07, "density_per_vm_runs_s_n8": 11.7925, "density_efficiency_n8": 0.5231810115350488, "density_cpu_per_loop_n8": 1.4584877076556133, "density_host_runs_s_n11": 99.645, "density_per_vm_runs_s_n11": 9.08, "density_efficiency_n11": 0.4028393966282165, "density_cpu_per_loop_n11": 1.2676192949031588}
+out/powersave/results-host-2026-11-12T053936Z.json
+A/B: governor performance, EPP performance
+== 2026-11-12T06:06:23Z --driver host --repeats 1 --only a --out out/performance
+[06:06:23] r0 probe
+[06:06:23] r0 node_setup
+[06:06:41] r0 node_loop
+[06:09:09] r0 done: {"create_ready_s": 2.9299999368959107e-06, "node_runs_s": [22.93, 23.16, 21.5]}
+out/performance/results-host-2026-11-12T060623Z.json
+== 2026-11-12T06:09:10Z --driver pandaos --repeats 1 --only a --out out/performance
+[06:09:11] r0 probe
+[06:09:11] r0 node_setup
+[06:09:41] r0 node_loop
+[06:12:12] r0 done: {"create_ready_s": 1.5983398110001872, "node_runs_s": [21.43, 21.39, 21.54]}
+out/performance/results-pandaos-2026-11-12T060910Z.json
+== 2026-11-12T06:12:12Z --driver pandaos --repeats 1 --only g --out out/performance
+[06:12:13] r0 probe
+[06:12:14] r0 density (1, 4, 8)
+[06:13:06] density: 8 of 8 VMs set up
+[06:19:32] r0 done: {"create_ready_s": 1.5834888790004698, "density_host_runs_s_n1": 20.97, "density_per_vm_runs_s_n1": 20.97, "density_efficiency_n1": 1.0, "density_cpu_per_loop_n1": 1.4836241623744835, "density_host_runs_s_n4": 63.92, "density_per_vm_runs_s_n4": 15.969999999999999, "density_efficiency_n4": 0.7615641392465426, "density_cpu_per_loop_n4": 1.4820805323875024, "density_host_runs_s_n8": 84.06, "density_per_vm_runs_s_n8": 10.5075, "density_efficiency_n8": 0.5010729613733906, "density_cpu_per_loop_n8": 1.4279853401166205}
+out/performance/results-pandaos-2026-11-12T061212Z.json
+== 2026-11-12T06:19:32Z --driver host --repeats 1 --only g --out out/performance
+[06:19:32] r0 probe
+[06:19:32] r0 density (1, 4, 8, 11)
+[06:28:54] r0 done: {"create_ready_s": 2.7999994927085936e-06, "density_host_runs_s_n1": 23.1, "density_per_vm_runs_s_n1": 23.1, "density_efficiency_n1": 1.0, "density_cpu_per_loop_n1": 1.5123715244318268, "density_host_runs_s_n4": 70.655, "density_per_vm_runs_s_n4": 17.7075, "density_efficiency_n4": 0.7665584415584414, "density_cpu_per_loop_n4": 1.5284649245054291, "density_host_runs_s_n8": 93.08, "density_per_vm_runs_s_n8": 11.6475, "density_efficiency_n8": 0.5042207792207792, "density_cpu_per_loop_n8": 1.4657488155341252, "density_host_runs_s_n11": 98.645, "density_per_vm_runs_s_n11": 8.96, "density_efficiency_n11": 0.3878787878787879, "density_cpu_per_loop_n11": 1.2705957686594795}
+out/performance/results-host-2026-11-12T061932Z.json
+reverted: governor powersave, EPP balance_performance
+left over: {'vms': []} {'snapshots': []}
+ALL_DONE 2026-11-12T06:28:54Z

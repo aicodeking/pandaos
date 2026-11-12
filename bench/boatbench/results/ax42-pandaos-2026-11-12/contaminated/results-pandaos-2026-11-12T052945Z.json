@@ -1,0 +1,215 @@
+{
+ "driver": "pandaos",
+ "run_id": "3ccb41",
+ "size": "default",
+ "started": "2026-11-12T05:29:45Z",
+ "host": {
+  "desc": "Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB; PandaOS 26.05 install (NixOS, kernel 6.18.57); boat store = native btrfs (compress=zstd:1) on one NVMe, Samsung MZVL2512HCJQ; boatd defaults (trusted, memOvercommit 1.5), owner team quota 8 default VMs; governor powersave, EPP balance_performance; 16 CPUs online"
+ },
+ "boatd_options": "{\"_installed\":\"/etc/boat/boatd.json sets no diskCache, memOvercommit, cpuOvercommit, warmPool or untrustedTenants: boatd defaults\",\"defaultTeam\":{\"maxVMs\":10,\"maxVCPU\":32,\"maxMemMiB\":65536}}",
+ "preset": "pandaos-install",
+ "fc_cache_type": "Unsafe (boatd default diskCache)",
+ "run_url": null,
+ "client": {
+  "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16",
+  "os": "Linux-6.18.57-x86_64-with-glibc2.42",
+  "egress": "HEL DE"
+ },
+ "parts": "g",
+ "repeats": [
+  {
+   "index": 0,
+   "metrics": {
+    "create_ready_s": 1.622510352000063,
+    "density_host_runs_s_n1": 18.42,
+    "density_per_vm_runs_s_n1": 18.42,
+    "density_efficiency_n1": 1.0,
+    "density_cpu_per_loop_n1": 1.4724812924066812,
+    "density_host_runs_s_n2": 32.480000000000004,
+    "density_per_vm_runs_s_n2": 16.240000000000002,
+    "density_efficiency_n2": 0.8816503800217156,
+    "density_cpu_per_loop_n2": 1.47427279049902,
+    "density_host_runs_s_n4": 62.015,
+    "density_per_vm_runs_s_n4": 15.504999999999999,
+    "density_efficiency_n4": 0.8417480998914222,
+    "density_cpu_per_loop_n4": 1.4800356481129595
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "density": {
+    "levels": [
+     {
+      "n": 1,
+      "vms_measured": 1,
+      "per_vm_runs_s": 18.42,
+      "per_vm_each": [
+       18.42
+      ],
+      "host_runs_s": 18.42,
+      "cpu_per_loop": 1.4724812924066812,
+      "host_cpus": 16,
+      "wall_s": 114.03946517199984,
+      "efficiency": 1.0,
+      "loops_per_cpu": 0.09203008077541758
+     },
+     {
+      "n": 2,
+      "vms_measured": 2,
+      "per_vm_runs_s": 16.240000000000002,
+      "per_vm_each": [
+       16.21,
+       16.27
+      ],
+      "host_runs_s": 32.480000000000004,
+      "cpu_per_loop": 1.47427279049902,
+      "host_cpus": 16,
+      "wall_s": 117.42892188199949,
+      "efficiency": 0.8816503800217156,
+      "loops_per_cpu": 0.18406016155083516
+     },
+     {
+      "n": 4,
+      "vms_measured": 4,
+      "per_vm_runs_s": 15.504999999999999,
+      "per_vm_each": [
+       15.504999999999999,
+       15.43,
+       15.504999999999999,
+       15.575
+      ],
+      "host_runs_s": 62.015,
+      "cpu_per_loop": 1.4800356481129595,
+      "host_cpus": 16,
+      "wall_s": 121.23068222199981,
+      "efficiency": 0.8417480998914222,
+      "loops_per_cpu": 0.3681203231016703
+     }
+    ],
+    "max_vms": 4,
+    "requested": [
+     1,
+     2,
+     4,
+     7,
+     8,
+     11
+    ],
+    "passes": 2,
+    "errors": [
+     "vm 4: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_eaf136ad9d5692e3\"}}\n",
+     "vm 8: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_d6c2a65659556e32\"}}\n",
+     "vm 9: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_06010068b2b976a7\"}}\n",
+     "vm 5: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_1343a0ced0303fbe\"}}\n",
+     "vm 10: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_a7801ae2286eb2d3\"}}\n",
+     "vm 6: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_e3e79e8a6d5ba5cc\"}}\n",
+     "vm 7: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_ce018b7f81803e1a\"}}\n"
+    ]
+   }
+  },
+  {
+   "index": 1,
+   "metrics": {
+    "create_ready_s": 1.64705789799973,
+    "density_host_runs_s_n1": 20.490000000000002,
+    "density_per_vm_runs_s_n1": 20.490000000000002,
+    "density_efficiency_n1": 1.0,
+    "density_cpu_per_loop_n1": 1.4892310001901752
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "density": {
+    "levels": [
+     {
+      "n": 1,
+      "vms_measured": 1,
+      "per_vm_runs_s": 20.490000000000002,
+      "per_vm_each": [
+       20.490000000000002
+      ],
+      "host_runs_s": 20.490000000000002,
+      "cpu_per_loop": 1.4892310001901752,
+      "host_cpus": 16,
+      "wall_s": 103.50895630099967,
+      "efficiency": 1.0,
+      "loops_per_cpu": 0.09307693751188595
+     },
+     {
+      "n": 2,
+      "vms_measured": 0,
+      "per_vm_runs_s": null,
+      "per_vm_each": [],
+      "host_runs_s": null,
+      "cpu_per_loop": null,
+      "host_cpus": 16,
+      "wall_s": 53.20894274700004,
+      "loops_per_cpu": 0.1861538750237719
+     },
+     {
+      "n": 4,
+      "vms_measured": 0,
+      "per_vm_runs_s": null,
+      "per_vm_each": [],
+      "host_runs_s": null,
+      "cpu_per_loop": null,
+      "host_cpus": 16,
+      "wall_s": 0.0011583540008359705,
+      "loops_per_cpu": 0.3723077500475438
+     }
+    ],
+    "max_vms": 4,
+    "requested": [
+     1,
+     2,
+     4,
+     7,
+     8,
+     11
+    ],
+    "passes": 2,
+    "errors": [
+     "vm 5: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_626b1d0555510eb2\"}}\n",
+     "vm 10: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_5fcb13363b55aa2d\"}}\n",
+     "vm 6: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_70165e70512c46f9\"}}\n",
+     "vm 9: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_617d263d6d31d699\"}}\n",
+     "vm 7: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_2234c18164451d6d\"}}\n",
+     "vm 3: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_9848d08a0b535a07\"}}\n",
+     "vm 8: ApiError: POST http://127.0.0.1:8740/v1/vms: HTTP 429: {\"error\":{\"code\":\"quota_exceeded\",\"message\":\"quota: team team_ed8314df1712 may use 32 vCPUs\",\"request_id\":\"req_f54d9c890f58a6b1\"}}\n",
+     "n=2: RemoteDisconnected: Remote end closed connection without response",
+     "n=2: RemoteDisconnected: Remote end closed connection without response",
+     "n=4: URLError: <urlopen error [Errno 111] Connection refused>",
+     "n=4: URLError: <urlopen error [Errno 111] Connection refused>",
+     "n=4: URLError: <urlopen error [Errno 111] Connection refused>",
+     "n=4: URLError: <urlopen error [Errno 111] Connection refused>"
+    ]
+   }
+  }
+ ]
+}

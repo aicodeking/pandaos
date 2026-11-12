@@ -1,0 +1,52 @@
+== 2026-11-12T06:28:55Z --driver pandaos --repeats 3 --only bcef --out out/rerun
+[06:28:57] r0 probe
+[06:28:57] r0 api_rtt
+[06:28:57] r0 exec_rtt
+[06:29:01] r0 node_setup
+[06:29:31] r0 net
+[06:29:34] r0 npm_cold
+[06:29:37] r0 snapshot
+[06:29:40] r0 fork
+[06:29:41] r0 stop_resume
+[06:29:43] delete snapshot snap-e5f903c2c116: DELETE http://127.0.0.1:8740/v1/snapshots/snap-e5f903c2c116: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_2492c683f92dfb26"}}
+
+[06:29:43] r0 concurrent
+[06:29:50] r0 done: {"create_ready_s": 1.5627114580001944, "api_rtt_p50_ms": 0.3275239996582968, "api_rtt_p95_ms": 0.4806328004633542, "exec_rtt_p50_ms": 2.551155000219296, "exec_rtt_p95_ms": 4.570727250120398, "dl_go_tarball_googlecdn_mbit": 828.6, "dl_nodejs_tarball_mbit": 835.6, "tcp_connect_cloudflare_1.1.1.1_ms": 1.42, "tcp_connect_github.com_ms": 24.03, "npm_ci_s": 2.465, "snapshot_s": 2.5499634400002833, "from_snapshot_ready_s": 0.4840221169997676, "fork_ready_s": 0.7879940510010783, "stop_s": 0.7360677730011957, "resume_ready_s": 0.24124633200153767, "concurrent8_wall_s": 3.5410045420012466, "create_ready_s_net": 1.5620564100008778, "fork_ready_s_net": 0.7873390030017617, "resume_ready_s_net": 0.24059128400222107, "from_snapshot_ready_s_net": 0.483367069000451, "stop_s_net": 0.7357402490015374, "snapshot_s_net": 2.549635916000625, "concurrent8_wall_s_net": 3.54034949400193, "exec_rtt_p50_ms_net": 2.2236310005609994}
+[06:29:51] r1 probe
+[06:29:51] r1 api_rtt
+[06:29:51] r1 exec_rtt
+[06:29:55] r1 node_setup
+[06:30:21] r1 net
+[06:30:25] r1 npm_cold
+[06:30:28] r1 snapshot
+[06:30:31] r1 fork
+[06:30:32] r1 stop_resume
+[06:30:34] delete snapshot snap-9bcf6c6778b9: DELETE http://127.0.0.1:8740/v1/snapshots/snap-9bcf6c6778b9: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_237582d6ad858905"}}
+
+[06:30:34] r1 concurrent
+[06:30:41] r1 done: {"create_ready_s": 1.5627142680004908, "api_rtt_p50_ms": 0.3108139990217751, "api_rtt_p95_ms": 0.468688600085443, "exec_rtt_p50_ms": 2.4198630007958855, "exec_rtt_p95_ms": 4.987141999481537, "dl_go_tarball_googlecdn_mbit": 732.6, "dl_nodejs_tarball_mbit": 822.3, "tcp_connect_cloudflare_1.1.1.1_ms": 1.41, "tcp_connect_github.com_ms": 23.96, "npm_ci_s": 2.47, "snapshot_s": 2.6722488810009963, "from_snapshot_ready_s": 0.5120501239998703, "fork_ready_s": 0.8504149899999902, "stop_s": 0.7280445420001342, "resume_ready_s": 0.19301368400010688, "concurrent8_wall_s": 3.5714750719998847, "create_ready_s_net": 1.5620926400024473, "fork_ready_s_net": 0.8497933620019467, "resume_ready_s_net": 0.19239205600206333, "from_snapshot_ready_s_net": 0.5114284960018267, "stop_s_net": 0.7277337280011125, "snapshot_s_net": 2.6719380670019746, "concurrent8_wall_s_net": 3.570853444001841, "exec_rtt_p50_ms_net": 2.1090490017741104}
+[06:30:42] r2 probe
+[06:30:42] r2 api_rtt
+[06:30:42] r2 exec_rtt
+[06:30:46] r2 node_setup
+[06:31:11] r2 net
+[06:31:14] r2 npm_cold
+[06:31:17] r2 snapshot
+[06:31:21] r2 fork
+[06:31:22] r2 stop_resume
+[06:31:24] delete snapshot snap-6851c252b6a9: DELETE http://127.0.0.1:8740/v1/snapshots/snap-6851c252b6a9: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_c5f32724de07c734"}}
+
+[06:31:24] r2 concurrent
+[06:31:31] r2 done: {"create_ready_s": 1.5975745439991442, "api_rtt_p50_ms": 0.30824399982520845, "api_rtt_p95_ms": 0.45840780039725365, "exec_rtt_p50_ms": 2.509898000425892, "exec_rtt_p95_ms": 5.207023050843418, "dl_go_tarball_googlecdn_mbit": 818.8, "dl_nodejs_tarball_mbit": 834.3, "tcp_connect_cloudflare_1.1.1.1_ms": 1.39, "tcp_connect_github.com_ms": 24.01, "npm_ci_s": 2.428, "snapshot_s": 3.0706207100010943, "from_snapshot_ready_s": 0.5376884300003439, "fork_ready_s": 0.823620838998977, "stop_s": 0.7277787839993834, "resume_ready_s": 0.19752112300011504, "concurrent8_wall_s": 3.5411258679996536, "create_ready_s_net": 1.5969580559994938, "fork_ready_s_net": 0.8230043509993266, "resume_ready_s_net": 0.19690463500046462, "from_snapshot_ready_s_net": 0.5370719420006935, "stop_s_net": 0.7274705399995582, "snapshot_s_net": 3.070312466001269, "concurrent8_wall_s_net": 3.540509380000003, "exec_rtt_p50_ms_net": 2.2016540006006835}
+out/rerun/results-pandaos-2026-11-12T062855Z.json
+== 2026-11-12T06:31:31Z --driver pandaos --repeats 2 --only g --out out/rerun
+[06:31:32] r0 probe
+[06:31:33] r0 density (1, 2, 4, 7, 8, 11)
+[06:32:22] density: 8 of 11 VMs set up
+[06:43:03] r0 done: {"create_ready_s": 1.5718351229988912, "density_host_runs_s_n1": 20.96, "density_per_vm_runs_s_n1": 20.96, "density_efficiency_n1": 1.0, "density_cpu_per_loop_n1": 1.4619527975789626, "density_host_runs_s_n2": 37.98, "density_per_vm_runs_s_n2": 18.99, "density_efficiency_n2": 0.9060114503816793, "density_cpu_per_loop_n2": 1.488839611813535, "density_host_runs_s_n4": 62.895, "density_per_vm_runs_s_n4": 15.745000000000001, "density_efficiency_n4": 0.7511927480916031, "density_cpu_per_loop_n4": 1.4864160338987233, "density_host_runs_s_n7": 81.13, "density_per_vm_runs_s_n7": 11.620000000000001, "density_efficiency_n7": 0.5543893129770993, "density_cpu_per_loop_n7": 1.4630226383207083, "density_host_runs_s_n8": 83.77, "density_per_vm_runs_s_n8": 10.45, "density_efficiency_n8": 0.49856870229007627, "density_cpu_per_loop_n8": 1.4307552169143123}
+[06:43:05] r1 probe
+[06:43:06] r1 density (1, 2, 4, 7, 8, 11)
+[06:44:02] density: 8 of 11 VMs set up
+[06:54:45] r1 done: {"create_ready_s": 1.647480664001705, "density_host_runs_s_n1": 20.985, "density_per_vm_runs_s_n1": 20.985, "density_efficiency_n1": 1.0, "density_cpu_per_loop_n1": 1.4666390653654653, "density_host_runs_s_n2": 37.915, "density_per_vm_runs_s_n2": 18.9575, "density_efficiency_n2": 0.9033833690731475, "density_cpu_per_loop_n2": 1.4870550551444541, "density_host_runs_s_n4": 61.95, "density_per_vm_runs_s_n4": 15.4525, "density_efficiency_n4": 0.7363593042649512, "density_cpu_per_loop_n4": 1.4820036743917981, "density_host_runs_s_n7": 81.155, "density_per_vm_runs_s_n7": 11.579999999999998, "density_efficiency_n7": 0.5518227305218012, "density_cpu_per_loop_n7": 1.463769510647253, "density_host_runs_s_n8": 83.13, "density_per_vm_runs_s_n8": 10.375, "density_efficiency_n8": 0.4944007624493686, "density_cpu_per_loop_n8": 1.4392462255687986}
+out/rerun/results-pandaos-2026-11-12T063131Z.json
+ALL_DONE2 2026-11-12T06:54:45Z
