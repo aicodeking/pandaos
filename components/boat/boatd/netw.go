@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/netip"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -247,10 +249,12 @@ func ruleset(c Config, vms []VM) string {
 		w("    iifname %q tcp dport { 25, 465, 587 } drop", br)
 	}
 	w("  }")
-	if c.Jailer != "" { // a VMM escaping into the host netns still can't reach host services
-		w("  chain output {\n    type filter hook output priority 0; policy accept;")
-		w("    meta skuid %d-%d drop\n  }", c.JailUIDBase, c.JailUIDBase+maxIndex)
+	w("  chain output {\n    type filter hook output priority 0; policy accept;")
+	w("    meta skuid %d drop", nobodyID) // the import decompressor (parity.go), should it leave its netns
+	if c.Jailer != "" {                   // a VMM escaping into the host netns still can't reach host services
+		w("    meta skuid %d-%d drop", c.JailUIDBase, c.JailUIDBase+maxIndex)
 	}
+	w("  }")
 
 	w("  chain prerouting {\n    type nat hook prerouting priority dstnat; policy accept;")
 	for _, v := range vms {
@@ -402,5 +406,41 @@ func writeRoutes(c Config, vms []VM) error {
 	}
 	// No fsync: it is rewritten from the VM list at every start, and an fsync here took
 	// up to 5.3 s behind a memory dump, under netMu, on a create (boatbench 41628497611).
-	return writeJSONNoSync(filepath.Join(c.RunDir, "routes.json"), rf, 0o644)
+	// 0640 root:routesGroup: every running VM's IP and team, for boat-gateway and the ssh
+	// jump host's key command only. The group is set before the rename: never unreadable.
+	path := filepath.Join(c.RunDir, "routes.json")
+	b, err := json.MarshalIndent(rf, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	os.Remove(tmp) // a leftover keeps its old mode and owner
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o640); err != nil {
+		return err
+	}
+	if c.routesGID > 0 {
+		if err := os.Chown(tmp, -1, c.routesGID); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+	}
+	return os.Rename(tmp, path)
+}
+
+// lookupRoutesGroup sets routesGID from routesGroup, else socketGroup (who may drive
+// boatd may read its routes); neither: root only.
+func lookupRoutesGroup(c *Config) error {
+	name := c.RoutesGroup
+	if name == "" {
+		name = c.SocketGroup
+	}
+	if name == "" {
+		return nil
+	}
+	g, err := user.LookupGroup(name)
+	if err != nil {
+		return fmt.Errorf("routesGroup: %w", err)
+	}
+	c.routesGID, err = strconv.Atoi(g.Gid)
+	return err
 }

@@ -21,8 +21,10 @@ let
     };
   };
 
-  # Image ids boat-api offers: first path component of each images entry.
-  imageIds = lib.unique (map (n: lib.head (lib.splitString "/" n)) (lib.attrNames cfg.images));
+  # Image ids boat-api offers: first path component of each images entry, then localImages.
+  imageIds = lib.unique (map (n: lib.head (lib.splitString "/" n)) (lib.attrNames cfg.images) ++ cfg.localImages);
+  # boatd's and boat-api's own default when nothing is declared.
+  defaultImage = if imageIds == [ ] then "ubuntu-24.04" else lib.head imageIds;
 
   imageType = types.submodule {
     options = {
@@ -44,28 +46,16 @@ let
   desktopCred = "boat-desktop-key:${desktopCredFile}";
   exportCredFile = "${cfg.dataDir}/secrets/boat-export-key.cred";
 
-  # What services.boat.untrustedTenants sets. boatd refuses to start if a key below
-  # is overridden to something weaker (config.go validateUntrusted).
-  untrustedSettings = {
-    untrustedTenants = true;
-    btrfsQgroups = true;
-    storageOvercommit = 1; # committed storage fits the disk: no tenant can fill it
-    memOvercommit = 1;
-    egressMbit = 1000;
-    ingressMbit = 1000;
-    # Busy VMs share the disk by weight, with latency targets; io.max is only a ceiling.
-    # io.max 500/20k cost 41% of a VM's sequential write on a slow runner and sat 6-14x
-    # (bandwidth) and 25-50x (IOPS) below an NVMe disk (PROTOCOL.md "Disk: measured").
-    ioCost = true; # needs the disk's model: services.boat.ioCostModel or boat-iocost-model.service
-    ioCostQoS = "rpct=95 rlat=5000 wpct=95 wlat=10000 min=25 max=400";
-    ioMaxMBps = 4000;
-    ioMaxIOPS = 200000;
-    ctPerVM = 4096;
-    diskEngine = "Sync"; # with kernel.io_uring_disabled: no io_uring for a broken-out VMM
-    hostDirtyRatio = 20; # a tenant must not be able to dirty half of the host's RAM
-    warmPool = false; # templates share ASLR across tenants
-    ksmTeam = ""; # a cross-VM side channel
-  };
+  # What services.boat.untrustedTenants sets: boatd/untrusted.json, the one list boatd
+  # checks too. boatd refuses to start if any of its keys is overridden to something
+  # weaker (config.go untrustedRules; config_test.go tries a weak value for each key).
+  # Bandwidth: each VM's cap is uplinkSharePct of the uplink NIC's speed, and cake shares
+  # the port between VMs. Disk: busy VMs share it by weight (ioCost; needs the disk's
+  # model, services.boat.ioCostModel or boat-iocost-model.service), io.max is a ceiling.
+  # jailGid: every jailed Firecracker runs with this gid, the only group given io_uring
+  # (kernel.io_uring_group below), so VMMs get the Async disk engine and nothing else does.
+  jailGid = 899999;
+  untrustedSettings = lib.importJSON ./boatd/untrusted.json // { inherit jailGid; };
 
   # The Firecracker that boat-e2e tests (e2e.sh FC_VERSION + FC_SHA256), not
   # whatever nixpkgs carries: snapshots are version-sensitive. Static binaries.
@@ -129,6 +119,12 @@ let
   imagesScript = pkgs.writeShellScript "boat-images" ''
     set -euo pipefail
     export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.zstd ]}
+    default=${cfg.imagesDir}/${defaultImage}
+    if [ ! -e "$default/rootfs.ext4" ] && ${lib.boolToString (cfg.images == { })}; then
+      echo "boat-images: no guest image in $default and services.boat.images is empty." >&2
+      echo "  Install one: sudo boat-admin images import <vmlinux> <rootfs.ext4[.zst]>" >&2
+      echo "  (components/boat/guest/build.sh builds both; docs/boat.md \"Guest images\")." >&2
+    fi
     fetch() { # <rel path> <url> <sha256>
       dest=${cfg.imagesDir}/$1 url=$2 sha=$3
       final=''${dest%.zst}
@@ -164,6 +160,8 @@ let
     runDir = "/run/boat";
     socket = "/run/boat/boatd.sock";
     socketGroup = "boat";
+    routesGroup = "boat-routes"; # routes.json 0640: boat-gateway and the jump host's key command
+    unpackSandbox = true; # snapshot imports decompress in a transient unit: no network, syscall filter
     btrfsQgroups = true; # boatd goes on without them only if dataDir is not btrfs
     inherit aiProxyPort;
     firecracker = lib.getExe' cfg.firecrackerPackage "firecracker";
@@ -180,6 +178,8 @@ let
   # on the host's own addresses, nothing else on the host.
   // lib.optionalAttrs (cfg.vmApiUrl != null) { hostHttpsPort = 443; }
   // lib.optionalAttrs cfg.untrustedTenants untrustedSettings
+  # Firecracker supports none of these with huge pages (boatd checks).
+  // lib.optionalAttrs cfg.hugePages { hugePages = true; balloon = false; diffSnapshots = false; warmPool = false; }
   // lib.optionalAttrs (cfg.ioCostModel != null) { inherit (cfg) ioCostModel; }
   // cfg.boatdSettings;
 
@@ -325,6 +325,29 @@ in
         its first component is the image id boat-api offers (first = default).
       '';
     };
+    localImages = mkOption {
+      type = types.listOf (types.strMatching "[a-z0-9][a-z0-9._-]{0,63}");
+      default = [ ];
+      example = [ "ubuntu-24.04-full" ];
+      description = ''
+        Image ids installed by hand under {option}`imagesDir` (`sudo boat-admin images import
+        --id ID <vmlinux> <rootfs>`), offered after those of {option}`images`. With neither,
+        boat-api offers `ubuntu-24.04`, which `boat-admin images import` installs by default.
+      '';
+    };
+    hugePages = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Back guest memory with 2 MiB huge pages (Firecracker `huge_pages`): fewer TLB misses
+        for memory-heavy guests. Firecracker supports neither the balloon nor diff snapshots
+        with them (both turned off here), and restores huge-page memory only through UFFD,
+        not the memory file boatd uses: VMs then have no snapshots or forks, and a stop shuts
+        the guest down, so the next start cold-boots its disk. Pages come from the kernel's
+        surplus pool (`vm.nr_overcommit_hugepages`), so huge-page memory is not counted in a
+        VM's cgroup memory limit; refused with {option}`untrustedTenants`.
+      '';
+    };
     firecrackerPackage = mkOption {
       type = types.package;
       default = firecrackerPinned;
@@ -377,9 +400,11 @@ in
       performance or density: SMT off (`nosmt=force`, half the threads of an SMT host),
       CPU mitigations and flushes on the kernel command line, per-VM egress, ingress and connection
       limits, the disk shared by weight (blk-iocost, see {option}`ioCostModel`) under per-VM
-      ceilings, committed storage capped at the disk's size, memory overcommit 1.0, the
-      `Sync` disk engine with io_uring off in the kernel, no swap, and refuses KSM and
-      `warmPool`. Needs a reboot to take effect; until then boatd refuses to start.
+      ceilings, committed storage capped at the disk's size, memory overcommit 1.0, io_uring
+      only for Firecracker (`kernel.io_uring_disabled = 1` with `kernel.io_uring_group` the
+      jailed VMMs' shared gid), each VM's bandwidth capped at a quarter of the uplink's speed
+      and the uplink fair-queued between VMs (cake), SMTP out blocked, no swap, and refuses
+      KSM, `warmPool` and {option}`hugePages`. The list is boatd/untrusted.json. Needs a reboot to take effect; until then boatd refuses to start.
       Each limit can be raised in {option}`boatdSettings`, not removed
     '';
     stopTimeoutSec = mkOption {
@@ -471,6 +496,10 @@ in
         );
       }
       {
+        assertion = cfg.untrustedTenants -> !cfg.hugePages;
+        message = "services.boat.untrustedTenants refuses hugePages: huge-page guest memory is outside the VMs' cgroup memory limits.";
+      }
+      {
         assertion = cfg.untrustedTenants -> !(cfg.boatdSettings.warmPool or false) && (cfg.boatdSettings.ksmTeam or "") == "";
         message = "services.boat.untrustedTenants refuses warmPool (templates share ASLR across tenants) and ksmTeam (a side channel between guests).";
       }
@@ -497,7 +526,14 @@ in
       "net.netfilter.nf_conntrack_max" = 1048576;
     }
     // lib.optionalAttrs cfg.untrustedTenants {
-      "kernel.io_uring_disabled" = 2; # diskEngine Sync; absent before Linux 6.6
+      # io_uring only for CAP_SYS_ADMIN and jailGid, the jailed VMMs' gid (boatd checks both
+      # at start; Linux >= 6.6). Firecracker's Async engine moves disk I/O off its one VMM thread.
+      "kernel.io_uring_disabled" = 1;
+      "kernel.io_uring_group" = jailGid;
+    }
+    // lib.optionalAttrs cfg.hugePages {
+      # Huge pages on demand from free memory, none reserved while no VM runs.
+      "vm.nr_overcommit_hugepages" = lib.mkDefault 1048576;
     }
     // lib.optionalAttrs (cfg.ipv6Prefix != null) {
       "net.ipv6.conf.all.forwarding" = 1;
@@ -512,15 +548,20 @@ in
     users.users.boat = {
       isSystemUser = true;
       group = "boat";
+      extraGroups = [ "boat-routes" ]; # the jump host's AuthorizedKeysCommand reads routes.json
       description = "boat API";
     };
     users.groups.boat = { };
+    # May read /run/boat/routes.json (0640): every running VM's IP and team.
+    users.groups.boat-routes = { };
+    # The jailed Firecrackers' shared gid (boatd jailGid), named for ps/ls; nobody is a member.
+    users.groups.boat-vmm = lib.mkIf cfg.untrustedTenants { gid = jailGid; };
 
     environment.etc."boat/boatd.json".text = builtins.toJSON boatdConfig;
 
     systemd.tmpfiles.rules = [
-      # 0751: boat-gateway (no boat group) reads routes.json by name; it cannot
-      # list the directory, and boatd's socket is 0660 root:boat.
+      # 0751: boat-gateway (no boat group) reads routes.json (0640 root:boat-routes) by
+      # name; it cannot list the directory, and boatd's socket is 0660 root:boat.
       "d /run/boat 0751 root boat - -"
       # `v`: a btrfs subvolume when on btrfs (outside root snapshots, reflink
       # clones for fork/snapshot), a plain directory elsewhere.
@@ -536,16 +577,18 @@ in
     # key, e.g. `sudo boat-admin init -user me -team ops`.
     environment.systemPackages = [
       cfg.cliPackage
-      (pkgs.writeShellScriptBin "boat-admin" ''
-        [ "''${1-}" = init ] && shift
-        ${config.systemd.package}/bin/systemd-run --quiet --pipe --wait --collect \
-          -p User=boat -p Group=boat \
-          -p LoadCredentialEncrypted=${masterCred} \
-          -p RequiresMountsFor=${cfg.dataDir} \
-          ${lib.getExe' cfg.apiPackage "boat-api"} admin init -data ${cfg.dataDir}/api "$@" || exit
-        # The running API reads its users at start.
-        ${config.systemd.package}/bin/systemctl try-restart boat-api.service
-      '')
+      (pkgs.writeShellApplication {
+        name = "boat-admin";
+        runtimeInputs = [ config.systemd.package pkgs.coreutils pkgs.jq pkgs.zstd pkgs.e2fsprogs ];
+        runtimeEnv = {
+          BOAT_API = lib.getExe' cfg.apiPackage "boat-api";
+          DATA_DIR = cfg.dataDir;
+          IMAGES_DIR = cfg.imagesDir;
+          MASTER_CRED = masterCred;
+          IMAGE_IDS = lib.concatStringsSep "," imageIds;
+        };
+        text = builtins.readFile ./boatd/boat-admin.sh;
+      })
     ];
 
     systemd.services.boat-secrets = {

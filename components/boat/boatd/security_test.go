@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -340,27 +341,35 @@ func TestCgroupsFailClosed(t *testing.T) {
 	}
 }
 
+// untrustedConfig: the defaults with untrusted.json (what the NixOS module merges in) on top.
+func untrustedConfig(t *testing.T) Config {
+	t.Helper()
+	b, err := os.ReadFile("untrusted.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := defaultConfig()
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatal(err)
+	}
+	c.Jailer, c.IOCostModel = "/bin/jailer", "rbps=1000000000 rrandiops=100000"
+	return c
+}
+
 func TestUntrustedTenantsConfig(t *testing.T) {
-	ok := defaultConfig()
-	ok.UntrustedTenants, ok.Jailer, ok.StorageOvercommit = true, "/bin/jailer", 1
-	ok.EgressMbit, ok.IngressMbit, ok.IOMaxMBps, ok.IOMaxIOPS = 1, 1, 1, 1
-	ok.IOCost, ok.IOCostModel = true, "rbps=1000000000 rrandiops=100000"
+	ok := untrustedConfig(t)
 	if err := ok.validate(); err != nil {
 		t.Fatal(err)
 	}
 	for name, spoil := range map[string]func(*Config){
-		"ksm":       func(c *Config) { c.KSMTeam = "x" },
-		"ksm all":   func(c *Config) { c.KSMTeam = "*" },
-		"warm":      func(c *Config) { c.WarmPool = true },
-		"no jailer": func(c *Config) { c.Jailer = "" },
-		"cgroups":   func(c *Config) { c.CgroupsOptional = true },
-		"qgroups":   func(c *Config) { c.BtrfsQgroups = false },
-		"storage":   func(c *Config) { c.StorageOvercommit = 2 },
-		"egress":    func(c *Config) { c.EgressMbit = 0 },
-		"io":        func(c *Config) { c.IOMaxIOPS = 0 },
-		"ct":        func(c *Config) { c.CtPerVM = 0 },
-		"no ioCost": func(c *Config) { c.IOCost = false },
-		"no model":  func(c *Config) { c.IOCostModel = "" },
+		"ksm":        func(c *Config) { c.KSMTeam = "x" },
+		"no jailer":  func(c *Config) { c.Jailer = "" },
+		"cgroups":    func(c *Config) { c.CgroupsOptional = true },
+		"storage 0":  func(c *Config) { c.StorageOvercommit = 0 },
+		"dirty 0":    func(c *Config) { c.HostDirtyRatio = 0 },
+		"share 101":  func(c *Config) { c.UplinkSharePct = 101 },
+		"no model":   func(c *Config) { c.IOCostModel = "" },
+		"huge pages": func(c *Config) { c.HugePages, c.Balloon, c.DiffSnapshots = true, false, false },
 	} {
 		c := ok
 		spoil(&c)
@@ -368,26 +377,105 @@ func TestUntrustedTenantsConfig(t *testing.T) {
 			t.Errorf("%s accepted with untrustedTenants", name)
 		}
 	}
+	// Raised limits stay accepted; explicit caps replace the uplink share.
+	c := ok
+	c.IOMaxMBps, c.CtPerVM, c.UplinkSharePct, c.EgressMbit, c.IngressMbit = 8000, 9000, 0, 300, 300
+	if err := c.validate(); err != nil {
+		t.Errorf("raised limits refused: %v", err)
+	}
+}
+
+// Every key of untrusted.json has a rule, and its weak value is refused (naming the key).
+func TestUntrustedEveryKeyChecked(t *testing.T) {
+	b, err := os.ReadFile("untrusted.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys map[string]any
+	if err := json.Unmarshal(b, &keys); err != nil {
+		t.Fatal(err)
+	}
+	rules := map[string]untrustedRule{}
+	for _, r := range untrustedRules {
+		rules[r.key] = r
+		if _, ok := keys[r.key]; !ok {
+			t.Errorf("rule %s is not in untrusted.json", r.key)
+		}
+	}
+	for k := range keys {
+		if k == "untrustedTenants" {
+			continue
+		}
+		r, ok := rules[k]
+		if !ok {
+			t.Errorf("untrusted.json key %s has no rule in untrustedRules", k)
+			continue
+		}
+		c := untrustedConfig(t)
+		weak, _ := json.Marshal(map[string]any{k: r.weak})
+		if err := json.Unmarshal(weak, &c); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.validate(); err == nil || !strings.Contains(err.Error(), k) {
+			t.Errorf("%s = %v: got %v, want a refusal naming %s", k, r.weak, err, k)
+		}
+	}
 }
 
 func TestHostHardened(t *testing.T) {
-	sys := t.TempDir()
+	sys, procSys := t.TempDir(), t.TempDir()
 	smt := filepath.Join(sys, "devices/system/cpu/smt/control")
 	ksm := filepath.Join(sys, "kernel/mm/ksm/run")
+	iou := filepath.Join(procSys, "kernel/io_uring_disabled")
+	group := filepath.Join(procSys, "kernel/io_uring_group")
 	os.MkdirAll(filepath.Dir(smt), 0o755)
 	os.MkdirAll(filepath.Dir(ksm), 0o755)
+	os.MkdirAll(filepath.Dir(iou), 0o755)
 	os.WriteFile(smt, []byte("on\n"), 0o644)
 	os.WriteFile(ksm, []byte("0\n"), 0o644)
-	if hostHardened(sys) == nil {
+	os.WriteFile(iou, []byte("2\n"), 0o644)
+	c := Config{JailGID: 899999}
+	if hostHardened(sys, procSys, c) == nil {
 		t.Error("SMT on accepted")
 	}
 	os.WriteFile(smt, []byte("forceoff\n"), 0o644)
-	if err := hostHardened(sys); err != nil {
+	if err := hostHardened(sys, procSys, c); err != nil {
 		t.Error(err)
 	}
 	os.WriteFile(ksm, []byte("1\n"), 0o644)
-	if hostHardened(sys) == nil {
+	if hostHardened(sys, procSys, c) == nil {
 		t.Error("KSM on accepted")
+	}
+	os.WriteFile(ksm, []byte("0\n"), 0o644)
+	for _, tc := range []struct {
+		disabled, group string
+		ok              bool
+	}{
+		{"2", "", true}, {"1", "899999", true}, {"1", "-1", true},
+		{"1", "100", false}, {"0", "899999", false}, {"", "", false},
+	} {
+		os.Remove(iou)
+		os.Remove(group)
+		if tc.disabled != "" {
+			os.WriteFile(iou, []byte(tc.disabled+"\n"), 0o644)
+		}
+		if tc.group != "" {
+			os.WriteFile(group, []byte(tc.group+"\n"), 0o644)
+		}
+		if err := hostHardened(sys, procSys, c); (err == nil) != tc.ok {
+			t.Errorf("io_uring_disabled=%q group=%q: %v, want ok=%v", tc.disabled, tc.group, err, tc.ok)
+		}
+	}
+}
+
+func TestJailGIDShared(t *testing.T) {
+	m := &Manager{cfg: Config{Jailer: "/bin/jailer", JailUIDBase: 900000}}
+	if u, g := m.ids(VM{Index: 7}); u != 900007 || g != 900007 {
+		t.Errorf("per-VM ids: %d %d", u, g)
+	}
+	m.cfg.JailGID = 899999
+	if u, g := m.ids(VM{Index: 7}); u != 900007 || g != 899999 {
+		t.Errorf("shared gid: %d %d", u, g)
 	}
 }
 

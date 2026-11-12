@@ -44,17 +44,25 @@ type Config struct {
 	Jailer      string   `json:"jailer"`      // jailer binary; "" = run firecracker as FCUser
 	JailerArgs  []string `json:"jailerArgs"`  // extra jailer flags (cgroups, netns...)
 	JailUIDBase int      `json:"jailUidBase"` // VM n runs as uid/gid base+n under the jailer
-	FCUID       int      `json:"fcUid"`       // no-jailer mode: uid/gid firecracker runs as (0 = boatd's)
-	FCGID       int      `json:"fcGid"`
-	Reflink     string   `json:"reflink"` // cp --reflink=<always|auto>
-	Bridge      string   `json:"bridge"`
-	Subnet      string   `json:"subnet"` // IPv4 /16; .0.1 is the gateway
-	DNS         []string `json:"dns"`
-	IPv6Prefix  string   `json:"ipv6Prefix"` // routed prefix, e.g. 2001:db8:1::/64; VM n gets prefix::n/128
-	PublicIPv4  []string `json:"publicIPv4"` // 1:1 NAT pool, routed to this host
-	PortMin     int      `json:"portMin"`
-	PortMax     int      `json:"portMax"`
-	DesktopPort int      `json:"desktopPort"` // guest port the gateway proxies the desktop to
+	// JailGID > 0: every jailed VMM runs with this gid instead of base+n (uids stay per VM;
+	// each chroot is 0700, so the shared gid opens no file of another VM). The NixOS module
+	// sets it with kernel.io_uring_group under untrustedTenants: only VMMs may use io_uring.
+	JailGID     int    `json:"jailGid"`
+	RoutesGroup string `json:"routesGroup"` // group that may read routes.json (mode 0640); "" = socketGroup
+	// UnpackSandbox: run the snapshot-import decompressor as a transient systemd unit with no
+	// network and a syscall filter (systemd-run). Off: a fresh network namespace as nobody.
+	UnpackSandbox bool     `json:"unpackSandbox"`
+	FCUID         int      `json:"fcUid"` // no-jailer mode: uid/gid firecracker runs as (0 = boatd's)
+	FCGID         int      `json:"fcGid"`
+	Reflink       string   `json:"reflink"` // cp --reflink=<always|auto>
+	Bridge        string   `json:"bridge"`
+	Subnet        string   `json:"subnet"` // IPv4 /16; .0.1 is the gateway
+	DNS           []string `json:"dns"`
+	IPv6Prefix    string   `json:"ipv6Prefix"` // routed prefix, e.g. 2001:db8:1::/64; VM n gets prefix::n/128
+	PublicIPv4    []string `json:"publicIPv4"` // 1:1 NAT pool, routed to this host
+	PortMin       int      `json:"portMin"`
+	PortMax       int      `json:"portMax"`
+	DesktopPort   int      `json:"desktopPort"` // guest port the gateway proxies the desktop to
 
 	Sizes        map[string]Size `json:"sizes"`
 	DefaultSize  string          `json:"defaultSize"`
@@ -91,11 +99,22 @@ type Config struct {
 	KSMTeam        string `json:"ksmTeam"`        // "" off; one team's VMs may merge; "*" all (one trust domain only)
 	VCPUCPUWeight  int    `json:"vcpuCpuWeight"`  // cpu.weight of <vm>/vcpu, the VM's vCPU threads apart from the VMM thread (vcpucg.go); 0 = one cgroup
 	CPUTraceS      int    `json:"cpuTraceS"`      // log each running VM's per-thread CPU and PSI every N s; 0 = off
+	// HugePages: guest memory on 2 MiB hugetlbfs pages (Firecracker huge_pages). Needs host
+	// hugepages (vm.nr_hugepages / nr_overcommit_hugepages), balloon, diffSnapshots and warmPool
+	// off, and Firecracker cannot restore such a VM from a memory file: stop/start and forks
+	// cold-boot from the disk instead (lifecycle.go falls back).
+	HugePages bool `json:"hugePages"`
 
 	// Egress policy.
 	AllowSMTP   bool `json:"allowSMTP"`   // else tcp 25/465/587 out is dropped
 	AIProxyPort int  `json:"aiProxyPort"` // gateway port VMs may reach (boat-api's AI proxy); 0 = closed
 	EgressMbit  int  `json:"egressMbit"`  // per-VM egress cap (bridge policer); 0 = none
+	// UplinkSharePct > 0: an unset egressMbit/ingressMbit becomes this share of the uplink's
+	// speed (the default route's NIC, /sys/class/net/<dev>/speed; 1000 Mbit when unknown).
+	UplinkSharePct int `json:"uplinkSharePct"`
+	// UplinkFairQueue: cake on the uplink's egress with `nat dual-srchost`, so VMs share the
+	// port by source host (each VM, before masquerade) and then by flow.
+	UplinkFairQueue bool `json:"uplinkFairQueue"`
 	// HostHTTPSPort: tcp port VMs may reach on any host-local address (Caddy's
 	// 443, so boat-api at its public URL, BOAT_URL, works from a guest on a
 	// single-host install); 0 = closed. Nothing else on the host is opened.
@@ -123,6 +142,7 @@ type Config struct {
 
 	cgroupLimits bool                  // set at startup when the cgroup controllers could be delegated
 	stateDisk    string                // "major:minor" of stateDir's disk, for io.max
+	routesGID    int                   // routesGroup's gid, set at startup
 	Teams        map[string]TeamPolicy `json:"teams"`
 	DefaultTeam  TeamPolicy            `json:"defaultTeam"`
 }
@@ -282,6 +302,12 @@ func (c Config) validate() error {
 	if c.MemOvercommit <= 0 || c.CPUOvercommit <= 0 || c.MinFreePct < 0 || c.MinFreePct > 90 || c.MinFreeGiB < 0 || c.ReapS < 1 {
 		return fmt.Errorf("memOvercommit/cpuOvercommit must be > 0, minFreePct 0-90, minFreeGiB >= 0, reapIntervalS >= 1")
 	}
+	if c.HugePages && (c.Balloon || c.DiffSnapshots || c.WarmPool) {
+		return fmt.Errorf("hugePages needs balloon, diffSnapshots and warmPool off (Firecracker supports none of them with huge pages)")
+	}
+	if c.UplinkSharePct < 0 || c.UplinkSharePct > 100 || c.JailGID < 0 {
+		return fmt.Errorf("uplinkSharePct must be 0-100 and jailGid >= 0")
+	}
 	if c.StorageOvercommit < 0 {
 		return fmt.Errorf("storageOvercommit must be >= 0")
 	}
@@ -311,29 +337,55 @@ func (c Config) validate() error {
 	return nil
 }
 
+// untrustedRule: one key of untrusted.json, the settings services.boat.untrustedTenants
+// sets (module.nix imports that file). Each key can be raised, never weakened: weak is a
+// value that must be refused (config_test.go applies it to every key in the file).
+type untrustedRule struct {
+	key  string
+	weak any
+	ok   func(Config) bool
+	why  string
+}
+
+var untrustedRules = []untrustedRule{
+	{"btrfsQgroups", false, func(c Config) bool { return c.BtrfsQgroups }, "each team's data needs a quota"},
+	{"storageOvercommit", 2, func(c Config) bool { return c.StorageOvercommit > 0 && c.StorageOvercommit <= 1 },
+		"must be in (0, 1]: committed storage fits the disk, so no tenant can fill it"},
+	{"memOvercommit", 1.5, func(c Config) bool { return c.MemOvercommit <= 1 }, "must be <= 1: guests' RAM fits the host's"},
+	{"uplinkSharePct", 0, func(c Config) bool {
+		return (c.UplinkSharePct > 0 && c.UplinkSharePct <= 100) || (c.EgressMbit > 0 && c.IngressMbit > 0)
+	}, "needs a per-VM bandwidth cap: uplinkSharePct 1-100, or egressMbit and ingressMbit"},
+	{"uplinkFairQueue", false, func(c Config) bool { return c.UplinkFairQueue }, "the uplink must be shared fairly between VMs"},
+	{"ioCost", false, func(c Config) bool { return c.IOCost }, "busy VMs share the disk by weight, see PROTOCOL.md \"Disk: measured\""},
+	{"ioCostQoS", "", func(c Config) bool { return c.IOCostQoS != "" }, "latency targets keep a flood from starving a VM that flushes"},
+	{"ioMaxMBps", 0, func(c Config) bool { return c.IOMaxMBps > 0 }, "a per-VM disk bandwidth ceiling is needed"},
+	{"ioMaxIOPS", 0, func(c Config) bool { return c.IOMaxIOPS > 0 }, "a per-VM disk IOPS ceiling is needed"},
+	{"ctPerVM", 0, func(c Config) bool { return c.CtPerVM > 0 }, "one VM must not fill the conntrack table"},
+	{"hostDirtyRatio", 50, func(c Config) bool { return c.HostDirtyRatio > 0 && c.HostDirtyRatio <= 20 },
+		"must be 1-20: a tenant must not dirty half of the host's RAM"},
+	{"allowSMTP", true, func(c Config) bool { return !c.AllowSMTP }, "tenants would send spam from this host's address"},
+	{"warmPool", true, func(c Config) bool { return !c.WarmPool }, "gives tenants one template's ASLR"},
+	{"ksmTeam", "*", func(c Config) bool { return c.KSMTeam == "" }, "is a side channel between guests"},
+}
+
 // validateUntrusted: untrustedTenants is a promise that these hold. The NixOS option
 // sets them all; a config that overrides one is refused rather than quietly weaker.
 func (c Config) validateUntrusted() error {
 	if !c.UntrustedTenants {
 		return nil
 	}
+	for _, r := range untrustedRules {
+		if !r.ok(c) {
+			return fmt.Errorf("untrustedTenants: %s %s", r.key, r.why)
+		}
+	}
 	switch {
-	case c.KSMTeam != "":
-		return fmt.Errorf("untrustedTenants: ksmTeam is a side channel between guests")
-	case c.WarmPool:
-		return fmt.Errorf("untrustedTenants: warmPool gives tenants one template's ASLR")
 	case c.Jailer == "":
 		return fmt.Errorf("untrustedTenants: needs the jailer")
 	case c.CgroupParent == "" || c.CgroupsOptional:
 		return fmt.Errorf("untrustedTenants: needs cgroup limits")
-	case !c.BtrfsQgroups:
-		return fmt.Errorf("untrustedTenants: needs btrfsQgroups")
-	case c.StorageOvercommit <= 0 || c.StorageOvercommit > 1:
-		return fmt.Errorf("untrustedTenants: storageOvercommit must be in (0, 1]")
-	case c.EgressMbit == 0 || c.IngressMbit == 0 || c.IOMaxMBps == 0 || c.IOMaxIOPS == 0 || c.CtPerVM == 0:
-		return fmt.Errorf("untrustedTenants: egressMbit, ingressMbit, ioMaxMBps, ioMaxIOPS and ctPerVM must be set")
-	case !c.IOCost:
-		return fmt.Errorf("untrustedTenants: needs ioCost (busy VMs share the disk by weight, see PROTOCOL.md \"Disk: measured\")")
+	case c.HugePages:
+		return fmt.Errorf("untrustedTenants: hugePages memory is outside the VMs' cgroup memory limits")
 	case c.IOCostModel == "":
 		return fmt.Errorf("untrustedTenants: %w", errNoIOCostModel)
 	}

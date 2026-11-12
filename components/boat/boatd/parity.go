@@ -313,12 +313,43 @@ func (m *Manager) ImportSnapshot(ctx context.Context, body io.Reader, team, name
 	return s, nil
 }
 
-// unprivileged: the decompressor parses a tenant's bytes, so it gets no root.
+// unprivileged: the decompressor parses a tenant's bytes, so it gets no root and, in a
+// network namespace of its own, no network (boat's output chain drops nobody's packets too).
 func unprivileged(euid int) *syscall.SysProcAttr {
 	if euid != 0 {
 		return nil
 	}
-	return &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: nobodyID, Gid: nobodyID, Groups: []uint32{}}}
+	return noNetwork(&syscall.SysProcAttr{Credential: &syscall.Credential{Uid: nobodyID, Gid: nobodyID, Groups: []uint32{}}})
+}
+
+// unpackSandboxProps: the transient unit the decompressor runs in under unpackSandbox. It
+// reads a tar.zst on stdin and writes a tar on stdout, nothing else.
+var unpackSandboxProps = []string{
+	"User=nobody", "PrivateNetwork=yes", "RestrictAddressFamilies=none", "IPAddressDeny=any",
+	"SystemCallFilter=@system-service", "SystemCallFilter=~@privileged @resources @mount",
+	"SystemCallArchitectures=native", "SystemCallErrorNumber=EPERM", "NoNewPrivileges=yes",
+	"CapabilityBoundingSet=", "ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes",
+	"PrivateDevices=yes", "PrivateIPC=yes", "ProtectKernelTunables=yes", "ProtectKernelModules=yes",
+	"ProtectKernelLogs=yes", "ProtectControlGroups=yes", "ProtectClock=yes", "ProtectHostname=yes",
+	"ProtectProc=invisible", "RestrictNamespaces=yes", "RestrictRealtime=yes", "RestrictSUIDSGID=yes",
+	"LockPersonality=yes", "MemoryDenyWriteExecute=yes", "MemoryMax=1G", "TasksMax=16",
+}
+
+// unpackCommand: the decompressor's argv and credentials. unpackSandbox (root only:
+// systemd-run starts a system unit) wraps it in systemd-run with unpackSandboxProps.
+func unpackCommand(c Config, argv []string, euid int) ([]string, *syscall.SysProcAttr, error) {
+	if !c.UnpackSandbox || euid != 0 {
+		return argv, unprivileged(euid), nil
+	}
+	bin, err := exec.LookPath(argv[0]) // the unit gets systemd's PATH, not boatd's
+	if err != nil {
+		return nil, nil, fmt.Errorf("unpack: %w", err)
+	}
+	run := []string{"systemd-run", "--quiet", "--pipe", "--wait", "--collect", "--service-type=exec"}
+	for _, p := range unpackSandboxProps {
+		run = append(run, "-p", p)
+	}
+	return append(append(run, "--", bin), argv[1:]...), nil, nil
 }
 
 const nobodyID = 65534
@@ -326,9 +357,13 @@ const nobodyID = 65534
 func (m *Manager) importInto(ctx context.Context, body io.Reader, dir string, s Snapshot, image, size string, res *reservation) (Snapshot, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, m.unpackArgv[0], m.unpackArgv[1:]...)
+	argv, attr, err := unpackCommand(m.cfg, m.unpackArgv, os.Geteuid())
+	if err != nil {
+		return s, err
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Stdin = body
-	cmd.Dir, cmd.Env, cmd.SysProcAttr = "/", []string{}, unprivileged(os.Geteuid())
+	cmd.Dir, cmd.Env, cmd.SysProcAttr = "/", []string{}, attr
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return s, err

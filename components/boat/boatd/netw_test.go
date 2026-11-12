@@ -51,8 +51,11 @@ func TestRuleset(t *testing.T) {
 			t.Errorf("ruleset missing %q\n%s", want, rs)
 		}
 	}
-	if strings.Contains(rs, "dport 3000 accept") || strings.Contains(rs, "ip6 daddr 2001:db8:1::/64 accept") || strings.Contains(rs, "skuid") {
+	if strings.Contains(rs, "dport 3000 accept") || strings.Contains(rs, "ip6 daddr 2001:db8:1::/64 accept") || strings.Contains(rs, "skuid 900000") {
 		t.Errorf("unpublished v6 port open, whole prefix open, or jail-uid rule without a jailer\n%s", rs)
+	}
+	if !strings.Contains(rs, "meta skuid 65534 drop") {
+		t.Errorf("nobody (the import decompressor) may send from the host\n%s", rs)
 	}
 	if strings.Contains(rs, "dport 8744") {
 		t.Error("AI proxy port open by default")

@@ -143,6 +143,24 @@ should come to about 130 MB (sampled ratio 0.35). The full package is about
 the first online rebuild, because `hardware-configuration.nix` enables
 `enableRedistributableFirmware` on real hardware.
 
+## After a server install: guest image and owner key
+
+A fresh `--profile server` box has no guest image: `services.boat.images` is empty and
+no release publishes one yet, so `boat-images.service` only logs how to add one. Build the
+kernel and rootfs (`components/boat/guest/build.sh kernel` and `rootfs slim`), copy them
+over, and install them as the default image (`ubuntu-24.04`, what boatd and boat-api use
+when nothing is declared):
+
+    sudo boat-admin images import vmlinux rootfs-slim.ext4.zst   # .zst or a plain .ext4
+    sudo boat-admin images list
+
+`--id NAME` installs another image; boat-admin then prints the line to declare it
+(`services.boat.localImages = [ "NAME" ];`) so boat-api offers it. Then the owner's key:
+
+    sudo boat-admin init -user me -team ops   # JSON on stdout; the bare token in /root/boat-owner-token (0600)
+
+`--token-file PATH` writes the token elsewhere.
+
 ## Known limits
 
 - UEFI only, with Secure Boot off. No BIOS support.

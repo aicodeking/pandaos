@@ -139,6 +139,15 @@ func (c *fcClient) putDrive(ctx context.Context, v VM, cfg Config) error {
 	return err
 }
 
+// machineConfig: hugePages backs guest memory with 2 MiB hugetlbfs pages (fewer TLB misses).
+func machineConfig(v VM, trackDirty bool, cfg Config) map[string]any {
+	mc := map[string]any{"vcpu_count": v.VCPU, "mem_size_mib": v.MemMiB, "smt": false, "track_dirty_pages": trackDirty}
+	if cfg.HugePages {
+		mc["huge_pages"] = "2M"
+	}
+	return mc
+}
+
 func (c *fcClient) boot(ctx context.Context, v VM, bootArgs string, trackDirty bool, cfg Config) error {
 	if err := c.putDrive(ctx, v, cfg); err != nil {
 		return err
@@ -152,7 +161,7 @@ func (c *fcClient) boot(ctx context.Context, v VM, bootArgs string, trackDirty b
 		body any
 	}{
 		{"/boot-source", map[string]string{"kernel_image_path": kernFile, "boot_args": bootArgs}},
-		{"/machine-config", map[string]any{"vcpu_count": v.VCPU, "mem_size_mib": v.MemMiB, "smt": false, "track_dirty_pages": trackDirty}},
+		{"/machine-config", machineConfig(v, trackDirty, cfg)},
 		{"/network-interfaces/eth0", nic},
 		{"/vsock", map[string]any{"guest_cid": 3, "uds_path": vsockUDS}},
 	}

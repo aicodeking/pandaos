@@ -135,6 +135,9 @@ func (m *Manager) root(id string) string {
 // ids: one uid/gid per VM under the jailer, else the shared firecracker user.
 func (m *Manager) ids(v VM) (int, int) {
 	if m.cfg.Jailer != "" {
+		if m.cfg.JailGID > 0 {
+			return m.cfg.JailUIDBase + v.Index, m.cfg.JailGID
+		}
 		return m.cfg.JailUIDBase + v.Index, m.cfg.JailUIDBase + v.Index
 	}
 	return m.cfg.FCUID, m.cfg.FCGID

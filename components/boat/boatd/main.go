@@ -67,9 +67,18 @@ func serve(cfgPath string) error {
 	}
 	log.Printf("boatd %s starting: bridge %s, stateDir %s", version, cfg.Bridge, cfg.StateDir)
 	if cfg.UntrustedTenants {
-		if err := hostHardened("/sys"); err != nil {
+		if err := hostHardened("/sys", "/proc/sys", cfg); err != nil {
 			return fmt.Errorf("untrustedTenants: %w", err)
 		}
+	}
+	if err := lookupRoutesGroup(&cfg); err != nil {
+		return err
+	}
+	if err := setupUplink(&cfg, execRunner, "/proc/net/route", "/sys/class/net"); err != nil {
+		if cfg.UntrustedTenants {
+			return fmt.Errorf("untrustedTenants: %w", err)
+		}
+		log.Printf("%v", err)
 	}
 	if err := setupBridge(cfg, execRunner); err != nil {
 		return fmt.Errorf("bridge: %w", err)
@@ -268,14 +277,36 @@ func stateDisk(dir string) string {
 
 // hostHardened checks what only the kernel command line and sysctls can give. SMT
 // shares a core's caches and buffers between guests; KSM merges their pages.
-func hostHardened(sys string) error {
+func hostHardened(sys, procSys string, c Config) error {
 	if b, err := os.ReadFile(filepath.Join(sys, "devices/system/cpu/smt/control")); err == nil && strings.TrimSpace(string(b)) == "on" {
 		return errors.New("SMT is on: boot with nosmt=force")
 	}
 	if b, err := os.ReadFile(filepath.Join(sys, "kernel/mm/ksm/run")); err == nil && strings.TrimSpace(string(b)) != "0" {
 		return errors.New("KSM is running: echo 0 >/sys/kernel/mm/ksm/run")
 	}
-	return nil
+	return ioUringClosed(procSys, c)
+}
+
+// ioUringClosed: io_uring is host kernel attack surface. Off for everyone (2), or open
+// only to CAP_SYS_ADMIN and kernel.io_uring_group (1), which must then be jailGid, the
+// gid only jailed VMMs run with (their Async disk engine); none (-1) is fine too.
+func ioUringClosed(procSys string, c Config) error {
+	b, err := os.ReadFile(filepath.Join(procSys, "kernel/io_uring_disabled"))
+	if err != nil {
+		return errors.New("kernel has no kernel.io_uring_disabled (Linux < 6.6): io_uring is open to every process")
+	}
+	switch strings.TrimSpace(string(b)) {
+	case "2":
+		return nil
+	case "1":
+		g, err := os.ReadFile(filepath.Join(procSys, "kernel/io_uring_group"))
+		gid := strings.TrimSpace(string(g))
+		if err == nil && (gid == "-1" || (c.JailGID > 0 && gid == strconv.Itoa(c.JailGID))) {
+			return nil
+		}
+		return fmt.Errorf("kernel.io_uring_group is %q, want jailGid (%d): other processes in that group can use io_uring", gid, c.JailGID)
+	}
+	return errors.New("io_uring is open to every process: set kernel.io_uring_disabled to 1 (with kernel.io_uring_group = jailGid) or 2")
 }
 
 // listenSocket: mode 0660, group socketGroup (boat-api's), so only root and

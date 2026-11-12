@@ -163,6 +163,20 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(curl + f"-o /dev/null -w '%{{http_code}}' https://{h}/healthz | grep -x 200", timeout=60)
         me = json.loads(machine.succeed(curl + f"-H 'Authorization: Bearer {token}' https://{h}/v1/me"))
         assert "ops" in json.dumps(me), me
+        # The bare token, for scripts: root only.
+        assert machine.succeed("cat /root/boat-owner-token").strip() == token
+        assert machine.succeed("stat -c %a /root/boat-owner-token").strip() == "600"
+
+    with subtest("no local control planes: Caddy admin API, LLMNR, mDNS"):
+        # Caddy's admin API took unauthenticated config changes from any local user.
+        machine.fail("curl -sS --max-time 5 http://127.0.0.1:2019/config/")
+        machine.fail("ss -Hltn 'sport = :2019' | grep -q .")
+        machine.fail("ss -Hlnu '( sport = :5353 or sport = :5355 )' | grep -q .")
+        machine.fail("ss -Hlnt 'sport = :5355' | grep -q .")
+        # routes.json (every VM's IP and team) is 0640 root:boat-routes: only its readers.
+        for u in ["boat-gateway", "boat"]:
+            assert "boat-routes" in machine.succeed(f"id -nG {u}").split(), u
+        assert "boat-routes" not in machine.succeed("id -nG panda").split()
 
     emit({"test": "boat-install", "installSec": install_sec})
     machine.shutdown()

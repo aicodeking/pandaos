@@ -395,6 +395,9 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 	if len(name) > 128 {
 		return Snapshot{}, errf(400, "name too long")
 	}
+	if m.cfg.HugePages {
+		return Snapshot{}, errHugePages
+	}
 	unlock := m.lock(vmID)
 	defer unlock()
 	v, err := m.get(vmID)

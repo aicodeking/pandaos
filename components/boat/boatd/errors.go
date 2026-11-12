@@ -39,3 +39,8 @@ func failFast(err error) error {
 }
 
 var errNotFound = &apiErr{code: http.StatusNotFound, msg: "vm not found"}
+
+// errHugePages: Firecracker restores huge-page guest memory only through UFFD, not from
+// the memory file boatd uses, so such VMs have no snapshots: forks and snapshots are
+// refused and a stop shuts the guest down (the next start cold-boots its disk).
+var errHugePages = errf(409, "hugePages is on: Firecracker cannot restore huge-page guest memory from a file, so this host has no snapshots or forks")

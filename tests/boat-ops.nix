@@ -60,7 +60,7 @@ pkgs.testers.runNixOSTest {
           autoFormat = true;
         };
       };
-      environment.systemPackages = [ pkgs.btrfs-progs pkgs.restic ];
+      environment.systemPackages = [ pkgs.btrfs-progs pkgs.restic pkgs.e2fsprogs ];
       services.boat = {
         requireKvm = false;
         boatdPackage = lib.mkDefault (stubBoatd "v1");
@@ -105,6 +105,32 @@ pkgs.testers.runNixOSTest {
           machine.wait_until_succeeds("ss -Hltn 'sport = :9100' | grep -q 127.0.0.1:9100")
           listen = machine.succeed("ss -Hltn 'sport = :9100'")
           assert "0.0.0.0:9100" not in listen and "[::]:9100" not in listen and "*:9100" not in listen, listen
+
+      with subtest("no guest image declared: boat-images says how to install one, boat-admin does"):
+          machine.wait_for_unit("boat-images.service")
+          machine.succeed("journalctl -u boat-images.service | grep -q 'boat-admin images import'")
+          machine.succeed(
+              "head -c 1M /dev/urandom >/tmp/vmlinux",
+              "truncate -s 16M /tmp/rootfs.ext4 && mkfs.ext4 -q /tmp/rootfs.ext4",
+              "${pkgs.zstd}/bin/zstd -q /tmp/rootfs.ext4 -o /tmp/rootfs.ext4.zst",
+              "head -c 1M /dev/zero >/tmp/not-ext4",
+          )
+          # Not an ext4 image: refused, nothing installed.
+          machine.fail("boat-admin images import /tmp/vmlinux /tmp/not-ext4")
+          machine.fail("test -e /var/lib/boat/images/ubuntu-24.04/rootfs.ext4")
+          out = machine.succeed("boat-admin images import /tmp/vmlinux /tmp/rootfs.ext4.zst 2>&1")
+          assert "installed image ubuntu-24.04" in out and "localImages" not in out, out
+          machine.succeed(
+              "cmp /tmp/vmlinux /var/lib/boat/images/ubuntu-24.04/vmlinux",
+              "cmp /tmp/rootfs.ext4 /var/lib/boat/images/ubuntu-24.04/rootfs.ext4",
+              "test $(stat -c %a /var/lib/boat/images/ubuntu-24.04/rootfs.ext4) = 644",
+          )
+          # Another id: installed, and boat-admin says how to declare it.
+          out = machine.succeed("boat-admin images import --id extra /tmp/vmlinux /tmp/rootfs.ext4 2>&1")
+          assert 'services.boat.localImages = [ "extra" ]' in out, out
+          listing = machine.succeed("boat-admin images list")
+          assert "ubuntu-24.04" in listing and "extra" in listing and "undeclared" in listing, listing
+          machine.succeed("rm -rf /var/lib/boat/images/extra")
 
       with subtest("switch to the next generation with VMs running"):
           assert read("/var/lib/boat/api/version") == "v1"

@@ -128,6 +128,31 @@ echo "disk (Sync, same runner): $disk_sync"
 cold_sync=$(cold_read "$pv")
 echo "cold rand read (Sync): $cold_sync IOPS"
 perf_del "$pv"
+
+# untrustedTenants' host setting: io_uring only for CAP_SYS_ADMIN and kernel.io_uring_group,
+# the jailed VMMs' shared gid (jailGid). Was io_uring off for all (Sync): the "before" above.
+disk_iou=null
+if [ "$JAILER" = 1 ] && [ -e /proc/sys/kernel/io_uring_group ]; then
+  log "perf e2e: Async engine, io_uring only for the VMMs' gid (untrustedTenants)"
+  iou_was="$(cat /proc/sys/kernel/io_uring_disabled) $(cat /proc/sys/kernel/io_uring_group)"
+  sudo sysctl -qw kernel.io_uring_disabled=1 kernel.io_uring_group=899999
+  iou_fio() { sudo -u nobody "$@" fio --name=u --filename=/tmp/iou-probe --size=4M --ioengine=io_uring --rw=write --bs=1M >/dev/null 2>&1; }
+  ! iou_fio || fail "io_uring open to a process outside kernel.io_uring_group"
+  iou_fio -g '#899999' || fail "io_uring refused to kernel.io_uring_group"
+  sudo rm -f /tmp/iou-probe
+  perf_cfg '.jailGid = 899999 | .diskEngine = "Async"' iou # Async refused would fail the create
+  pv=$(perf_vm pv)
+  [ "$(sudo awk '/^Gid:/ {print $2}' "/proc/$(vmf "$pv" pid)/status")" = 899999 ] || fail "the VMM does not run with jailGid"
+  put_disk "$pv"
+  disk_iou=$(bx "$pv" 'bash /tmp/disk.sh' 300 | sed -n 's/^BB_JSON //p') || disk_stuck "fio on Async with io_uring_group"
+  echo "disk (Async, io_uring for the VMMs only): $disk_iou"
+  echo "untrusted seq write: Sync (before) $(jq -r .seq_write_mbps <<<"$disk_sync") MB/s, Async with io_uring_group (after) $(jq -r .seq_write_mbps <<<"$disk_iou") MB/s"
+  perf_del "$pv"
+  read -r iou_d iou_g <<<"$iou_was"
+  sudo sysctl -qw kernel.io_uring_disabled="$iou_d" kernel.io_uring_group="$iou_g"
+else
+  echo "perf e2e: no jailer or no kernel.io_uring_group (Linux < 6.6): Async with io_uring_group not measured"
+fi
 perf_cfg '.' again
 pv=$(perf_vm pv)
 
@@ -269,14 +294,14 @@ check_min perf_rand_read "$(d rand_read_iops)" "$PERF_RAND_READ_MIN"
 check_min perf_rand_write "$(d rand_write_iops)" "$PERF_RAND_WRITE_MIN"
 restart_boatd "$WORK/boatd.json"
 
-echo "METRIC $(jq -nc --argjson disk "$disk" --argjson disks "$disk_sync" --arg blk "$guest_blk" \
+echo "METRIC $(jq -nc --argjson disk "$disk" --argjson disks "$disk_sync" --argjson diskiou "$disk_iou" --arg blk "$guest_blk" \
   --argjson csw "$c_sw" --argjson crw "$c_rw" --argjson crr "$c_rr" \
   --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" --argjson kk2 "$kvm_fork2" \
   --argjson nbr "$nb_rss" --argjson nbc "$nb_cg" --argjson br "$b_rss" --argjson bc "$b_cg" \
   --argjson dnq "$disk_noq" --argjson nqs "$noq_snap" --argjson nqf "$noq_from" --argjson nqk "$noq_fork" \
   --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fc "$fit_cold" --argjson fw "$fit_warm" --argjson fk "$fit_ksm" --argjson ca "${cold_async:-0}" --argjson cs "${cold_sync:-0}" \
   --argjson ct "$cold_ten" --argjson wt "$warm_ten" --argjson wr "$warm_rss" \
-  '{test: "boat-perf", disk: $disk, diskSync: $disks, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
+  '{test: "boat-perf", disk: $disk, diskSync: $disks, diskAsyncIoUringGroup: $diskiou, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
     snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2, noQuotas: {disk: $dnq, snapshotS: $nqs, fromSnapshotS: $nqf, forkS: $nqk},
     idleRssMiB: {noBalloon: $nbr, balloon: $br, ksm: $kr, warm: $wr}, idleCgroupMiB: {noBalloon: $nbc, balloon: $bc},
     ksmDedupMiB: $ksm, fitsIn8GiB: {cold: $fc, warm: $fw, coldKsm: $fk}, coldRandReadIops: {async: $ca, sync: $cs}, tenCreatesS: {cold: $ct, warm: $wt}}')"

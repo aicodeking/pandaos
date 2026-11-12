@@ -46,6 +46,21 @@
     ];
   };
 
+  # A dedicated VM host: full clock speed over power saving. On amd-pstate/intel_pstate
+  # (active mode) `performance` also sets the energy-performance preference to performance.
+  # Set "powersave" (with EPP balance_performance) to trade latency for watts.
+  powerManagement.cpuFreqGovernor = lib.mkDefault "performance";
+  # Guest memory on 2 MiB huge pages: off by default (no snapshots or forks then; see
+  # services.boat.hugePages). The bench A/Bs it.
+
+  # No name resolution by multicast on a server facing the internet: LLMNR (5355) and
+  # mDNS (5353) answer anyone on the link. Only matters if systemd-resolved is turned on.
+  services.resolved.settings.Resolve = {
+    LLMNR = lib.mkDefault false;
+    MulticastDNS = lib.mkDefault false;
+  };
+  services.avahi.enable = lib.mkDefault false;
+
   # Host metrics on 127.0.0.1:9100 only: they name units, mounts and tenant
   # load. Scrape through an ssh tunnel, or set listenAddress to an admin
   # (WireGuard) address and open the port on that interface only.

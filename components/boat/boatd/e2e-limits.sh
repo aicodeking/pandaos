@@ -119,16 +119,32 @@ echo "export ${export_s}s, $(($(stat -c %s "$WORK/tmp/exp.tar.zst") >> 20)) MiB"
 imported() { curl -fsS --unix-socket "$SOCK" -X POST -T "$1" "http://boatd/v1/snapshots/import?team=lim&name=$2"; }
 in1=$(imported "$WORK/tmp/exp.tar.zst" signed)
 [ "$(jq -r .has_mem <<<"$in1")" = true ] || fail "signed import lost its memory: $in1"
-# zstd parses a tenant's bytes: not as root. A slow upload keeps it alive to look at.
-curl -fsS --limit-rate 64k --unix-socket "$SOCK" -o /dev/null -X POST -T "$WORK/tmp/exp.tar.zst" "http://boatd/v1/snapshots/import?team=lim&name=slow" &
-slow=$!
-zuid=""
-# ps exits 1 while no zstd runs yet: under pipefail that ended the whole run with no
-# message (boat-e2e 41669516359), and cleanup's pkill then looked like a dead VMM.
-for _ in $(seq 50); do zuid=$(ps -o uid= -C zstd | head -n 1 | tr -d ' ' || true); [ -n "$zuid" ] && break; sleep 0.1; done
-kill "$slow" 2>/dev/null || true
-wait "$slow" 2>/dev/null || true
-[ "$zuid" = 65534 ] || fail "import decompressor runs as uid '$zuid'"
+# zstd parses a tenant's bytes: not as root, not on the network. A slow upload keeps it
+# alive to look at: plain (nobody in its own netns), then unpackSandbox (systemd-run unit).
+slow_import() { # LABEL SECCOMP_WANTED
+  local slow zpid="" zuid znet zsec
+  curl -fsS --limit-rate 64k --unix-socket "$SOCK" -o /dev/null -X POST -T "$WORK/tmp/exp.tar.zst" "http://boatd/v1/snapshots/import?team=lim&name=slow" &
+  slow=$!
+  # pgrep exits 1 while no zstd runs yet: under pipefail that ended the whole run with no
+  # message (boat-e2e 41669516359), and cleanup's pkill then looked like a dead VMM.
+  for _ in $(seq 100); do zpid=$(pgrep -x zstd | head -n 1 || true); [ -n "$zpid" ] && break; sleep 0.1; done
+  zuid=$(ps -o uid= -p "${zpid:-1}" | tr -d ' ' || true)
+  znet=$(sudo readlink "/proc/${zpid:-1}/ns/net" || true)
+  zsec=$(sudo awk '/^Seccomp:/ {print $2}' "/proc/${zpid:-1}/status" || true)
+  kill "$slow" 2>/dev/null || true
+  wait "$slow" 2>/dev/null || true
+  echo "import decompressor ($1): uid $zuid, netns $znet (host $(sudo readlink /proc/1/ns/net)), seccomp $zsec"
+  [ "$zuid" = 65534 ] || fail "import decompressor ($1) runs as uid '$zuid'"
+  [ -n "$znet" ] && [ "$znet" != "$(sudo readlink /proc/1/ns/net)" ] || fail "import decompressor ($1) is in the host's network namespace"
+  [ "$zsec" = "$2" ] || fail "import decompressor ($1): seccomp mode '$zsec', want $2"
+}
+slow_import plain 0
+restart_boatd "$(cfg_with '.unpackSandbox = true' unpack)"
+slow_import unpackSandbox 2
+in3=$(imported "$WORK/tmp/exp.tar.zst" sandboxed)
+[ "$(jq -r .has_mem <<<"$in3")" = true ] || fail "import through unpackSandbox lost its memory: $in3"
+bd DELETE "/v1/snapshots/$(jq -r .id <<<"$in3")" >/dev/null
+restart_boatd "$WORK/boatd.json"
 # The imports ran beside d1: its VMM must still be there.
 d1pid=$(vmf "$d1" pid)
 [ "$(vmf "$d1" state)" = running ] && sudo kill -0 "$d1pid" 2>/dev/null || fail "d1's firecracker ($d1pid) is gone after the imports"
@@ -310,7 +326,8 @@ bd DELETE "/v1/vms/$d1/snapshots/$sn" >/dev/null
 sudo rm -f "$WORK/tmp/victim"
 
 log "limits e2e: untrustedTenants refuses a weaker config or host"
-ut_filter=".untrustedTenants = true | .storageOvercommit = 1 | .egressMbit = 100 | .ingressMbit = 100 | .ioMaxMBps = 100 | .ioMaxIOPS = 1000 | .ioCost = true | .ioCostModel = \"rbps=500000000 rseqiops=20000 rrandiops=20000 wbps=400000000 wseqiops=10000 wrandiops=10000\" | .socket = \"$WORK/run/ut.sock\""
+# The settings services.boat.untrustedTenants sets (module.nix imports the same file).
+ut_filter=". * $(jq -c . "$HERE/boatd/untrusted.json") | .egressMbit = 100 | .ingressMbit = 100 | .ioMaxMBps = 100 | .ioMaxIOPS = 1000 | .ioCostModel = \"rbps=500000000 rseqiops=20000 rrandiops=20000 wbps=400000000 wseqiops=10000 wrandiops=10000\" | .socket = \"$WORK/run/ut.sock\""
 # ioCost without a model: refused, naming the command; that command measures this disk.
 sudo rm -f "$STATE/iocost-model"
 if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | del(.ioCostModel)" ut0)" 2>&1); then fail "untrustedTenants started without an ioCostModel"; fi
@@ -324,6 +341,10 @@ if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | .wa
 grep -q 'warmPool' <<<"$out" || fail "untrustedTenants + warmPool: $out"
 if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | .ksmTeam = \"*\"" ut2)" 2>&1); then fail "untrustedTenants accepted KSM"; fi
 grep -q 'ksmTeam' <<<"$out" || fail "untrustedTenants + ksmTeam: $out"
+for kv in memOvercommit=1.5 hostDirtyRatio=50 allowSMTP=true uplinkFairQueue=false; do # one weaker key each
+  if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | .${kv%%=*} = ${kv#*=}" ut4)" 2>&1); then fail "untrustedTenants accepted $kv"; fi
+  grep -q "${kv%%=*}" <<<"$out" || fail "untrustedTenants + $kv: $out"
+done
 if [ "$(cat /sys/devices/system/cpu/smt/control 2>/dev/null)" = on ]; then
   if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter" ut3)" 2>&1); then fail "untrustedTenants started with SMT on"; fi
   grep -q 'SMT is on' <<<"$out" || fail "untrustedTenants with SMT on: $out"

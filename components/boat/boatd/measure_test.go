@@ -31,9 +31,8 @@ func TestMeasureDiskModel(t *testing.T) {
 // with stateDir/iocost-model (what boatd -measure-disk writes) it starts.
 func TestUntrustedIOCostModelFromStateDir(t *testing.T) {
 	dir := t.TempDir()
-	c := defaultConfig()
-	c.StateDir, c.UntrustedTenants, c.Jailer, c.StorageOvercommit = dir, true, "/bin/jailer", 1
-	c.EgressMbit, c.IngressMbit, c.IOMaxMBps, c.IOMaxIOPS, c.IOCost = 1, 1, 4000, 200000, true
+	c := untrustedConfig(t)
+	c.StateDir, c.IOCostModel = dir, ""
 	b, _ := json.Marshal(c)
 	path := filepath.Join(dir, "boatd.json")
 	if err := os.WriteFile(path, b, 0o600); err != nil {

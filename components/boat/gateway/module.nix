@@ -140,9 +140,14 @@ in
         package = cfg.caddyPackage;
         email = boat.acmeEmail;
         inherit (cfg) environmentFile;
+        # admin off: Caddy's admin API (127.0.0.1:2019 by default) takes unauthenticated
+        # config changes from any local user, who could reroute api.<domain> and capture
+        # tokens. So a config change restarts Caddy instead of reloading it.
+        enableReload = false;
         # skip_install_trust: Caddy's local CA (only *.localhost) never touches
         # this system's trust store.
         globalConfig = ''
+          admin off
           skip_install_trust
         '' + lib.optionalString (cfg.dnsProvider == null) ''
           on_demand_tls {
@@ -177,6 +182,7 @@ in
       users.users.boat-gateway = {
         isSystemUser = true;
         group = "boat-gateway";
+        extraGroups = [ "boat-routes" ]; # reads /run/boat/routes.json (0640)
         description = "boat HTTP router";
       };
       users.groups.boat-gateway = { };

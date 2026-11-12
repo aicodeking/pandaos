@@ -430,6 +430,9 @@ func (m *Manager) stop(ctx context.Context, id, reason string, force bool) (VM, 
 	snap := false
 	if !force {
 		err = m.checkFloor(uint64(v.MemMiB) << 20) // a diff is usually far smaller; plan for a full one
+		if m.cfg.HugePages {
+			err = errHugePages // a memory file it could not restore: shut down instead
+		}
 		if err == nil {
 			v, err = m.takeSnapshot(ctx, v, true) // a stop's file is the next start's base: flushed now
 		}
@@ -531,6 +534,9 @@ func (m *Manager) Start(ctx context.Context, id string, env map[string]string) (
 func (m *Manager) Fork(ctx context.Context, id, name, team string) (VM, error) {
 	if name != "" && !reName.MatchString(name) {
 		return VM{}, errf(400, "invalid name")
+	}
+	if m.cfg.HugePages {
+		return VM{}, errHugePages
 	}
 	unlockP := m.lock(id)
 	p, err := m.get(id)
