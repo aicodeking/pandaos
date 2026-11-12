@@ -175,6 +175,19 @@ class AgentTest(unittest.TestCase):
         time.sleep(3.5)
         self.assertFalse(os.path.exists(marker), "background child survived the group kill")
 
+    def test_exit_reply_bounded_for_an_unkillable_process(self):
+        class Stuck:  # SIGKILL sent, still in D state
+            pid = 4242
+
+            def wait(self, timeout=None):
+                if timeout is None:
+                    raise AssertionError("unbounded wait after a timeout")
+                raise agent.subprocess.TimeoutExpired("x", timeout)
+        res = agent.exit_reply(Stuck(), True)
+        self.assertTrue(res["timed_out"])
+        self.assertEqual(res["exit"], 137)
+        self.assertIn("did not exit after SIGKILL", res["error"])
+
     def test_exec_background_child_survives_writing_after_exit(self):
         # `server &` must not die of SIGPIPE on its first log line after exec returns.
         marker = os.path.join(self.tmp, "alive")

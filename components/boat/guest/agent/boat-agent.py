@@ -373,13 +373,24 @@ def exec_child(req, send, proc, fds, sink, timeout):
             drain_in_background(proc.stdout)
             drain_in_background(proc.stderr)
         touch(-1)
-    rc = proc.wait()
+    send(exit_reply(proc, timed_out))
+
+
+def exit_reply(proc, timed_out):
+    """The exec's last line. After a timeout the kill is already sent: a process in
+    uninterruptible sleep (stuck on I/O) does not die from it, and an unbounded
+    wait would leave the host without an answer (boat-e2e 43313462575: resize2fs)."""
+    try:
+        rc = proc.wait(timeout=KILL_GRACE_S if timed_out else None)
+    except subprocess.TimeoutExpired:
+        return {"exit": 137, "signal": "SIGKILL", "timed_out": True,
+                "error": "pid %d did not exit after SIGKILL (uninterruptible sleep, likely stuck on I/O)" % proc.pid}
     res = {"exit": rc if rc >= 0 else 128 - rc}
     if rc < 0:
         res["signal"] = signal.Signals(-rc).name
     if timed_out:
         res["timed_out"] = True
-    send(res)
+    return res
 
 
 def pump(proc, fds, send, deadline):

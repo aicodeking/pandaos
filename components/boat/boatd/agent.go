@@ -35,6 +35,8 @@ type reply struct {
 	EOF    bool     `json:"eof,omitempty"`
 	Error  string   `json:"error,omitempty"`
 	IdleS  *float64 `json:"idle_s,omitempty"`
+	// TimedOut: an exec ran past its timeout_s and was killed.
+	TimedOut bool `json:"timed_out,omitempty"`
 	// Attached: exec_attach took the session over (execstream.go).
 	Attached string `json:"attached,omitempty"`
 }

@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -112,7 +113,9 @@ func (m *Manager) Resize(ctx context.Context, id string, r ResizeReq) (VM, error
 		return nv, err
 	}
 	m.ev.publish(Event{Type: "vm.resized", VMID: id, Team: v.Team, Size: nv.Size, State: nv.State})
-	if disk > v.DiskGiB && v.State == Running {
+	// An explicit disk_gib at the current size grows the guest again: the retry after
+	// a resize2fs that timed out (the host side is already done, see growGuestDisk).
+	if v.State == Running && (disk > v.DiskGiB || r.DiskGiB == v.DiskGiB) {
 		if err := m.growGuestDisk(ctx, nv); err != nil {
 			return nv, err
 		}
@@ -127,34 +130,58 @@ func (m *Manager) growGuestDisk(ctx context.Context, v VM) error {
 	if err := fc.call(ctx, "PATCH", "/drives/rootfs", map[string]string{"drive_id": "rootfs", "path_on_host": diskFile}); err != nil {
 		return err
 	}
-	return execRoot(ctx, filepath.Join(root, vsockUDS), []string{"resize2fs", "/dev/vda"})
+	err := execRoot(ctx, filepath.Join(root, vsockUDS), []string{"resize2fs", "/dev/vda"})
+	if err == nil {
+		return nil
+	}
+	m.resizeDiag(v, err)
+	if guestTimeout(err) {
+		return &apiErr{code: http.StatusGatewayTimeout, kind: codeResizeTimeout, msg: fmt.Sprintf(
+			"resize: the disk is %d GiB on the host, but the guest's resize2fs did not finish (%v); resize again with the same disk_gib to retry", v.DiskGiB, err)}
+	}
+	return err
 }
 
 // execRoot runs argv as root in the guest and requires exit 0.
 func execRoot(ctx context.Context, sock string, argv []string) error {
-	c, cancel := context.WithTimeout(ctx, 60*time.Second)
+	_, err := execRootOut(ctx, sock, argv, guestExecTimeout)
+	return err
+}
+
+// execRootOut is execRoot with the stdout, and the agent's own timeout (boatd waits
+// guestExecGrace longer: the agent answers a timeout, see boat-agent.py reap).
+func execRootOut(ctx context.Context, sock string, argv []string, timeout time.Duration) ([]byte, error) {
+	c, cancel := context.WithTimeout(ctx, timeout+guestExecGrace)
 	defer cancel()
 	a, err := dialAgent(c, sock)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer a.Close()
-	if err := a.send(map[string]any{"op": "exec", "argv": argv, "user": "root", "timeout_s": 50}); err != nil {
-		return err
+	if err := a.send(map[string]any{"op": "exec", "argv": argv, "user": "root", "timeout_s": int(timeout.Seconds())}); err != nil {
+		return nil, err
 	}
+	var out []byte
 	for {
 		_, r, err := a.recv()
 		if err != nil {
-			return err
+			return out, err
+		}
+		if r.TimedOut {
+			return out, fmt.Errorf("%s: %w after %s %s", argv[0], errGuestTimeout, timeout, r.Error)
 		}
 		if r.Error != "" {
-			return &agentErr{r.Error}
+			return out, &agentErr{r.Error}
+		}
+		if r.Stream == "stdout" {
+			b, _ := base64.StdEncoding.DecodeString(r.Data)
+			out = append(out, b...)
 		}
 		if r.Exit != nil {
 			if *r.Exit != 0 {
-				return &agentErr{fmt.Sprintf("%s exited %d", argv[0], *r.Exit)}
+				return out, &agentErr{fmt.Sprintf("%s exited %d", argv[0], *r.Exit)}
 			}
-			return nil
+			return out, nil
 		}
 	}
 }

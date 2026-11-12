@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -224,5 +225,37 @@ func mustRemove(t *testing.T, p string) {
 	t.Helper()
 	if err := os.Remove(p); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A guest resize2fs that times out: 504 resize_timeout (not a 502), the host side
+// stays grown and recorded, and the same disk_gib again retries the guest grow.
+func TestResizeGuestTimeout(t *testing.T) {
+	m, h := newTestManager(t, nil)
+	ctx := context.Background()
+	v, _ := m.Create(ctx, CreateReq{})
+	h.mu.Lock()
+	h.execKilled = map[string]bool{"resize2fs": true}
+	h.mu.Unlock()
+	var ae *apiErr
+	if _, err := m.Resize(ctx, v.ID, ResizeReq{DiskGiB: 2}); !errors.As(err, &ae) || ae.code != 504 || ae.kind != codeResizeTimeout {
+		t.Fatalf("want 504 %s, got %v", codeResizeTimeout, err)
+	}
+	if got, _ := m.get(v.ID); got.DiskGiB != 2 || got.State != Running {
+		t.Fatalf("after the timeout: %+v", got)
+	}
+	if st, _ := os.Stat(filepath.Join(m.root(v.ID), diskFile)); st.Size() != 2<<30 {
+		t.Fatalf("disk %d", st.Size())
+	}
+	h.mu.Lock()
+	h.execKilled = nil
+	h.mu.Unlock()
+	got, err := m.Resize(ctx, v.ID, ResizeReq{DiskGiB: 2})
+	if err != nil || got.DiskGiB != 2 {
+		t.Fatalf("retry: %+v %v", got, err)
+	}
+	// Other failures keep their own status.
+	if guestTimeout(&agentErr{"resize2fs exited 1"}) || !guestTimeout(fmt.Errorf("x: %w", os.ErrDeadlineExceeded)) {
+		t.Fatal("guestTimeout")
 	}
 }

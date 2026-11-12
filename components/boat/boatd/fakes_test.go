@@ -41,6 +41,7 @@ type fakeHost struct {
 	failResume int             // refuse this many resumes (PATCH /vm Resumed) with 503
 	slowGo     chan struct{}   // "slow" execs (sessions) send their end once this is closed
 	loseExec   int             // ignore this many exec requests (lost in a vsock reset)
+	execKilled map[string]bool // execs (by argv[0]) the agent reports timed out and killed
 	sockDelay  time.Duration   // the API socket appears this long after the start (a stalled fs)
 }
 
@@ -436,6 +437,13 @@ func (f *fakeFC) agentConn(c net.Conn) {
 			var argv []string
 			for _, a := range q["argv"].([]any) {
 				argv = append(argv, a.(string))
+			}
+			f.h.mu.Lock()
+			killed := f.h.execKilled[argv[0]]
+			f.h.mu.Unlock()
+			if killed {
+				send(map[string]any{"exit": 137, "signal": "SIGKILL", "timed_out": true})
+				continue
 			}
 			if argv[0] == "date" {
 				f.mu.Lock()
