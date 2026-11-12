@@ -215,6 +215,9 @@ in
           # polls boat-api's loopback-only /internal/route-gens.
           User = "boat-gateway";
           Group = "boat-gateway";
+          # Named in the unit too, so a switch that adds the group changes the
+          # unit and restarts the gateway (a running process keeps old groups).
+          SupplementaryGroups = [ "boat-routes" ];
           LoadCredentialEncrypted = "boat-desktop-key:${boat.dataDir}/secrets/boat-desktop-key.cred";
           Restart = "always";
           RestartSec = 2;

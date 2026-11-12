@@ -157,6 +157,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed("pkill -KILL -u agent -f 'panda-cu session'")
         machine.wait_until_succeeds(f"test \"$(systemctl show -p MainPID --value panda-cu)\" != {pid}", timeout=60)
         machine.wait_until_succeeds(f"test \"$(stat -c %Y /run/panda-cu/ready)\" -ge {t0}", timeout=90)
+        # journald can lag the restart; wait for the line instead of reading once.
+        machine.wait_until_succeeds("journalctl -u panda-cu --no-pager | grep -qi 'session ended'", timeout=60)
         print(machine.succeed("journalctl -u panda-cu --no-pager | grep -i 'session ended' | tail -3"))
   '';
 }
