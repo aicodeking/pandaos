@@ -138,7 +138,49 @@ ROUTES = [
     ("POST", "/api/v1/sandboxes/{id}/share", "/sandboxes/{sandboxId}/share", "vms:write", None, "share with the team (a no-op: team sandboxes are shared)"),
     ("POST", "/api/v1/sandboxes/{id}/unshare", "/sandboxes/{sandboxId}/unshare", "vms:write", None, "make private: 501 not_supported (no private sandboxes here)"),
     ("POST", "/api/v1/sandboxes/{id}/recover", "/sandboxes/{sandboxId}/recover", "vms:write", None, "power-cycle (forced stop, then start; the disk is kept)"),
+    # credential profiles: the team's one "default" profile over /v1/ai/credentials (compat_profiles.go)
+    ("GET", "/api/v1/credential-profiles", "/credential-profiles", "admin", None, "the team's one profile (GET /v1/ai/credentials)"),
+    ("POST", "/api/v1/credential-profiles", "/credential-profiles", "admin", None, "more profiles: 501 not_supported"),
+    ("PUT", "/api/v1/credential-profiles/{profile}", "/credential-profiles/{profile}", "admin", ["name", "isDefault", "access"],
+     "update: already the default; renaming or access is 501 not_supported"),
+    ("DELETE", "/api/v1/credential-profiles/{profile}", "/credential-profiles/{profile}", "admin", None, "delete: always 409 is_default"),
+    ("PUT", "/api/v1/credential-profiles/{profile}/keys/{credential}", "/credential-profiles/{profile}/keys/{credential}", "admin",
+     ["value", "keepCurrent"], "set an API key (PUT /v1/ai/credentials/{provider})"),
+    ("DELETE", "/api/v1/credential-profiles/{profile}/keys/{credential}", "/credential-profiles/{profile}/keys/{credential}", "admin", None,
+     "remove an API key (DELETE /v1/ai/credentials/{provider})"),
+    ("GET", "/api/v1/credential-profiles/{profile}/accounts/{credential}", "/credential-profiles/{profile}/accounts/{credential}", "admin", None,
+     "the credential's one account"),
+    ("POST", "/api/v1/credential-profiles/{profile}/accounts/{credential}", "/credential-profiles/{profile}/accounts/{credential}", "admin",
+     ["value", "keepCurrent"], "set the first key; a second account is 501 not_supported"),
+    ("PUT", "/api/v1/credential-profiles/{profile}/accounts/{credential}/{account}/active",
+     "/credential-profiles/{profile}/accounts/{credential}/{account}/active", "admin", None, "switch: only to the one account (a no-op)"),
+    ("DELETE", "/api/v1/credential-profiles/{profile}/accounts/{credential}/{account}",
+     "/credential-profiles/{profile}/accounts/{credential}/{account}", "admin", None, "forget the account (DELETE /v1/ai/credentials/{provider})"),
+    ("PUT", "/api/v1/credential-profiles/{profile}/custom-apis/{name}", "/credential-profiles/{profile}/custom-apis/{name}", "admin", None,
+     "custom APIs: 501 not_supported"),
+    ("DELETE", "/api/v1/credential-profiles/{profile}/custom-apis/{name}", "/credential-profiles/{profile}/custom-apis/{name}", "admin", None,
+     "custom APIs: 501 not_supported"),
+    ("GET", "/api/v1/snapshots/{sid}/download", "/snapshots/{snapshotId}/download", "exec", None,
+     "the snapshot archive itself (GET /v1/vms/{id}/snapshots/{sid}/download), not signed chunk URLs"),
+] + [
+    (m, "/api/v1" + p.replace("{environmentId}", "{id}").replace("{snapshotId}", "{sid}"), p, "", None, what + ": 501 not_supported")
+    for m, p, what in [
+        ("GET", "/orgs", "organizations"), ("PATCH", "/orgs/active", "organizations"), ("PATCH", "/orgs/{org}", "organizations"),
+        ("GET", "/account/data-retention", "data retention"), ("PATCH", "/account/data-retention", "data retention"),
+        ("GET", "/repos", "repositories"), ("POST", "/repos", "repositories"),
+        ("GET", "/ci", "boat CI"), ("POST", "/ci/connect", "boat CI"), ("POST", "/ci/public", "boat CI"),
+        ("GET", "/ci/jobs/{jobId}", "boat CI"), ("GET", "/ci/jobs/{jobId}/logs", "boat CI"),
+        ("POST", "/environments/{environmentId}/upgrade", "environment upgrades"),
+        ("PUT", "/environments/{environmentId}/secret-files", "environment secret files"),
+        ("DELETE", "/environments/{environmentId}/secret-files", "environment secret files"),
+        ("POST", "/environments/{environmentId}/repos", "environment repositories"),
+        ("DELETE", "/environments/{environmentId}/repos/{repositoryId}", "environment repositories"),
+        ("GET", "/snapshots/{snapshotId}/tree", "snapshot trees"), ("GET", "/snapshots/{snapshotId}/files", "snapshot files"),
+    ]
 ]
+
+# Operations whose 2xx answer differs in kind from boat.dev's.
+BINARY_200 = {("GET", "/api/v1/snapshots/{sid}/download")}
 
 # Paths under /api/v1 that are this server's own, not boat.dev operations.
 EXTRA = {
@@ -256,6 +298,9 @@ def main(src, dst):
                 r["content"][ct].pop("examples", None)
                 r["content"][ct].pop("example", None)
             resps[code] = {"description": "boat.dev " + code, **({"content": rewrite(r["content"])} if r.get("content") else {})}
+        if (method, ours) in BINARY_200:
+            resps = {"200": {"description": "The snapshot archive (tar.zst)",
+                             "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}}
         resps["default"] = {"description": "boat.dev error envelope",
                             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}}
         out["responses"] = resps

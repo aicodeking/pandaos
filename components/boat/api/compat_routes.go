@@ -106,4 +106,6 @@ func (s *server) compatRoutes() {
 	s.route("POST /api/v1/sandboxes/{id}/recover", "vms:write", s.compatRecover)
 	s.route("POST /api/v1/sandboxes/{id}/unshare", "vms:write", s.compatUnshare)
 	s.route("GET /api/v1/provider-models", "", s.compatProviderModels)
+	// credential profiles, snapshot download, 501s (compat_profiles.go)
+	s.compatProfileRoutes()
 }

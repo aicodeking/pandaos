@@ -10044,6 +10044,1340 @@
     }
    }
   },
+  "/api/v1/credential-profiles": {
+   "get": {
+    "summary": "boat.dev listCredentialProfiles: the team's one profile (GET /v1/ai/credentials)",
+    "operationId": "compat_listCredentialProfiles",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialProfileListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "boat.dev createCredentialProfile: more profiles: 501 not_supported",
+    "operationId": "compat_createCredentialProfile",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "201": {
+      "description": "boat.dev 201",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialProfileResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/credential-profiles/{profile}": {
+   "put": {
+    "summary": "boat.dev updateCredentialProfile: update: already the default; renaming or access is 501 not_supported",
+    "operationId": "compat_updateCredentialProfile",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string"
+         },
+         "isDefault": {
+          "type": "boolean"
+         },
+         "access": {
+          "allOf": [
+           {
+            "$ref": "#/components/schemas/BDResourceAccessUpdate"
+           }
+          ]
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialProfileResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteCredentialProfile: delete: always 409 is_default",
+    "operationId": "compat_deleteCredentialProfile",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialProfileDeletedResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/credential-profiles/{profile}/keys/{credential}": {
+   "put": {
+    "summary": "boat.dev setCredentialProfileKey: set an API key (PUT /v1/ai/credentials/{provider})",
+    "operationId": "compat_setCredentialProfileKey",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "value": {
+          "type": "string"
+         },
+         "keepCurrent": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialProfileResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteCredentialProfileKey: remove an API key (DELETE /v1/ai/credentials/{provider})",
+    "operationId": "compat_deleteCredentialProfileKey",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialProfileResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/credential-profiles/{profile}/accounts/{credential}": {
+   "get": {
+    "summary": "boat.dev listCredentialAccounts: the credential's one account",
+    "operationId": "compat_listCredentialAccounts",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialAccountsResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "boat.dev addCredentialAccount: set the first key; a second account is 501 not_supported",
+    "operationId": "compat_addCredentialAccount",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "value": {
+          "type": "string"
+         },
+         "keepCurrent": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "boat.dev 201",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialAccountsResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/credential-profiles/{profile}/accounts/{credential}/{account}/active": {
+   "put": {
+    "summary": "boat.dev switchCredentialAccount: switch: only to the one account (a no-op)",
+    "operationId": "compat_switchCredentialAccount",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialAccountsResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/credential-profiles/{profile}/accounts/{credential}/{account}": {
+   "delete": {
+    "summary": "boat.dev deleteCredentialAccount: forget the account (DELETE /v1/ai/credentials/{provider})",
+    "operationId": "compat_deleteCredentialAccount",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialAccountsResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/credential-profiles/{profile}/custom-apis/{name}": {
+   "put": {
+    "summary": "boat.dev setCredentialProfileCustomApi: custom APIs: 501 not_supported",
+    "operationId": "compat_setCredentialProfileCustomApi",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialProfileResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteCredentialProfileCustomApi: custom APIs: 501 not_supported",
+    "operationId": "compat_deleteCredentialProfileCustomApi",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCredentialProfileResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/snapshots/{sid}/download": {
+   "get": {
+    "summary": "boat.dev getSnapshotDownload: the snapshot archive itself (GET /v1/vms/{id}/snapshots/{sid}/download), not signed chunk URLs",
+    "operationId": "compat_getSnapshotDownload",
+    "x-boat-scope": "exec",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "sid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The snapshot archive (tar.zst)",
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/orgs": {
+   "get": {
+    "summary": "boat.dev listOrganizations: organizations: 501 not_supported",
+    "operationId": "compat_listOrganizations",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDOrgListResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/orgs/active": {
+   "patch": {
+    "summary": "boat.dev setActiveOrganization: organizations: 501 not_supported",
+    "operationId": "compat_setActiveOrganization",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDActiveOrgResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/orgs/{org}": {
+   "patch": {
+    "summary": "boat.dev updateOrganization: organizations: 501 not_supported",
+    "operationId": "compat_updateOrganization",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "org",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "type": {
+           "type": "string"
+          },
+          "success": {
+           "type": "boolean"
+          },
+          "name": {
+           "type": "string"
+          },
+          "newSandboxesPrivate": {
+           "type": "boolean"
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/account/data-retention": {
+   "get": {
+    "summary": "boat.dev getDataRetention: data retention: 501 not_supported",
+    "operationId": "compat_getDataRetention",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDDataRetentionPolicyResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "patch": {
+    "summary": "boat.dev updateDataRetention: data retention: 501 not_supported",
+    "operationId": "compat_updateDataRetention",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDDataRetentionPolicyResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/repos": {
+   "get": {
+    "summary": "boat.dev repos: repositories: 501 not_supported",
+    "operationId": "compat_repos",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "sync",
+      "in": "query",
+      "schema": {
+       "type": "boolean"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 200,
+       "default": 100
+      }
+     },
+     {
+      "name": "cursor",
+      "in": "query",
+      "schema": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     {
+      "name": "sort",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "asc",
+        "desc"
+       ],
+       "default": "desc"
+      }
+     },
+     {
+      "name": "q",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "selected",
+      "in": "query",
+      "schema": {
+       "type": "boolean"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDReposResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "post": {
+    "summary": "boat.dev selectRepo: repositories: 501 not_supported",
+    "operationId": "compat_selectRepo",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDRepoSelectionResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/ci": {
+   "get": {
+    "summary": "boat.dev getCiOverview: boat CI: 501 not_supported",
+    "operationId": "compat_getCiOverview",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "account",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "repo",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "state",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "all",
+        "active",
+        "failed"
+       ],
+       "default": "all"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 500,
+       "default": 200
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCiOverviewResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/ci/connect": {
+   "post": {
+    "summary": "boat.dev connectCiGithub: boat CI: 501 not_supported",
+    "operationId": "compat_connectCiGithub",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCiConnectResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/ci/public": {
+   "post": {
+    "summary": "boat.dev setCiPublicRepos: boat CI: 501 not_supported",
+    "operationId": "compat_setCiPublicRepos",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCiPublicReposResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/ci/jobs/{jobId}": {
+   "get": {
+    "summary": "boat.dev getCiJob: boat CI: 501 not_supported",
+    "operationId": "compat_getCiJob",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "jobId",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCiJobResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/ci/jobs/{jobId}/logs": {
+   "get": {
+    "summary": "boat.dev getCiJobLog: boat CI: 501 not_supported",
+    "operationId": "compat_getCiJobLog",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "jobId",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDCiJobLogResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/environments/{id}/upgrade": {
+   "post": {
+    "summary": "boat.dev upgradeEnvironment: environment upgrades: 501 not_supported",
+    "operationId": "compat_upgradeEnvironment",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDUpgradeSandboxEnvironmentResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/environments/{id}/secret-files": {
+   "put": {
+    "summary": "boat.dev setEnvironmentSecretFile: environment secret files: 501 not_supported",
+    "operationId": "compat_setEnvironmentSecretFile",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDEnvironmentItemChangeResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "boat.dev deleteEnvironmentSecretFile: environment secret files: 501 not_supported",
+    "operationId": "compat_deleteEnvironmentSecretFile",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDEnvironmentItemChangeResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/environments/{id}/repos": {
+   "post": {
+    "summary": "boat.dev addEnvironmentRepo: environment repositories: 501 not_supported",
+    "operationId": "compat_addEnvironmentRepo",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDEnvironmentItemChangeResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/environments/{id}/repos/{repositoryId}": {
+   "delete": {
+    "summary": "boat.dev deleteEnvironmentRepo: environment repositories: 501 not_supported",
+    "operationId": "compat_deleteEnvironmentRepo",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "repositoryId",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDEnvironmentItemChangeResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/snapshots/{sid}/tree": {
+   "get": {
+    "summary": "boat.dev getSnapshotTree: snapshot trees: 501 not_supported",
+    "operationId": "compat_getSnapshotTree",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "sid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDSnapshotTreeResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/snapshots/{sid}/files": {
+   "get": {
+    "summary": "boat.dev getSnapshotFile: snapshot files: 501 not_supported",
+    "operationId": "compat_getSnapshotFile",
+    "x-boat-scope": "",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "sid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/octet-stream": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       },
+       "application/x-tar": {
+        "schema": {
+         "type": "string",
+         "format": "binary"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/v1/file-downloads/{token}": {
    "get": {
     "summary": "Download a file through a signed URL from POST /api/v1/sandboxes/{id}/files/download-url (no API key)",
@@ -11705,6 +13039,48 @@
      }
     ]
    },
+   "BDActiveOrgResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "active"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "org.active_updated"
+       },
+       "active": {
+        "type": "object",
+        "required": [
+         "id",
+         "name",
+         "type"
+        ],
+        "properties": {
+         "id": {
+          "type": "string"
+         },
+         "name": {
+          "type": "string"
+         },
+         "type": {
+          "type": "string",
+          "enum": [
+           "personal",
+           "org"
+          ]
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
    "BDAiProxySettings": {
     "allOf": [
      {
@@ -12199,6 +13575,548 @@
       }
      }
     ]
+   },
+   "BDCiConnectResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "installUrl"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "ci.connect"
+       },
+       "installUrl": {
+        "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDCiInstallation": {
+    "type": "object",
+    "required": [
+     "id",
+     "accountLogin",
+     "accountType",
+     "manageUrl",
+     "repositories"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "accountLogin": {
+      "type": "string"
+     },
+     "accountType": {
+      "type": "string",
+      "enum": [
+       "Organization",
+       "User"
+      ]
+     },
+     "teamId": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "allowPublicRepos": {
+      "type": "boolean"
+     },
+     "publicRepoUsers": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "manageUrl": {
+      "type": "string"
+     },
+     "repositories": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/BDCiRepository"
+      }
+     }
+    }
+   },
+   "BDCiJob": {
+    "type": "object",
+    "required": [
+     "id",
+     "repo",
+     "jobName",
+     "label",
+     "machineClass",
+     "state",
+     "queuedAt"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "repo": {
+      "type": "string"
+     },
+     "runId": {
+      "type": "string"
+     },
+     "jobName": {
+      "type": "string"
+     },
+     "workflowName": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "headBranch": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "headSha": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "htmlUrl": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "label": {
+      "type": "string"
+     },
+     "machineClass": {
+      "type": "string",
+      "enum": [
+       "small",
+       "default",
+       "large",
+       "xlarge"
+      ]
+     },
+     "state": {
+      "$ref": "#/components/schemas/BDCiJobState"
+     },
+     "error": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "sandboxId": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "sandboxState": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "live",
+       "busy",
+       "kept",
+       "deleted",
+       null
+      ]
+     },
+     "queuedAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "runStartedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "finishedAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "waitSeconds": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "runSeconds": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "costDollars": {
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    }
+   },
+   "BDCiJobLogResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "log"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "ci.job.logs"
+       },
+       "log": {
+        "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDCiJobResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "job"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "ci.job"
+       },
+       "job": {
+        "$ref": "#/components/schemas/BDCiJob"
+       }
+      }
+     }
+    ]
+   },
+   "BDCiJobState": {
+    "type": "string",
+    "enum": [
+     "queued",
+     "running",
+     "success",
+     "failure",
+     "cancelled",
+     "skipped",
+     "failed",
+     "refused"
+    ]
+   },
+   "BDCiOverviewResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "setup",
+       "installations",
+       "counts",
+       "stats",
+       "jobs"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "ci.overview"
+       },
+       "setup": {
+        "type": "object",
+        "properties": {
+         "complete": {
+          "type": "boolean"
+         },
+         "next": {
+          "type": [
+           "string",
+           "null"
+          ],
+          "enum": [
+           "install",
+           "repositories",
+           "workflow",
+           "first-pass",
+           null
+          ]
+         },
+         "steps": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "properties": {
+            "id": {
+             "type": "string"
+            },
+            "title": {
+             "type": "string"
+            },
+            "done": {
+             "type": "boolean"
+            },
+            "detail": {
+             "type": "string"
+            }
+           }
+          }
+         },
+         "problems": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "properties": {
+            "jobId": {
+             "type": "string"
+            },
+            "repo": {
+             "type": "string"
+            },
+            "message": {
+             "type": "string"
+            },
+            "at": {
+             "type": "string",
+             "format": "date-time"
+            },
+            "count": {
+             "type": "integer"
+            }
+           }
+          }
+         }
+        }
+       },
+       "installations": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDCiInstallation"
+        }
+       },
+       "filter": {
+        "type": "object",
+        "properties": {
+         "account": {
+          "type": [
+           "string",
+           "null"
+          ]
+         },
+         "repo": {
+          "type": [
+           "string",
+           "null"
+          ]
+         },
+         "state": {
+          "type": "string",
+          "enum": [
+           "all",
+           "active",
+           "failed"
+          ]
+         }
+        }
+       },
+       "counts": {
+        "type": "object",
+        "properties": {
+         "all": {
+          "type": "integer"
+         },
+         "active": {
+          "type": "integer"
+         },
+         "failed": {
+          "type": "integer"
+         }
+        }
+       },
+       "stats": {
+        "type": "object",
+        "properties": {
+         "jobs": {
+          "type": "integer"
+         },
+         "running": {
+          "type": "integer"
+         },
+         "successRate": {
+          "type": [
+           "number",
+           "null"
+          ]
+         },
+         "medianWaitSeconds": {
+          "type": [
+           "number",
+           "null"
+          ]
+         },
+         "medianRunSeconds": {
+          "type": [
+           "number",
+           "null"
+          ]
+         },
+         "costDollars": {
+          "type": "number"
+         },
+         "perDay": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "properties": {
+            "day": {
+             "type": "string",
+             "format": "date"
+            },
+            "success": {
+             "type": "integer"
+            },
+            "failure": {
+             "type": "integer"
+            },
+            "other": {
+             "type": "integer"
+            }
+           }
+          }
+         }
+        }
+       },
+       "jobs": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDCiJob"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDCiPublicReposResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "allowPublicRepos",
+       "publicRepoUsers"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "ci.public"
+       },
+       "allowPublicRepos": {
+        "type": "boolean"
+       },
+       "publicRepoUsers": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "login": {
+           "type": "string"
+          },
+          "avatarUrl": {
+           "type": [
+            "string",
+            "null"
+           ]
+          }
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDCiRepository": {
+    "type": "object",
+    "required": [
+     "fullName",
+     "private",
+     "htmlUrl",
+     "status",
+     "jobs7d"
+    ],
+    "properties": {
+     "fullName": {
+      "type": "string"
+     },
+     "private": {
+      "type": "boolean"
+     },
+     "htmlUrl": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "ok",
+       "no-jobs",
+       "failing",
+       "public-blocked"
+      ]
+     },
+     "jobs7d": {
+      "type": "integer"
+     },
+     "lastState": {
+      "oneOf": [
+       {
+        "type": "null"
+       },
+       {
+        "$ref": "#/components/schemas/BDCiJobState"
+       }
+      ]
+     },
+     "lastAt": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "lastError": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    }
    },
    "BDCommandAttachFrame": {
     "type": "object",
@@ -12959,6 +14877,291 @@
        },
        "giftLimitNotice": {
         "type": "string"
+       }
+      }
+     }
+    ]
+   },
+   "BDCredentialAccount": {
+    "type": "object",
+    "required": [
+     "id",
+     "label",
+     "active"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "label": {
+      "type": "string"
+     },
+     "active": {
+      "type": "boolean"
+     },
+     "addedAt": {
+      "type": "string",
+      "format": "date-time"
+     }
+    }
+   },
+   "BDCredentialAccountsResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success",
+       "profileId",
+       "credential",
+       "accounts"
+      ],
+      "properties": {
+       "success": {
+        "type": "boolean"
+       },
+       "profileId": {
+        "type": "string"
+       },
+       "credential": {
+        "$ref": "#/components/schemas/BDCredentialId"
+       },
+       "accounts": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDCredentialAccount"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDCredentialId": {
+    "type": "string",
+    "enum": [
+     "anthropic-api-key",
+     "openai-api-key",
+     "openrouter-api-key",
+     "llmgateway-api-key",
+     "deepseek-api-key",
+     "moonshot-api-key",
+     "mistral-api-key",
+     "xai-api-key",
+     "opencode-api-key",
+     "claude-subscription",
+     "chatgpt-subscription",
+     "kimi-subscription",
+     "mistral-vibe-subscription",
+     "grok-subscription",
+     "claude-bedrock",
+     "codex-bedrock"
+    ]
+   },
+   "BDCredentialProfile": {
+    "type": "object",
+    "required": [
+     "id",
+     "name",
+     "isDefault",
+     "owner",
+     "canManage",
+     "connected",
+     "customApis",
+     "createdAt",
+     "updatedAt"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "isDefault": {
+      "type": "boolean"
+     },
+     "owner": {
+      "type": "object",
+      "required": [
+       "id",
+       "kind",
+       "name",
+       "aiProxyEnabled"
+      ],
+      "properties": {
+       "id": {
+        "type": "string"
+       },
+       "kind": {
+        "type": "string",
+        "enum": [
+         "personal",
+         "org"
+        ]
+       },
+       "name": {
+        "type": "string"
+       },
+       "aiProxyEnabled": {
+        "type": "boolean"
+       }
+      }
+     },
+     "canManage": {
+      "type": "boolean"
+     },
+     "connected": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/BDCredentialId"
+      }
+     },
+     "accounts": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "array",
+       "items": {
+        "$ref": "#/components/schemas/BDCredentialAccount"
+       }
+      }
+     },
+     "customApis": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "createdAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+     },
+     "access": {
+      "$ref": "#/components/schemas/BDResourceAccess"
+     }
+    }
+   },
+   "BDCredentialProfileDeletedResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success"
+      ],
+      "properties": {
+       "success": {
+        "type": "boolean"
+       }
+      }
+     }
+    ]
+   },
+   "BDCredentialProfileListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "profiles"
+      ],
+      "properties": {
+       "profiles": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDCredentialProfile"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDCredentialProfileResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success",
+       "profile"
+      ],
+      "properties": {
+       "success": {
+        "type": "boolean"
+       },
+       "profile": {
+        "$ref": "#/components/schemas/BDCredentialProfile"
+       }
+      }
+     }
+    ]
+   },
+   "BDDataRetentionPolicyResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "enabled",
+       "enabledAt"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "enum": [
+         "data_retention.info",
+         "data_retention.updated"
+        ]
+       },
+       "enabled": {
+        "type": "boolean"
+       },
+       "enabledAt": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "format": "date-time"
+       },
+       "queuedSandboxes": {
+        "type": "integer",
+        "minimum": 0
+       },
+       "acceptedDeletionOperationsIrreversible": {
+        "type": "boolean"
+       },
+       "snapshotsOff": {
+        "type": "boolean"
+       },
+       "snapshotsOffAt": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "format": "date-time"
+       },
+       "monitoringOff": {
+        "type": "boolean"
+       },
+       "monitoringOffAt": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "format": "date-time"
        }
       }
      }
@@ -14588,6 +16791,77 @@
      }
     ]
    },
+   "BDOrg": {
+    "type": "object",
+    "required": [
+     "id",
+     "name",
+     "type",
+     "role",
+     "memberCount",
+     "active"
+    ],
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "type": {
+      "type": "string",
+      "enum": [
+       "personal",
+       "org"
+      ]
+     },
+     "role": {
+      "type": "string",
+      "enum": [
+       "owner",
+       "member"
+      ]
+     },
+     "memberCount": {
+      "type": "integer"
+     },
+     "subscriptionStatus": {
+      "type": "string"
+     },
+     "active": {
+      "type": "boolean"
+     }
+    }
+   },
+   "BDOrgListResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "orgs",
+       "activeWalletChosen"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "org.list"
+       },
+       "activeWalletChosen": {
+        "type": "boolean"
+       },
+       "orgs": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDOrg"
+        }
+       }
+      }
+     }
+    ]
+   },
    "BDPageInfo": {
     "type": "object",
     "required": [
@@ -14805,6 +17079,82 @@
      }
     ]
    },
+   "BDRepoSelectionResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "success",
+       "environmentId",
+       "selectedRepositories"
+      ],
+      "properties": {
+       "success": {
+        "type": "boolean"
+       },
+       "environmentId": {
+        "type": "string"
+       },
+       "subenvironmentId": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "selectedRepositories": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSelectedRepository"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "BDReposResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "installations",
+       "environmentId",
+       "selectedRepositories"
+      ],
+      "properties": {
+       "installations": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDRepositoryInstallation"
+        }
+       },
+       "environmentId": {
+        "type": "string"
+       },
+       "subenvironmentId": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "selectedRepositories": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSelectedRepository"
+        }
+       },
+       "pageInfo": {
+        "$ref": "#/components/schemas/BDPageInfo"
+       }
+      }
+     }
+    ]
+   },
    "BDRepository": {
     "type": "object",
     "additionalProperties": true,
@@ -14847,11 +17197,52 @@
      }
     }
    },
+   "BDRepositoryInstallation": {
+    "type": "object",
+    "properties": {
+     "type": {
+      "type": "string"
+     },
+     "accountLogin": {
+      "type": "string"
+     },
+     "accountAvatarUrl": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "uri"
+     },
+     "repositories": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/BDRepository"
+      }
+     }
+    }
+   },
    "BDResourceAccess": {
     "type": "object",
     "required": [
      "restricted",
      "members"
+    ],
+    "properties": {
+     "restricted": {
+      "type": "boolean"
+     },
+     "members": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   },
+   "BDResourceAccessUpdate": {
+    "type": "object",
+    "required": [
+     "restricted"
     ],
     "properties": {
      "restricted": {
@@ -16071,6 +18462,127 @@
      }
     ]
    },
+   "BDSnapshotChunk": {
+    "type": "object",
+    "required": [
+     "snapshotId",
+     "generation",
+     "chunkIndex",
+     "r2Key",
+     "sizeBytes",
+     "sha256",
+     "signedUrl"
+    ],
+    "properties": {
+     "snapshotId": {
+      "type": "string",
+      "format": "uuid"
+     },
+     "generation": {
+      "type": "integer"
+     },
+     "chunkIndex": {
+      "type": "integer"
+     },
+     "r2Key": {
+      "type": "string"
+     },
+     "sizeBytes": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "sha256": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "signedUrl": {
+      "type": "string",
+      "format": "uri"
+     }
+    }
+   },
+   "BDSnapshotDownloadResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "snapshotId",
+       "sandboxId",
+       "kind",
+       "generation",
+       "expiresInSeconds",
+       "reconstruct",
+       "chunks"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.download"
+       },
+       "snapshotId": {
+        "type": "string",
+        "format": "uuid"
+       },
+       "sandboxId": {
+        "type": "string"
+       },
+       "kind": {
+        "type": "string",
+        "enum": [
+         "base",
+         "incremental",
+         "legacy"
+        ]
+       },
+       "generation": {
+        "type": "integer"
+       },
+       "expiresInSeconds": {
+        "type": "integer"
+       },
+       "reconstruct": {
+        "type": "string"
+       },
+       "inventory": {
+        "oneOf": [
+         {
+          "type": "object",
+          "required": [
+           "r2Key",
+           "signedUrl"
+          ],
+          "properties": {
+           "r2Key": {
+            "type": "string"
+           },
+           "signedUrl": {
+            "type": "string",
+            "format": "uri"
+           }
+          }
+         },
+         {
+          "type": "null"
+         }
+        ]
+       },
+       "chunks": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSnapshotChunk"
+        }
+       }
+      }
+     }
+    ]
+   },
    "BDSnapshotLatestResponse": {
     "allOf": [
      {
@@ -16220,6 +18732,86 @@
       ]
      }
     }
+   },
+   "BDSnapshotTreeEntry": {
+    "type": "object",
+    "required": [
+     "path",
+     "kind"
+    ],
+    "properties": {
+     "path": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string",
+      "enum": [
+       "file",
+       "dir",
+       "symlink"
+      ]
+     },
+     "size": {
+      "type": "integer"
+     }
+    }
+   },
+   "BDSnapshotTreeResponse": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/BDSuccessBase"
+     },
+     {
+      "type": "object",
+      "required": [
+       "snapshotId",
+       "sandboxId",
+       "generation",
+       "treeAvailable",
+       "truncated",
+       "fileCount",
+       "totalSizeBytes",
+       "entries"
+      ],
+      "properties": {
+       "type": {
+        "type": "string",
+        "const": "snapshot.tree"
+       },
+       "snapshotId": {
+        "type": "string",
+        "format": "uuid"
+       },
+       "sandboxId": {
+        "type": "string"
+       },
+       "generation": {
+        "type": "integer"
+       },
+       "treeAvailable": {
+        "type": "boolean"
+       },
+       "truncated": {
+        "type": "boolean"
+       },
+       "fileCount": {
+        "type": "integer"
+       },
+       "totalSizeBytes": {
+        "type": "integer"
+       },
+       "entries": {
+        "type": "array",
+        "items": {
+         "$ref": "#/components/schemas/BDSnapshotTreeEntry"
+        }
+       },
+       "reason": {
+        "type": "string"
+       }
+      }
+     }
+    ]
    },
    "BDSshKeyResponse": {
     "allOf": [
@@ -16544,6 +19136,34 @@
        "string",
        "null"
       ]
+     }
+    }
+   },
+   "BDUpgradeSandboxEnvironmentResponse": {
+    "type": "object",
+    "required": [
+     "success",
+     "upgraded",
+     "failed"
+    ],
+    "properties": {
+     "success": {
+      "type": "boolean"
+     },
+     "upgraded": {
+      "type": "integer"
+     },
+     "upgradedLive": {
+      "type": "integer"
+     },
+     "upgradedStopped": {
+      "type": "integer"
+     },
+     "failed": {
+      "type": "integer"
+     },
+     "latestVersionId": {
+      "type": "string"
      }
     }
    },

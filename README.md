@@ -27,10 +27,12 @@ approve agent tasks on it.
   sync and long commands (`run_command`/`follow_command`), files, find, download URLs, hosted ports,
   ssh keys, the desktop, snapshots (saved, named, listings, share codes), secrets, the AI proxy
   switch, webhooks, API keys, environments and limits, plus telemetry, AI usage and access,
-  environment vars, file replace, upload URLs, artifacts, share and recover. 90 of boat.dev's 122
-  operations are mapped; prompts, events and `hostedPorts` are tested against a fake boatd only,
-  and orgs, repos, CI, credential profiles, data retention, environment upgrades/repos/secret files
-  and snapshot trees/files/download are not mapped (`unshare` answers 501: no private sandboxes here)
+  environment vars, file replace, upload URLs, artifacts, share and recover. 100 of boat.dev's 122
+  operations are mapped (credential profiles as one `default` profile per team, snapshot download
+  as the archive itself); prompts, events and `hostedPorts` are tested against a fake boatd only.
+  The other 22 (orgs, repos, CI, data retention, more credential profiles and custom APIs,
+  environment upgrades/repos/secret files, snapshot trees/files) answer 501 `not_supported`, as
+  does `unshare` (no private sandboxes here)
   ([list](docs/boat.md#boatdev-api-compatibility-apiv1)).
   **Pre-release:** not for untrusted tenants without the operator checklist and an external pentest;
   see [docs/boat.md](docs/boat.md).
