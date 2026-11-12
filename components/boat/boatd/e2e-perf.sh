@@ -10,19 +10,21 @@
 #   density   idle RSS per default VM with and without the balloon, KSM saving
 #   warm      10 concurrent creates, cold and from a warm template
 #
-# Gates: measured on GitHub's EPYC 7763 runner (4 shared vCPU, loop btrfs, host fio
-# 329-449 MB/s) in runs 41600185173, 41605574172 and 41609413499, plus margin. They
-# catch regressions, not runner noise; rand IOPS here move by a factor of 2 between runs.
-PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-18}    # 3.8 GiB to write: 8.1-9 s
-PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-6}             # 0.74-4.07 s in 27 runs (2026-10/11): the restore reads the mem file behind the dump's 3.8 GiB writeback
-PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-3}             # right after that snapshot: 1.5 s
-PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-13}    # 7.9-9.3 s; 10 x 4 vCPU on 4 host CPUs
-PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 528 MiB
-PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 257-264 MiB
-PERF_FREED_RSS_MAX=${E2E_PERF_FREED_RSS_MAX:-1000} # 3 GiB used, freed, 20 s later: 531 MiB
-PERF_SEQ_WRITE_MIN=${E2E_PERF_SEQ_WRITE_MIN:-250}  # MB/s: 781-1085
-PERF_RAND_READ_MIN=${E2E_PERF_RAND_READ_MIN:-15000} # IOPS: 27k-76k (all Async)
-PERF_RAND_WRITE_MIN=${E2E_PERF_RAND_WRITE_MIN:-15000} # IOPS: 41k-56k (all Async)
+# Gates: GitHub's EPYC 7763 runner (4 shared vCPU, loop btrfs, host fio 329-449 MB/s).
+# Each is about 2x the worst value (or half the worst, for minimums) in the 11 green
+# boat-e2e runs on main 42710565475-43209685030 (2026-11-09..12); a gate already
+# tighter than that stays where it is. They catch regressions, not runner noise: rand
+# IOPS move by a factor of 5 between runs. Worst green value -> gate:
+PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-18}    # 5.91-9.73 s (3.8 GiB to write) -> 18 (1.85x)
+PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-5}             # 0.75-2.48 s -> 5; red runs saw 3.18 (43151531250) and 4.07: the restore reads the mem file behind the dump's 3.8 GiB writeback
+PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-3}             # right after that snapshot: 1.10-2.03 s -> 3 (1.5x)
+PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-13}    # 4.93-9.44 s; 10 x 4 vCPU on 4 host CPUs -> 13 (1.4x)
+PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 527-530 MiB -> 700
+PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 259-280 MiB -> 450
+PERF_FREED_RSS_MAX=${E2E_PERF_FREED_RSS_MAX:-1000} # 3 GiB used, freed, 20 s later: 529-536 MiB -> 1000
+PERF_SEQ_WRITE_MIN=${E2E_PERF_SEQ_WRITE_MIN:-250}  # MB/s: 530-911 -> 250
+PERF_RAND_READ_MIN=${E2E_PERF_RAND_READ_MIN:-15000} # IOPS: 25k-171k (all Async) -> 15000 (0.6x)
+PERF_RAND_WRITE_MIN=${E2E_PERF_RAND_WRITE_MIN:-15000} # IOPS: 34k-58k (all Async) -> 15000
 check_min() { # NAME VALUE MIN
   printf 'e2e: %-14s %s (min %s)\n' "$1" "$2" "$3"
   awk -v a="$2" -v b="$3" 'BEGIN { exit !(a >= b) }' || perf_fail+="$1 was $2 < $3; "
