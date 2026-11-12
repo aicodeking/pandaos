@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -212,10 +213,10 @@ func (s *server) createShare(w http.ResponseWriter, r *http.Request, p *principa
 	sh := &SnapShare{ID: randHex(8), TeamID: p.Team.ID, VMID: r.PathValue("id"), SnapshotID: sid, Created: now}
 	view := shareView{}
 	if body.TeamID != "" {
-		// A team that does not exist gets the same answer as one that does not
-		// want it: 404. Team ids are not secret from their members only.
-		if t := s.store.Snapshot().Teams[body.TeamID]; t == nil || body.TeamID == p.Team.ID {
-			writeErr(w, r, 404, "not_found", "team not found")
+		// The answer is the same whether the team exists or not (no oracle);
+		// the grant reaches it only once it allowlists this team (grantFor).
+		if !reTeamID.MatchString(body.TeamID) || body.TeamID == p.Team.ID {
+			writeErr(w, r, 400, "invalid_request", "team_id must be another team's id")
 			return
 		}
 		sh.Grantee = body.TeamID
@@ -338,11 +339,18 @@ func (s *server) revokeShare(w http.ResponseWriter, r *http.Request, p *principa
 
 func shareLive(sh *SnapShare) bool { return sh.Expires == nil || time.Now().Before(*sh.Expires) }
 
+// grantFor: a live team grant to team that team has accepted (allowlisted the sender).
+func grantFor(st *State, sh *SnapShare, team string) bool {
+	t := st.Teams[team]
+	return sh != nil && sh.Grantee == team && shareLive(sh) && t != nil && slices.Contains(t.AcceptSharesFrom, sh.TeamID)
+}
+
 // sharedWithMe lists grants to the caller's team.
 func (s *server) sharedWithMe(w http.ResponseWriter, r *http.Request, p *principal) {
 	out := []shareView{}
-	for _, sh := range s.store.Snapshot().SnapShares {
-		if sh.Grantee == p.Team.ID && shareLive(sh) {
+	st := s.store.Snapshot()
+	for _, sh := range st.SnapShares {
+		if grantFor(st, sh, p.Team.ID) {
 			out = append(out, viewShare(sh))
 		}
 	}
@@ -410,8 +418,8 @@ func (s *server) importShare(w http.ResponseWriter, r *http.Request, p *principa
 	var sh *SnapShare
 	if body.Code != "" {
 		sh = s.shareByCode(body.Code)
-	} else if cur := s.store.Snapshot().SnapShares[body.ShareID]; cur != nil && cur.Grantee == p.Team.ID && shareLive(cur) {
-		sh = cur
+	} else if st := s.store.Snapshot(); grantFor(st, st.SnapShares[body.ShareID], p.Team.ID) {
+		sh = st.SnapShares[body.ShareID]
 	}
 	if sh == nil {
 		writeErr(w, r, 404, "not_found", "share not found or expired")

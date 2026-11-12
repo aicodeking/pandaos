@@ -42,6 +42,8 @@ type Team struct {
 	Name    string    `json:"name"`
 	Members []Member  `json:"members"`
 	Created time.Time `json:"created"`
+	// AcceptSharesFrom: teams whose snapshot grants this team sees and takes.
+	AcceptSharesFrom []string `json:"accept_shares_from,omitempty"`
 }
 
 func (t *Team) role(userID string) string {

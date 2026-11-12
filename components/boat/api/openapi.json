@@ -9294,6 +9294,73 @@
      }
     }
    }
+  },
+  "/v1/teams/{id}/share-allowlist": {
+   "put": {
+    "summary": "Set the teams whose snapshot grants this team accepts (recipient consent)",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Teams"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": ""
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "teams": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        },
+        "required": [
+         "teams"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "teams": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          }
+         },
+         "required": [
+          "teams"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
   }
  },
  "components": {
@@ -10412,6 +10479,12 @@
      "created": {
       "type": "string",
       "format": "date-time"
+     },
+     "accept_shares_from": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
      }
     },
     "required": [

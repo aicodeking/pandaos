@@ -175,6 +175,8 @@ type teamView struct {
 	Role    string    `json:"role"`
 	Members []Member  `json:"members,omitempty"`
 	Created time.Time `json:"created"`
+	// AcceptSharesFrom is shown to the team's own members only.
+	AcceptSharesFrom []string `json:"accept_shares_from,omitempty"`
 }
 
 func (s *server) listTeams(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -194,7 +196,54 @@ func (s *server) getTeam(w http.ResponseWriter, r *http.Request, p *principal) {
 		writeErr(w, r, 404, "not_found", "team not found")
 		return
 	}
-	writeJSON(w, 200, teamView{ID: t.ID, Name: t.Name, Role: t.role(p.User.ID), Members: t.Members, Created: t.Created})
+	writeJSON(w, 200, teamView{ID: t.ID, Name: t.Name, Role: t.role(p.User.ID), Members: t.Members, Created: t.Created, AcceptSharesFrom: t.AcceptSharesFrom})
+}
+
+const maxShareAllow = 64
+
+var reTeamID = regexp.MustCompile(`^team_[0-9a-f]{1,32}$`)
+
+// setShareAllowlist: the recipient's consent for snapshot grants (snapshots.go).
+func (s *server) setShareAllowlist(w http.ResponseWriter, r *http.Request, p *principal) {
+	var body struct {
+		Teams []string `json:"teams"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if len(body.Teams) > maxShareAllow {
+		writeErr(w, r, 400, "invalid_request", "at most 64 teams")
+		return
+	}
+	for _, id := range body.Teams {
+		if !reTeamID.MatchString(id) {
+			writeErr(w, r, 400, "invalid_request", "invalid team id "+id)
+			return
+		}
+	}
+	t, _, ok := s.teamAdmin(w, r, p)
+	if !ok {
+		return
+	}
+	allow := slices.Clone(body.Teams)
+	slices.Sort(allow)
+	allow = slices.Compact(allow)
+	err := s.store.Update(func(st *State) error {
+		team := st.Teams[t.ID]
+		if team == nil {
+			return errConflict
+		}
+		team.AcceptSharesFrom = allow
+		return nil
+	})
+	if err != nil {
+		s.storeErr(w, r, err)
+		return
+	}
+	if allow == nil {
+		allow = []string{}
+	}
+	writeJSON(w, 200, map[string]any{"teams": allow})
 }
 
 // createTeam is operator-only: tenants are onboarded by the operator. With

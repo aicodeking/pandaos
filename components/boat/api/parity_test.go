@@ -640,8 +640,11 @@ func TestSnapshotDownloadImportShare(t *testing.T) {
 	}
 
 	// grant another team
-	if st, _ := e.do(e.owner, "POST", base+"/shares", map[string]any{"team_id": "team_nope"}); st != 404 {
-		t.Errorf("share to unknown team: %d", st)
+	if st, _ := e.do(e.owner, "POST", base+"/shares", map[string]any{"team_id": "team_nope"}); st != 400 {
+		t.Errorf("share to an invalid team id: %d", st)
+	}
+	if st, _ := e.do(other, "PUT", "/v1/teams/"+tid+"/share-allowlist", map[string]any{"teams": []string{e.teamID()}}); st != 200 {
+		t.Fatalf("allowlist: %d", st)
 	}
 	if st, _ := e.do(e.owner, "POST", base+"/shares", map[string]any{"ttl_s": -1}); st != 400 {
 		t.Errorf("bad ttl: %d", st)
