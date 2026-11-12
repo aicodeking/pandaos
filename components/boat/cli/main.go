@@ -59,19 +59,23 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat secrets ls | set NAME [VALUE|-] [--no-inject] | rotate NAME [VALUE|-] | rm NAME
   boat keys [ls | create [--name N] [--scopes a,b] [--team T] | rm ID | rotate ID [--overlap 24h] | usage ID]
   boat teams [ls | create NAME [--owner U] | show ID | rm ID | add-member TEAM NAME [--role R] | rm-member TEAM USER]
+  boat status <vm> | events <vm> [--limit N] | recover <vm> | share <vm> | unshare <vm> (not supported here)
+  boat dashboard [--no-open]           boat deletion status <operation id>
   boat upgrade|self-update [--version vX.Y.Z]   replace this binary with a release build (checksum-verified)
   boat completions bash|zsh|fish|powershell     print a shell completion script
   boat webhooks [ls | create URL [--events a,b] | show ID | update ID [--url U] [--events a,b] | rm ID | deliveries ID | test ID | rotate ID [--overlap 24h]]
 
 A <vm> can be an id, a unique name, current (last created or forked in this shell) or self (inside a VM).
 Inside a VM: host <port> [--public] | host list | host url <port> | host hide <port>.
-Global: --json (JSON lines on stdout, errors as JSON on stderr). Env: BOAT_URL, BOAT_API_KEY, BOAT_CONFIG.`
+Global: --json (JSON lines on stdout, errors as JSON on stderr), --api-url URL (this run's API; login --url saves one).
+Env: BOAT_URL, BOAT_API_KEY, BOAT_CONFIG. boat.dev cloud-only verbs (org, billing, repos, ci, credentials, retention, onboard) are not supported here.`
 
 type app struct {
 	out, errw io.Writer
 	in        io.Reader
 	getenv    func(string) string
 	json      bool
+	apiURL    string // global --api-url (boat.dev's flag): overrides the saved URL and BOAT_URL
 	cfg       Config
 	c         *client
 	execProg  func(argv []string) error // replaces the process (ssh)
@@ -114,13 +118,26 @@ var errUsage = errors.New("usage")
 func (a *app) run(args []string) int {
 	// --json is global and may appear anywhere before "--".
 	var rest []string
+	skip := false
 	for i, x := range args {
+		if skip {
+			skip = false
+			continue
+		}
 		if x == "--" {
 			rest = append(rest, args[i:]...)
 			break
 		}
 		if x == "--json" || x == "-json" {
 			a.json = true
+			continue
+		}
+		if v, ok := strings.CutPrefix(x, "--api-url="); ok {
+			a.apiURL = v
+			continue
+		}
+		if x == "--api-url" && i+1 < len(args) {
+			a.apiURL, skip = args[i+1], true
 			continue
 		}
 		rest = append(rest, x)
@@ -155,6 +172,9 @@ func (a *app) run(args []string) int {
 
 func (a *app) dispatch(cmd string, args []string) error {
 	if cmd == "login" {
+		if a.apiURL != "" {
+			args = append([]string{"--url", a.apiURL}, args...)
+		}
 		return a.login(args)
 	}
 	switch cmd {
@@ -164,6 +184,9 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.logout(args)
 	case "completions":
 		return a.completions(args)
+	}
+	if slices.Contains(notSelfHosted, cmd) {
+		return fmt.Errorf("boat %s is a boat.dev cloud feature; it is not supported on self-hosted boat", cmd)
 	}
 	if cmd == "version" {
 		return a.emit(obj{"version": version}, func() { fmt.Fprintln(a.out, "boat", version) })
@@ -181,6 +204,9 @@ func (a *app) dispatch(cmd string, args []string) error {
 			return errors.New("this VM has no API key: boat-api injects BOAT_URL and a key for this VM only when the operator sets -vm-api-url (or -public-url); otherwise, on your computer, store a key as team secrets (boat keys create --scopes vms:read,vms:write,exec; boat secrets set BOAT_API_KEY; boat secrets set BOAT_URL) and restart the VM")
 		}
 		return errors.New("not logged in: run boat login --url URL --key KEY")
+	}
+	if a.apiURL != "" {
+		cfg.URL = a.apiURL
 	}
 	a.cfg = cfg
 	a.c = &client{base: cfg.URL, key: cfg.Key, hc: &http.Client{}, alias: a.vmAlias}
