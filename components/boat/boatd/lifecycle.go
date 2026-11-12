@@ -275,7 +275,7 @@ func (m *Manager) bootArgs(v VM) string {
 // boot launches firecracker and either cold-boots or restores root/{vmstate,mem}.
 func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 	uid, gid := m.ids(v)
-	if err := addVMNet(m.cfg, m.run, v, uid); err != nil {
+	if err := addVMNet(m.cfg, m.run, v, uid, gid); err != nil {
 		return v, err
 	}
 	root := m.root(v.ID)

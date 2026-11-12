@@ -107,17 +107,17 @@ func netnsFor(i int) string { return fmt.Sprintf("boat%d", i) }
 func netnsPath(i int) string { return "/run/netns/" + netnsFor(i) }
 
 // addVMNet builds the VM's network: netns boat<n> holding tap0 (owned by the
-// VM's uid) bridged to veth0, whose peer bt<n> is the VM's port on boatbr0.
+// VM's uid and gid: the kernel checks both, so a shared jailGid must be the tap's group) bridged to veth0, whose peer bt<n> is the VM's port on boatbr0.
 // The jailer joins the netns, so firecracker sees no host interface at all.
-func addVMNet(c Config, run runner, v VM, uid int) error {
+func addVMNet(c Config, run runner, v VM, uid, gid int) error {
 	delVMNet(run, v)
-	ns, u := netnsFor(v.Index), fmt.Sprint(uid)
+	ns, u, g := netnsFor(v.Index), fmt.Sprint(uid), fmt.Sprint(gid)
 	steps := [][]string{
 		{"ip", "netns", "add", ns},
 		{"ip", "link", "add", v.Tap, "type", "veth", "peer", "name", "veth0", "netns", ns},
 		{"ip", "netns", "exec", ns, "sysctl", "-qw", "net.ipv6.conf.all.disable_ipv6=1"},
 		{"ip", "-n", ns, "link", "add", "br0", "type", "bridge"},
-		{"ip", "-n", ns, "tuntap", "add", "dev", guestTap, "mode", "tap", "user", u, "group", u},
+		{"ip", "-n", ns, "tuntap", "add", "dev", guestTap, "mode", "tap", "user", u, "group", g},
 		{"ip", "-n", ns, "link", "set", guestTap, "master", "br0", "up"},
 		{"ip", "-n", ns, "link", "set", "veth0", "master", "br0", "up"},
 		{"ip", "-n", ns, "link", "set", "br0", "up"},
