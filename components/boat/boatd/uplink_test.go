@@ -88,7 +88,7 @@ func TestUnpackCommand(t *testing.T) {
 	}
 	joined := strings.Join(argv, " ")
 	for _, want := range []string{"systemd-run ", "--pipe", "--wait", "-p User=nobody", "-p PrivateNetwork=yes",
-		"-p RestrictAddressFamilies=none", "-p SystemCallFilter=@system-service", "-p CapabilityBoundingSet="} {
+		"-p SystemCallFilter=~@network-io", "-p SystemCallFilter=@system-service", "-p CapabilityBoundingSet="} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("sandboxed argv lacks %q: %s", want, joined)
 		}

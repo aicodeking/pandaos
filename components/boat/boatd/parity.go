@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -325,8 +326,8 @@ func unprivileged(euid int) *syscall.SysProcAttr {
 // unpackSandboxProps: the transient unit the decompressor runs in under unpackSandbox. It
 // reads a tar.zst on stdin and writes a tar on stdout, nothing else.
 var unpackSandboxProps = []string{
-	"User=nobody", "PrivateNetwork=yes", "RestrictAddressFamilies=none", "IPAddressDeny=any",
-	"SystemCallFilter=@system-service", "SystemCallFilter=~@privileged @resources @mount",
+	"User=nobody", "PrivateNetwork=yes", "IPAddressDeny=any",
+	"SystemCallFilter=@system-service", "SystemCallFilter=~@privileged @resources @mount", "SystemCallFilter=~@network-io",
 	"SystemCallArchitectures=native", "SystemCallErrorNumber=EPERM", "NoNewPrivileges=yes",
 	"CapabilityBoundingSet=", "ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes",
 	"PrivateDevices=yes", "PrivateIPC=yes", "ProtectKernelTunables=yes", "ProtectKernelModules=yes",
@@ -364,6 +365,8 @@ func (m *Manager) importInto(ctx context.Context, body io.Reader, dir string, s 
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Stdin = body
 	cmd.Dir, cmd.Env, cmd.SysProcAttr = "/", []string{}, attr
+	stderr := &cappedBuffer{max: 4096} // zstd's or systemd-run's complaint, for the log
+	cmd.Stderr = stderr
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return s, err
@@ -375,6 +378,9 @@ func (m *Manager) importInto(ctx context.Context, body io.Reader, dir string, s 
 	cancel()
 	cmd.Wait() // a corrupt stream already surfaced as a tar error
 	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			log.Printf("import %s: decompressor: %s", s.ID, msg)
+		}
 		return s, err
 	}
 	var mf exportManifest
@@ -547,4 +553,17 @@ func (m *Manager) snapshotsOfTeam(team string) []Snapshot {
 		}
 	}
 	return out
+}
+
+// cappedBuffer keeps the first max bytes written to it and drops the rest.
+type cappedBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.Len(); room > 0 {
+		b.Buffer.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
 }
