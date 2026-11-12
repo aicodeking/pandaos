@@ -1,0 +1,3 @@
+SMT control: off, CPUs online: 8
+cpuOvercommit 12 on 8 online CPUs
+cpuOvercommit 12 on 16 online CPUs

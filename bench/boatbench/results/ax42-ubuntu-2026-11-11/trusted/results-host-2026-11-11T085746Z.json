@@ -1,0 +1,60 @@
+{
+ "driver": "host",
+ "run_id": "d05f92",
+ "size": "host",
+ "started": "2026-11-11T08:57:46Z",
+ "host": {
+  "desc": "Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB, 2x512 GB NVMe mdadm RAID1; boat state = btrfs loop file on ext4 on RAID1; preset trusted; 16 CPUs online"
+ },
+ "boatd_options": "{\"cgroupParent\":\"boat-bench\",\"reflink\":\"always\",\"bootTimeoutS\":120,\"defaultImage\":\"slim\",\"memOvercommit\":8,\"cpuOvercommit\":12,\"defaultTeam\":{\"maxVMs\":16}}",
+ "preset": "trusted",
+ "fc_cache_type": "-",
+ "run_url": null,
+ "client": {
+  "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16",
+  "os": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
+  "egress": "HEL DE"
+ },
+ "parts": "ad",
+ "repeats": [
+  {
+   "index": 0,
+   "metrics": {
+    "create_ready_s": 2.5999906938523054e-06,
+    "node_runs_s": [
+     22.83,
+     23.07,
+     22.85
+    ],
+    "seq_write_mbps": 4539.0,
+    "seq_read_mbps": 7238.1,
+    "rand_write_iops": 123102.0,
+    "rand_read_iops": 251333.0,
+    "pts_rand_read_iops": 253094.0,
+    "pts_rand_write_iops": 123679.0,
+    "pts_seq_write_mibps": 4775.9,
+    "fsync_rand_write_iops": 83.0,
+    "seq_write_endfsync_mbps": 5452.1
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 16,
+    "cpu_count": 16,
+    "mem_mib": 63381,
+    "disk_gib": 100.0,
+    "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics",
+    "kernel": "6.8.0-146-generic",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "none",
+    "system_node": "",
+    "user": "root",
+    "home_fs": "btrfs",
+    "egress_colo": "HEL",
+    "egress_country": "DE"
+   },
+   "node": "v22.22.3",
+   "disk_tool": "fio",
+   "disk_errors": null
+  }
+ ]
+}

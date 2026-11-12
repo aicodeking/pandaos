@@ -58,6 +58,9 @@ B=/tmp/bb; rm -rf $B; mkdir -p $B/node $B/wtb; cd $B
 curl -fsSLo node.tar.xz https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-linux-x64.tar.xz
 echo "{NODE_SHA256}  node.tar.xz" | sha256sum -c - >/dev/null
 tar -xJf node.tar.xz -C node --strip-components=1
+# Hosts without an FHS loader (NixOS): BB_NODE_LOADER="ld.so --library-path ..." runs the same binary. VMs never set it.
+if [ -n "${{BB_NODE_LOADER:-}}" ]; then mv node/bin/node node/bin/node.real
+  printf '#!/bin/sh\nexec %s %s/node/bin/node.real "$@"\n' "$BB_NODE_LOADER" "$B" >node/bin/node; chmod +x node/bin/node; fi
 cd wtb
 curl -fsSLo web-tooling-benchmark-0.5.3.tar.gz https://github.com/v8/web-tooling-benchmark/archive/v0.5.3.tar.gz
 echo "{WTB_SHA256}  web-tooling-benchmark-0.5.3.tar.gz" | sha256sum -c - >/dev/null

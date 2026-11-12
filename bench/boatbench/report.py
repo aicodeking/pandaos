@@ -20,6 +20,7 @@ METRICS = [
     ("snapshot_s", "(b) snapshot (until usable)", "s", False),
     ("from_snapshot_ready_s", "(b) new-from-snapshot -> exec-ready", "s", False),
     ("concurrent10_wall_s", "(c) 10 concurrent creates, wall to all exec-ready", "s", False),
+    ("concurrent8_wall_s", "(c) 8 concurrent creates (BOATBENCH_CONCURRENT_N=8), wall to all exec-ready", "s", False),
     ("seq_write_mbps", "(d) disk seq write 1M", "MB/s", True),
     ("seq_read_mbps", "(d) disk seq read 1M", "MB/s", True),
     ("rand_write_iops", "(d) disk rand write 4k", "IOPS", True),
@@ -38,7 +39,7 @@ METRICS = [
 
 # Lifecycle metrics also reported net of the API round trip (boatbench.add_net).
 NET_KEYS = ("exec_rtt_p50_ms", "create_ready_s", "fork_ready_s", "stop_s", "resume_ready_s", "snapshot_s",
-            "from_snapshot_ready_s", "concurrent10_wall_s")
+            "from_snapshot_ready_s", "concurrent10_wall_s", "concurrent8_wall_s")
 _BASE = {k: (label, unit, hib) for k, label, unit, hib in METRICS}
 METRICS = METRICS + [(k + "_net", _BASE[k][0] + ", NET of API round trips (raw - k x baseline p50)", _BASE[k][1],
                       _BASE[k][2]) for k in NET_KEYS]
@@ -123,7 +124,25 @@ def samples(result, key):
     return [x for x in out if x is not None]
 
 
-def load_prices(path):
+def server_price(raw, key):
+    """PandaOS price block for one server of prices.json["servers"], by its `key` (ax42, ax102, ...)."""
+    srv = {x.get("key"): x for x in raw.get("servers", [])}
+    if key not in srv:
+        raise ValueError(f"unknown --server {key!r}; prices.json has {sorted(k for k in srv if k)}")
+    s, a = srv[key], raw.get("assumptions", {})
+    hours = a.get("hours_per_month", 730)
+    monthly = s["usd_per_month"] + s["setup_usd"] / a.get("setup_amortization_months", 12) + s["backup_usd_per_month"]
+    operator = a.get("operator_hours_per_month", 0) * a.get("operator_usd_per_hour", 0)
+    return {"usd_per_hour": monthly / hours / s["vms_overcommit_1_0"], "cpu": s["cpu"], "server": s,
+            "source": f"prices.json servers[{key}]: {s['source']}; ${monthly:.2f}/month incl. setup/12 + backup, "
+                      f"/ {s['vms_overcommit_1_0']} VMs (memOvercommit 1.0) / {hours} h",
+            "density_model": {"name": s["name"], "host_usd_per_hour": monthly / hours,
+                              "host_usd_per_hour_operator": (monthly + operator) / hours,
+                              "trusted": {"vms": s["vms_overcommit_1_5"], "cpus": s["vcpu_threads"]},
+                              "untrusted": {"vms": s["vms_untrusted"], "cpus": s["cores"]}}}
+
+
+def load_prices(path, server=None):
     if not path or not os.path.exists(path):
         return None
     with open(path) as f:
@@ -131,6 +150,9 @@ def load_prices(path):
     prices = {}
     for side in SIDES:
         p = raw.get(side)
+        if side == "pandaos" and raw.get("servers") and isinstance(p, dict) and "usd_per_hour" not in p:
+            prices[side] = server_price(raw, server or p.get("default_server", "ax102"))
+            continue
         if isinstance(p, dict) and isinstance(p.get("usd_per_hour"), (int, float)) and p["usd_per_hour"] >= 0:
             prices[side] = {"usd_per_hour": float(p["usd_per_hour"]), "source": p.get("source", ""),
                             "cpu": p.get("cpu", "")}
@@ -169,7 +191,9 @@ def cost_section(summ, prices, res, published):
             "|---|---|---|---|---|---|"]
     for side, p, per_k, per_npm in rows:
         measured = cpu_of(res[side]) if side in res else "-"
-        mixed = not p.get("cpu") or measured == "-" or not _same_cpu(p["cpu"], measured)
+        mixed = side not in res or not speed_on_cpu(res[side], p.get("cpu"))
+        if side in res and side == "pandaos":
+            measured += f" (guest); harness host {res[side].get('client', {}).get('cpu_model', '-')}"
         tag = " (MIXED CPUs)" if mixed else ""
         out.append(f"| {side} | {p['usd_per_hour']:.4f} | {p.get('cpu') or '-'} | {measured} | "
                    f"{'-' if per_k is None else f'{per_k:.6f}{tag}'} | {'-' if per_npm is None else f'{per_npm:.6f}{tag}'} |")
@@ -178,15 +202,21 @@ def cost_section(summ, prices, res, published):
         v = published["metrics"]["node_runs_s"]["value"]
         out += ["", f"CPU-consistent figure: boat.dev's price with boat.dev's own published speed on the CPU it "
                 f"sells ({v} runs/s, vendor-measured, {published['rows'][0]['cpu']}): "
-                f"**{bd['usd_per_hour'] / 3600 * 1000 / v:.6f} USD per 1000 runs**. PandaOS has no CPU-consistent "
-                "figure yet: its price is an AX102 (Ryzen 9 7950X3D, Zen 4), and nobody has run boatbench on one. "
-                "The 9950X projection below is not that CPU either."]
+                f"**{bd['usd_per_hour'] / 3600 * 1000 / v:.6f} USD per 1000 runs**. PandaOS's price here is "
+                f"{(prices.get('pandaos') or {}).get('cpu') or '-'}: its per-run cost is CPU-consistent only where "
+                "the speed above was measured on that CPU (the density section says which)."]
     return out
+
+
+def speed_on_cpu(result, cpu):
+    """Was this result's speed measured on `cpu`? Firecracker guests may report a generic model ("AMD EPYC"),
+    so the harness host's CPU counts too: true when the harness runs on the PandaOS host (run-on-server.sh, CI)."""
+    return bool(cpu) and (_same_cpu(cpu, cpu_of(result)) or _same_cpu(cpu, result.get("client", {}).get("cpu_model")))
 
 
 def _same_cpu(a, b):
     """Loose model match: the price's CPU string names the measured model."""
-    m = re.search(r"(EPYC \w+|Ryzen \d \w+|Xeon[^,(]*)", b or "")
+    m = re.search(r"(EPYC \w+|Ryzen \d (?:PRO )?\w+|Xeon[^,(]*)", b or "")
     return bool(m) and m.group(1).lower() in (a or "").lower()
 
 
@@ -345,7 +375,7 @@ def normalization(host_results, vm, published):
 
 
 PRESET_METRICS = ("node_runs_s", "api_rtt_p50_ms", "create_ready_s", "exec_rtt_p50_ms", "fork_ready_s", "stop_s", "resume_ready_s",
-                  "snapshot_s", "from_snapshot_ready_s", "concurrent10_wall_s", "seq_write_mbps", "seq_read_mbps",
+                  "snapshot_s", "from_snapshot_ready_s", "concurrent10_wall_s", "concurrent8_wall_s", "seq_write_mbps", "seq_read_mbps",
                   "rand_write_iops", "rand_read_iops", "pts_rand_write_iops", "pts_rand_read_iops",
                   "fsync_rand_write_iops", "seq_write_endfsync_mbps",
                   "dl_go_tarball_googlecdn_mbit", "npm_ci_s")
@@ -423,7 +453,8 @@ def render(results, prices=None, published=None):
             out += [f"| {r['provider']} | {r['runs_s']} | {r['cpu']} |" for r in published["rows"]]
     if host_results and "pandaos" in res:
         out += normalization(host_results, res["pandaos"], published)
-    out += density_section(res, prices)
+    out += density_section(res, prices, published)
+    out += host_density_lines(host_results, res.get("pandaos"))
     out += cost_section(summ, prices, res, published)
     out += ["", "## Caveats", ""] + [f"- {c}" for c in CAVEATS + auto_caveats(res)]
     return "\n".join(out) + "\n"
@@ -480,7 +511,7 @@ def density_projection(levels, model):
     return model["vms"], model["cpus"], load, eff, inside
 
 
-def density_section(res, prices):
+def density_section(res, prices, published=None):
     out = []
     for side, r in res.items():
         lv = density_levels(r)
@@ -510,7 +541,56 @@ def density_section(res, prices):
         model = (p or {}).get("density_model") if pan else None
         if model:
             mode = "untrusted" if "untrusted" in str(r.get("preset", "")) else "trusted"
-            out += density_projection_lines(lv, model, mode)
+            same = speed_on_cpu(r, p.get("cpu"))
+            out += (measured_cost_lines(lv, model, mode, prices, published) if same
+                    else density_projection_lines(lv, model, mode))
+    return out
+
+
+def boatdev_ref(prices, published):
+    """boat.dev's USD per 1000 runs at its price and its published solo speed (the CPU-consistent figure)."""
+    bd = (prices or {}).get("boatdev")
+    return bd["usd_per_hour"] / 3.6 / published["metrics"]["node_runs_s"]["value"] if bd and published else None
+
+
+def measured_cost_lines(lv, model, mode, prices, published):
+    """Cost per run from the measured host throughput at each N, when the price is this CPU's."""
+    host, op, ref = model["host_usd_per_hour"], model.get("host_usd_per_hour_operator"), boatdev_ref(prices, published)
+    out = ["", f"### Cost per run on {model['name']}, MEASURED (price and speed from the same CPU)", "",
+           f"USD per 1000 runs = ${host:.4f}/h / 3.6 / measured host runs/s, at 100% busy, no retention"
+           + (f"; + operator time: ${op:.4f}/h" if op else "") + ". "
+           f"boatd admits {model[mode]['vms']} `default` VMs on it in {mode} mode (prices.json). "
+           + (f"boat.dev reference: ${ref:.6f} (its price at its PUBLISHED solo speed; its speed under load is "
+              "unmeasured)." if ref else ""), "",
+           "| N VMs | host runs/s (measured) | USD per 1000 runs | + operator time | vs boat.dev reference |",
+           "|---|---|---|---|---|"]
+    for n, f in lv.items():
+        h = (f.get("host_runs_s") or {}).get("median")
+        if not h:
+            continue
+        k = host / 3.6 / h
+        out.append(f"| {n} | {h:.2f} | ${k:.6f} | {f'${op / 3.6 / h:.6f}' if op else '-'} | "
+                   f"{f'{k / ref:.2f}x' if ref else '-'} |")
+    return out
+
+
+def host_density_lines(host_results, vm_result):
+    """N Node loops directly on the host vs N VMs: separates CPU saturation from virtualization overhead."""
+    hl = density_levels(merged(host_results)) if host_results else {}
+    if not hl:
+        return []
+    vl = density_levels(vm_result) if vm_result else {}
+    out = ["", "## (g) Host-native density baseline vs VMs (MEASURED, same host)", "",
+           "N copies of the Node loop directly on the host (no VM), against N VMs each running one. "
+           "Both lose speed as the CPUs fill; the VM / host ratio at each N is what virtualization adds.", "",
+           "| N | host loops: per-loop / total runs/s | efficiency | VMs: per-VM / total runs/s | efficiency | "
+           "VM / host at this N |", "|---|---|---|---|---|---|"]
+    med = lambda lv, n, k: ((lv.get(n) or {}).get(k) or {}).get("median")  # noqa: E731
+    for n in sorted(set(hl) | set(vl)):
+        h, v = med(hl, n, "per_vm_runs_s"), med(vl, n, "per_vm_runs_s")
+        out.append(f"| {n} | {fmt(h)} / {fmt(med(hl, n, 'host_runs_s'))} | {fmt(med(hl, n, 'efficiency'))} | "
+                   f"{fmt(v)} / {fmt(med(vl, n, 'host_runs_s'))} | {fmt(med(vl, n, 'efficiency'))} | "
+                   f"{fmt(v / h) if h and v else '-'} |")
     return out
 
 
@@ -532,7 +612,7 @@ def density_projection_lines(lv, model, mode):
             f"**{load:.2f} loops per CPU** ({rng}). Measured efficiency there: **{eff:.3f}**, so a packed host "
             f"delivers {vms} x {eff:.3f} = {vms * eff:.1f} solo-VM equivalents, and cost per run is "
             f"**{1 / eff:.2f}x** the uncontended figure.",
-            f"With this runner's solo speed ({solo:.2f} runs/s, a different CPU) as the per-VM speed: "
+            f"With the measured solo speed ({solo:.2f} runs/s, a different CPU) as the per-VM speed: "
             f"${host_usd:.4f}/h / ({vms} x {solo:.2f} x {eff:.3f}) = **{per_k:.6f} USD per 1000 runs (MIXED CPUs)**. "
-            "Nobody ran PandaOS on that server; the efficiency curve comes from this runner, whose CPU, SMT "
+            "Nobody ran PandaOS on that server; the efficiency curve comes from the measured host, whose CPU, SMT "
             "layout and memory bandwidth differ."] + warn

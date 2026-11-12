@@ -115,6 +115,10 @@ class Density:
 
     def grow(self, want):
         """`want` fresh VMs at once, each set up; the provider's refusals are left out."""
+        if self.d.name == "host":  # no VMs: set Node up once, then N loops run side by side on the host
+            self.gexec(self.d, "host", W.NODE_SETUP)
+            self.vms = ["host"] * want
+            return
         with concurrent.futures.ThreadPoolExecutor(want) as ex:
             got = list(ex.map(self.one_vm, range(want)))
         self.vms = [v for v in got if isinstance(v, str)]
@@ -148,7 +152,7 @@ class Density:
         return lv
 
     def run(self):
-        cpus = host_cpus() if self.d.name == "pandaos" else None
+        cpus = host_cpus() if self.d.name in ("pandaos", "host") else None
         try:
             self.grow(max(self.levels))
             done = [self.level(n, cpus) for n in self.levels if n <= len(self.vms)]
@@ -160,7 +164,7 @@ class Density:
 
     def cleanup(self):
         self.vms_made = list(self.vms)
-        for vm in self.vms + self.broken:
+        for vm in [v for v in self.vms if v != "host"] + self.broken:
             try:
                 self.d.delete(vm)
             except Exception as e:

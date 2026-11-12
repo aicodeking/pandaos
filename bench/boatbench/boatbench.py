@@ -3,15 +3,18 @@
 
   boatbench.py run --driver pandaos|boatdev [--repeats 5] [--only a,b,c,d,e,f,g] [--out DIR]
   boatbench.py run --driver host --only ad [--repeats 5] [--out DIR]   # same scripts, no VM
-  boatbench.py report RESULTS.json... [--prices prices.json] [--out report.md]
+  boatbench.py report RESULTS.json... [--prices prices.json] [--server ax42|ax102|...] [--out report.md]
   boatbench.py presets RESULTS.json... [--out presets.md]   # PandaOS per boatd preset
+  boatbench.py costs [--prices prices.json] [--out costs.md]   # price-only tables (no results)
 
 pandaos needs BOAT_URL + BOAT_KEY; boatdev needs BOATDEV_API_KEY. Each repeat is a
 fresh 4 vCPU / 8 GiB VM. Raw per-repeat data goes to DIR/results-<driver>-<ts>.json.
 Optional env: BOATBENCH_HOST_DESC (hardware/location of the provider host, printed
 in the report), BOATBENCH_RUN_URL, BOATBENCH_BOATD_OPTIONS and BOATBENCH_PRESET
 (printed in the report), BOATBENCH_DENSITY_LEVELS (workload g, default 1,2,4,6),
-BOATBENCH_HOST_CPUS (workload g: CPUs of the PandaOS host if the harness runs elsewhere).
+BOATBENCH_HOST_CPUS (workload g: CPUs of the PandaOS host if the harness runs elsewhere),
+BOATBENCH_CONCURRENT_N (workload c, default 10: VMs created at once), BB_NODE_LOADER (host
+driver on NixOS: the ELF loader command that runs the pinned Node binary).
 
 Every repeat that runs b or c first records the API round-trip baseline: API_RTT_CALLS
 cheap authenticated GETs of the VM (api_rtt_p50_ms). Lifecycle metrics then also get
@@ -33,6 +36,7 @@ import traceback
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cost_tables  # noqa: E402
 import density  # noqa: E402
 import drivers  # noqa: E402
 import report  # noqa: E402
@@ -309,9 +313,11 @@ def cmd_run(a):
     for i in range(a.repeats):
         rec = Repeat(d, run_id, i, parts).run()
         if "c" in parts:
-            log(f"r{i} concurrent {CONCURRENT_N}")
+            log(f"r{i} concurrent")
+            n = int(os.environ.get("BOATBENCH_CONCURRENT_N") or CONCURRENT_N)  # e.g. a team quota below 10
+            rec["concurrent_n"] = n
             try:
-                rec["metrics"]["concurrent10_wall_s"], rec["concurrent_each_s"] = concurrent_create(d, run_id, i)
+                rec["metrics"][f"concurrent{n}_wall_s"], rec["concurrent_each_s"] = concurrent_create(d, run_id, i, n)
             except Exception as e:
                 rec["errors"]["concurrent"] = f"{type(e).__name__}: {e}"
         if "g" in parts:
@@ -338,7 +344,7 @@ def cmd_report(a):
     for p in a.results:
         with open(p) as f:
             results.append(json.load(f))
-    md = report.render(results, report.load_prices(a.prices), report.load_published())
+    md = report.render(results, report.load_prices(a.prices, a.server), report.load_published())
     if a.out:
         with open(a.out, "w") as f:
             f.write(md)
@@ -359,6 +365,15 @@ def cmd_presets(a):
     return 0
 
 
+def cmd_costs(a):
+    md = cost_tables.render(cost_tables.load(a.prices))
+    if a.out:
+        with open(a.out, "w") as f:
+            f.write(md)
+    print(md)
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -370,16 +385,21 @@ def main(argv=None):
     g = sub.add_parser("report")
     g.add_argument("results", nargs="+")
     g.add_argument("--prices", default=os.path.join(HERE, "prices.json"))
+    g.add_argument("--server", help="PandaOS price: a prices.json servers[].key (ax42, ax102, ...); "
+                   "default pandaos.default_server")
     g.add_argument("--out")
     q = sub.add_parser("presets", help="PandaOS medians side by side per boatd preset")
     q.add_argument("results", nargs="+")
     q.add_argument("--out")
+    c = sub.add_parser("costs", help="price-only tables: per VM-hour, break-even, retention (nominal vs thin model)")
+    c.add_argument("--prices", default=os.path.join(HERE, "prices.json"))
+    c.add_argument("--out")
     a = p.parse_args(argv)
     if a.cmd == "run" and (a.repeats < 1 or not set(a.only.replace(",", "")) <= set(ALL_PARTS)):
         p.error("--repeats must be >= 1 and --only a subset of abcdefg")
     if a.cmd == "run" and a.driver == "host" and not set(a.only.replace(",", "")) <= drivers.Host.PARTS:
-        p.error("--driver host only runs workloads a and d")
-    return {"run": cmd_run, "report": cmd_report, "presets": cmd_presets}[a.cmd](a)
+        p.error("--driver host only runs workloads a, d and g")
+    return {"run": cmd_run, "report": cmd_report, "presets": cmd_presets, "costs": cmd_costs}[a.cmd](a)
 
 
 if __name__ == "__main__":

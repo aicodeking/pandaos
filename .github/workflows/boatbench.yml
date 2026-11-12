@@ -55,6 +55,7 @@ jobs:
           python3 -m py_compile bench/boatbench/*.py
           python3 bench/boatbench/test_boatbench.py
           python3 bench/boatbench/test_boatdev.py
+          python3 bench/boatbench/cost_tables.py >/dev/null
           bash -n bench/boatbench/stack.sh bench/boatbench/run-on-server.sh
       - id: plan
         name: Preset matrix
@@ -174,6 +175,8 @@ jobs:
         run: |
           set -a; . /mnt/boatbench/env; set +a
           python3 bench/boatbench/boatbench.py run --driver pandaos --repeats "$DENSITY_REPEATS" --only g --out results
+          # Host-native baseline: the same N Node loops on the runner without VMs (CPU saturation vs virtualization).
+          python3 bench/boatbench/boatbench.py run --driver host --repeats 1 --only g --out results
       - name: Stack logs
         if: always()
         run: |

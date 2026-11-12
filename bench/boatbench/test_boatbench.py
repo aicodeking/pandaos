@@ -9,6 +9,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import admission  # noqa: E402
+import cost_tables  # noqa: E402
 import boatbench  # noqa: E402
 import density  # noqa: E402
 import drivers  # noqa: E402
@@ -235,14 +236,32 @@ class Prices(unittest.TestCase):
         self.assertEqual(admission.vms_by_ram(127743, 1.0, self.d), 14)
 
     def test_prices_recompute(self):
-        ax = next(s for s in self.p["servers"] if s["name"] == "Hetzner AX102")
+        ax = next(s for s in self.p["servers"] if s["key"] == "ax102")
         month = ax["usd_per_month"] + ax["setup_usd"] / 12 + ax["backup_usd_per_month"]
-        pan = self.p["pandaos"]
-        self.assertAlmostEqual(pan["usd_per_hour"], month / (ax["vms_overcommit_1_0"] * 730), places=4)
-        self.assertAlmostEqual(pan["usd_per_hour_overcommit_1_5"], month / (ax["vms_overcommit_1_5"] * 730), places=4)
-        self.assertAlmostEqual(pan["usd_per_hour_untrusted"], month / (ax["vms_untrusted"] * 730), places=4)
+        pan = report.load_prices(os.path.join(report.HERE, "prices.json"))["pandaos"]  # default_server ax102
+        self.assertAlmostEqual(pan["usd_per_hour"], month / (ax["vms_overcommit_1_0"] * 730), places=6)
+        self.assertAlmostEqual(pan["usd_per_hour"], 0.0279, places=4)
+        self.assertEqual(pan["density_model"]["untrusted"], {"vms": 15, "cpus": 16})
+        self.assertEqual(pan["density_model"]["trusted"], {"vms": 22, "cpus": 32})
         self.assertIn("7950X3D", pan["cpu"])
         self.assertIn("9950X", self.p["boatdev"]["cpu"])
+
+    def test_server_is_selectable(self):
+        path = os.path.join(report.HERE, "prices.json")
+        ax42 = report.load_prices(path, "ax42")["pandaos"]
+        self.assertAlmostEqual(ax42["density_model"]["host_usd_per_hour"], 119.04 / 730, places=3)
+        self.assertEqual(ax42["density_model"]["untrusted"], {"vms": 7, "cpus": 8})
+        self.assertIn("8700GE", ax42["cpu"])
+        self.assertEqual(len({s["key"] for s in self.p["servers"]}), len(self.p["servers"]))
+        with self.assertRaises(ValueError):
+            report.load_prices(path, "nope")
+
+    def test_cost_tables(self):
+        md = cost_tables.render(self.p)
+        self.assertIn("| Hetzner AX102, conservative / untrusted (15) | $0.279 | $0.112 | $0.056 | $0.028 | $0.042 |", md)
+        self.assertIn("509, $0.600/h", md)  # AX102, 8 h sessions kept 14 days, shipped policy
+        self.assertIn("MODEL, thin provisioning", md)
+        self.assertEqual(cost_tables.capacity(15, 30, 24, 336, 730), 30 * 730 * 24 / 360)
 
 
 class Presets(unittest.TestCase):
@@ -494,6 +513,36 @@ class DensityTests(unittest.TestCase):
         self.assertAlmostEqual(eff, (0.4 + (0.5 - 0.4) * 0.5) / 0.75)  # host per CPU interpolated
         _, _, _, eff, _ = report.density_projection(lv, {"vms": 1, "cpus": 16})  # below the range
         self.assertEqual(eff, 1.0)
+
+    def test_host_density_sets_up_once_and_runs_n_loops(self):
+        d = FakeDriver()
+        d.name = "host"
+        rec, _ = self.run_density(d)
+        self.assertEqual(d.setups, 1)  # one Node install, N loops side by side
+        self.assertEqual(d.n, 0)  # no VMs created
+        self.assertEqual([lv["vms_measured"] for lv in rec["levels"]], [1, 2, 4])
+        self.assertEqual(rec["levels"][0]["host_cpus"], 4)
+
+    def test_report_measured_cost_when_price_cpu_matches_and_host_baseline(self):
+        d = FakeDriver()
+        d.name = "pandaos"
+        rec, m = self.run_density(d)
+        h = FakeDriver()
+        h.name = "host"
+        hrec, hm = self.run_density(h)
+        cpu = {"cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16"}
+        vm = {"driver": "pandaos", "preset": "pandaos-install", "client": cpu,
+              "repeats": [{"index": 0, "metrics": m, "density": rec, "errors": {}}]}
+        host = {"driver": "host", "client": cpu, "repeats": [{"index": 0, "metrics": hm, "density": hrec, "errors": {}}]}
+        path = os.path.join(report.HERE, "prices.json")
+        md = report.render([vm, host], report.load_prices(path, "ax42"), report.load_published())
+        self.assertIn("Cost per run on Hetzner AX42, MEASURED", md)
+        self.assertNotIn("PROJECTION: Hetzner AX42", md)
+        self.assertIn("| 4 | 40.00 | $", md)  # 4 VMs x 10 runs/s
+        self.assertIn("Host-native density baseline vs VMs", md)
+        self.assertIn("| 1 | 10.00 / 10.00 | 1.00 | 10.00 / 10.00 | 1.00 | 1.00 |", md)
+        md102 = report.render([vm], report.load_prices(path, "ax102"), report.load_published())
+        self.assertIn("PROJECTION: Hetzner AX102, trusted", md102)
 
     def test_report_renders_density_with_projection(self):
         d = FakeDriver()

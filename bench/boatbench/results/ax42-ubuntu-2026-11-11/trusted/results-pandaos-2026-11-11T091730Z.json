@@ -1,0 +1,313 @@
+{
+ "driver": "pandaos",
+ "run_id": "699e4a",
+ "size": "default",
+ "started": "2026-11-11T09:17:30Z",
+ "host": {
+  "desc": "Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB, 2x512 GB NVMe mdadm RAID1; boat state = btrfs loop file on ext4 on RAID1; preset trusted; 16 CPUs online"
+ },
+ "boatd_options": "{\"cgroupParent\":\"boat-bench\",\"reflink\":\"always\",\"bootTimeoutS\":120,\"defaultImage\":\"slim\",\"memOvercommit\":8,\"cpuOvercommit\":12,\"defaultTeam\":{\"maxVMs\":16}}",
+ "preset": "trusted",
+ "fc_cache_type": "Unsafe (boatd default diskCache)",
+ "run_url": null,
+ "client": {
+  "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16",
+  "os": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
+  "egress": "HEL DE"
+ },
+ "parts": "g",
+ "repeats": [
+  {
+   "index": 0,
+   "metrics": {
+    "create_ready_s": 1.3715815769974142,
+    "density_host_runs_s_n1": 20.765,
+    "density_per_vm_runs_s_n1": 20.765,
+    "density_efficiency_n1": 1.0,
+    "density_cpu_per_loop_n1": 1.5001250952843348,
+    "density_host_runs_s_n2": 37.95,
+    "density_per_vm_runs_s_n2": 18.975,
+    "density_efficiency_n2": 0.9137972549963882,
+    "density_cpu_per_loop_n2": 1.4990898557888737,
+    "density_host_runs_s_n4": 62.62,
+    "density_per_vm_runs_s_n4": 15.6525,
+    "density_efficiency_n4": 0.7537924392005778,
+    "density_cpu_per_loop_n4": 1.4833537442203812,
+    "density_host_runs_s_n7": 80.345,
+    "density_per_vm_runs_s_n7": 11.495000000000001,
+    "density_efficiency_n7": 0.5535757283891163,
+    "density_cpu_per_loop_n7": 1.467524553267863,
+    "density_host_runs_s_n11": 86.9,
+    "density_per_vm_runs_s_n11": 7.895,
+    "density_efficiency_n11": 0.38020707921984104,
+    "density_cpu_per_loop_n11": 1.2668343054137843
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "density": {
+    "levels": [
+     {
+      "n": 1,
+      "vms_measured": 1,
+      "per_vm_runs_s": 20.765,
+      "per_vm_each": [
+       20.765
+      ],
+      "host_runs_s": 20.765,
+      "cpu_per_loop": 1.5001250952843348,
+      "host_cpus": 16,
+      "wall_s": 103.91183758700208,
+      "efficiency": 1.0,
+      "loops_per_cpu": 0.09375781845527092
+     },
+     {
+      "n": 2,
+      "vms_measured": 2,
+      "per_vm_runs_s": 18.975,
+      "per_vm_each": [
+       19.14,
+       18.810000000000002
+      ],
+      "host_runs_s": 37.95,
+      "cpu_per_loop": 1.4990898557888737,
+      "host_cpus": 16,
+      "wall_s": 106.33416643900273,
+      "efficiency": 0.9137972549963882,
+      "loops_per_cpu": 0.18751563691054185
+     },
+     {
+      "n": 4,
+      "vms_measured": 4,
+      "per_vm_runs_s": 15.6525,
+      "per_vm_each": [
+       15.6,
+       15.715,
+       15.665,
+       15.64
+      ],
+      "host_runs_s": 62.62,
+      "cpu_per_loop": 1.4833537442203812,
+      "host_cpus": 16,
+      "wall_s": 120.04649254199467,
+      "efficiency": 0.7537924392005778,
+      "loops_per_cpu": 0.3750312738210837
+     },
+     {
+      "n": 7,
+      "vms_measured": 7,
+      "per_vm_runs_s": 11.495000000000001,
+      "per_vm_each": [
+       11.445,
+       11.495000000000001,
+       11.535,
+       11.495000000000001,
+       11.415,
+       11.41,
+       11.55
+      ],
+      "host_runs_s": 80.345,
+      "cpu_per_loop": 1.467524553267863,
+      "host_cpus": 16,
+      "wall_s": 148.57558035499824,
+      "efficiency": 0.5535757283891163,
+      "loops_per_cpu": 0.6563047291868964
+     },
+     {
+      "n": 11,
+      "vms_measured": 11,
+      "per_vm_runs_s": 7.895,
+      "per_vm_each": [
+       7.85,
+       7.785,
+       7.965,
+       7.945,
+       7.99,
+       7.955,
+       7.98,
+       7.895,
+       7.8149999999999995,
+       7.83,
+       7.890000000000001
+      ],
+      "host_runs_s": 86.9,
+      "cpu_per_loop": 1.2668343054137843,
+      "host_cpus": 16,
+      "wall_s": 213.24055885599228,
+      "efficiency": 0.38020707921984104,
+      "loops_per_cpu": 1.0313360030079801
+     }
+    ],
+    "max_vms": 11,
+    "requested": [
+     1,
+     2,
+     4,
+     7,
+     11
+    ],
+    "passes": 2,
+    "errors": []
+   }
+  },
+  {
+   "index": 1,
+   "metrics": {
+    "create_ready_s": 1.4560339439922245,
+    "density_host_runs_s_n1": 20.82,
+    "density_per_vm_runs_s_n1": 20.82,
+    "density_efficiency_n1": 1.0,
+    "density_cpu_per_loop_n1": 1.4727037062971382,
+    "density_host_runs_s_n2": 37.825,
+    "density_per_vm_runs_s_n2": 18.9125,
+    "density_efficiency_n2": 0.9083813640730067,
+    "density_cpu_per_loop_n2": 1.499690889917507,
+    "density_host_runs_s_n4": 61.405,
+    "density_per_vm_runs_s_n4": 15.302499999999998,
+    "density_efficiency_n4": 0.7349903938520652,
+    "density_cpu_per_loop_n4": 1.4818494978210202,
+    "density_host_runs_s_n7": 80.58500000000001,
+    "density_per_vm_runs_s_n7": 11.52,
+    "density_efficiency_n7": 0.5533141210374639,
+    "density_cpu_per_loop_n7": 1.462831440351529,
+    "density_host_runs_s_n11": 87.215,
+    "density_per_vm_runs_s_n11": 7.94,
+    "density_efficiency_n11": 0.3813640730067243,
+    "density_cpu_per_loop_n11": 1.2692362591918136
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "density": {
+    "levels": [
+     {
+      "n": 1,
+      "vms_measured": 1,
+      "per_vm_runs_s": 20.82,
+      "per_vm_each": [
+       20.82
+      ],
+      "host_runs_s": 20.82,
+      "cpu_per_loop": 1.4727037062971382,
+      "host_cpus": 16,
+      "wall_s": 103.42746699400595,
+      "efficiency": 1.0,
+      "loops_per_cpu": 0.09204398164357114
+     },
+     {
+      "n": 2,
+      "vms_measured": 2,
+      "per_vm_runs_s": 18.9125,
+      "per_vm_each": [
+       18.89,
+       18.935000000000002
+      ],
+      "host_runs_s": 37.825,
+      "cpu_per_loop": 1.499690889917507,
+      "host_cpus": 16,
+      "wall_s": 105.63651886400476,
+      "efficiency": 0.9083813640730067,
+      "loops_per_cpu": 0.18408796328714228
+     },
+     {
+      "n": 4,
+      "vms_measured": 4,
+      "per_vm_runs_s": 15.302499999999998,
+      "per_vm_each": [
+       15.535,
+       15.265,
+       15.329999999999998,
+       15.275
+      ],
+      "host_runs_s": 61.405,
+      "cpu_per_loop": 1.4818494978210202,
+      "host_cpus": 16,
+      "wall_s": 122.41959671099903,
+      "efficiency": 0.7349903938520652,
+      "loops_per_cpu": 0.36817592657428455
+     },
+     {
+      "n": 7,
+      "vms_measured": 7,
+      "per_vm_runs_s": 11.52,
+      "per_vm_each": [
+       11.530000000000001,
+       11.52,
+       11.595,
+       11.49,
+       11.54,
+       11.435,
+       11.475000000000001
+      ],
+      "host_runs_s": 80.58500000000001,
+      "cpu_per_loop": 1.462831440351529,
+      "host_cpus": 16,
+      "wall_s": 148.4185972099949,
+      "efficiency": 0.5533141210374639,
+      "loops_per_cpu": 0.6443078715049979
+     },
+     {
+      "n": 11,
+      "vms_measured": 11,
+      "per_vm_runs_s": 7.94,
+      "per_vm_each": [
+       7.945,
+       7.83,
+       7.92,
+       7.885,
+       8.02,
+       7.965,
+       7.955,
+       7.94,
+       7.91,
+       7.890000000000001,
+       7.955
+      ],
+      "host_runs_s": 87.215,
+      "cpu_per_loop": 1.2692362591918136,
+      "host_cpus": 16,
+      "wall_s": 213.16946148600255,
+      "efficiency": 0.3813640730067243,
+      "loops_per_cpu": 1.0124837980792825
+     }
+    ],
+    "max_vms": 11,
+    "requested": [
+     1,
+     2,
+     4,
+     7,
+     11
+    ],
+    "passes": 2,
+    "errors": []
+   }
+  }
+ ]
+}

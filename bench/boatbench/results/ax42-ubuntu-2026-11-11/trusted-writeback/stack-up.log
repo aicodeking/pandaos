@@ -1,0 +1,19 @@
+
+[1m==> tools + runner network (same fixes as e2e.sh: br_netfilter off, FORWARD accept)[0m
+
+[1m==> firecracker v1.17.0 (checksum from e2e.sh)[0m
+
+[1m==> go build boatd, boat-api[0m
+
+[1m==> boatd options: preset trusted-writeback, then BOATBENCH_BOATD_OPTIONS[0m
+
+[1m==> state: btrfs loop (reflinks like production, 100G sparse) + slim image[0m
+cpuOvercommit 12 on 16 online CPUs
+
+[1m==> boatd (production defaults; overcommit raised for 10 x 8 GiB on the runner): {"diskCache":"Writeback"}[0m
+
+[1m==> boat-api[0m
+2026/11/11 12:00:39 WARNING: master key is a plain file on the data disk; use the systemd credential boat-master-key (LoadCredentialEncrypted=, see README) so secrets at rest are not readable from disk images or backups (/opt/boatbench/work/api/master.key)
+Store this key now; it is not shown again. Restart boat-api if it is running.
+
+[1m==> stack up: /opt/boatbench/work/env[0m

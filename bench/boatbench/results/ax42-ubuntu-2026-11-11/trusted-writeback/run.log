@@ -1,0 +1,10 @@
+[11:00:48] r0 probe
+[11:00:48] r0 disk
+[11:07:10] r0 done: {"create_ready_s": 9.130668521000189, "seq_write_mbps": 2637.6, "seq_read_mbps": 7452.4, "rand_write_iops": 143135.0, "rand_read_iops": 176344.0, "pts_rand_read_iops": 179871.0, "pts_rand_write_iops": 169463.0, "pts_seq_write_mibps": 3770.3, "fsync_rand_write_iops": 38.0, "seq_write_endfsync_mbps": 2190.2}
+[11:07:12] r1 probe
+[11:07:12] r1 disk
+[11:13:23] r1 done: {"create_ready_s": 1.73454013299488, "seq_write_mbps": 2818.9, "seq_read_mbps": 10870.9, "rand_write_iops": 145464.0, "rand_read_iops": 174697.0, "pts_rand_read_iops": 179819.0, "pts_rand_write_iops": 168718.0, "pts_seq_write_mibps": 4860.4, "fsync_rand_write_iops": 39.0, "seq_write_endfsync_mbps": 4555.4}
+[11:13:25] r2 probe
+[11:13:25] r2 disk
+[11:19:35] r2 done: {"create_ready_s": 1.7074618479964556, "seq_write_mbps": 3841.6, "seq_read_mbps": 9959.3, "rand_write_iops": 140044.0, "rand_read_iops": 174443.0, "pts_rand_read_iops": 177509.0, "pts_rand_write_iops": 167338.0, "pts_seq_write_mibps": 4055.8, "fsync_rand_write_iops": 38.0, "seq_write_endfsync_mbps": 3517.1}
+/opt/boatbench/results/trusted-writeback/results-pandaos-2026-11-11T110039Z.json

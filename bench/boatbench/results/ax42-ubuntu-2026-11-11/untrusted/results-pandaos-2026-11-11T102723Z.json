@@ -1,0 +1,60 @@
+{
+ "driver": "pandaos",
+ "run_id": "7e9206",
+ "size": "default",
+ "started": "2026-11-11T10:27:23Z",
+ "host": {
+  "desc": "Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB, 2x512 GB NVMe mdadm RAID1; boat state = btrfs loop file on ext4 on RAID1; preset untrusted; 8 CPUs online"
+ },
+ "boatd_options": "{\"cgroupParent\":\"boat-bench\",\"reflink\":\"always\",\"bootTimeoutS\":120,\"defaultImage\":\"slim\",\"memOvercommit\":8,\"cpuOvercommit\":12,\"defaultTeam\":{\"maxVMs\":16},\"untrustedTenants\":true,\"btrfsQgroups\":true,\"storageOvercommit\":1,\"egressMbit\":1000,\"ingressMbit\":1000,\"ioCost\":true,\"ioCostQoS\":\"rpct=95 rlat=5000 wpct=95 wlat=10000 min=25 max=400\",\"ioMaxMBps\":4000,\"ioMaxIOPS\":200000,\"ctPerVM\":4096,\"diskEngine\":\"Sync\",\"hostDirtyRatio\":20,\"warmPool\":false,\"ksmTeam\":\"\"}",
+ "preset": "untrusted",
+ "fc_cache_type": "Unsafe (boatd default diskCache)",
+ "run_url": null,
+ "client": {
+  "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x8",
+  "os": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
+  "egress": "HEL DE"
+ },
+ "parts": "ad",
+ "repeats": [
+  {
+   "index": 0,
+   "metrics": {
+    "create_ready_s": 1.3919715810043272,
+    "node_runs_s": [
+     21.09,
+     21.04,
+     21.19
+    ],
+    "seq_write_mbps": 351.1,
+    "seq_read_mbps": 6395.7,
+    "rand_write_iops": 86535.0,
+    "rand_read_iops": 203659.0,
+    "pts_rand_read_iops": 209731.0,
+    "pts_rand_write_iops": 160698.0,
+    "pts_seq_write_mibps": 2476.3,
+    "fsync_rand_write_iops": 25549.0,
+    "seq_write_endfsync_mbps": 562.6
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "node": "v22.22.3",
+   "disk_tool": "fio",
+   "disk_errors": null
+  }
+ ]
+}

@@ -1,0 +1,31 @@
+[11:00:05] r0 probe
+[11:00:05] r0 api_rtt
+[11:00:05] r0 exec_rtt
+[11:00:05] r0 snapshot
+[11:00:06] r0 fork
+[11:00:07] r0 stop_resume
+[11:00:08] delete snapshot snap-4a309eee2f5a: DELETE http://127.0.0.1:8740/v1/snapshots/snap-4a309eee2f5a: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_71b080641aae38c7"}}
+
+[11:00:08] r0 concurrent 10
+[11:00:12] r0 done: {"create_ready_s": 0.30163210300088394, "api_rtt_p50_ms": 0.23915499332360923, "api_rtt_p95_ms": 0.38156200025696313, "exec_rtt_p50_ms": 2.3681355014559813, "exec_rtt_p95_ms": 2.928712501307018, "snapshot_s": 0.6610937919904245, "from_snapshot_ready_s": 0.24552346700511407, "fork_ready_s": 0.5164992159989197, "stop_s": 0.5552698969986523, "resume_ready_s": 0.19305617100326344, "concurrent10_wall_s": 1.4772096350061474, "create_ready_s_net": 0.3011537930142367, "fork_ready_s_net": 0.5160209060122725, "resume_ready_s_net": 0.19257786101661623, "from_snapshot_ready_s_net": 0.24504515701846685, "stop_s_net": 0.5550307420053286, "snapshot_s_net": 0.6608546369971009, "concurrent10_wall_s_net": 1.4767313250195002, "exec_rtt_p50_ms_net": 2.128980508132372}
+[11:00:13] r1 probe
+[11:00:13] r1 api_rtt
+[11:00:13] r1 exec_rtt
+[11:00:13] r1 snapshot
+[11:00:14] r1 fork
+[11:00:15] r1 stop_resume
+[11:00:16] delete snapshot snap-de5a960696b6: DELETE http://127.0.0.1:8740/v1/snapshots/snap-de5a960696b6: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_0160933aab6dd62e"}}
+
+[11:00:16] r1 concurrent 10
+[11:00:21] r1 done: {"create_ready_s": 0.3181655939988559, "api_rtt_p50_ms": 0.24049400235526264, "api_rtt_p95_ms": 0.37470220122486353, "exec_rtt_p50_ms": 2.3467299979529344, "exec_rtt_p95_ms": 2.9700429542572238, "snapshot_s": 0.6796942159999162, "from_snapshot_ready_s": 0.2622709110000869, "fork_ready_s": 0.7004147590050707, "stop_s": 0.6039203940017615, "resume_ready_s": 0.23997919099929277, "concurrent10_wall_s": 1.7412190890026977, "create_ready_s_net": 0.3176846059941454, "fork_ready_s_net": 0.6999337710003601, "resume_ready_s_net": 0.23949820299458224, "from_snapshot_ready_s_net": 0.2617899229953764, "stop_s_net": 0.6036798999994062, "snapshot_s_net": 0.6794537219975609, "concurrent10_wall_s_net": 1.7407381009979872, "exec_rtt_p50_ms_net": 2.1062359955976717}
+[11:00:21] r2 probe
+[11:00:21] r2 api_rtt
+[11:00:21] r2 exec_rtt
+[11:00:21] r2 snapshot
+[11:00:22] r2 fork
+[11:00:23] r2 stop_resume
+[11:00:25] delete snapshot snap-8b05ebc4138a: DELETE http://127.0.0.1:8740/v1/snapshots/snap-8b05ebc4138a: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_2481530f78d54b49"}}
+
+[11:00:25] r2 concurrent 10
+[11:00:29] r2 done: {"create_ready_s": 0.3363614529953338, "api_rtt_p50_ms": 0.3129050019197166, "api_rtt_p95_ms": 0.45582959719467914, "exec_rtt_p50_ms": 2.4398719979217276, "exec_rtt_p95_ms": 3.203153649519663, "snapshot_s": 0.6622944569971878, "from_snapshot_ready_s": 0.23643625000840984, "fork_ready_s": 0.625642543003778, "stop_s": 0.6641541669960134, "resume_ready_s": 0.2383850930054905, "concurrent10_wall_s": 1.7015538359992206, "create_ready_s_net": 0.3357356429914944, "fork_ready_s_net": 0.6250167329999385, "resume_ready_s_net": 0.23775928300165106, "from_snapshot_ready_s_net": 0.2358104400045704, "stop_s_net": 0.6638412619940937, "snapshot_s_net": 0.6619815519952681, "concurrent10_wall_s_net": 1.7009280259953812, "exec_rtt_p50_ms_net": 2.126966996002011}
+/opt/boatbench/results/trusted-warm/results-pandaos-2026-11-11T110005Z.json

@@ -1,0 +1,25 @@
+2026/11/11 12:00:39 boatd 0.1.0 starting: bridge boatbr0, stateDir /opt/boatbench/state
+2026/11/11 12:00:39 cgroups: parent "boat-bench", limits true
+2026/11/11 12:00:39 boatd 0.1.0 listening on /opt/boatbench/work/run/boatd.sock (0 VMs)
+2026/11/11 12:00:46 images: /opt/boatbench/state/images/slim/rootfs.ext4 converted to NOCOW in 7499ms (flush 4652ms)
+2026/11/11 12:00:46 conntrack: conntrack -D -f ipv4 -s 10.200.0.2: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:46 conntrack: conntrack -D -f ipv4 -d 10.200.0.2: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:46 vm-229cc4277ab0: create alloc=3ms materialize=0ms
+2026/11/11 12:00:46 vm-229cc4277ab0: boot=116ms net=22ms
+2026/11/11 12:00:48 vm-229cc4277ab0: guest init agent=1633ms identity=50ms clock+env=0ms
+2026/11/11 12:07:10 conntrack: conntrack -D -f ipv4 -s 10.200.0.2: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:07:10 conntrack: conntrack -D -f ipv4 -d 10.200.0.2: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:07:10 conntrack: conntrack -D -f ipv4 -s 10.200.0.3: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:07:10 conntrack: conntrack -D -f ipv4 -d 10.200.0.3: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:07:10 vm-e5ab4a2081cf: create alloc=0ms materialize=0ms
+2026/11/11 12:07:10 vm-e5ab4a2081cf: boot=119ms net=21ms
+2026/11/11 12:07:12 vm-e5ab4a2081cf: guest init agent=1558ms identity=28ms clock+env=0ms
+2026/11/11 12:13:23 conntrack: conntrack -D -f ipv4 -s 10.200.0.3: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:13:23 conntrack: conntrack -D -f ipv4 -d 10.200.0.3: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:13:23 conntrack: conntrack -D -f ipv4 -s 10.200.0.4: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:13:23 conntrack: conntrack -D -f ipv4 -d 10.200.0.4: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:13:23 vm-521d78ec9ef7: create alloc=0ms materialize=0ms
+2026/11/11 12:13:23 vm-521d78ec9ef7: boot=113ms net=22ms
+2026/11/11 12:13:25 vm-521d78ec9ef7: guest init agent=1515ms identity=49ms clock+env=0ms
+2026/11/11 12:19:34 conntrack: conntrack -D -f ipv4 -s 10.200.0.4: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:19:34 conntrack: conntrack -D -f ipv4 -d 10.200.0.4: exec: "conntrack": executable file not found in $PATH: 

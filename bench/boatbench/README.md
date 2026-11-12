@@ -151,14 +151,37 @@ Tables, projections and verdict: [`docs/cost.md`](../../docs/cost.md#measured-bo
 
 ## Cost
 
-`prices.json` belongs to the cost comparison (`docs/cost.md`):
-`{"pandaos": {"usd_per_hour": X, "cpu": "...", "source": "..."}, "boatdev": {...}}`.
-Cost per 1000 Node loop runs = usd_per_hour / 3600 × 1000 / runs_s. Cost per cold
-npm ci = usd_per_hour / 3600 × seconds. If the file is missing, the report shows
-runs/s only. A row whose price's CPU (`cpu`) is not the CPU the VMs reported is marked
-**MIXED CPUs**: in CI that is an AX102 (Ryzen 9 7950X3D) price times a runner (EPYC)
-speed, which is no machine's cost. The only CPU-consistent figure is boat.dev's price
-with boat.dev's own published speed.
+`prices.json` belongs to the cost comparison (`docs/cost.md`). The PandaOS price is not hard-coded.
+`boatbench.py report ... --server KEY` picks a server from `servers[]`. The keys are `ax42`, `ax102` (the default,
+`pandaos.default_server`), `ax162`, `ovh-advance-3` and `latitude-m4-medium`. Each entry carries its list price,
+setup fee, backup cost, source URL, CPU and admission counts. From these, `report.load_prices` derives:
+- the host's price per hour: (month + setup/12 + backup) / 730;
+- the per-VM price: the host's price per hour divided by the `memOvercommit` 1.0 count;
+- the density model (trusted: the 1.5 count on threads; untrusted: the untrusted count on cores).
+
+Cost per 1000 Node loop runs = usd_per_hour / 3600 × 1000 / runs_s. Cost per cold npm ci =
+usd_per_hour / 3600 × seconds. If the file is missing, the report shows runs/s only.
+
+The density section prints a **measured** cost-per-run table only when the speed was measured on the priced CPU. The
+guest's model counts, and so does the harness host's when the harness runs on the PandaOS host. That table is
+host $/h / 3.6 / measured host runs/s at each N. On any other server the section prints a **projection** of the
+measured curve, marked NOT A MEASUREMENT. Rows whose price and speed come from different CPUs are marked
+**MIXED CPUs**.
+
+`boatbench.py costs` prints the price-only tables in `docs/cost.md`: cost per VM-hour by utilization, break-even
+against boat.dev, and stopped-VM retention. Retention is shown under the shipped `storageOvercommit` 1 policy, where
+every VM, running or stopped, is charged its nominal 59 GiB. It is also shown under a thin-provisioning **model** that
+charges actual use (`assumptions.retention`).
+
+Workload g also runs on `--driver host`: N Node loops side by side directly on the host, with Node installed once.
+The report puts that next to the VM curve, so CPU saturation can be told apart from virtualization overhead. On a
+host without an FHS loader (NixOS), set `BB_NODE_LOADER` to the glibc loader command
+(`/nix/store/...-glibc-*/lib/ld-linux-x86-64.so.2 --library-path <glibc>/lib:<gcc-lib>/lib`). The same pinned Node
+binary then runs through that loader. `BOATBENCH_CONCURRENT_N` sets how many VMs workload c creates at once (default
+10), for example a team quota of 8.
+
+Raw results of server runs are committed under `results/` (one directory per run, with a README giving the hardware,
+OS, commit and commands).
 
 The VM counts behind the prices come from `admission.py`, which reads boatd's admission
 constants (`hostReserveMiB`, `vmOverheadMiB`, overcommits, the `default` size) from

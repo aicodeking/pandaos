@@ -1,0 +1,27 @@
+
+[1m==> tools + runner network (same fixes as e2e.sh: br_netfilter off, FORWARD accept)[0m
+
+[1m==> firecracker v1.17.0 (checksum from e2e.sh)[0m
+
+[1m==> go build boatd, boat-api[0m
+
+[1m==> boatd options: preset untrusted, then BOATBENCH_BOATD_OPTIONS[0m
+
+[1m==> untrustedTenants host settings (module.nix kernel params, as far as a runner allows)[0m
+SMT control: off, CPUs online: 8
+
+[1m==> state: btrfs loop (reflinks like production, 1T sparse) + slim image[0m
+cpuOvercommit 12 on 8 online CPUs
+
+[1m==> boatd (production defaults; overcommit raised for 10 x 8 GiB on the runner): {"untrustedTenants":true,"btrfsQgroups":true,"storageOvercommit":1,"egressMbit":1000,"ingressMbit":1000,"ioCost":true,"ioCostQoS":"rpct=95 rlat=5000 wpct=95 wlat=10000 min=25 max=400","ioMaxMBps":4000,"ioMaxIOPS":200000,"ctPerVM":4096,"diskEngine":"Sync","hostDirtyRatio":20,"warmPool":false,"ksmTeam":"","cgroupParent":"boat-bench","reflink":"always","bootTimeoutS":120,"defaultImage":"slim","memOvercommit":8,"cpuOvercommit":12,"defaultTeam":{"maxVMs":16}}[0m
+
+[1m==> iocost model of the state disk (boatd -measure-disk, about 25 s)[0m
+2026/11/11 10:43:16 measure-disk: /opt/boatbench/state, about 25 s of direct I/O on a 1 GiB file
+2026/11/11 10:43:37 measure-disk: wrote /opt/boatbench/state/iocost-model; boatd uses it while ioCostModel is unset
+rbps=7161368569 rseqiops=437155 rrandiops=437155 wbps=4562158427 wseqiops=55529 wrandiops=55529
+
+[1m==> boat-api[0m
+2026/11/11 10:43:38 WARNING: master key is a plain file on the data disk; use the systemd credential boat-master-key (LoadCredentialEncrypted=, see README) so secrets at rest are not readable from disk images or backups (/opt/boatbench/work/api/master.key)
+Store this key now; it is not shown again. Restart boat-api if it is running.
+
+[1m==> stack up: /opt/boatbench/work/env[0m

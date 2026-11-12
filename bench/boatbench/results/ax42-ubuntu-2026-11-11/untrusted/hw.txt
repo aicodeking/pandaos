@@ -1,0 +1,10 @@
+CPU(s):                                  16
+On-line CPU(s) list:                     0-7
+Model name:                              AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics
+BIOS Model name:                         AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics  Unknown CPU @ 3.6GHz
+Thread(s) per core:                      1
+CPU(s) scaling MHz:                      69%
+               total        used        free      shared  buff/cache   available
+Mem:           63381        1155       50236           1       12704       62225
+Swap:          31726           0       31726
+off

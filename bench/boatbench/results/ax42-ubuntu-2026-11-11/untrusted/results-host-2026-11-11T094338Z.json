@@ -1,0 +1,60 @@
+{
+ "driver": "host",
+ "run_id": "893b49",
+ "size": "host",
+ "started": "2026-11-11T09:43:38Z",
+ "host": {
+  "desc": "Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB, 2x512 GB NVMe mdadm RAID1; boat state = btrfs loop file on ext4 on RAID1; preset untrusted; 8 CPUs online"
+ },
+ "boatd_options": "{\"cgroupParent\":\"boat-bench\",\"reflink\":\"always\",\"bootTimeoutS\":120,\"defaultImage\":\"slim\",\"memOvercommit\":8,\"cpuOvercommit\":12,\"defaultTeam\":{\"maxVMs\":16},\"untrustedTenants\":true,\"btrfsQgroups\":true,\"storageOvercommit\":1,\"egressMbit\":1000,\"ingressMbit\":1000,\"ioCost\":true,\"ioCostQoS\":\"rpct=95 rlat=5000 wpct=95 wlat=10000 min=25 max=400\",\"ioMaxMBps\":4000,\"ioMaxIOPS\":200000,\"ctPerVM\":4096,\"diskEngine\":\"Sync\",\"hostDirtyRatio\":20,\"warmPool\":false,\"ksmTeam\":\"\"}",
+ "preset": "untrusted",
+ "fc_cache_type": "-",
+ "run_url": null,
+ "client": {
+  "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x8",
+  "os": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
+  "egress": "HEL DE"
+ },
+ "parts": "ad",
+ "repeats": [
+  {
+   "index": 0,
+   "metrics": {
+    "create_ready_s": 3.3099931897595525e-06,
+    "node_runs_s": [
+     22.87,
+     22.73,
+     22.94
+    ],
+    "seq_write_mbps": 4277.6,
+    "seq_read_mbps": 7590.7,
+    "rand_write_iops": 123432.0,
+    "rand_read_iops": 246344.0,
+    "pts_rand_read_iops": 247394.0,
+    "pts_rand_write_iops": 121887.0,
+    "pts_seq_write_mibps": 4136.6,
+    "fsync_rand_write_iops": 77.0,
+    "seq_write_endfsync_mbps": 5180.8
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 8,
+    "cpu_count": 8,
+    "mem_mib": 63381,
+    "disk_gib": 1024.0,
+    "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics",
+    "kernel": "6.8.0-146-generic",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "none",
+    "system_node": "",
+    "user": "root",
+    "home_fs": "btrfs",
+    "egress_colo": "HEL",
+    "egress_country": "DE"
+   },
+   "node": "v22.22.3",
+   "disk_tool": "fio",
+   "disk_errors": null
+  }
+ ]
+}

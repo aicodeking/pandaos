@@ -1,0 +1,80 @@
+2026/11/11 12:00:23 vm-d7e6255c4409: guest init agent=175ms identity=50ms clock+env=0ms
+2026/11/11 12:00:23 conntrack: conntrack -D -f ipv4 -s 10.200.0.31: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:23 conntrack: conntrack -D -f ipv4 -d 10.200.0.31: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:23 vm-26d7d8a99785: snapshot (diff) sync=1ms pause=0ms write=137ms written=10MiB
+2026/11/11 12:00:24 vm-26d7d8a99785: merge reflink=41ms flush=0ms copy=24ms
+2026/11/11 12:00:24 vm-26d7d8a99785: snapshot install merge=209ms
+2026/11/11 12:00:24 vm-26d7d8a99785: stop (api) snapshot=349ms kill=124ms flush=103ms state=59ms net=14ms
+2026/11/11 12:00:24 vm-26d7d8a99785: guest init agent=83ms identity=0ms clock+env=16ms
+2026/11/11 12:00:24 conntrack: conntrack -D -f ipv4 -s 10.200.0.29: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:24 conntrack: conntrack -D -f ipv4 -d 10.200.0.29: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -s 10.200.0.32: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -d 10.200.0.32: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -s 10.200.0.33: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -d 10.200.0.33: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -s 10.200.0.34: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -d 10.200.0.34: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -s 10.200.0.35: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -d 10.200.0.35: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -s 10.200.0.36: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -d 10.200.0.36: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -s 10.200.0.37: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -d 10.200.0.37: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -s 10.200.0.38: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -d 10.200.0.38: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -s 10.200.0.39: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -d 10.200.0.39: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -s 10.200.0.40: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -d 10.200.0.40: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -s 10.200.0.41: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 conntrack: conntrack -D -f ipv4 -d 10.200.0.41: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:25 vm-3eab68091106: create alloc=0ms materialize=3ms
+2026/11/11 12:00:25 vm-e0c0b3b6f83b: create alloc=0ms materialize=4ms
+2026/11/11 12:00:25 vm-09d8dec809d1: create alloc=0ms materialize=5ms
+2026/11/11 12:00:25 vm-01844584f3b3: create alloc=0ms materialize=7ms
+2026/11/11 12:00:25 vm-1049ea9d23d8: create alloc=0ms materialize=6ms
+2026/11/11 12:00:25 vm-296307a8ed97: create alloc=0ms materialize=9ms
+2026/11/11 12:00:25 vm-cd59d1c9cbf6: create alloc=1ms materialize=8ms
+2026/11/11 12:00:25 vm-a1928111a57d: create alloc=0ms materialize=11ms
+2026/11/11 12:00:25 vm-f7957913b402: create alloc=1ms materialize=12ms
+2026/11/11 12:00:25 vm-37bfd1ddbcc7: create alloc=1ms materialize=13ms
+2026/11/11 12:00:25 vm-3eab68091106: boot=95ms net=112ms
+2026/11/11 12:00:25 vm-e0c0b3b6f83b: boot=108ms net=115ms
+2026/11/11 12:00:25 vm-09d8dec809d1: boot=121ms net=127ms
+2026/11/11 12:00:25 vm-01844584f3b3: boot=145ms net=129ms
+2026/11/11 12:00:25 vm-1049ea9d23d8: boot=172ms net=123ms
+2026/11/11 12:00:25 vm-296307a8ed97: boot=176ms net=140ms
+2026/11/11 12:00:25 vm-cd59d1c9cbf6: boot=189ms net=153ms
+2026/11/11 12:00:25 vm-a1928111a57d: boot=203ms net=157ms
+2026/11/11 12:00:25 vm-f7957913b402: boot=218ms net=161ms
+2026/11/11 12:00:25 vm-37bfd1ddbcc7: boot=265ms net=134ms
+2026/11/11 12:00:26 vm-e0c0b3b6f83b: guest init agent=699ms identity=290ms clock+env=0ms
+2026/11/11 12:00:26 vm-3eab68091106: guest init agent=492ms identity=543ms clock+env=17ms
+2026/11/11 12:00:26 vm-09d8dec809d1: guest init agent=682ms identity=423ms clock+env=15ms
+2026/11/11 12:00:26 vm-01844584f3b3: guest init agent=833ms identity=297ms clock+env=2ms
+2026/11/11 12:00:26 vm-296307a8ed97: guest init agent=854ms identity=232ms clock+env=0ms
+2026/11/11 12:00:26 vm-cd59d1c9cbf6: guest init agent=851ms identity=363ms clock+env=13ms
+2026/11/11 12:00:26 vm-f7957913b402: guest init agent=862ms identity=219ms clock+env=166ms
+2026/11/11 12:00:26 vm-1049ea9d23d8: guest init agent=876ms identity=442ms clock+env=21ms
+2026/11/11 12:00:26 vm-a1928111a57d: guest init agent=863ms identity=437ms clock+env=1ms
+2026/11/11 12:00:26 vm-37bfd1ddbcc7: guest init agent=863ms identity=408ms clock+env=0ms
+2026/11/11 12:00:26 conntrack: conntrack -D -f ipv4 -s 10.200.0.32: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:26 conntrack: conntrack -D -f ipv4 -d 10.200.0.32: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:27 conntrack: conntrack -D -f ipv4 -s 10.200.0.34: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:27 conntrack: conntrack -D -f ipv4 -d 10.200.0.34: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:27 conntrack: conntrack -D -f ipv4 -s 10.200.0.33: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:27 conntrack: conntrack -D -f ipv4 -d 10.200.0.33: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:27 conntrack: conntrack -D -f ipv4 -s 10.200.0.35: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:27 conntrack: conntrack -D -f ipv4 -d 10.200.0.35: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:27 conntrack: conntrack -D -f ipv4 -s 10.200.0.36: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:27 conntrack: conntrack -D -f ipv4 -d 10.200.0.36: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:28 conntrack: conntrack -D -f ipv4 -s 10.200.0.38: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:28 conntrack: conntrack -D -f ipv4 -d 10.200.0.38: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:28 conntrack: conntrack -D -f ipv4 -s 10.200.0.37: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:28 conntrack: conntrack -D -f ipv4 -d 10.200.0.37: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:28 conntrack: conntrack -D -f ipv4 -s 10.200.0.40: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:28 conntrack: conntrack -D -f ipv4 -d 10.200.0.40: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:29 conntrack: conntrack -D -f ipv4 -s 10.200.0.41: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:29 conntrack: conntrack -D -f ipv4 -d 10.200.0.41: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:29 conntrack: conntrack -D -f ipv4 -s 10.200.0.39: exec: "conntrack": executable file not found in $PATH: 
+2026/11/11 12:00:29 conntrack: conntrack -D -f ipv4 -d 10.200.0.39: exec: "conntrack": executable file not found in $PATH: 

@@ -1,0 +1,255 @@
+{
+ "driver": "pandaos",
+ "run_id": "207854",
+ "size": "default",
+ "started": "2026-11-11T10:38:37Z",
+ "host": {
+  "desc": "Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB, 2x512 GB NVMe mdadm RAID1; boat state = btrfs loop file on ext4 on RAID1; preset untrusted; 8 CPUs online"
+ },
+ "boatd_options": "{\"cgroupParent\":\"boat-bench\",\"reflink\":\"always\",\"bootTimeoutS\":120,\"defaultImage\":\"slim\",\"memOvercommit\":8,\"cpuOvercommit\":12,\"defaultTeam\":{\"maxVMs\":16},\"untrustedTenants\":true,\"btrfsQgroups\":true,\"storageOvercommit\":1,\"egressMbit\":1000,\"ingressMbit\":1000,\"ioCost\":true,\"ioCostQoS\":\"rpct=95 rlat=5000 wpct=95 wlat=10000 min=25 max=400\",\"ioMaxMBps\":4000,\"ioMaxIOPS\":200000,\"ctPerVM\":4096,\"diskEngine\":\"Sync\",\"hostDirtyRatio\":20,\"warmPool\":false,\"ksmTeam\":\"\"}",
+ "preset": "untrusted",
+ "fc_cache_type": "Unsafe (boatd default diskCache)",
+ "run_url": null,
+ "client": {
+  "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x8",
+  "os": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
+  "egress": "HEL DE"
+ },
+ "parts": "g",
+ "repeats": [
+  {
+   "index": 0,
+   "metrics": {
+    "create_ready_s": 1.3838397460058331,
+    "density_host_runs_s_n1": 21.009999999999998,
+    "density_per_vm_runs_s_n1": 21.009999999999998,
+    "density_efficiency_n1": 1.0,
+    "density_cpu_per_loop_n1": 1.4998124905118475,
+    "density_host_runs_s_n2": 38.84,
+    "density_per_vm_runs_s_n2": 19.42,
+    "density_efficiency_n2": 0.9243217515468826,
+    "density_cpu_per_loop_n2": 1.4769246172182156,
+    "density_host_runs_s_n4": 64.535,
+    "density_per_vm_runs_s_n4": 16.115000000000002,
+    "density_efficiency_n4": 0.7670157068062828,
+    "density_cpu_per_loop_n4": 1.3860520225958592,
+    "density_host_runs_s_n7": 75.975,
+    "density_per_vm_runs_s_n7": 10.82,
+    "density_efficiency_n7": 0.5149928605425989,
+    "density_cpu_per_loop_n7": 1.0751309578959098
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "density": {
+    "levels": [
+     {
+      "n": 1,
+      "vms_measured": 1,
+      "per_vm_runs_s": 21.009999999999998,
+      "per_vm_each": [
+       21.009999999999998
+      ],
+      "host_runs_s": 21.009999999999998,
+      "cpu_per_loop": 1.4998124905118475,
+      "host_cpus": 8,
+      "wall_s": 101.2806095929991,
+      "efficiency": 1.0,
+      "loops_per_cpu": 0.18747656131398094
+     },
+     {
+      "n": 2,
+      "vms_measured": 2,
+      "per_vm_runs_s": 19.42,
+      "per_vm_each": [
+       19.4,
+       19.44
+      ],
+      "host_runs_s": 38.84,
+      "cpu_per_loop": 1.4769246172182156,
+      "host_cpus": 8,
+      "wall_s": 104.77412553300383,
+      "efficiency": 0.9243217515468826,
+      "loops_per_cpu": 0.3749531226279619
+     },
+     {
+      "n": 4,
+      "vms_measured": 4,
+      "per_vm_runs_s": 16.115000000000002,
+      "per_vm_each": [
+       16.11,
+       16.25,
+       16.055,
+       16.12
+      ],
+      "host_runs_s": 64.535,
+      "cpu_per_loop": 1.3860520225958592,
+      "host_cpus": 8,
+      "wall_s": 118.45872911899642,
+      "efficiency": 0.7670157068062828,
+      "loops_per_cpu": 0.7499062452559238
+     },
+     {
+      "n": 7,
+      "vms_measured": 7,
+      "per_vm_runs_s": 10.82,
+      "per_vm_each": [
+       10.809999999999999,
+       10.815000000000001,
+       11.004999999999999,
+       10.82,
+       10.774999999999999,
+       10.870000000000001,
+       10.879999999999999
+      ],
+      "host_runs_s": 75.975,
+      "cpu_per_loop": 1.0751309578959098,
+      "host_cpus": 8,
+      "wall_s": 158.34113077000075,
+      "efficiency": 0.5149928605425989,
+      "loops_per_cpu": 1.3123359291978667
+     }
+    ],
+    "max_vms": 7,
+    "requested": [
+     1,
+     2,
+     4,
+     7
+    ],
+    "passes": 2,
+    "errors": []
+   }
+  },
+  {
+   "index": 1,
+   "metrics": {
+    "create_ready_s": 1.3928875150013482,
+    "density_host_runs_s_n1": 20.905,
+    "density_per_vm_runs_s_n1": 20.905,
+    "density_efficiency_n1": 1.0,
+    "density_cpu_per_loop_n1": 1.4606664697182383,
+    "density_host_runs_s_n2": 38.68,
+    "density_per_vm_runs_s_n2": 19.34,
+    "density_efficiency_n2": 0.9251375269074383,
+    "density_cpu_per_loop_n2": 1.4965758221349135,
+    "density_host_runs_s_n4": 63.39,
+    "density_per_vm_runs_s_n4": 15.8525,
+    "density_efficiency_n4": 0.7583114087538866,
+    "density_cpu_per_loop_n4": 1.3807412769990859,
+    "density_host_runs_s_n7": 75.845,
+    "density_per_vm_runs_s_n7": 10.825,
+    "density_efficiency_n7": 0.5178187036594115,
+    "density_cpu_per_loop_n7": 1.078389838718871
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "density": {
+    "levels": [
+     {
+      "n": 1,
+      "vms_measured": 1,
+      "per_vm_runs_s": 20.905,
+      "per_vm_each": [
+       20.905
+      ],
+      "host_runs_s": 20.905,
+      "cpu_per_loop": 1.4606664697182383,
+      "host_cpus": 8,
+      "wall_s": 101.20538880200183,
+      "efficiency": 1.0,
+      "loops_per_cpu": 0.1825833087147798
+     },
+     {
+      "n": 2,
+      "vms_measured": 2,
+      "per_vm_runs_s": 19.34,
+      "per_vm_each": [
+       19.465,
+       19.215
+      ],
+      "host_runs_s": 38.68,
+      "cpu_per_loop": 1.4965758221349135,
+      "host_cpus": 8,
+      "wall_s": 105.2600658099982,
+      "efficiency": 0.9251375269074383,
+      "loops_per_cpu": 0.3651666174295596
+     },
+     {
+      "n": 4,
+      "vms_measured": 4,
+      "per_vm_runs_s": 15.8525,
+      "per_vm_each": [
+       15.879999999999999,
+       15.91,
+       15.825,
+       15.774999999999999
+      ],
+      "host_runs_s": 63.39,
+      "cpu_per_loop": 1.3807412769990859,
+      "host_cpus": 8,
+      "wall_s": 119.675852690998,
+      "efficiency": 0.7583114087538866,
+      "loops_per_cpu": 0.7303332348591192
+     },
+     {
+      "n": 7,
+      "vms_measured": 7,
+      "per_vm_runs_s": 10.825,
+      "per_vm_each": [
+       10.79,
+       10.905,
+       10.945,
+       10.75,
+       10.825,
+       10.805,
+       10.825
+      ],
+      "host_runs_s": 75.845,
+      "cpu_per_loop": 1.078389838718871,
+      "host_cpus": 8,
+      "wall_s": 158.81504544599738,
+      "efficiency": 0.5178187036594115,
+      "loops_per_cpu": 1.2780831610034586
+     }
+    ],
+    "max_vms": 7,
+    "requested": [
+     1,
+     2,
+     4,
+     7
+    ],
+    "passes": 2,
+    "errors": []
+   }
+  }
+ ]
+}

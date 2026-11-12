@@ -63,7 +63,7 @@ class PandaOS:
 
     name = "pandaos"
     ROUND_TRIPS = {"create_ready_s": 2, "fork_ready_s": 2, "resume_ready_s": 2, "from_snapshot_ready_s": 2,
-                   "stop_s": 1, "snapshot_s": 1, "concurrent10_wall_s": 2, "exec_rtt_p50_ms": 1}
+                   "stop_s": 1, "snapshot_s": 1, "concurrent10_wall_s": 2, "concurrent8_wall_s": 2, "exec_rtt_p50_ms": 1}
 
     def __init__(self, url=None, key=None, size=None):
         self.url = (url or os.environ["BOAT_URL"]).rstrip("/")
@@ -150,7 +150,7 @@ class BoatDev:
     READY = ("ready", "idle", "running")
     # stop and saved snapshot are a POST plus at least one GET poll.
     ROUND_TRIPS = {"create_ready_s": 2, "fork_ready_s": 2, "resume_ready_s": 2, "from_snapshot_ready_s": 2,
-                   "stop_s": 2, "snapshot_s": 2, "concurrent10_wall_s": 2, "exec_rtt_p50_ms": 1}
+                   "stop_s": 2, "snapshot_s": 2, "concurrent10_wall_s": 2, "concurrent8_wall_s": 2, "exec_rtt_p50_ms": 1}
 
     def __init__(self, base=None, key=None, size=None):
         self.url = (base or os.environ.get("BOATDEV_API_BASE", "https://boat.dev/api/v1")).rstrip("/")
@@ -235,11 +235,12 @@ class BoatDev:
 
 class Host:
     """No VM: the same scripts on the machine running the harness, to measure
-    VM / host overhead. Only workloads a and d apply: there is no lifecycle.
+    VM / host overhead. Only workloads a, d and g apply: there is no lifecycle. g runs N
+    Node loops side by side on the host (host-native density baseline).
     BOATBENCH_HOST_DIR is $HOME for the scripts, so fio can hit the store the VMs use."""
 
     name, size = "host", "host"
-    PARTS = frozenset("ad")
+    PARTS = frozenset("adg")
     ROUND_TRIPS = {}
 
     def __init__(self):
