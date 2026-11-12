@@ -298,7 +298,10 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 		return v, err
 	}
 	go m.watch(v.ID, pid, done)
-	err = waitSock(filepath.Join(root, apiSock), done, 5*time.Second)
+	// Bounded like the guest agent, not by a few seconds: binding the socket is an inode
+	// create in the state dir, which a btrfs commit with GiBs in writeback (a snapshot
+	// just dumped) stalls for longer than that. A dead firecracker still fails at once.
+	err = waitSock(filepath.Join(root, apiSock), done, time.Duration(m.cfg.BootTimeoutS)*time.Second)
 	fc := newFC(filepath.Join(root, apiSock))
 	if err == nil && restore {
 		if err = fc.restore(ctx, m.cfg.DiffSnapshots); err == nil {

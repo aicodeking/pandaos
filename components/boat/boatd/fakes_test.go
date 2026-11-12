@@ -41,6 +41,7 @@ type fakeHost struct {
 	failResume int             // refuse this many resumes (PATCH /vm Resumed) with 503
 	slowGo     chan struct{}   // "slow" execs (sessions) send their end once this is closed
 	loseExec   int             // ignore this many exec requests (lost in a vsock reset)
+	sockDelay  time.Duration   // the API socket appears this long after the start (a stalled fs)
 }
 
 func init() { quotaCtl = func(string) error { return nil } }
@@ -126,12 +127,22 @@ func (h *fakeHost) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 	}
 	h.nftAtStart[v.ID] = h.nft
 	h.mu.Unlock()
-	ln, err := net.Listen("unix", filepath.Join(root, apiSock))
-	if err != nil {
+	listen := func() error {
+		ln, err := net.Listen("unix", filepath.Join(root, apiSock))
+		if err != nil {
+			return err
+		}
+		f.mu.Lock()
+		f.lns = append(f.lns, ln)
+		f.mu.Unlock()
+		go (&http.Server{Handler: f, ConnState: f.connState}).Serve(ln)
+		return nil
+	}
+	if h.sockDelay > 0 {
+		time.AfterFunc(h.sockDelay, func() { listen() })
+	} else if err := listen(); err != nil {
 		return 0, nil, err
 	}
-	f.lns = append(f.lns, ln)
-	go (&http.Server{Handler: f, ConnState: f.connState}).Serve(ln)
 	h.mu.Lock()
 	h.next++
 	pid := h.next

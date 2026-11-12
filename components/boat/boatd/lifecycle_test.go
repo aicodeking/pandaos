@@ -725,3 +725,14 @@ func TestDeleteSnapshotWhileSyncing(t *testing.T) {
 		}
 	}
 }
+
+// A firecracker that is alive but slow to bind its API socket (a btrfs commit with a
+// fresh multi-GiB snapshot in writeback) boots: the wait is bootTimeoutS, not 5 s.
+func TestBootWaitsForSlowAPISocket(t *testing.T) {
+	m, h := newTestManager(t, func(c *Config) { c.BootTimeoutS = 10 })
+	h.sockDelay = 5500 * time.Millisecond
+	v, err := m.Create(context.Background(), CreateReq{Team: "t"})
+	if err != nil || v.State != Running {
+		t.Fatalf("slow socket: %v %+v", err, v)
+	}
+}
