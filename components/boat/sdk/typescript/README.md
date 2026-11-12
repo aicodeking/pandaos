@@ -8,7 +8,7 @@ uses `node:crypto`.
 import { Boat, verifyWebhook } from "@boat/sdk";
 
 const boat = new Boat({ url: "https://boat.example", key: process.env.BOAT_API_KEY });
-const vm = await boat.createVM({ name: "demo", ttlS: 3600, secrets: ["OPENAI_API_KEY"] }); // omit = all, [] = none
+const vm = await boat.createVM({ name: "demo", ttlS: 3600, secrets: ["OPENAI_API_KEY"] }); // omit = the default-injected ones, [] = none
 for await (const ev of boat.prompt(vm.id, "fix the failing test", { agent: "codex" })) {
   process.stdout.write(ev.data);            // ev.exitCode is set on the last event
 }

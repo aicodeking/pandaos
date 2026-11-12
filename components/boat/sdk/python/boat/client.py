@@ -247,7 +247,7 @@ class Boat:
                   idle_stop_s: Optional[int] = None, snapshot: Optional[str] = None,
                   environment: Optional[str] = None, no_env: Optional[bool] = None,
                   from_share: Optional[str] = None, fail_fast: bool = False) -> VM:
-        """secrets: team secret names to inject (None = all, [] = none); forks inherit it.
+        """secrets: team secret names to inject (None = the secrets an admin marked default-injected, [] = none); forks inherit it.
         environment runs that environment's setup (vm.raw["setup_cmd_id"]) unless it has a current build.
         from_share: a share code bsh_..., copied into your team first.
         fail_fast: a full host raises BoatError(503, "no_ready_machine") at once."""

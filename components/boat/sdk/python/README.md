@@ -1,13 +1,13 @@
 # boat (Python SDK)
 
 Uses only the standard library (urllib) and needs Python 3.8 or newer. Install it with
-`pip install ./components/boat/sdk/python`, or put the directory on your `PYTHONPATH`.
+`pip install ./components/boat/sdk/python` (the distribution is `pandaos-boat`, not boat.dev's `boat-sdk`; it imports as `boat`), or put the directory on your `PYTHONPATH`.
 
 ```python
 from boat import Boat, verify_webhook
 
 boat = Boat()  # BOAT_URL / BOAT_API_KEY, else ~/.config/boat/config.json; or Boat(url, key)
-vm = boat.create_vm(name="demo", ttl_s=3600, secrets=["ANTHROPIC_API_KEY"])  # -> VM; secrets: None = all, [] = none
+vm = boat.create_vm(name="demo", ttl_s=3600, secrets=["ANTHROPIC_API_KEY"])  # -> VM; secrets: None = the default-injected ones, [] = none
 for ev in boat.prompt(vm.id, "fix the failing test", agent="claude"):  # ExecEvent stream
     print(ev.data.decode(), end="")
 res = boat.run(vm.id, ["pytest", "-q"])        # ExecResult(stdout, stderr, exit_code)

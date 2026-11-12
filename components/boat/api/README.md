@@ -53,7 +53,7 @@ The full schema is in `openapi.json` (OpenAPI 3.1), which the server also serves
 | `GET /v1/me` | any | user, team, role, effective scopes |
 | `GET /v1/images` | any | from `-images`; the first one is the default |
 | `GET /v1/usage[?from&to]` | vms:read | boatd `/v1/usage?team=`: VM-seconds by size, snapshot-days, starts |
-| `GET/POST /v1/vms` | vms:read / vms:write | create body `{name,size,image,ttl_s,idle_stop_s,snapshot,labels,env,secrets,environment,no_env,from}`; `secrets:[names]` picks the injected team secrets (absent = all, `[]` = none); label keys starting with `boat.` are reserved (boat-api stores the selection in `boat.secrets`) |
+| `GET/POST /v1/vms` | vms:read / vms:write | create body `{name,size,image,ttl_s,idle_stop_s,snapshot,labels,env,secrets,environment,no_env,from}`; `secrets:[names]` picks the injected team secrets (absent = the ones an admin marked default-injected, `[]` = none); label keys starting with `boat.` are reserved (boat-api stores the selection in `boat.secrets`) |
 | `GET/DELETE /v1/vms/{id}` | vms:read / vms:write | |
 | `POST /v1/vms/{id}/start\|stop\|fork` | vms:write | start re-injects secrets `{env}`; fork `{name}` |
 | `POST /v1/vms/{id}/exec` | exec | `{cmd[],env,cwd,stdin_b64,timeout_s}` → NDJSON `{stream,data_b64}` … `{exit}` |
@@ -67,7 +67,7 @@ The full schema is in `openapi.json` (OpenAPI 3.1), which the server also serves
 | `GET /v1/vms/{id}/desktop` | exec | `{url,expires_at}`, signed and short-lived (`-desktop-ttl`, default 5m) |
 | `GET/POST /v1/teams`, `GET/DELETE /v1/teams/{id}` | any / admin + operator | create and delete are operator-only (see Tenant model) |
 | `POST /v1/teams/{id}/members`, `DELETE …/members/{user}` | admin + team owner/admin role | creating a member returns their first key; the last owner cannot be removed |
-| `GET/POST /v1/keys`, `DELETE /v1/keys/{id}` | any | the token is shown only once |
+| `GET/POST /v1/keys`, `DELETE /v1/keys/{id}` | any | the token is shown only once; `expires_in_s` (≤ 365 days) makes the key expire (then 401). Deleting a key revokes the private port links it minted and its signed file URLs |
 | `GET /v1/secrets`, `PUT/DELETE /v1/secrets/{NAME}` | vms:read / admin | values are never returned |
 | `POST/GET /v1/vms/{id}/commands`, `GET/DELETE …/commands/{cid}` | exec | detached commands: `{cmd[],env,cwd}` → `{id,cmd,state}`; DELETE sends TERM |
 | `GET …/commands/{cid}/logs?offset=&limit=&follow=1` | exec | one chunk, or with `follow=1` NDJSON until the command ends |
@@ -287,7 +287,8 @@ https, and `scheme://host:port` is used as is for dev).
 - **Private (default):** the gateway requires a token from
   `GET /v1/vms/{id}/ports/{port}/url`:
   - format: `<exp>.<sig>`, with `sig = hex(HMAC-SHA256(desktopKey, "route.<port>-<vmid>.<exp>"))`;
-  - lifetime: `ttl_s` 60..604800, default `-port-url-ttl` = 1h;
+  - lifetime: `ttl_s` 60..604800, default `-port-url-ttl` = 1h, never past the minting key's expiry;
+  - deleting the minting key, or removing its member, bumps the VM's route generation;
   - the URL carries `?boat_exp=&boat_sig=`. The gateway trades them for the host-only
     cookie `__Host-boat_route` and redirects without them;
   - scripts send the header `X-Boat-Route-Token: <exp>.<sig>` instead.

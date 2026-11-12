@@ -22,7 +22,7 @@ export interface CreateVMOptions {
   ttlS?: number;
   labels?: Record<string, string>;
   env?: Record<string, string>;
-  /** Team secret names to inject (omit = all, [] = none). Forks inherit it. */
+  /** Team secret names to inject (omit = the default-injected ones, [] = none). Forks inherit it. */
   secrets?: string[];
   /** Auto-stop after this many idle seconds; -1 = never. */
   idleStopS?: number;
