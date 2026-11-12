@@ -143,12 +143,58 @@ func (m *Manager) liftMemLimits(v VM) {
 	}
 }
 
+// memMaxWait bounds how long setMemLimits waits for a VM's usage to fit under memory.max.
+var memMaxWait = 30 * time.Second
+
+// setMemLimits gives a VM its limits back after a dump. memory.high first: it reclaims
+// and throttles, never kills. memory.max only once the usage fits under it: written
+// over a higher memory.current, the kernel OOM-kills the VMM as soon as reclaim stalls
+// (the dump's page cache in writeback), which is how a VM died right after a refused
+// fork (boat-e2e 43224143615: firecracker gone without a word, no guest panic).
+// memory.reclaim pushes the usage down meanwhile. Past memMaxWait the max stays lifted
+// (by at most the VM's RAM, see liftMemLimits) and memory.high still bounds the VM.
 func (m *Manager) setMemLimits(v VM) {
-	if m.cfg.cgroupLimits {
-		high, hard := m.cfg.memLimits(v)
-		m.writeCgroup(v, "memory.high", strconv.FormatInt(high, 10)) // reclaims first
-		m.writeCgroup(v, "memory.max", strconv.FormatInt(hard, 10))
+	if !m.cfg.cgroupLimits {
+		return
 	}
+	high, hard := m.cfg.memLimits(v)
+	m.writeCgroup(v, "memory.high", strconv.FormatInt(high, 10))
+	cg := filepath.Join(cgroupRoot, m.cfg.CgroupParent, v.ID)
+	for deadline := time.Now().Add(memMaxWait); ; time.Sleep(200 * time.Millisecond) {
+		cur, err := readInt(filepath.Join(cg, "memory.current"))
+		if err != nil || cur <= hard {
+			break // no memory.current: deleted meanwhile, or no memory controller to wait for
+		}
+		if time.Now().After(deadline) {
+			log.Printf("%s: memory.max stays lifted: %d MiB in use over its %d MiB", v.ID, cur>>20, hard>>20)
+			return
+		}
+		os.WriteFile(filepath.Join(cg, "memory.reclaim"), []byte(strconv.FormatInt(cur-hard, 10)), 0) // EAGAIN when short
+	}
+	m.writeCgroup(v, "memory.max", strconv.FormatInt(hard, 10))
+}
+
+func readInt(path string) (int64, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+}
+
+// oomKills is the VM cgroup's oom_kill count, -1 when unknown.
+func (m *Manager) oomKills(id string) int64 {
+	b, err := os.ReadFile(filepath.Join(cgroupRoot, m.cfg.CgroupParent, id, "memory.events"))
+	if err != nil {
+		return -1
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(l); len(f) == 2 && f[0] == "oom_kill" {
+			n, _ := strconv.ParseInt(f[1], 10, 64)
+			return n
+		}
+	}
+	return -1
 }
 
 // ---- memory density ----

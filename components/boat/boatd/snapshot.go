@@ -223,6 +223,8 @@ func (m *Manager) settleAfterDump(v VM) {
 	if err := fsyncFile(filepath.Join(m.root(v.ID), memFile)); err != nil {
 		log.Printf("%s: flush mem: %v", v.ID, err)
 	}
+	unlock := m.lock(v.ID) // not lowering the limits under the next dump's lift
+	defer unlock()
 	m.setMemLimits(v)
 }
 

@@ -62,6 +62,9 @@ cleanup() {
   sudo ip6tables -D FORWARD -i boatbr0 -j ACCEPT 2>/dev/null
   sudo ip6tables -D FORWARD -o boatbr0 -j ACCEPT 2>/dev/null
   sudo sh -c 'for f in "$1"/vms/*/firecracker.log; do [ -f "$f" ] && { echo "--- $f (tail)"; tail -n 30 "$f"; }; done' _ "$STATE"
+  # A VMM that "exited on its own" without a word was SIGKILLed: say whether by the OOM killer.
+  sudo sh -c 'for f in /sys/fs/cgroup/boat-e2e/vm-*/memory.events; do [ -f "$f" ] && echo "--- $f: $(tr "\n" " " <"$f")"; done' 2>/dev/null
+  sudo dmesg 2>/dev/null | grep -iE 'oom|killed process' | tail -n 10
   mountpoint -q "$STATE" && sudo umount -l "$STATE"
   sudo rmdir /sys/fs/cgroup/boat-e2e 2>/dev/null
   for f in boatd api gateway hooks; do

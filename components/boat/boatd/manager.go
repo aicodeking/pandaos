@@ -593,7 +593,7 @@ func (m *Manager) watch(id string, pid int, done <-chan struct{}) {
 	if err != nil || v.PID != pid || v.State != Running {
 		return
 	}
-	log.Printf("%s: firecracker pid %d exited on its own", id, pid)
+	log.Printf("%s: firecracker pid %d exited on its own (cgroup oom_kill %d)", id, pid, m.oomKills(id))
 	m.procs.Kill(pid) // never leave a VM running behind a "stopped" record
 	delVMNet(m.run, v)
 	if _, err := m.update(id, "exited", func(v *VM) {

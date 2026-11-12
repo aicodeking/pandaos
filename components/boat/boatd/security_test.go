@@ -323,6 +323,33 @@ func TestLiftedMemoryLimitIsBounded(t *testing.T) {
 	}
 }
 
+// Writing memory.max under memory.current OOM-kills the VMM: the max waits for the usage.
+func TestMemoryMaxNotLoweredUnderUsage(t *testing.T) {
+	cgroupRoot = t.TempDir()
+	defer func() { cgroupRoot = "/sys/fs/cgroup"; memMaxWait = 30 * time.Second }()
+	memMaxWait = 300 * time.Millisecond
+	m, _ := newTestManager(t, func(c *Config) { c.CgroupParent = "p" })
+	m.cfg.cgroupLimits = true
+	v := VM{ID: "vm-x", MemMiB: 1024}
+	dir := filepath.Join(cgroupRoot, "p", v.ID)
+	os.MkdirAll(dir, 0o755)
+	high, hard := m.cfg.memLimits(v)
+	for _, f := range []string{"memory.max", "memory.high", "memory.reclaim"} {
+		os.WriteFile(filepath.Join(dir, f), nil, 0o644)
+	}
+	read := func(f string) string { b, _ := os.ReadFile(filepath.Join(dir, f)); return string(b) }
+	os.WriteFile(filepath.Join(dir, "memory.current"), []byte(strconv.FormatInt(hard+(1<<20), 10)+"\n"), 0o644)
+	m.setMemLimits(v)
+	if read("memory.max") != "" || read("memory.high") != strconv.FormatInt(high, 10) || read("memory.reclaim") != "1048576" {
+		t.Fatalf("over the limit: max %q high %q reclaim %q", read("memory.max"), read("memory.high"), read("memory.reclaim"))
+	}
+	os.WriteFile(filepath.Join(dir, "memory.current"), []byte(strconv.FormatInt(hard, 10)+"\n"), 0o644)
+	m.setMemLimits(v)
+	if read("memory.max") != strconv.FormatInt(hard, 10) {
+		t.Fatalf("usage fits, memory.max %q", read("memory.max"))
+	}
+}
+
 func TestCgroupsFailClosed(t *testing.T) {
 	cgroupRoot = t.TempDir()
 	defer func() { cgroupRoot = "/sys/fs/cgroup" }()
