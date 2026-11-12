@@ -65,10 +65,14 @@ export function startServer(upstream) {
   });
 }
 
+const START_TIMEOUT_MS = 45000;
+const START_ATTEMPTS = 3;
+
 function waitForDevtoolsUrl(proc) {
   return new Promise((ok, fail) => {
     let log = "";
-    const timer = setTimeout(() => fail(new Error(`Chrome did not start:\n${log}`)), 30000);
+    const started = Date.now();
+    const timer = setTimeout(() => fail(new Error(`Chrome did not print its DevTools URL within ${START_TIMEOUT_MS / 1000}s; stderr:\n${log || "(empty)"}`)), START_TIMEOUT_MS);
     proc.stderr.on("data", (chunk) => {
       log += chunk;
       const match = log.match(/DevTools listening on (ws:\/\/\S+)/);
@@ -77,9 +81,13 @@ function waitForDevtoolsUrl(proc) {
         ok(match[1]);
       }
     });
-    proc.on("exit", (code) => {
+    proc.on("error", (err) => {
       clearTimeout(timer);
-      fail(new Error(`Chrome exited with ${code}:\n${log}`));
+      fail(new Error(`Chrome could not be spawned: ${err.message}`));
+    });
+    proc.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      fail(new Error(`Chrome exited (code ${code}, signal ${signal}) after ${Date.now() - started}ms; stderr:\n${log || "(empty)"}`));
     });
   });
 }
@@ -96,13 +104,44 @@ function killGroup(pid, signal) {
 }
 
 // Launches Chrome and opens one page. Records requests, CSP errors and console errors.
+// Chrome's own processes, killed and waited for, then its profile removed.
+async function stopChrome(proc, profile) {
+  const exited = proc.exitCode !== null || proc.signalCode !== null || new Promise((r) => proc.once("exit", r));
+  killGroup(proc.pid, "SIGKILL");
+  await exited;
+  // Chrome's helpers write the profile until the last of them is gone.
+  const deadline = Date.now() + 10000;
+  while (killGroup(proc.pid, 0) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  // A helper that left the group (crashpad) can still write; the retries cover it.
+  rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+}
+
+// Starts headless Chrome with a fresh profile. A busy CI runner (Firecracker VMs
+// alongside) can stall a cold start, so it gets a bounded number of tries, each
+// failure logged with Chrome's stderr. Flags only remove host dependencies
+// (sandbox, /dev/shm, D-Bus, keyring); the page and its CSP are unchanged.
+async function startChrome(chromePath, width, height) {
+  for (let attempt = 1; ; attempt += 1) {
+    const profile = mkdtempSync(join(tmpdir(), "boat-dash-"));
+    const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, `--window-size=${width},${height}`, "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-extensions", "--disable-gpu",
+      "--no-sandbox", "--disable-dev-shm-usage", "--password-store=basic", "--use-mock-keychain", "--disable-breakpad", "--disable-features=MediaRouter,DialMediaRouteProvider", "about:blank"];
+    // No session bus: Chrome must not wait on D-Bus for anything.
+    const env = { ...process.env, DBUS_SESSION_BUS_ADDRESS: "disabled:", DBUS_SYSTEM_BUS_ADDRESS: "disabled:" };
+    // Its own process group, so close() can stop and wait for the helpers too.
+    const proc = spawn(chromePath, args, { stdio: ["ignore", "ignore", "pipe"], detached: true, env });
+    try {
+      return { proc, profile, wsUrl: await waitForDevtoolsUrl(proc) };
+    } catch (err) {
+      await stopChrome(proc, profile);
+      if (attempt >= START_ATTEMPTS) throw new Error(`Chrome did not start after ${attempt} attempts (${chromePath}). Last: ${err.message}`);
+      console.error(`WARN Chrome start attempt ${attempt}/${START_ATTEMPTS} failed, retrying: ${err.message}`);
+    }
+  }
+}
+
+// Launches Chrome and opens one page. Records requests, CSP errors and console errors.
 export async function launch(chromePath, { width = 1280, height = 900 } = {}) {
-  const profile = mkdtempSync(join(tmpdir(), "boat-dash-"));
-  const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, `--window-size=${width},${height}`, "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-extensions", "--disable-gpu", "about:blank"];
-  if (process.getuid?.() === 0) args.push("--no-sandbox");
-  // Its own process group, so close() can stop and wait for the helpers too.
-  const proc = spawn(chromePath, args, { stdio: ["ignore", "ignore", "pipe"], detached: true });
-  const wsUrl = await waitForDevtoolsUrl(proc);
+  const { proc, profile, wsUrl } = await startChrome(chromePath, width, height);
   const port = new URL(wsUrl).port;
   const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();
   const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -180,14 +219,7 @@ export async function launch(chromePath, { width = 1280, height = 900 } = {}) {
     screenshot: async () => Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64"),
     close: async () => {
       ws.close();
-      const exited = proc.exitCode !== null || proc.signalCode !== null || new Promise((r) => proc.once("exit", r));
-      killGroup(proc.pid, "SIGKILL");
-      await exited;
-      // Chrome's helpers write the profile until the last of them is gone.
-      const deadline = Date.now() + 10000;
-      while (killGroup(proc.pid, 0) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
-      // A helper that left the group (crashpad) can still write; the retries cover it.
-      rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+      await stopChrome(proc, profile);
     },
   };
 }
