@@ -60,6 +60,8 @@ $UEFI_NOTE
   --user NAME             login user, in group wheel (default: panda)
   --password-hash HASH    crypt(3) hash, e.g. from: mkpasswd -m yescrypt
   --ssh-key KEY           optional ssh public key for the user (one line; repeat for more)
+  --sudo-nopasswd         sudo without a password (key-only boxes); then --password-hash
+                          is optional and, if omitted, the password is locked
   --timezone TZ           e.g. Europe/Berlin (default: UTC)
   --relay URL             enable the optional panda-agentd with this relay (https)
   --allow-insecure-relay  accept an http:// relay URL
@@ -74,7 +76,8 @@ $UEFI_NOTE
   --acme-email E          optional Let's Encrypt account e-mail (none: ACME without one)
   --ipv6-prefix P         routed IPv6 prefix for VMs, e.g. 2a01:4f8:1:2:b0a7::/80
   --data-disk DEV         second disk for VM data (/var/lib/boat), ERASED, btrfs
-  --yes                   no questions; --disk and --password-hash are required
+  --yes                   no questions; --disk and --password-hash (unless
+                          --sudo-nopasswd) are required
   -h, --help              this text
 EOF
 }
@@ -216,6 +219,10 @@ parse_args() {
         build=1
         shift
         ;;
+      --sudo-nopasswd)
+        sudo_nopasswd=1
+        shift
+        ;;
       --disk | --profile | --hostname | --user | --password-hash | --ssh-key | --timezone | --relay | \
         --domain | --acme-email | --ipv6-prefix | --data-disk | --extra-config)
         (($# >= 2)) || die "$1 needs a value"
@@ -266,7 +273,7 @@ release_stale_mnt() {
 gather() {
   if ((yes)); then
     [[ -n $disk ]] || die "--disk is required with --yes"
-    [[ -n $password_hash ]] || die "--password-hash is required with --yes"
+    [[ -n $password_hash ]] || ((sudo_nopasswd)) || die "--password-hash is required with --yes (or pass --sudo-nopasswd)"
     profile=${profile:-$PANDA_DEFAULT_PROFILE}
     hostname=${hostname:-pandaos}
     user=${user:-panda}
@@ -304,7 +311,11 @@ gather() {
     ask_valid relay check_relay "panda-agentd relay URL (optional, most boxes skip it; Enter to skip)"
   fi
   gather_server
-  if [[ -n $password_hash ]]; then check_hash "$password_hash" || exit 1; else
+  if [[ -n $password_hash ]]; then check_hash "$password_hash" || exit 1
+  elif ((sudo_nopasswd)); then
+    ((${#ssh_keys[@]})) || die "--sudo-nopasswd without --password-hash needs --ssh-key (no way to log in)"
+    password_hash='!' # locked: ssh keys only
+  else
     ask_password
   fi
   disk=$(readlink -f -- "$disk")
@@ -476,6 +487,10 @@ $extra    hashedPassword = "$password_hash";
   users.users.panda.initialPassword = lib.mkForce null;
 EOF
     [[ $user == panda ]] || echo '  users.users.panda.hashedPassword = "!";'
+    if ((sudo_nopasswd)); then
+      echo '  # panda-install --sudo-nopasswd: key-only box, wheel sudo without a password.'
+      echo '  security.sudo.wheelNeedsPassword = lib.mkForce false;'
+    fi
     echo '}'
   } >"$1/local.nix"
 }
@@ -566,7 +581,7 @@ main() {
   disk="" profile="" hostname="" user="" password_hash="" timezone="" relay=""
   domain="" acme_email="" ipv6_prefix="" data_disk="" extra_config=""
   ssh_keys=()
-  yes=0 build=0 ssh_key_set=0 relay_set=0 allow_insecure_relay=0 boot_dev="" root_dev=""
+  yes=0 build=0 sudo_nopasswd=0 ssh_key_set=0 relay_set=0 allow_insecure_relay=0 boot_dev="" root_dev=""
   [[ -d ${PANDA_SYSTEMS:-} && -n ${PANDA_FLAKE_URL:-} && -n ${PANDA_DEFAULT_PROFILE:-} ]] ||
     die "PANDA_SYSTEMS/PANDA_FLAKE_URL/PANDA_DEFAULT_PROFILE unset; run the packaged panda-install"
   PANDA_FLAKE_LOCK=${PANDA_FLAKE_LOCK:-}
