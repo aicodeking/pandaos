@@ -14,7 +14,7 @@
 # 329-449 MB/s) in runs 41600185173, 41605574172 and 41609413499, plus margin. They
 # catch regressions, not runner noise; rand IOPS here move by a factor of 2 between runs.
 PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-18}    # 3.8 GiB to write: 8.1-9 s
-PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-3}             # 1.1-1.7 s
+PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-6}             # 0.74-4.07 s in 27 runs (2026-10/11): the restore reads the mem file behind the dump's 3.8 GiB writeback
 PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-3}             # right after that snapshot: 1.5 s
 PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-13}    # 7.9-9.3 s; 10 x 4 vCPU on 4 host CPUs
 PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 528 MiB

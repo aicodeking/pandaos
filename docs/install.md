@@ -140,6 +140,11 @@ sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
 2. Connect the box to PandaCode: `sudo panda-connect sign-in`, open the GitHub link it prints and
    approve it with the GitHub account you use in PandaCode (see
    [agents.md](agents.md#pandacode-connect-pandacode-host)). On the desktop, click *PandaCode* in the dock.
+   No terminal is needed: the sign-in runs as `pandacode-sign-in.service` (the host's user and
+   sandbox) and every line it prints, the GitHub link and code included, goes to the journal. Over
+   ssh without a tty or from a script: `sudo panda-connect sign-in --no-wait`, then
+   `journalctl -u pandacode-sign-in -o cat` for the code. After you approve it, the unit records the
+   sign-in and starts `pandacode-host` by itself; codes expire after 15 minutes.
 3. Check the state with `panda-connect status`. The box now shows up as a computer in PandaCode.
 4. Only if you passed `--relay`: pair `panda-agentd`, see [agents.md](agents.md#pairing).
 

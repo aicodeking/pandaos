@@ -103,8 +103,14 @@ The box does not show up in PandaCode:
    other devices use.
 2. `service: failed` or `activating` for long: read `panda-connect logs -n 100`. PandaCode Connect
    refuses requests whose clock is more than a minute off, so check `timedatectl` (NTP synced).
-3. Sign-in hangs or fails: it needs outbound HTTPS to GitHub and to PandaCode's relay. Check the
-   network (above) and try again; Ctrl-C stops it.
+3. Sign-in hangs or fails: it needs outbound HTTPS to GitHub and to PandaCode's relay. It runs as
+   `pandacode-sign-in.service` with the host's user (`agent`), environment and sandbox, so it does
+   not depend on your terminal, `sudo` environment or current directory. Read
+   `journalctl -u pandacode-sign-in -o cat`: PandaCode's own message (`Sign-in failed: ...`), and on
+   failure one `curl` line showing what that sandbox sees of github.com (HTTP code, address, or the
+   DNS/TLS error). Then check the network (above) and try again. Ctrl-C stops following, not the
+   sign-in: `sudo systemctl stop pandacode-sign-in` stops it. Headless (no tty, a script):
+   `sudo panda-connect sign-in --no-wait` and read the code from the same journal.
 4. Agents cannot find a CLI: install it with `sudo panda-agents-install <cli>` (or
    `pandaos.agents.clis`), then log it in as the agent user: `sudo -iu agent claude` (or `codex`,
    ...), and the same for `gh`. Then run `sudo panda-agents sync --user agent` and

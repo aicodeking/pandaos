@@ -79,7 +79,7 @@ Before you hand out API keys:
      maintenance.reboot = true;
    };
    ```
-5. **First admin key:** run `sudo boat-admin init -user me -team ops`. It prints an owner API key once, as a labelled line holding only the `boat_...` token (`-json` prints the full key record, as it does when the output is piped). boat-admin runs `boat-api admin init` as `boat` with the sealed master key, then restarts boat-api. Then run `boat login --url https://api.boat.example.com --key boat_...`; `boat login` also accepts the whole JSON record.
+5. **First admin key:** run `sudo boat-admin init -user me -team ops`. boat-admin runs `boat-api admin init` as `boat` with the sealed master key, prints the new owner key record (JSON) once, writes the bare `boat_...` token to `/root/boat-owner-token` (mode 0600; `--token-file PATH` for elsewhere), then restarts boat-api. Then run `boat login --url https://api.boat.example.com --key "$(sudo cat /root/boat-owner-token)"`; `boat login` also accepts the whole JSON record. Delete the file once the token is stored where you keep secrets.
 
 ### Guest images before a release
 
@@ -87,7 +87,7 @@ No tagged release has published `boat-guest-*` yet, so the release URLs in step 
 
 - **CI artifact (no build):** run the release workflow by hand, which is a dry run that builds every asset without publishing: `gh workflow run release.yml -R AICodeKing/pandaos`, then `gh run download <run-id> -R AICodeKing/pandaos -n boat-assets` (kept 7 days). It holds `boat-guest-vmlinux`, `boat-guest-rootfs-{slim,full}.ext4.zst` and `boat_guest_SHA256SUMS`. Check them with `sha256sum -c boat_guest_SHA256SUMS`.
 - **Build:** on any x86_64 host with Docker, `components/boat/guest/build.sh all` writes `out/vmlinux` and `out/rootfs-{slim,full}.ext4.zst`.
-- **Then install:** either copy them by hand (`sudo install -D -m0644 boat-guest-vmlinux /var/lib/boat/images/ubuntu-24.04/vmlinux` and `zstd -d boat-guest-rootfs-full.ext4.zst -o rootfs.ext4` into the same directory, then `sudo systemctl restart boatd boat-api`), or put the files on any HTTPS server you control and set `services.boat.images` to those URLs with the hashes from `boat_guest_SHA256SUMS`. `boat-images.service` fetches only `https://` URLs and checks every hash.
+- **Then install:** `sudo boat-admin images import boat-guest-vmlinux boat-guest-rootfs-full.ext4.zst` (a `.zst` is decompressed; a plain `.ext4` is copied with a reflink when it can be). It checks the rootfs is a clean ext4 image before replacing anything, installs both files 0644 as `ubuntu-24.04` (the default id while nothing is declared) and needs no restart: VMs created after it use the new files, running ones keep theirs. `--id NAME` installs another image; declare it with `services.boat.localImages = [ "NAME" ];` so boat-api offers it (boat-admin prints that line). `sudo boat-admin images list` shows what is installed and whether it is declared. `boat-images.service` logs the import command while the default image is missing. Or put the files on any HTTPS server you control and set `services.boat.images` to those URLs with the hashes from `boat_guest_SHA256SUMS`. `boat-images.service` fetches only `https://` URLs and checks every hash.
 
 Use `full` for the desktop; on `slim`, `POST …/desktop` answers 422 `not_supported`.
 
