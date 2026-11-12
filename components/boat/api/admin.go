@@ -96,6 +96,7 @@ type keyView struct {
 	Rotated *time.Time `json:"rotated,omitempty"`
 	// PrevUntil: the previous secret keeps working until then.
 	PrevUntil *time.Time `json:"prev_until,omitempty"`
+	Expires   *time.Time `json:"expires,omitempty"`
 }
 
 func viewKey(k *APIKey, token string) keyView {
@@ -103,7 +104,7 @@ func viewKey(k *APIKey, token string) keyView {
 	if sc == nil {
 		sc = []string{}
 	}
-	return keyView{ID: k.ID, UserID: k.UserID, TeamID: k.TeamID, Name: k.Name, Scopes: sc, Created: k.Created, Token: token, Rotated: k.Rotated, PrevUntil: k.PrevUntil}
+	return keyView{ID: k.ID, UserID: k.UserID, TeamID: k.TeamID, Name: k.Name, Scopes: sc, Created: k.Created, Token: token, Rotated: k.Rotated, PrevUntil: k.PrevUntil, Expires: k.Expires}
 }
 
 // mintKey adds a key to st and returns it with its one-time token.
@@ -582,15 +583,20 @@ func (s *server) listKeys(w http.ResponseWriter, r *http.Request, p *principal) 
 // caller's own effective scopes and of their role in the target team.
 func (s *server) createKey(w http.ResponseWriter, r *http.Request, p *principal) {
 	var body struct {
-		Name   string   `json:"name"`
-		TeamID string   `json:"team_id"`
-		Scopes []string `json:"scopes"`
+		Name       string   `json:"name"`
+		TeamID     string   `json:"team_id"`
+		Scopes     []string `json:"scopes"`
+		ExpiresInS int64    `json:"expires_in_s"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
 	if body.Name == "" {
 		body.Name = "key"
+	}
+	if body.ExpiresInS < 0 || body.ExpiresInS > maxKeyTTLS {
+		writeErr(w, r, 400, "invalid_request", "expires_in_s must be 1 to 31536000 (365 days), or left out for a key that never expires")
+		return
 	}
 	if !reName.MatchString(body.Name) {
 		writeErr(w, r, 400, "invalid_request", "invalid key name")
@@ -629,6 +635,10 @@ func (s *server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 			return errLimit
 		}
 		k, tok := mintKey(s.keys, st, p.User.ID, t.ID, body.Name, slices.Clone(scopes))
+		if body.ExpiresInS > 0 {
+			exp := k.Created.Add(time.Duration(body.ExpiresInS) * time.Second)
+			k.Expires = &exp
+		}
 		kv = viewKey(k, tok)
 		return nil
 	})

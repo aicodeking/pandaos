@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,10 +39,17 @@ func (s *server) compatKeyView(k *APIKey) map[string]any {
 	if scopes == nil {
 		scopes = []string{}
 	}
+	var exp any
+	expired, soon := false, false
+	if k.Expires != nil {
+		exp = k.Expires.UTC()
+		left := time.Until(*k.Expires)
+		expired, soon = left <= 0, left > 0 && left < 7*24*time.Hour
+	}
 	return map[string]any{"id": k.ID, "name": k.Name, "credentialLane": "scoped-v1", "keyPrefix": tokenPrefix + k.ID,
 		"keyLastFour": "****", "sandboxId": nil, "createdAt": k.Created, "lastUsedAt": last,
 		"usage": map[string]any{"requests": req, "windowDays": 30}, "resources": map[string]any{"total": 0, "sandboxes": 0, "agents": 0},
-		"expiresAt": nil, "expired": false, "expiringSoon": false, "scope": map[string]any{"actions": scopes}}
+		"expiresAt": exp, "expired": expired, "expiringSoon": soon, "scope": map[string]any{"actions": scopes}}
 }
 
 func (s *server) compatKeyList(p *principal) []map[string]any {
@@ -77,9 +86,10 @@ func (s *server) compatCreateKey(w http.ResponseWriter, r *http.Request, p *prin
 		return
 	}
 	scopes := slices.Clone(body.Actions)
+	ttl, ttlErr := parseKeyTTL(body.TTL)
 	switch {
-	case body.TTL != "" && body.TTL != "never":
-		writeErr(w, r, 400, "invalid_request", "keys do not expire on this server; leave ttl out")
+	case ttlErr != nil:
+		writeErr(w, r, 400, "invalid_request", ttlErr.Error())
 		return
 	case len(body.SandboxIDs) > 0 || len(body.EnvironmentIDs) > 0:
 		writeErr(w, r, 400, "invalid_request", "keys cannot be limited to sandboxes or environments on this server")
@@ -93,7 +103,7 @@ func (s *server) compatCreateKey(w http.ResponseWriter, r *http.Request, p *prin
 		scopes = append(scopes, pre...)
 	}
 	slices.Sort(scopes)
-	res := s.callNative(r, p, "POST /v1/keys", s.createKey, "", map[string]any{"name": body.Name, "scopes": slices.Compact(scopes)})
+	res := s.callNative(r, p, "POST /v1/keys", s.createKey, "", map[string]any{"name": body.Name, "scopes": slices.Compact(scopes), "expires_in_s": ttl})
 	if !res.ok() {
 		res.relay(w)
 		return
@@ -302,4 +312,32 @@ func (s *server) compatDeleteEnv(w http.ResponseWriter, r *http.Request, p *prin
 		return
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "environment": view})
+}
+
+// maxKeyTTLS is boat.dev's longest key ttl: 365 days.
+const maxKeyTTLS = 365 * 24 * 3600
+
+// parseKeyTTL reads boat.dev's key ttl: "90d", "24h", a number of seconds, or
+// "never". Left out it is never here (boat.dev defaults to 90d). 0 = never.
+func parseKeyTTL(v string) (int64, error) {
+	bad := errors.New("ttl must be a duration such as 90d, 24h or seconds, up to 365d, or never")
+	if v == "" || v == "never" {
+		return 0, nil
+	}
+	mul := int64(1)
+	switch {
+	case strings.HasSuffix(v, "d"):
+		v, mul = strings.TrimSuffix(v, "d"), 86400
+	case strings.HasSuffix(v, "h"):
+		v, mul = strings.TrimSuffix(v, "h"), 3600
+	case strings.HasSuffix(v, "m"):
+		v, mul = strings.TrimSuffix(v, "m"), 60
+	case strings.HasSuffix(v, "s"):
+		v = strings.TrimSuffix(v, "s")
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 || n > maxKeyTTLS/mul {
+		return 0, bad
+	}
+	return n * mul, nil
 }

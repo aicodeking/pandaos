@@ -69,6 +69,7 @@ type APIKey struct {
 	PrevHash  string     `json:"prev_hash,omitempty"`
 	PrevUntil *time.Time `json:"prev_until,omitempty"`
 	Rotated   *time.Time `json:"rotated,omitempty"`
+	Expires   *time.Time `json:"expires,omitempty"` // nil = never; after it the key is 401
 }
 
 type Secret struct {

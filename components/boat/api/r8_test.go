@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 // Native /v1 routes (and so the native CLI) accept a boat.dev bx_ id; another
@@ -55,6 +56,42 @@ func TestCompatProviderModels(t *testing.T) {
 	for _, bad := range []string{"nope=x", "claude", "claude=bad model!"} {
 		if _, err := parseProviderModels(bad); err == nil {
 			t.Errorf("%q should not parse", bad)
+		}
+	}
+}
+
+// Keys may expire (boat.dev ttl); an expired key is 401.
+func TestKeyTTL(t *testing.T) {
+	e := setup(t)
+	st, out, _ := e.compat(e.owner, "POST", "/api/v1/api-keys/scoped", map[string]any{"name": "t", "ttl": "1h", "preset": "read-only"}, nil)
+	if st != 201 {
+		t.Fatalf("create: %d %v", st, out)
+	}
+	ak := out["apiKey"].(map[string]any)
+	if ak["expiresAt"] == nil || ak["expired"] != false {
+		t.Errorf("apiKey: %v", ak)
+	}
+	tok := out["secret"].(string)
+	if st, _ := e.do(tok, "GET", "/v1/me", nil); st != 200 {
+		t.Fatalf("fresh key: %d", st)
+	}
+	id, _, _ := ParseToken(tok)
+	e.srv.store.Update(func(s *State) error {
+		past := time.Now().Add(-time.Second)
+		s.Keys[id].Expires = &past
+		return nil
+	})
+	if st, _ := e.do(tok, "GET", "/v1/me", nil); st != 401 {
+		t.Errorf("expired key: %d, want 401", st)
+	}
+	for _, ttl := range []string{"366d", "0", "-1h", "soon"} {
+		if st, out, _ := e.compat(e.owner, "POST", "/api/v1/api-keys/scoped", map[string]any{"name": "t", "ttl": ttl, "preset": "read-only"}, nil); st != 400 {
+			t.Errorf("ttl %q: %d %v", ttl, st, out)
+		}
+	}
+	for ttl, want := range map[string]int64{"never": 0, "": 0, "90d": 90 * 86400, "24h": 86400, "3600": 3600, "365d": maxKeyTTLS} {
+		if got, err := parseKeyTTL(ttl); err != nil || got != want {
+			t.Errorf("parseKeyTTL(%q) = %d, %v", ttl, got, err)
 		}
 	}
 }

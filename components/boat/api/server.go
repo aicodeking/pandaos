@@ -37,8 +37,8 @@ type Config struct {
 	VMDomain         string // port routes are <port>-<vmid>.<VMDomain> (scheme optional, default https)
 	VMAPIURL         string // this API as VMs reach it (BOAT_URL in the guest); empty = PublicURL
 	PortURLTTL       time.Duration
-	BodyTimeout      time.Duration  // request body read deadline on non-stream routes (0 = default)
-	HookDeny         []netip.Prefix // more webhook targets to refuse (the VM pool's prefixes)
+	BodyTimeout      time.Duration       // request body read deadline on non-stream routes (0 = default)
+	HookDeny         []netip.Prefix      // more webhook targets to refuse (the VM pool's prefixes)
 	ProviderModels   map[string][]string // agent -> models listed by GET /api/v1/provider-models
 }
 
@@ -133,7 +133,7 @@ func (s *server) authenticate(header string) *principal {
 	}
 	st := s.store.Snapshot()
 	k := st.Keys[id]
-	if k == nil {
+	if k == nil || (k.Expires != nil && !time.Now().Before(*k.Expires)) {
 		return nil
 	}
 	got := s.keys.HashSecret(k.Salt, secret)
