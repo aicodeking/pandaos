@@ -79,8 +79,9 @@ sudo panda-install \
 | `--profile NAME` | the ISO's own profile | `headless`, or `desktop` (desktop ISO only). The desktop ISO defaults to `desktop` |
 | `--hostname NAME` | `pandaos` | `a-z`, `0-9` and `-`, at most 63 characters |
 | `--user NAME` | `panda` | Your login user, in `wheel`, `networkmanager` and `panda-mem`. Any other name gets created, and `panda` is then locked |
-| `--password-hash H` | (required with `--yes`) | A crypt(3) hash, not the plain password |
+| `--password-hash H` | (required with `--yes` unless `--sudo-nopasswd`) | A crypt(3) hash, not the plain password |
 | `--ssh-key K` | none | One authorized ssh public key line for the user; repeat the flag for more keys |
+| `--sudo-nopasswd` | off | Key-only box: `sudo` without a password; the account password is locked unless `--password-hash` is given |
 | `--timezone TZ` | `UTC` | A zone under `/etc/zoneinfo`, e.g. `Europe/Berlin` |
 | `--relay URL` | none (agentd off) | Enables the optional `panda-agentd` with this `https://` relay. Written to `/var/lib/panda-agentd/relay`, which overrides `services.panda-agentd.relayUrl`. Most boxes skip it and use PandaCode Connect |
 | `--yes` | | No questions and no typed disk confirmation |
@@ -192,11 +193,12 @@ the box is unreachable, and only the provider's rescue system gets it back.**
    ./pi/bin/panda-install --profile server --build --yes \
      --disk /dev/nvme0n1 --data-disk /dev/nvme1n1 \
      --domain boat.example.com --ipv6-prefix 2001:db8:1:2:b0a7::/80 \
-     --password-hash '<mkpasswd -m yescrypt>' \
+     --sudo-nopasswd \
      --ssh-key "ssh-ed25519 AAAA... one" --ssh-key "ssh-ed25519 AAAA... two" \
      --extra-config ./extra.nix
    ```
-   The password is for `sudo` only: ssh accepts keys only, and root cannot log in.
+   ssh accepts keys only and root cannot log in. `--sudo-nopasswd` lets the key holder use `sudo`
+   without a password (the account password stays locked); or pass `--password-hash` for a sudo password.
 5. Before rebooting, check the built network unit, and register the boot entry (PandaOS leaves EFI
    variables alone). Keep the provider's PXE entry first so its rescue system still works:
    ```sh
