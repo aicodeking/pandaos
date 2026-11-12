@@ -1,6 +1,7 @@
 $ boat stop nope --json
 exit 1
 --- stdout
+{"error":"no VM with id or name \"nope\"","event":"error","message":"no VM with id or name \"nope\""}
 --- stderr
 {"error":{"message":"no VM with id or name \"nope\""}}
 --- requests

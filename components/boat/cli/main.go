@@ -41,7 +41,7 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat steer <vm> "text" [--prompt-id ID]       boat interrupt <vm> [--prompt-id ID]
   boat env ls | new NAME | show E | set E | default E | build E | rm E   [--image I] [--size S] [--setup TEXT|--setup-file F] [--var K=V] [--secrets A,B]
   boat rename <vm> NAME                boat api-key create NAME [--preset read-only|full-sandbox|ci|admin | --actions a,b] | list | usage ID | rotate ID | revoke ID
-  boat fork <vm> [--name N] [--fail-fast]   boat stop <vm> [--force]   boat rm|delete <vm>
+  boat fork <vm> [--name N] [--fail-fast]   boat stop <vm> [--force]   boat rm|delete <vm> [--yes]
   boat extend <vm> --hours N | --ttl SECS | --no-auto-stop | --by 2h   auto-stop: set the time left, or push it out
   boat limits                          sandboxes active and whether one can start
   boat history <vm> [command-id] [-f] [--limit N]    commands of a VM, newest first, or one's output
@@ -67,8 +67,9 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
 
 A <vm> can be an id, a unique name, current (last created or forked in this shell) or self (inside a VM).
 Inside a VM: host <port> [--public] | host list | host url <port> | host hide <port>.
-Global: --json (JSON lines on stdout, errors as JSON on stderr), --api-url URL (this run's API; login --url saves one).
-Env: BOAT_URL, BOAT_API_KEY, BOAT_CONFIG. boat.dev cloud-only verbs (org, billing, repos, ci, credentials, retention, onboard) are not supported here.`
+Global: --json (JSON lines on stdout; new ends with {"event":"ready",...}; an error is {"error":{...}} on stderr and
+  a last {"event":"error","code","status","message"} line on stdout), --api-url URL (this run's API; login --url saves one).
+Env: BOAT_URL (or BOAT_API_URL), BOAT_API_KEY, BOAT_CONFIG. boat.dev cloud-only verbs (org, billing, repos, ci, credentials, retention, onboard) are not supported here.`
 
 type app struct {
 	out, errw io.Writer
@@ -159,11 +160,15 @@ func (a *app) run(args []string) int {
 	}
 	if a.json {
 		e := map[string]any{"message": err.Error()}
+		// boat.dev's last line on stdout: {"event":"error","error","code","status"}.
+		ev := map[string]any{"event": "error", "error": err.Error(), "message": err.Error()}
 		var ae *apiError
 		if errors.As(err, &ae) {
 			e = map[string]any{"status": ae.Status, "code": ae.Code, "message": ae.Message, "request_id": ae.RequestID}
+			ev["code"], ev["status"], ev["message"] = ae.Code, ae.Status, ae.Message
 		}
 		json.NewEncoder(a.errw).Encode(map[string]any{"error": e})
+		json.NewEncoder(a.out).Encode(ev)
 	} else {
 		fmt.Fprintln(a.errw, "boat:", err)
 	}
@@ -206,7 +211,7 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return errors.New("not logged in: run boat login --url URL --key KEY")
 	}
 	if a.apiURL != "" {
-		cfg.URL = a.apiURL
+		cfg.URL = apiOrigin(a.apiURL)
 	}
 	a.cfg = cfg
 	a.c = &client{base: cfg.URL, key: cfg.Key, hc: &http.Client{}, alias: a.vmAlias}

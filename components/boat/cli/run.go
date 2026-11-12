@@ -75,6 +75,12 @@ func (a *app) newBatch(body obj, n int) error {
 	if err := a.c.call("POST", "/v1/vms", body, &out); err != nil {
 		return fmt.Errorf("the batch was not created (all or none): %w", err)
 	}
+	if a.json {
+		for _, vm := range out.VMs {
+			a.emit(readyEvent(vm), nil)
+		}
+		return nil
+	}
 	return a.emitList(out.VMs, vmCols...)
 }
 

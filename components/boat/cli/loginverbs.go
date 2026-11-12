@@ -84,7 +84,7 @@ func (a *app) login(args []string) error {
 	if *u == "" || key == "" {
 		return fmt.Errorf("login needs --url and a key: %w", errUsage)
 	}
-	base := strings.TrimRight(*u, "/")
+	base := apiOrigin(*u)
 	c := &client{base: base, key: key, hc: &http.Client{Timeout: 30 * time.Second}}
 	var me obj
 	if err := c.call("GET", "/v1/me", nil, &me); err != nil {

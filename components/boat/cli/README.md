@@ -97,9 +97,14 @@ Commands: `login whoami images usage new run push list info ps vm-usage ssh ssh-
 - **Output:** `--json` works on every command and can go anywhere before `--`. With it,
   stdout carries one JSON object per line. Lists print one item per line; exec and
   prompt pass the server's `{stream,data_b64}`/`{exit}` lines through unchanged.
-  Errors go to stderr as `{"error":{…}}`.
+  Errors go to stderr as `{"error":{…}}`, and stdout ends with boat.dev's
+  `{"event":"error","error","code","status","message"}` line. `boat new --json` prints
+  the VM with `"event":"ready"`, so boat.dev's scripts work unchanged:
+  `id=$(boat new --json | jq -r 'select(.event == "ready") | .id')`,
+  `boat delete "$id" --yes --json` (`--yes`/`-y` are accepted; this CLI never asks).
 - **VM names:** a `<vm>` argument can be an id or a unique name.
-- **Environment:** `BOAT_URL`, `BOAT_API_KEY` and `BOAT_CONFIG` override the config file.
+- **Environment:** `BOAT_URL` (or boat.dev's `BOAT_API_URL`; a trailing `/api/v1` is
+  dropped), `BOAT_API_KEY` and `BOAT_CONFIG` override the config file.
 
 Tests: `go test -race ./...`. They compare output against the golden files in
 `testdata/`; run `go test -update` to regenerate them.

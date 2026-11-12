@@ -182,16 +182,34 @@ func cmdNew(a *app, args []string) error {
 		return err
 	}
 	a.setCurrent(s(vm, "id"))
-	if err := a.emitVM(vm); err != nil {
-		return err
+	// --json: boat.dev's JSON Lines end with {"event":"ready","id":…}; this API
+	// answers once the VM is up, so that one line (with every VM field) is all.
+	if !a.json {
+		if err := a.emitVM(vm); err != nil {
+			return err
+		}
 	}
 	if se := s(vm, "setup_error"); se != "" {
 		fmt.Fprintln(a.errw, "boat: setup:", se)
 	}
 	if c := s(vm, "setup_cmd_id"); c != "" && *waitSetup {
-		return a.followLogs(vmPath(s(vm, "id"), "commands", c, "logs"))
+		if err := a.followLogs(vmPath(s(vm, "id"), "commands", c, "logs")); err != nil {
+			return err
+		}
+	}
+	if a.json {
+		return a.emit(readyEvent(vm), nil)
 	}
 	return nil
+}
+
+// readyEvent is boat.dev's last `boat new --json` line: the VM with "event".
+func readyEvent(vm obj) obj {
+	ev := obj{"event": "ready"}
+	for k, v := range vm {
+		ev[k] = v
+	}
+	return ev
 }
 
 func cmdList(a *app, args []string) error {
@@ -233,7 +251,15 @@ func cmdStop(a *app, args []string) error {
 }
 
 func cmdRm(a *app, args []string) error {
-	vm, err := oneVM(a, args)
+	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
+	// boat.dev's scripts pass --yes; this CLI never asks.
+	fs.Bool("yes", false, "accepted for boat.dev scripts; delete never asks here")
+	fs.Bool("y", false, "same as --yes")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	vm, err := oneVM(a, pos)
 	if err != nil {
 		return err
 	}

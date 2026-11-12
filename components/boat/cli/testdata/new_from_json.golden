@@ -1,7 +1,7 @@
 $ boat new --from bsh_x_y --no-env --json
 exit 0
 --- stdout
-{"id":"vm3","image":"ubuntu-24.04","name":"new","size":"small","state":"creating"}
+{"event":"ready","id":"vm3","image":"ubuntu-24.04","name":"new","size":"small","state":"creating"}
 --- stderr
 --- requests
 POST /v1/vms {"from":"bsh_x_y","image":"","name":"","no_env":true,"size":"","ttl_s":0}

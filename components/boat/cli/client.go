@@ -36,7 +36,14 @@ func homeDir(getenv func(string) string) string {
 	return getenv("USERPROFILE")
 }
 
-// loadConfig reads the config file; BOAT_URL / BOAT_API_KEY override it.
+// apiOrigin accepts boat.dev's API base (https://host/api/v1) for this CLI,
+// which talks to the native /v1 next to it.
+func apiOrigin(u string) string {
+	return strings.TrimSuffix(strings.TrimRight(u, "/"), "/api/v1")
+}
+
+// loadConfig reads the config file; BOAT_URL (or boat.dev's BOAT_API_URL) and
+// BOAT_API_KEY override it.
 func loadConfig(getenv func(string) string) (Config, error) {
 	var c Config
 	b, err := os.ReadFile(configPath(getenv))
@@ -50,6 +57,9 @@ func loadConfig(getenv func(string) string) (Config, error) {
 	}
 	if v := getenv("BOAT_URL"); v != "" {
 		c.URL = v
+	}
+	if v := getenv("BOAT_API_URL"); v != "" { // boat.dev's name (env of --api-url)
+		c.URL = apiOrigin(v)
 	}
 	if v := getenv("BOAT_API_KEY"); v != "" {
 		c.Key = v
