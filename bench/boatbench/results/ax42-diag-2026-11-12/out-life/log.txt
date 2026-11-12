@@ -1,0 +1,17 @@
+13:41:31Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | /dev/nvme0n1 btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ | [none] mq-deadline kyber  | Mem:           63383        1500       61987           8         492       61882 |  13:41:31  up   9:41,  0 users,  load average: 0.59, 1.32, 1.45
+13:41:31Z image /var/lib/boat/images/ubuntu-24.04/rootfs.ext4: attrs ---------------C------; 22567 extents found; size 3.0G apparent, 2.8G used
+13:41:31Z   compsize: Type       Perc     Disk Usage   Uncompressed Referenced   | TOTAL      100%      2.7G         2.7G         2.7G        | none       100%      2.7G         2.7G         2.7G
+13:41:31Z   one reflink copy into scratch: 10 ms (incl. sync)
+13:41:31Z image /var/lib/boat/images/ubuntu-full/rootfs.ext4: attrs ----------------------; 39762 extents found; size 7.9G apparent, 7.5G used
+13:41:31Z   compsize: Type       Perc     Disk Usage   Uncompressed Referenced   | TOTAL       58%      4.3G         7.4G         7.4G        | none       100%      2.8G         2.8G         2.8G        | zstd        32%      1.4G         4.5G         4.5G
+13:41:32Z   one reflink copy into scratch: 327 ms (incl. sync)
+13:41:33Z created bb-fio-484507 vm-e803af3237d2, exec-ready in 1.49s
+13:41:34Z snapshot snap-d3c2ba983c76 in 0.54s
+13:41:34Z   rootfs.ext4: attrs ---------------C------; 22666 extents found; compsize: TOTAL      100%      2.7G         2.7G         2.7G        | none       100%      2.7G         2.7G         2.7G
+13:41:34Z   vmlinux: attrs ----------------------; 272 extents found; compsize: TOTAL       40%       17M          42M          42M        | none       100%       10M          10M          10M        | zstd        20%      6.3M          31M          31M
+13:41:34Z   mem: attrs ----------------------; 3293 extents found; compsize: TOTAL       22%      100M         440M         440M        | none       100%       38M          38M          38M        | zstd        15%       61M         401M         401M
+13:41:34Z   vmstate: attrs ----------------------; 1 extent found; compsize: TOTAL        7%      4.0K          52K          52K        | zstd         7%      4.0K          52K          52K
+13:41:34Z   snap.json: attrs ----------------------; 1 extent found; compsize: TOTAL       74%      216B         289B         289B        | zstd        74%      216B         289B         289B
+13:41:34Z new-from-snapshot vm-2ce0943a44e1 exec-ready in 0.35s
+13:41:35Z boatd journal for these VMs: 2026/11/12 13:41:32 vm-e803af3237d2: create alloc=20ms materialize=154ms | 2026/11/12 13:41:32 vm-e803af3237d2: boot=114ms net=14ms | 2026/11/12 13:41:33 vm-e803af3237d2: guest init agent=1115ms identity=57ms clock+env=0ms | 2026/11/12 13:41:34 vm-e803af3237d2: snapshot (diff) sync=3ms pause=0ms write=381ms written=440MiB | 2026/11/12 13:41:34 vm-e803af3237d2: snapshot install merge=0ms | 2026/11/12 13:41:34 vm-e803af3237d2: freeze disk=143ms rest=9ms | 2026/11/12 13:41:34 vm-2ce0943a44e1: create alloc=20ms materialize=165ms
+13:41:35Z scratch removed: True; GET /v1/vms: {"vms":[]}; GET /v1/snapshots: {"snapshots":[]}

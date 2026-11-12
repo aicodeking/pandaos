@@ -1,0 +1,12 @@
+{
+ "tool": "fio",
+ "seq_write_mbps": 1629.4,
+ "seq_read_mbps": 12353.0,
+ "rand_write_iops": 225507.0,
+ "rand_read_iops": 218022.0,
+ "pts_rand_read_iops": 217977.0,
+ "pts_rand_write_iops": 250938.0,
+ "pts_seq_write_mibps": 1776.8,
+ "fsync_rand_write_iops": 25670.0,
+ "seq_write_endfsync_mbps": 1957.9
+}

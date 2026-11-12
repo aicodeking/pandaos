@@ -1,0 +1,20 @@
+13:41:35Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | /dev/nvme0n1 btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ | [none] mq-deadline kyber  | Mem:           63383        2268       61146           8         565       61115 |  13:41:35  up   9:42,  0 users,  load average: 0.86, 1.36, 1.47
+13:41:37Z created bb-fio-24c12e vm-fb08fe759b16, exec-ready in 1.58s
+13:41:41Z disk /var/lib/boat/teams/t_team_ed8314df1712/vms/vm-fb08fe759b16/firecracker/vm-fb08fe759b16/root/rootfs.ext4; attrs ---------------C------ /var/lib/boat/teams/t_team_ed8314df1712/vms/vm-fb08fe759b16/firecracker/vm-fb08fe759b16/root/rootfs.ext4; firecracker pid 39790; cgroup /boat-vms/vm-fb08fe759b16; memory.high 8858370048 memory.max 9395240960
+13:43:06Z   t1 after write: cgroup memory.current 2593 MiB, anon 786 MiB, file 1796 MiB, file_dirty 1024 MiB, file_writeback 0 MiB; disk file resident 1764 MiB
+13:44:32Z wb2-t1-nosync-randread: 217869 IOPS, 851.1 MiB/s, clat p50 292.9 us
+13:44:32Z   t1: nvme0n1 read I/Os during the read: 0
+13:44:32Z   t1 after read: cgroup memory.current 2593 MiB, anon 786 MiB, file 1796 MiB, file_dirty 0 MiB, file_writeback 0 MiB; disk file resident 1764 MiB
+13:45:57Z   t2 after write: cgroup memory.current 3629 MiB, anon 794 MiB, file 2820 MiB, file_dirty 472 MiB, file_writeback 24 MiB; disk file resident 2788 MiB
+13:47:23Z wb2-t2-nosync-randread: 63712 IOPS, 248.9 MiB/s, clat p50 1036.3 us
+13:47:23Z   t2: nvme0n1 read I/Os during the read: 0
+13:47:23Z   t2 after read: cgroup memory.current 3628 MiB, anon 794 MiB, file 2820 MiB, file_dirty 0 MiB, file_writeback 0 MiB; disk file resident 2788 MiB
+13:48:48Z   t3 after write: cgroup memory.current 4653 MiB, anon 793 MiB, file 3845 MiB, file_dirty 768 MiB, file_writeback 32 MiB; disk file resident 3812 MiB
+13:50:13Z wb2-t3-nosync-randread: 218768 IOPS, 854.6 MiB/s, clat p50 292.9 us
+13:50:13Z   t3: nvme0n1 read I/Os during the read: 0
+13:50:13Z   t3 after read: cgroup memory.current 4653 MiB, anon 793 MiB, file 3845 MiB, file_dirty 0 MiB, file_writeback 0 MiB; disk file resident 3812 MiB
+13:51:39Z   t4 after write: cgroup memory.current 5681 MiB, anon 793 MiB, file 4869 MiB, file_dirty 1024 MiB, file_writeback 0 MiB; disk file resident 4837 MiB
+13:53:04Z wb2-t4-nosync-randread: 218407 IOPS, 853.2 MiB/s, clat p50 292.9 us
+13:53:04Z   t4: nvme0n1 read I/Os during the read: 0
+13:53:04Z   t4 after read: cgroup memory.current 5680 MiB, anon 793 MiB, file 4869 MiB, file_dirty 0 MiB, file_writeback 0 MiB; disk file resident 4837 MiB
+13:53:05Z deleted vm-fb08fe759b16; GET /v1/vms now: {"vms":[]}

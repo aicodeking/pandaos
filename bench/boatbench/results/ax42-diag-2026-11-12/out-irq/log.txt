@@ -1,0 +1,22 @@
+14:10:57Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | /dev/nvme0n1 btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ | [none] mq-deadline kyber  | Mem:           63383        1431       61873           9         676       61951 |  14:10:57  up  10:11,  0 users,  load average: 1.46, 1.64, 1.59
+14:10:58Z created bb-fio-b2c354 vm-bc537cc1961c, exec-ready in 1.62s
+14:12:28Z guest /proc/interrupts (virtio):
+ 26:          0          0         60          0   IO-APIC   5-edge      virtio0
+ 27:          0          0          0      80563   IO-APIC   6-edge      virtio1
+ 28:       6883          0          0          0   IO-APIC   7-edge      virtio2
+ 29:          0        144          0          0   IO-APIC   8-edge      virtio3
+
+14:12:28Z virtio-blk interrupt line: 27:          0          0          0      80563   IO-APIC   6-edge      virtio1 -> vCPU 3; other vCPU 1
+14:12:53Z irq-t1-fio-on-same-vcpu3: 59947 IOPS, 234.2 MiB/s, clat p50 1036.3 us
+14:13:18Z irq-t1-fio-on-other-vcpu1: 219149 IOPS, 856.1 MiB/s, clat p50 292.9 us
+14:13:44Z irq-t2-fio-on-same-vcpu3: 59505 IOPS, 232.5 MiB/s, clat p50 1036.3 us
+14:14:09Z irq-t2-fio-on-other-vcpu1: 219754 IOPS, 858.4 MiB/s, clat p50 292.9 us
+14:14:34Z irq-t3-fio-on-same-vcpu3: 59612 IOPS, 232.9 MiB/s, clat p50 1036.3 us
+14:15:00Z irq-t3-fio-on-other-vcpu1: 219337 IOPS, 856.8 MiB/s, clat p50 292.9 us
+14:15:00Z guest /proc/interrupts after:
+ 26:          0          0         60          0   IO-APIC   5-edge      virtio0
+ 27:          0          0          0    6282574   IO-APIC   6-edge      virtio1
+ 28:       6886          0          0          0   IO-APIC   7-edge      virtio2
+ 29:          0        225          0          0   IO-APIC   8-edge      virtio3
+
+14:15:00Z deleted vm-bc537cc1961c; GET /v1/vms now: {"vms":[]}

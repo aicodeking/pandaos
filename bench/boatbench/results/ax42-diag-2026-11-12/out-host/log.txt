@@ -1,0 +1,16 @@
+12:45:20Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | /dev/nvme0n1 btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ | [none] mq-deadline kyber  | Mem:           63383        1926       46864           8       15306       61456 |  12:45:20  up   8:45,  0 users,  load average: 0.45, 0.10, 0.03
+12:45:20Z attrs: ---------------C------ /var/lib/boat/bb-fio-scratch/nocow | ---------------------- /var/lib/boat/bb-fio-scratch/cow
+12:46:41Z host-nocow-pts-seqwrite: 4842 IOPS, 4842.1 MiB/s, clat p50 12517.4 us
+12:48:01Z host-nocow-pts-randread-1: 198247 IOPS, 774.4 MiB/s, clat p50 317.4 us
+12:49:22Z host-nocow-pts-randread-2: 197548 IOPS, 771.7 MiB/s, clat p50 317.4 us
+12:50:42Z host-nocow-pts-randread-3: 198036 IOPS, 773.6 MiB/s, clat p50 317.4 us
+12:50:42Z nocow extents: /var/lib/boat/bb-fio-scratch/nocow/f: 2 extents found
+12:52:03Z host-cow-pts-seqwrite: 746 IOPS, 745.7 MiB/s, clat p50 84410.4 us
+12:53:24Z host-cow-pts-randread-1: 174436 IOPS, 681.4 MiB/s, clat p50 358.4 us
+12:54:44Z host-cow-pts-randread-2: 174485 IOPS, 681.6 MiB/s, clat p50 358.4 us
+12:56:05Z host-cow-pts-randread-3: 174834 IOPS, 682.9 MiB/s, clat p50 358.4 us
+12:56:05Z cow extents: /var/lib/boat/bb-fio-scratch/cow/f: 2 extents found
+12:56:31Z host-nocow-randread-qd1: 17808 IOPS, 69.6 MiB/s, clat p50 52.5 us
+12:56:58Z host-nocow-randread-iouring-qd64: 222505 IOPS, 869.2 MiB/s, clat p50 280.6 us
+12:57:24Z host-nocow-randread-buffered-warm: 17625 IOPS, 68.9 MiB/s, clat p50 3522.6 us
+12:57:24Z scratch removed: True

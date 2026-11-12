@@ -1,0 +1,43 @@
+12:57:25Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | /dev/nvme0n1 btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ | [none] mq-deadline kyber  | Mem:           63383        1762       47060           8       15274       61621 |  12:57:25  up   8:57,  0 users,  load average: 0.96, 0.87, 0.51
+12:57:25Z boatd Async refusals in journal: 0
+12:57:26Z created bb-fio-c8e3f0 vm-dcc8b5841ba0, exec-ready in 1.56s
+12:57:26Z guest: 6.1.191 | 4 | [none] mq-deadline kyber bfq  | /dev/vda ext4   rw,noatime | 
+12:57:31Z guest fio: fio-3.36 
+12:57:31Z disk file: ; attrs ---------------------- ./__pycache__
+---------------------- ./out-vm
+---------------------- ./vm.out
+---------------------- ./out-host
+---------------------- ./host.out
+---------------------- ./run.sh
+---------------------- ./fio_ab.py
+---------------------- ./results
+---------------------- ./cost_tables.py
+---------------------- ./admission.py
+---------------------- ./density.py
+---------------------- ./report.py
+---------------------- ./workloads.py
+---------------------- ./boatbench.py
+---------------------- ./drivers.py; io_engine/cache from boatd: Async (default auto), Unsafe
+12:58:56Z vm-t1-pts-seqwrite: 1770 IOPS, 1771.0 MiB/s, clat p50 35389.4 us
+12:58:56Z t1 host page cache of the VM disk after write:  bytes
+13:00:22Z vm-t1-pts-randread-cached: 219308 IOPS, 856.7 MiB/s, clat p50 292.9 us
+13:00:24Z t1 dropped host caches:  bytes resident
+13:01:50Z vm-t1-pts-randread-dropped: 217825 IOPS, 850.9 MiB/s, clat p50 292.9 us
+13:01:50Z t1 after the read:  bytes resident
+13:03:15Z vm-t2-pts-seqwrite: 1692 IOPS, 1693.1 MiB/s, clat p50 36962.3 us
+13:03:15Z t2 host page cache of the VM disk after write:  bytes
+13:04:41Z vm-t2-pts-randread-cached: 59467 IOPS, 232.3 MiB/s, clat p50 1036.3 us
+13:04:41Z t2 dropped host caches:  bytes resident
+13:06:07Z vm-t2-pts-randread-dropped: 216299 IOPS, 844.9 MiB/s, clat p50 297.0 us
+13:06:07Z t2 after the read:  bytes resident
+13:07:32Z vm-t3-pts-seqwrite: 1721 IOPS, 1721.7 MiB/s, clat p50 36438.0 us
+13:07:32Z t3 host page cache of the VM disk after write:  bytes
+13:08:57Z vm-t3-pts-randread-cached: 218298 IOPS, 852.7 MiB/s, clat p50 292.9 us
+13:08:58Z t3 dropped host caches:  bytes resident
+13:10:23Z vm-t3-pts-randread-dropped: 219539 IOPS, 857.6 MiB/s, clat p50 292.9 us
+13:10:23Z t3 after the read:  bytes resident
+13:10:49Z vm-randread-qd1: 33021 IOPS, 129.0 MiB/s, clat p50 25.0 us
+13:11:14Z vm-randread-iouring-qd64: 245245 IOPS, 958.0 MiB/s, clat p50 259.1 us
+13:17:02Z DISK script 1: {"tool": "fio", "seq_write_mbps": 1629.4, "seq_read_mbps": 12353.0, "rand_write_iops": 225507.0, "rand_read_iops": 218022.0, "pts_rand_read_iops": 217977.0, "pts_rand_write_iops": 250938.0, "pts_seq_write_mibps": 1776.8, "fsync_rand_write_iops": 25670.0, "seq_write_endfsync_mbps": 1957.9}; resident 
+13:22:50Z DISK script 2: {"tool": "fio", "seq_write_mbps": 1564.1, "seq_read_mbps": 10938.4, "rand_write_iops": 227225.0, "rand_read_iops": 218752.0, "pts_rand_read_iops": 220201.0, "pts_rand_write_iops": 257561.0, "pts_seq_write_mibps": 1799.2, "fsync_rand_write_iops": 25637.0, "seq_write_endfsync_mbps": 1750.9}; resident 
+13:22:50Z deleted vm-dcc8b5841ba0; GET /v1/vms now: {"vms":[]}

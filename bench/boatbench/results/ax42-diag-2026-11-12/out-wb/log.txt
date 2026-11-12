@@ -1,0 +1,15 @@
+13:22:57Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | /dev/nvme0n1 btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ | [none] mq-deadline kyber  | Mem:           63383        1437       62204           8         339       61945 |  13:22:57  up   9:23,  0 users,  load average: 1.37, 1.84, 1.65
+13:22:59Z created bb-fio-c9da55 vm-840652201555, exec-ready in 1.57s
+13:25:55Z wb-t1-nosync-randread: 58979 IOPS, 230.4 MiB/s, clat p50 1036.3 us
+13:25:55Z   dirty at read start 1024 MiB; Writeback>0 in 0 samples (s -..-); measured window is s 25..85
+13:28:46Z wb-t2-sync-randread: 218793 IOPS, 854.7 MiB/s, clat p50 292.9 us
+13:28:46Z   dirty at read start 0 MiB; Writeback>0 in 0 samples (s -..-); measured window is s 25..85
+13:31:38Z wb-t3-nosync-randread: 58854 IOPS, 229.9 MiB/s, clat p50 1036.3 us
+13:31:38Z   dirty at read start 365 MiB; Writeback>0 in 1 samples (s 0..0); measured window is s 25..85
+13:34:29Z wb-t4-sync-randread: 216203 IOPS, 844.5 MiB/s, clat p50 297.0 us
+13:34:29Z   dirty at read start 0 MiB; Writeback>0 in 0 samples (s -..-); measured window is s 25..85
+13:37:21Z wb-t5-nosync-randread: 215141 IOPS, 840.4 MiB/s, clat p50 297.0 us
+13:37:21Z   dirty at read start 1024 MiB; Writeback>0 in 1 samples (s 1..1); measured window is s 25..85
+13:40:12Z wb-t6-sync-randread: 216771 IOPS, 846.8 MiB/s, clat p50 297.0 us
+13:40:12Z   dirty at read start 0 MiB; Writeback>0 in 0 samples (s -..-); measured window is s 25..85
+13:40:13Z deleted vm-840652201555; GET /v1/vms now: {"vms":[]}
