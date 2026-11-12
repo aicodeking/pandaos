@@ -538,11 +538,14 @@ func (s *server) removeMember(w http.ResponseWriter, r *http.Request, p *princip
 			return errors.New("cannot remove the last owner")
 		}
 		team.Members = kept
+		gone := map[string]bool{}
 		for id, k := range st.Keys {
 			if k.UserID == uid && k.TeamID == t.ID {
 				delete(st.Keys, id)
+				gone[id] = true
 			}
 		}
+		revokeLinksOf(st, func(k string) bool { return gone[k] })
 		pruneOrphanUsers(st)
 		return nil
 	})
@@ -726,7 +729,11 @@ func (s *server) deleteKey(w http.ResponseWriter, r *http.Request, p *principal)
 		writeErr(w, r, 404, "not_found", "key not found")
 		return
 	}
-	if err := s.store.Update(func(st *State) error { delete(st.Keys, id); return nil }); err != nil {
+	if err := s.store.Update(func(st *State) error {
+		delete(st.Keys, id)
+		revokeLinksOf(st, func(k string) bool { return k == id })
+		return nil
+	}); err != nil {
 		s.storeErr(w, r, err)
 		return
 	}

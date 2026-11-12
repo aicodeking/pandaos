@@ -392,7 +392,9 @@ func keys(m map[string]bool) []string {
 }
 
 // noCoverage lists routes the Go suite cannot produce a 2xx for, with why.
-var noCoverage = map[string]string{}
+var noCoverage = map[string]string{
+	"POST /api/v1/sandboxes/{id}/unshare": "always 501 not_supported: there are no private sandboxes here (TestCompatUnshareNotSupported)",
+}
 
 func TestMain(m *testing.M) {
 	code := m.Run()

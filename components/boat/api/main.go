@@ -287,6 +287,7 @@ func newServer(store *Store, kr *Keyring, bd *boatdClient, cfg Config, lim *limi
 		streams: newInflight(defaultTeamStreams), uploads: newInflight(defaultTeamUploads), aiInflight: newInflight(defaultAIVMInflight),
 		teamAll: newInflight(defaultTeamInflight)}
 	s.hooks = newDispatcher(s, cfg.AllowPrivateHook)
+	s.idem.store, s.deletions.store, s.stops.store = store, store, store
 	s.routes()
 	s.compatRoutes()
 	return s

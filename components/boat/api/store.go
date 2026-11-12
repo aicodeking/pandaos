@@ -140,6 +140,15 @@ type State struct {
 	ForeignVMs map[string]bool `json:"foreign_vms"`
 	// RouteGens: per VM, bumped to revoke its port tokens (see SignRoute).
 	RouteGens map[string]int `json:"route_gens"`
+	// PortMinters: per VM, the API keys that minted its private port links;
+	// deleting one (or removing its member) bumps the VM's RouteGens.
+	PortMinters map[string][]string `json:"port_minters,omitempty"`
+	// boat.dev operations kept across restarts (compat_stops.go, compat.go,
+	// compat_idem.go). Op maps keep their team (and VM) under "_" keys.
+	StopOps     map[string]map[string]any `json:"stop_ops,omitempty"`     // stop id -> op
+	StopLast    map[string]string         `json:"stop_last,omitempty"`    // vm id -> its last stop id
+	DeletionOps map[string]map[string]any `json:"deletion_ops,omitempty"` // op id -> op
+	Idempotency map[string]*IdemRecord    `json:"idempotency,omitempty"`  // team + "\x00" + key -> answer
 	// VMTokens: per VM, the generation of its own API token (selftoken.go).
 	VMTokens map[string]*VMToken `json:"vm_tokens"`
 	// CompatIDs: boat.dev bx_ sandbox ids (compat_ids.go), and the reverse.
@@ -354,6 +363,21 @@ func (st *State) init() {
 	}
 	if st.RouteGens == nil {
 		st.RouteGens = map[string]int{}
+	}
+	if st.PortMinters == nil {
+		st.PortMinters = map[string][]string{}
+	}
+	if st.StopOps == nil {
+		st.StopOps = map[string]map[string]any{}
+	}
+	if st.StopLast == nil {
+		st.StopLast = map[string]string{}
+	}
+	if st.DeletionOps == nil {
+		st.DeletionOps = map[string]map[string]any{}
+	}
+	if st.Idempotency == nil {
+		st.Idempotency = map[string]*IdemRecord{}
 	}
 }
 

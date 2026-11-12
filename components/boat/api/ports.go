@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -225,7 +226,15 @@ func (s *server) portURL(w http.ResponseWriter, r *http.Request, p *principal) {
 	u := url.URL{Scheme: base.Scheme, Host: label + "." + base.Host, Path: "/"}
 	out := map[string]any{"url": "", "auth": route["auth"], "guest_port": port}
 	if route["auth"] == "private" {
-		exp := time.Now().Add(ttl).Unix()
+		if err := s.recordPortMinter(id, p.Key.ID); err != nil {
+			s.storeErr(w, r, err)
+			return
+		}
+		expAt := time.Now().Add(ttl)
+		if p.Key.Expires != nil && p.Key.Expires.Before(expAt) {
+			expAt = *p.Key.Expires // a link never outlives its key
+		}
+		exp := expAt.Unix()
 		sig := SignRoute(PurposeKey(s.cfg.DesktopKey, purposePortRoute), label, s.store.Snapshot().RouteGens[id], exp)
 		u.RawQuery = url.Values{"boat_exp": {strconv.FormatInt(exp, 10)}, "boat_sig": {sig}}.Encode()
 		out["expires_at"] = time.Unix(exp, 0).UTC()
@@ -233,4 +242,50 @@ func (s *server) portURL(w http.ResponseWriter, r *http.Request, p *principal) {
 	}
 	out["url"] = u.String()
 	writeJSON(w, 200, out)
+}
+
+// recordPortMinter notes that key minted a private link of vmID, so deleting
+// the key or removing its member revokes the VM's port links (revokeLinksOf).
+// A VM's own token (vm_ ids) is not recorded: it dies with the VM.
+func (s *server) recordPortMinter(vmID, keyID string) error {
+	if strings.HasPrefix(keyID, "vm_") || slices.Contains(s.store.Snapshot().PortMinters[vmID], keyID) {
+		return nil
+	}
+	return s.store.Update(func(st *State) error {
+		if !slices.Contains(st.PortMinters[vmID], keyID) {
+			st.PortMinters[vmID] = append(slices.Clone(st.PortMinters[vmID]), keyID)
+		}
+		return nil
+	})
+}
+
+// revokeLinksOf bumps the route generation of every VM whose private port
+// links one of gone minted (inside Store.Update). The gateway then refuses
+// them; signed file URLs check their key at use (keyAlive) instead.
+func revokeLinksOf(st *State, gone func(keyID string) bool) {
+	for vm, keys := range st.PortMinters {
+		kept := slices.DeleteFunc(slices.Clone(keys), gone)
+		if len(kept) == len(keys) {
+			continue
+		}
+		st.RouteGens[vm]++
+		if len(kept) == 0 {
+			delete(st.PortMinters, vm)
+		} else {
+			st.PortMinters[vm] = kept
+		}
+	}
+}
+
+// keyAlive says whether the key that minted a signed URL still stands: it
+// exists in team, has not expired, and its user is still a member. A VM's own
+// token (vm_<id>) stands while the VM's token record does.
+func (s *server) keyAlive(keyID, team string, now time.Time) bool {
+	st := s.store.Snapshot()
+	if vm, ok := strings.CutPrefix(keyID, "vm_"); ok {
+		t := st.VMTokens[vm]
+		return t != nil && t.TeamID == team
+	}
+	k, t := st.Keys[keyID], st.Teams[team]
+	return k != nil && t != nil && k.TeamID == team && (k.Expires == nil || now.Before(*k.Expires)) && t.role(k.UserID) != ""
 }

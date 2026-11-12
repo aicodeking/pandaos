@@ -23,7 +23,8 @@ import (
 // streams the file as raw bytes with no size limit. The token is
 // base64url({t,v,p,e}) "." hex(HMAC-SHA256(fileKey, that)), fileKey derived
 // from the API's master key for this purpose only. It is bound to the team,
-// the VM and the path, and expires after ttlSeconds (default 900, at most
+// the VM, the path and the minting key (dead with that key or its member),
+// and expires after ttlSeconds (default 900, at most
 // 3600). Served at /api/v1/file-downloads/<token>, which Caddy routes with
 // the rest of /api/v1; the audit log never shows the token.
 
@@ -39,6 +40,7 @@ type fileGrant struct {
 	Path string `json:"p"`
 	Exp  int64  `json:"e"`
 	Op   string `json:"o,omitempty"` // "put": an upload URL (compat_extra.go)
+	Key  string `json:"k"`           // the minting API key: the URL dies with it (keyAlive)
 }
 
 func (s *server) signFileGrant(g fileGrant) string {
@@ -57,7 +59,7 @@ func (s *server) openFileGrant(token string, now time.Time) (fileGrant, bool) {
 	if err != nil || json.Unmarshal(b, &g) != nil || !now.Before(time.Unix(g.Exp, 0)) {
 		return g, false
 	}
-	return g, true
+	return g, s.keyAlive(g.Key, g.Team, now)
 }
 
 // publicBase is this API's public base URL: -public-url, else what the request
@@ -97,7 +99,7 @@ func (s *server) compatDownloadURL(w http.ResponseWriter, r *http.Request, p *pr
 		return
 	}
 	exp := time.Now().Add(time.Duration(ttl) * time.Second).Truncate(time.Second)
-	tok := s.signFileGrant(fileGrant{Team: p.Team.ID, VM: r.PathValue("id"), Path: file, Exp: exp.Unix()})
+	tok := s.signFileGrant(fileGrant{Team: p.Team.ID, VM: r.PathValue("id"), Path: file, Exp: exp.Unix(), Key: p.Key.ID})
 	writeCompat(w, 200, "file.download_url", map[string]any{"url": s.publicBase(r) + fileDownloadPath + tok,
 		"method": "GET", "path": file, "expiresAt": exp.UTC()})
 }

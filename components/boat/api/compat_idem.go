@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -15,8 +16,12 @@ import (
 // different body is 409 idempotency_key_reused, a request still running is
 // 409 idempotency_in_progress, and a failed request frees its key at once.
 //
-// ponytail: in memory, so a restart forgets the keys (a retry then creates a
-// second VM), and one process only. Persist them if that matters.
+// A finished answer is kept in the store (State.Idempotency), so a restart
+// still replays it. A request in flight is held in memory only: if the API
+// dies mid-request the key is free again after the restart.
+//
+// ponytail: answers live in state.json, which is rewritten on every update;
+// maxIdemEntries bounds it. Move them to their own file if they grow.
 
 const (
 	idemTTL        = 24 * time.Hour
@@ -24,48 +29,47 @@ const (
 	maxIdemEntries = 10000
 )
 
-type idemEntry struct {
-	hash   string
-	done   bool
-	status int
-	ctype  string
-	body   []byte
-	at     time.Time
+// IdemRecord is one finished answer to replay.
+type IdemRecord struct {
+	Hash   string    `json:"hash"`
+	Status int       `json:"status"`
+	CType  string    `json:"ctype"`
+	Body   []byte    `json:"body"`
+	At     time.Time `json:"at"`
 }
 
 type idemCache struct {
-	mu  sync.Mutex
-	m   map[string]*idemEntry
-	now func() time.Time
+	mu      sync.Mutex
+	pending map[string]string // key -> body hash, while the first request runs
+	store   *Store
+	now     func() time.Time
 }
 
-// begin claims key for hash. It returns the finished entry to replay, or the
+// begin claims key for hash. It returns the finished answer to replay, or the
 // error code to answer, or neither when the caller should run the request.
-func (c *idemCache) begin(key, hash string) (*idemEntry, string) {
+func (c *idemCache) begin(key, hash string) (*IdemRecord, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := c.clock()
-	if c.m == nil {
-		c.m = map[string]*idemEntry{}
-	}
-	for k, e := range c.m { // cheap at maxIdemEntries; keeps the map bounded
-		if now.Sub(e.at) > idemTTL {
-			delete(c.m, k)
-		}
-	}
-	if e := c.m[key]; e != nil {
-		switch {
-		case e.hash != hash:
+	st := c.store.Snapshot()
+	if e := st.Idempotency[key]; e != nil && c.clock().Sub(e.At) <= idemTTL {
+		if e.Hash != hash {
 			return nil, "idempotency_key_reused"
-		case !e.done:
-			return nil, "idempotency_in_progress"
 		}
 		return e, ""
 	}
-	if len(c.m) >= maxIdemEntries {
+	if h, ok := c.pending[key]; ok {
+		if h != hash {
+			return nil, "idempotency_key_reused"
+		}
+		return nil, "idempotency_in_progress"
+	}
+	if len(c.pending)+len(st.Idempotency) >= maxIdemEntries {
 		return nil, "rate_limited"
 	}
-	c.m[key] = &idemEntry{hash: hash, at: now}
+	if c.pending == nil {
+		c.pending = map[string]string{}
+	}
+	c.pending[key] = hash
 	return nil, ""
 }
 
@@ -73,12 +77,23 @@ func (c *idemCache) begin(key, hash string) (*idemEntry, string) {
 func (c *idemCache) finish(key string, status int, ctype string, body []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	hash := c.pending[key]
+	delete(c.pending, key)
 	if status/100 != 2 {
-		delete(c.m, key)
 		return
 	}
-	if e := c.m[key]; e != nil {
-		e.done, e.status, e.ctype, e.body = true, status, ctype, body
+	now := c.clock()
+	err := c.store.Update(func(st *State) error {
+		for k, e := range st.Idempotency { // keeps the map bounded
+			if now.Sub(e.At) > idemTTL {
+				delete(st.Idempotency, k)
+			}
+		}
+		st.Idempotency[key] = &IdemRecord{Hash: hash, Status: status, CType: ctype, Body: body, At: now}
+		return nil
+	})
+	if err != nil {
+		log.Printf("idempotency: %v", err) // the answer went out; a retry runs again
 	}
 }
 
@@ -137,10 +152,10 @@ func (s *server) idempotent(w http.ResponseWriter, r *http.Request, p *principal
 		writeErr(w, r, 409, code, "Idempotency-Key: "+code)
 		return
 	case e != nil:
-		w.Header().Set("Content-Type", e.ctype)
+		w.Header().Set("Content-Type", e.CType)
 		w.Header().Set("Idempotent-Replayed", "true")
-		w.WriteHeader(e.status)
-		w.Write(e.body)
+		w.WriteHeader(e.Status)
+		w.Write(e.Body)
 		return
 	}
 	t := &teeWriter{ResponseWriter: w}

@@ -8,12 +8,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -535,40 +535,35 @@ func compatPage(boxes []map[string]any, cursor string, limit int, desc bool) ([]
 // ---- delete, with boat.dev's confirmation header and deletion operations ----
 
 // deletions remembers finished deletes for GET /deletion-operations (in memory).
-type deletions struct {
-	mu sync.Mutex
-	m  map[string]map[string]any // op id -> operation (with its team under "_team")
-}
+// deletions are boat.dev's deletion operations, kept in the store
+// (State.DeletionOps) so a restart keeps them.
+type deletions struct{ store *Store }
 
 const maxDeletionOps = 10000
 
 func (d *deletions) add(team string, op map[string]any) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.m == nil || len(d.m) >= maxDeletionOps {
-		d.m = map[string]map[string]any{} // ponytail: forgets all past ops at the cap
-	}
 	cp := map[string]any{"_team": team}
 	for k, v := range op {
 		cp[k] = v
 	}
-	d.m[op["id"].(string)] = cp
+	err := d.store.Update(func(st *State) error {
+		if len(st.DeletionOps) >= maxDeletionOps {
+			st.DeletionOps = map[string]map[string]any{} // ponytail: forgets all past ops at the cap
+		}
+		st.DeletionOps[op["id"].(string)] = cp
+		return nil
+	})
+	if err != nil {
+		log.Printf("deletion operations: %v", err) // the deletion happened; only its record is lost
+	}
 }
 
 func (d *deletions) get(team, id string) map[string]any {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	op := d.m[id]
+	op := d.store.Snapshot().DeletionOps[id]
 	if op == nil || op["_team"] != team {
 		return nil
 	}
-	out := map[string]any{}
-	for k, v := range op {
-		if k != "_team" {
-			out[k] = v
-		}
-	}
-	return out
+	return public(op)
 }
 
 func (s *server) compatDelete(w http.ResponseWriter, r *http.Request, p *principal) {

@@ -772,6 +772,8 @@ func (s *server) forgetVM(id string) {
 		delete(st.VMEnvs, id)
 		delete(st.ForeignVMs, id)
 		delete(st.RouteGens, id)
+		delete(st.PortMinters, id)
+		forgetStops(st, id)
 		delete(st.VMTokens, id)
 		forgetCompatID(st, id)
 		delete(st.CommandSeq, id)

@@ -1,8 +1,8 @@
 package main
 
 import (
+	"log"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -10,39 +10,45 @@ import (
 // (Sandbox.stop) and every stop by id (GET /sandboxes/{id}/stops/{stopId}).
 // A stop through this server finishes before it answers, so an operation is
 // completed, failing (the native stop failed) or superseded (a resume came).
-//
-// ponytail: in memory, so a restart forgets them (Sandbox.stop is then null).
-type stopOps struct {
-	mu     sync.Mutex
-	byID   map[string]map[string]any // stop id -> op (with "_team", "_vm")
-	lastOf map[string]string         // vm id -> its last stop id
-}
+// They live in the store (State.StopOps), so a restart keeps them.
+type stopOps struct{ store *Store }
 
 const maxStopOps = 10000
 
 func (o *stopOps) begin(team, vm string) map[string]any {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.byID == nil || len(o.byID) >= maxStopOps {
-		o.byID, o.lastOf = map[string]map[string]any{}, map[string]string{} // ponytail: forgets all at the cap
-	}
 	now := time.Now().UTC()
 	op := map[string]any{"id": "stop_" + randHex(8), "status": "pending", "requestedAt": now, "lastAttemptAt": nil,
 		"error": nil, "endedAt": nil, "_team": team, "_vm": vm}
-	o.byID[op["id"].(string)] = op
-	o.lastOf[vm] = op["id"].(string)
+	o.update(func(st *State) {
+		if len(st.StopOps) >= maxStopOps {
+			st.StopOps, st.StopLast = map[string]map[string]any{}, map[string]string{} // ponytail: forgets all at the cap
+		}
+		st.StopOps[op["id"].(string)] = op
+		st.StopLast[vm] = op["id"].(string)
+	})
 	return public(op)
 }
 
+// update writes a stop change. A store error is logged: the stop itself
+// happened, only its record is behind.
+func (o *stopOps) update(f func(st *State)) {
+	if err := o.store.Update(func(st *State) error { f(st); return nil }); err != nil {
+		log.Printf("stop operations: %v", err)
+	}
+}
+
 func (o *stopOps) set(stopID string, f func(op map[string]any)) map[string]any {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	op := o.byID[stopID]
-	if op == nil {
+	var out map[string]any
+	if o.store.Snapshot().StopOps[stopID] == nil {
 		return nil
 	}
-	f(op)
-	return public(op)
+	o.update(func(st *State) {
+		if op := st.StopOps[stopID]; op != nil {
+			f(op)
+			out = public(op)
+		}
+	})
+	return out
 }
 
 func (o *stopOps) complete(vm string, op map[string]any) map[string]any {
@@ -60,11 +66,13 @@ func (o *stopOps) fail(vm string, op map[string]any, why string) {
 
 // supersede ends a pending or failing stop when the VM is resumed.
 func (o *stopOps) supersede(vm string) {
-	o.mu.Lock()
-	id := o.lastOf[vm]
-	o.mu.Unlock()
-	o.set(id, func(op map[string]any) {
-		if st := op["status"]; st == "pending" || st == "failing" {
+	st := o.store.Snapshot()
+	op := st.StopOps[st.StopLast[vm]]
+	if op == nil || (op["status"] != "pending" && op["status"] != "failing") {
+		return
+	}
+	o.set(st.StopLast[vm], func(op map[string]any) {
+		if s := op["status"]; s == "pending" || s == "failing" {
 			op["status"], op["endedAt"] = "superseded", time.Now().UTC()
 		}
 	})
@@ -72,23 +80,29 @@ func (o *stopOps) supersede(vm string) {
 
 // last is the VM's last stop, or nil.
 func (o *stopOps) last(vm string) any {
-	o.mu.Lock()
-	id := o.lastOf[vm]
-	o.mu.Unlock()
-	if op := o.set(id, func(map[string]any) {}); op != nil {
-		return op
+	st := o.store.Snapshot()
+	if op := st.StopOps[st.StopLast[vm]]; op != nil {
+		return public(op)
 	}
 	return nil
 }
 
 func (o *stopOps) get(team, vm, stopID string) map[string]any {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	op := o.byID[stopID]
+	op := o.store.Snapshot().StopOps[stopID]
 	if op == nil || op["_team"] != team || op["_vm"] != vm {
 		return nil
 	}
 	return public(op)
+}
+
+// forgetStops drops a deleted VM's stop operations (inside Store.Update).
+func forgetStops(st *State, vm string) {
+	delete(st.StopLast, vm)
+	for id, op := range st.StopOps {
+		if op["_vm"] == vm {
+			delete(st.StopOps, id)
+		}
+	}
 }
 
 // public copies op without its private "_" keys.
