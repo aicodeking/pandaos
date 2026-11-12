@@ -114,7 +114,7 @@ Use `full` for the desktop; on `slim`, `POST …/desktop` answers 422 `not_suppo
 
 ## Sizing
 
-The default sizes are `small` 2 vCPU/4 GiB, `default` 4/8, `large` 8/16 and `xlarge` 16/32, with sparse disks. The default team quota is 10 VMs / 32 vCPU / 64 GiB.
+The default sizes are `small` 2 vCPU/4 GiB, `default` 4/8, `large` 8/16 and `xlarge` 16/32, with sparse disks. The default team quota follows `services.boat.untrustedTenants`, which the server profile turns on by default: 10 VMs / 32 vCPU / 64 GiB per team; with `untrustedTenants = false` (a host whose tenants are all trusted) it is 0, no per-team cap, and host admission alone bounds a team.
 
 - **RAM** is the limit, because guest memory is not overcommitted. Budget the sum of running VMs' memory plus 2 GiB for the host.
 - **Stop time.** On stop or reboot, boatd writes every running VM's memory to disk. `services.boat.stopTimeoutSec` (default 900 s) must cover the total RAM of running VMs divided by the disk's write speed. That is about 128 GiB at 1 GB/s ≈ 2-3 min, so 900 s leaves room.
@@ -171,7 +171,7 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 - **Deleting a team** also deletes its snapshots, imported ones included.
 - A team sees and reaches only its own VMs: API objects are filtered by team, nftables blocks other teams' VMs, jump grants list only the team's VM IPs, and every desktop link and route token is bound to one VM.
 - **Secrets reach VMs only when chosen.** See [Secrets](#secrets).
-- **Quotas** (`services.boat.quotas`, per-team overrides with `boatdSettings.teams`) cap running and total VMs, vCPU, memory, disk, snapshots and routes, all finite by default. Metering (`/v1/usage`) records VM-seconds per size and snapshot-days per team. There is no billing.
+- **Quotas** (`services.boat.quotas`, per-team overrides with `boatdSettings.teams`) cap running and total VMs, vCPU, memory, disk, snapshots and routes, all finite by default under `untrustedTenants` (the server profile's default); with `untrustedTenants = false` the VM, vCPU and memory caps default to 0 (host admission only). Metering (`/v1/usage`) records VM-seconds per size and snapshot-days per team. There is no billing.
 
 ### Secrets
 
