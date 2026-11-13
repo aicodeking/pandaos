@@ -7,6 +7,41 @@
 > official SDKs for the sandbox lifecycle, commands, files, prompts, snapshots and webhooks, but not the
 > whole boat.dev API (see [boat.dev API compatibility](#boatdev-api-compatibility-apiv1)).
 
+## Quick start
+
+1. **Install the server.** Boot the `iso-server` ISO on a dedicated host with KVM and run
+   `panda-install --profile server --disk /dev/nvme0n1 --domain boat.example.com --ssh-key "ssh-ed25519 ..."`,
+   reboot, then `sudo nixos-rebuild switch --flake /etc/pandaos#pandaos`. Point `api.boat.example.com`,
+   `*.vm.boat.example.com` and `*.desktop.boat.example.com` at the host first ([DNS](#dns-records)); the
+   [install section](#install-on-a-dedicated-server-hetzner-ovh) has the data disk, guest images and TLS.
+2. **Get the owner key.** `sudo boat-admin init -user me -team ops` prints the owner key record once and
+   writes the bare `boat_...` token to `/root/boat-owner-token` (mode 0600).
+3. **Point boat.dev's SDK at it.** Only the base URL changes: `https://api.boat.example.com/api/v1`.
+   ```python
+   from boat_sdk import ApiClient, BoatApi, Configuration
+   from boat_sdk.models.create_sandbox_request import CreateSandboxRequest
+   api = BoatApi(ApiClient(Configuration(host="https://api.boat.example.com/api/v1", access_token=TOKEN)))
+   sid = api.create(create_sandbox_request=CreateSandboxRequest(name="first")).sandbox.id
+   ```
+   ```ts
+   import { BoatApi, Configuration } from "@boatdev/sdk";
+   const api = new BoatApi(new Configuration({ basePath: "https://api.boat.example.com/api/v1", accessToken: TOKEN }));
+   const { sandbox } = await api.create({ createSandboxRequest: { name: "first" } });
+   ```
+   The spec those SDKs are generated from is served at `https://api.boat.example.com/api/v1/openapi.json`
+   (also `/openapi.json` and `/openapi.yaml`). For the CLI, use this repo's `boat` (no release yet:
+   build it from source, see [components/boat/cli/README.md](../components/boat/cli/README.md)); it takes
+   boat.dev's verbs and flags and accepts the `/api/v1` URL. boat.dev's own CLI binary is not tested
+   against this server.
+4. **First sandbox from the CLI.**
+   ```sh
+   boat login --url https://api.boat.example.com/api/v1 "$(sudo cat /root/boat-owner-token)"
+   boat new --name first --no-auto-stop     # prints the sandbox
+   boat exec current -- uname -a
+   boat host current 3000                   # a token-gated https URL for port 3000
+   boat delete current --yes
+   ```
+
 `boat` turns one dedicated server into a self-hosted alternative to boat.dev.
 Each agent gets a persistent Firecracker microVM, and you get an API, a CLI,
 SDKs, a web dashboard, ssh, port URLs, a browser desktop, forks and snapshots. The server
@@ -158,6 +193,8 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 - **What a share gives away.** A snapshot holds the VM's disk, including `/etc/boat/env`. Creating a share moves the source VM to a new AI proxy token, so the token on the snapshot is dead; processes already running in that VM keep the dead token until they restart. Team secrets on the disk and raw AI keys (proxy off) go with the share and cannot be taken back: revoke them at their issuer.
 - **In-flight limits.** Per team, at most 64 open exec, SSE, log and download streams (`-team-streams`), 8 file uploads and imports (`-team-uploads`), and 128 requests of any kind (`-team-inflight`); the `/api/v1` file routes hold the same slots as their `/v1` twins. Signed-link downloads count separately from the team's. Per VM, at most 16 AI proxy requests (`-ai-vm-inflight`). Past a limit the API answers 429.
 - **Request bodies.** A body sent to a VM route (`/v1/vms/{id}/…`, `/api/v1/sandboxes/{id}/…`) is read only after the VM's ownership check, so another team's VM costs boat-api no memory. On every route that is not a stream or an upload the body must arrive within `-body-timeout` (30 s). JSON bodies are capped at 1 MiB, boat.dev file writes at about 7 MiB (5 MiB base64-encoded).
+- **Scopes through `/api/v1`.** A compat route runs native handlers only within its caller's scopes: each native call checks the scope of the native route it runs, so `POST /api/v1/sandboxes/{id}/host` (and create's `hostedPorts`) needs `exec` like the native port URL does, and saving, deleting or sharing a saved snapshot needs `vms:read` too (it lists the team's snapshots). A unit test sends every `/api/v1` route a key of each single scope and fails if any native call ran without its scope.
+- **Signed links at use.** A file download, upload or snapshot-chunk URL works only while its minting key exists, is unexpired, its user is still a member, and the key still holds the scope minting needed. Links a VM's own token mints (port, desktop and file URLs) die when that token's generation moves (create, start, fork, snapshot, share); its share codes and ssh grants live while the VM's token does.
 - **Webhook targets.** Deliveries dial only public addresses, checked after DNS on the address actually dialed: never private or special-purpose networks, never this host's own addresses (its public ones included, which reach services bound to loopback through a NAT rule), never a VM's `ip`, `ipv6` or `public_ip` as boatd reports them (refreshed every 10 s; a webhook fails closed while boatd cannot be read), and never the `-webhook-deny` CIDRs (repeatable: set the VM pool's public prefix there). Uploads go to an unlinked temp file on the data disk, not memory. The AI proxy still shares boat-api's process, so a flood of allowed requests costs the API's memory too.
 - **State caps.** Per team: 200 secrets and 2 MiB of sealed secret values, 100 live shares, 4 MiB of environment scripts and vars, 200 ssh keys. The command history keeps 8 KiB of each argv.
 - **Secrets.** `state.json` is sealed as a whole under the master key, because it holds environment vars, setup scripts, command lines and prompts. A plaintext file from an older version is sealed when boat-api opens it, and an older boat-api cannot read the sealed file, so do not roll back past this change. Tenant secrets and webhook keys are also sealed individually with AES-256-GCM under boat-api's master key. That key and the desktop/route HMAC key exist on disk only as systemd credentials (`/var/lib/boat/secrets/*.cred`, directory 0700 root), encrypted with the TPM2 when present plus the host key `/var/lib/systemd/credential.secret`, and handed to the services with `LoadCredentialEncrypted`. Plaintext keys from older installs are sealed, verified and deleted on upgrade. Backups contain only the sealed files, so **a backup alone cannot decrypt anything on another host. Keep offline copies:** `sudo systemd-creds decrypt --name=boat-master-key /var/lib/boat/secrets/boat-master-key.cred - | base64` (same for `boat-desktop-key`). API keys are stored as salted HMACs. Caddy's DNS token belongs in `gateway.environmentFile`.
@@ -288,14 +325,14 @@ Compared with the full [docs.boat.dev](https://docs.boat.dev/llms.txt) page list
 | | block a VM's AI access | unit | |
 | | computer use, MCP server, skills, llms.txt | no | not integrated in boat (PandaOS has `panda-cu` separately) |
 | API and SDKs | REST + OpenAPI, Python, TypeScript | yes | own schema, see above |
-| | CLI with `--json` | partial | the common verbs plus `current`, `extend`, `ssh-config`, `push`, `host`, `run` (all in `sdk/e2e-live.sh`); no `api-key` presets |
-| | boat.dev's `/api/v1` API and official SDKs | partial | 100 of 122 operations mapped, the other 22 answer 501 `not_supported`; see [boat.dev API compatibility](#boatdev-api-compatibility-apiv1). The official Python and TypeScript SDKs (pinned 1.13.0) run on real VMs through Caddy in `boat-e2e` over the calls listed there, prompts, steer, interrupt, events and conversations included (a stub `claude`, or Claude Code when `ANTHROPIC_API_KEY` is set); `hostedPorts`, and the TypeScript SDK's file permissions, webhook update/rotate/list, key and environment calls are tested against a fake boatd only |
+| | CLI with `--json` | partial | the common verbs plus `current`, `extend`, `ssh-config`, `push`, `host`, `run` (all in `sdk/e2e-live.sh`). Every invocation in boat.dev's CLI reference either makes its call or fails with the reason (unit: `cli/r12_reference_test.go` against a stub); flags with no equivalent here (`--no-snapshots`, `--no-monitoring`, `--localhost`, `--visibility private`, `fork --type`, `--org`) are refused with why |
+| | boat.dev's `/api/v1` API and official SDKs | partial | 100 of 122 operations mapped, the other 22 answer 501 `not_supported`; see [boat.dev API compatibility](#boatdev-api-compatibility-apiv1). The official Python and TypeScript SDKs (pinned 1.13.0) run on real VMs through Caddy in `boat-e2e` over the calls listed there, prompts, steer, interrupt, events and conversations included (a stub `claude`, or Claude Code when `ANTHROPIC_API_KEY` is set), create's `hostedPorts`, file permissions, webhook update/rotate/list, scoped keys (create, list, rotate, usage, revoke) and environments (create, update, set and delete a variable, list, delete) included, in both SDKs |
 | Keys | create, list, revoke, scopes | yes | |
 | | rotate | yes | through `sdk/e2e-live.sh` |
 | | per-key usage | unit | |
 | Webhooks | signed, delivery log, test | yes | |
 | | rotate | yes | through `sdk/e2e-live.sh` |
-| | update | unit | |
+| | update | yes | through the official SDKs in `boat-e2e` |
 | Monitoring | OpenTelemetry | unit | `boat telemetry`; exporting to a real collector is untested |
 | Teams | teams, members, quotas | yes | no invites, seats or shared wallets |
 | Dashboard | web UI | partial | new; sign-in and VM list covered by a browser smoke test; less than boat.dev's |
@@ -358,7 +395,7 @@ const api = new BoatApi(new Configuration({ basePath: "https://api.boat.example/
 | `POST /sandboxes` | `POST /v1/vms` | 202 `sandbox.created`, `status` always `ready` (this server answers when the VM is up). `type`, `ttlSeconds` (absent = 3600, `null`/`"infinite"` = none), `labels`, `env`, `environment` (`base` = the team default), `noEnv`, `failFast`, `count` (1-16), `from` (saved snapshot name or id, or `bsh_` code). `snapshots`, `monitoring`, `visibility`, `org`, `teamId` are ignored; `hostedPorts` hosts each port as `POST …/host` does and answers `hostedPorts` (an entry with `error` for a port that failed; 400 `invalid_hosted_ports`, `count_with_hosted_ports`, `fail_fast_with_hosted_ports` as on boat.dev). `files` (at most 32; `encoding` utf8 or base64; relative paths resolve against the home, and only the home and `/tmp` take files) are written before create answers; `setupScript` (at most 64 KiB) then runs in the background as the sandbox user with the sandbox env. `setupStatus` (`pending`, `running`, `done`, `failed`) and `setupError` (exit code and a stderr tail) on the sandbox report it; create succeeds either way |
 | `GET /sandboxes` | `GET /v1/vms` | `pageInfo {nextCursor, hasMore, limit}`; `limit` 1-200, `cursor`, `sort`, `state`, `name`, `namePrefix`, `label=k=v`; `org`, `include` ignored; anything else 400 `invalid_query` (`stoppedBefore`, `dataExpired` included) |
 | `GET /sandboxes/{id}` | `GET /v1/vms/{id}` | `archiveAfter` is boatd's auto-stop deadline, `stop` the last stop operation, `stoppedAt` the last state change of a stopped VM. No `url`, `desktopUrl`, `cost`, `subdomain`, `hydrated`, `health` |
-| `PATCH /sandboxes/{id}` | `PATCH /v1/vms/{id}` | `name`, `ttlSeconds` (sets the deadline to now + ttl; `null` = none). `subdomain` refused. Needs boatd's `PATCH /v1/vms/{id}`: an older boatd gives 501 `not_supported` |
+| `PATCH /sandboxes/{id}` | `PATCH /v1/vms/{id}` | `name`, `ttlSeconds` (sets the deadline to now + ttl; `null` = none). `subdomain` answers 501 `not_supported` and changes nothing: port URLs are `<port>-<vm id>.<vm domain>`, and the gateway's route tokens and TLS certificates are bound to that name. Needs boatd's `PATCH /v1/vms/{id}`: an older boatd gives 501 `not_supported` |
 | `DELETE /sandboxes/{id}` | `DELETE /v1/vms/{id}` | `X-Ascii-Confirm-Delete: <id>` required (409 `confirmation_required`). 202 `sandbox.deleting` with a `bdop_…` operation already `completed` |
 | `GET /deletion-operations/{id}` | boat-api's store | kept across restarts (at most 10000) |
 | `POST /sandboxes/{id}/stop` | `POST /v1/vms/{id}/stop` | `force` works. 202 `sandbox.stopping`, but the stop has finished: `status: archived`, a `completed` operation, `statusUrl` |

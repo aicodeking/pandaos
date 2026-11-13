@@ -2,7 +2,7 @@
 this server's /api/v1: create, get, list, rename, commands (sync, and long ones
 through the SDK's own run_command / follow_command helpers), files, find,
 folders, moves, search and delete, command records, logs and processes, recover,
-download URLs, hosted ports, ssh keys, the desktop (wait_for_desktop), stop,
+download URLs, hosted ports (also create's hostedPorts), ssh keys, the desktop (wait_for_desktop), stop,
 resume, fork, snapshot listings, saved and named snapshots, share codes,
 secrets, the AI proxy switch, webhooks, keys, environments, limits and delete,
 each answer parsed by the SDK's own models (they check every id, enum and
@@ -158,11 +158,16 @@ def agent_steps(sid):
 
 
 try:
-    created = api.create(create_sandbox_request=CreateSandboxRequest(name=prefix, ttl_seconds=3600, labels={"suite": "official"}),
-                         idempotency_key=secrets.token_hex(8))
+    created = api.create(create_sandbox_request=CreateSandboxRequest(
+        name=prefix, ttl_seconds=3600, labels={"suite": "official"},
+        hosted_ports=[HostPortRequest(port=8090), HostPortRequest(port=8091, public=True)]),
+        idempotency_key=secrets.token_hex(8))
     sid = created.sandbox.id
     made.append(sid)
     check(sid.startswith("bx_") and created.sandbox.name == prefix, "create " + sid)
+    hp = created.hosted_ports or []
+    check(len(hp) == 2 and hp[0].port == 8090 and hp[0].is_protected and hp[0].url and hp[1].access == "public"
+          and not hp[0].error, "create with hostedPorts (%s)" % hp)
     sb = ready(sid)
     check(sb.archive_after is not None and sb.ttl_seconds == 3600, "archiveAfter and ttlSeconds")
     listed = api.sandboxes(name_prefix=prefix).sandboxes

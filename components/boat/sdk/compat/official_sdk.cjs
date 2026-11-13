@@ -2,9 +2,12 @@
 // against this server's /api/v1: create, get, list, rename, commands (long ones
 // through the SDK's runCommand / followCommand), command records, logs and
 // processes, files, find, folders, moves, search and delete, download URLs,
-// hosted ports, ssh keys, waitForDesktop, stop, resume, fork, recover, snapshot
-// listings and downloads, named and saved snapshots, share codes, secrets,
-// webhooks, the AI proxy switch and delete. Run by ../e2e-live.sh with NODE_PATH at the installed node_modules
+// hosted ports (also create's hostedPorts), file permissions, ssh keys,
+// waitForDesktop, stop, resume, fork, recover, snapshot listings and downloads,
+// named and saved snapshots, share codes, secrets, webhooks (create, get,
+// update, rotate, list), scoped keys (create, list, rotate, usage, revoke),
+// environments (create, update, set and delete a variable, list, delete), the
+// AI proxy switch and delete. Run by ../e2e-live.sh with NODE_PATH at the installed node_modules
 // (NODE_EXTRA_CA_CERTS for a private CA; BOAT_LIVE_DESKTOP_NAME as in
 // official_sdk.py):
 //
@@ -116,10 +119,14 @@ async function collect(gen) {
 }
 
 async function main() {
-  const created = await api.create({ idempotencyKey: crypto.randomUUID(), createSandboxRequest: { name: prefix, ttlSeconds: 3600 } });
+  const created = await api.create({ idempotencyKey: crypto.randomUUID(),
+    createSandboxRequest: { name: prefix, ttlSeconds: 3600, hostedPorts: [{ port: 8090 }, { port: 8091, _public: true }] } });
   const sandboxId = created.sandbox.id;
   made.push(sandboxId);
   check(/^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/.test(sandboxId), "create " + sandboxId);
+  const hp = created.hostedPorts || [];
+  check(hp.length === 2 && hp[0].port === 8090 && hp[0].isProtected === true && Boolean(hp[0].url) && hp[1].access === "public" && !hp[0].error,
+    "create with hostedPorts (" + JSON.stringify(hp) + ")");
   const sb = await ready(sandboxId);
   check(sb.archiveAfter instanceof Date && sb.ttlSeconds === 3600, "archiveAfter and ttlSeconds");
   check((await api.sandboxes({ namePrefix: prefix })).sandboxes.map((s) => s.id).join() === sandboxId, "list by name prefix");
@@ -151,6 +158,9 @@ async function main() {
   await api.writeFile({ sandboxId, fileWriteRequest: { path: "compat/ts.txt", content: payload } });
   const got = await api.readFile({ sandboxId, path: "compat/ts.txt" });
   check(!REAL || got.content === payload, "write and read a file");
+  await api.setFilePermissions({ sandboxId, filePermissionsRequest: { path: "compat/ts.txt", mode: "600" } });
+  const info = await api.getFileInfo({ sandboxId, path: "compat/ts.txt" });
+  check(!REAL || info.mode.endsWith("600"), "file permissions (" + info.mode + ")");
   const found = await api.findInFiles({ sandboxId, pattern: payload.slice(-8), path: "compat" });
   check(!REAL || found.matches.some((m) => m.file.endsWith("compat/ts.txt")), "find in files");
   const dl = await api.createDownloadUrl({ sandboxId, fileUrlRequest: { path: "compat/ts.txt", ttlSeconds: 120 } });
@@ -199,8 +209,30 @@ async function main() {
   check(sec.envContents.includes("OFFICIAL_TS_SECRET=\n"), "default-injected secret");
   await api.updateSecrets({ secretsUpdateRequest: { envContents: before } });
   const hook = await api.createWebhook({ webhookCreateRequest: { name: "official-ts", url: "https://example.invalid/h", events: ["sandbox.ready"] } });
-  check((await api.getWebhook({ webhookId: hook.webhook.id })).webhook.id === hook.webhook.id, "get a webhook");
-  await api.deleteWebhook({ webhookId: hook.webhook.id });
+  const webhookId = hook.webhook.id;
+  check((await api.getWebhook({ webhookId })).webhook.id === webhookId, "get a webhook");
+  await api.updateWebhook({ webhookId, webhookUpdateRequest: { events: ["sandbox.archived"] } });
+  check([...(await api.getWebhook({ webhookId })).webhook.events].join() === "sandbox.archived", "update a webhook");
+  check((await api.rotateWebhookSigningSecret({ webhookId })).secret !== hook.secret, "rotate a webhook's secret");
+  check((await api.listWebhooks()).webhooks.some((h) => h.id === webhookId), "list webhooks");
+  await api.deleteWebhook({ webhookId });
+  const scoped = await api.createScopedApiKey({ createScopedApiKeyRequest: { name: prefix.slice(-30), preset: "read-only" } });
+  const apiKeyId = scoped.apiKey.id;
+  check(scoped.secret.startsWith("boat_") && scoped.apiKey.scope.actions.join() === "vms:read", "create a scoped key");
+  check((await api.apiKeys()).apiKeys.some((k) => k.id === apiKeyId), "list keys");
+  check((await api.rotateApiKey({ apiKeyId })).secret !== scoped.secret, "rotate the key");
+  check((await api.apiKeyUsage({ apiKeyId })).id === apiKeyId, "key usage");
+  check((await api.revokeApiKey({ apiKeyId })).apiKeys.every((k) => k.id !== apiKeyId), "revoke the key");
+  const envName = prefix + "-env";
+  const env = (await api.createEnvironment({ createSandboxEnvironmentRequest: { name: envName } })).environments.find((x) => x.name === envName);
+  check(Boolean(env), "create an environment");
+  const environmentId = String(env.id);
+  const updEnv = (await api.updateEnvironment({ environmentId, updateSandboxEnvironmentRequest: { envContents: "GREETING=hi\n" } })).environment;
+  check(updEnv.envContents === "GREETING=hi\n", "environment variables");
+  check((await api.setEnvironmentVar({ environmentId, key: "PROBE", setEnvironmentVarRequest: { value: "1" } })).success, "set one environment variable");
+  check((await api.deleteEnvironmentVar({ environmentId, key: "PROBE" })).success, "delete one environment variable");
+  check((await api.environments()).environments.some((x) => String(x.id) === environmentId), "list environments");
+  await api.deleteEnvironment({ environmentId });
   const stopped = await api.stop({ sandboxId });
   check(stopped.sandbox.state === "archived" && stopped.sandbox.stop.status === "completed", "stop");
   await api.resume({ sandboxId });

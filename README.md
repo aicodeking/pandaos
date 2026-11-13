@@ -4,6 +4,10 @@ A lightweight, agent-first Linux built on NixOS. Install it on an old PC and it 
 it connects through PandaCode Connect, so the PandaCode app on your other devices can start, watch and
 approve agent tasks on it.
 
+**Self-hosting boat.dev-style agent sandboxes?** Start with the [boat quick start](docs/boat.md#quick-start):
+install the server, get the owner key, point boat.dev's SDK at `https://api.<domain>/api/v1`, create the
+first sandbox.
+
 - **Agents are kept apart from you.** They run as a separate non-wheel user, `agent`, that cannot touch
   your home or use `sudo`.
 - **A runaway task dies alone.** Each agent run gets its own cgroup in a capped `agents.slice`, so
@@ -32,8 +36,7 @@ approve agent tasks on it.
   operations are mapped (credential profiles as one `default` profile per team, snapshot download
   as one signed chunk URL; create `files` and `setupScript`; fork and resume `env` and
   `type`, fork `labels`; `RateLimit` headers); the official SDKs also run prompt, steer, interrupt, events and
-  conversations on real VMs (a stub agent without `ANTHROPIC_API_KEY`); `hostedPorts` is tested
-  against a fake boatd only.
+  conversations on real VMs (a stub agent without `ANTHROPIC_API_KEY`), and create's `hostedPorts`.
   The other 22 (orgs, repos, CI, data retention, more credential profiles and custom APIs,
   environment upgrades/repos/secret files, snapshot trees/files) answer 501 `not_supported`, as
   does `unshare` (no private sandboxes here). Snapshot trees/files would need host-side parsing of
