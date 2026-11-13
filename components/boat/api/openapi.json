@@ -447,6 +447,13 @@
          "fail_fast": {
           "type": "boolean",
           "description": "answer 503 no_ready_machine at once when the host is full (or boatd is still converting its images) instead of waiting"
+         },
+         "env": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          },
+          "description": "extra env vars over the team secrets (this run / the child); valid env names only"
          }
         }
        }
@@ -537,6 +544,13 @@
          "fail_fast": {
           "type": "boolean",
           "description": "answer 503 no_ready_machine at once when the host is full (or boatd is still converting its images) instead of waiting"
+         },
+         "env": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          },
+          "description": "extra env vars over the team secrets (this run / the child); valid env names only"
          }
         }
        }

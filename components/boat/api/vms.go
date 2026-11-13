@@ -604,9 +604,14 @@ func (s *server) applyEnvToVM(r *http.Request, p *principal, vmID string, env *E
 
 func (s *server) startVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	var body struct {
-		FailFast bool `json:"fail_fast"`
+		FailFast bool              `json:"fail_fast"`
+		Env      map[string]string `json:"env"` // this run's extra env, over team secrets
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	if msg := validEnv(body.Env); msg != "" {
+		writeErr(w, r, 400, "invalid_request", msg)
 		return
 	}
 	t := newPhases()
@@ -620,6 +625,9 @@ func (s *server) startVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	env, ok := s.envOrFail(w, r, p, s.vmSecretsOf(id, vm))
 	if !ok {
 		return
+	}
+	for k, v := range body.Env {
+		env[k] = v
 	}
 	// A new token generation per run: tokens copied from a past run are dead.
 	ai, err := s.aiEnv(id, p.Team.ID, true)
@@ -675,14 +683,19 @@ func (s *server) deleteVM(w http.ResponseWriter, r *http.Request, p *principal) 
 
 func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	var body struct {
-		Name     string `json:"name"`
-		FailFast bool   `json:"fail_fast"`
+		Name     string            `json:"name"`
+		FailFast bool              `json:"fail_fast"`
+		Env      map[string]string `json:"env"` // the child's extra env, over team secrets
 	}
 	if !decode(w, r, &body) {
 		return
 	}
 	if body.Name != "" && !reVMName.MatchString(body.Name) {
 		writeErr(w, r, 400, "invalid_request", "invalid name")
+		return
+	}
+	if msg := validEnv(body.Env); msg != "" {
+		writeErr(w, r, 400, "invalid_request", msg)
 		return
 	}
 	t := newPhases()
@@ -731,6 +744,9 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	if vars, err := s.teamEnv(p.Team.ID, s.vmSecrets(childID)); err != nil {
 		log.Printf("%s: env for fork %s: %v", info(r).id, childID, err)
 	} else {
+		for k, v := range body.Env {
+			vars[k] = v
+		}
 		extra := s.guestEnv(childID, p.Team.ID, vars)
 		if ai, err := s.aiEnvNewVM(childID, p.Team.ID); err != nil {
 			log.Printf("%s: AI env for fork %s: %v", info(r).id, childID, err)
@@ -782,6 +798,7 @@ func (s *server) forgetVM(id string) {
 		delete(st.VMTokens, id)
 		forgetCompatID(st, id)
 		delete(st.CommandSeq, id)
+		delete(st.CompatSetups, id)
 		for k, sh := range st.SnapShares {
 			if sh.VMID == id {
 				delete(st.SnapShares, k)

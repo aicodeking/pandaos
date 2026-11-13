@@ -165,6 +165,8 @@ type State struct {
 	// CompatIDs: boat.dev bx_ sandbox ids (compat_ids.go), and the reverse.
 	CompatIDs  map[string]*CompatID `json:"compat_ids"`
 	CompatByVM map[string]string    `json:"compat_by_vm"`
+	// CompatSetups: boat.dev create files/setupScript status per VM (compat_setup.go).
+	CompatSetups map[string]*CompatSetup `json:"compat_setups,omitempty"`
 	// CommandSeq: the last ProcessID given out per VM.
 	CommandSeq map[string]int `json:"command_seq"`
 

@@ -147,7 +147,7 @@ func TestCompatStreamFilesAndErrors(t *testing.T) {
 		{e.owner, "GET", "/api/v1/sandboxes/nope", nil, 404, "not_found"},
 		{e.owner, "GET", "/api/v1/sandboxes?bogus=1", nil, 400, "invalid_query"},
 		{e.owner, "POST", "/api/v1/sandboxes", map[string]any{"unknownField": 1}, 400, "invalid_json"},
-		{e.owner, "POST", "/api/v1/sandboxes", map[string]any{"setupScript": "x"}, 400, "invalid_request"},
+		{e.owner, "POST", "/api/v1/sandboxes", map[string]any{"setupScript": 1}, 400, "invalid_json"},
 		{e.owner, "POST", "/api/v1/sandboxes", map[string]any{"ttlSeconds": 0}, 400, "invalid_request"},
 		{e.owner, "POST", "/api/v1/sandboxes", map[string]any{"from": "no-such-snapshot"}, 404, "snapshot_not_found"},
 		{e.owner, "POST", "/api/v1/sandboxes/" + id + "/commands", map[string]any{"command": "x", "timeoutSeconds": 601}, 400, "invalid_timeout"},

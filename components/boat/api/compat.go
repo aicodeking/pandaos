@@ -253,6 +253,9 @@ func (s *server) sandboxAs(vm VM, bx string) map[string]any {
 	if state == "stopped" {
 		out["stoppedAt"] = vm["updated_at"]
 	}
+	if cs := s.store.Snapshot().CompatSetups[id]; cs != nil {
+		out["setupStatus"], out["setupError"] = cs.Status, nullIfEmpty(cs.Error)
+	}
 	return out
 }
 
@@ -284,9 +287,9 @@ type compatCreateReq struct {
 	Org         string          `json:"org"`
 	TeamID      string          `json:"teamId"`
 	HostedPorts []compatHostReq `json:"hostedPorts"` // POST …/host for each, after the create
-	// Refused with a clear message: not supported by this server.
-	SetupScript string `json:"setupScript"`
-	Files       []any  `json:"files"`
+	// Written before create answers; the script then runs in the background (compat_setup.go).
+	SetupScript string       `json:"setupScript"`
+	Files       []compatFile `json:"files"`
 }
 
 const (
@@ -314,12 +317,15 @@ func (s *server) compatCreate(w http.ResponseWriter, r *http.Request, p *princip
 			return
 		}
 		ttl, ok := compatTTL(c.TTLSeconds)
+		files, fmsg := s.prepareCompatFiles(c.Files)
 		msg := ""
 		switch {
 		case !ok:
 			msg = "ttlSeconds must be 1-2592000, null or \"infinite\""
-		case c.SetupScript != "" || len(c.Files) > 0:
-			msg = "setupScript and files are not supported by this server: use an environment, POST /api/v1/sandboxes/{id}/files, or the native /v1 API"
+		case len(c.SetupScript) > maxCompatSetupScript || strings.ContainsRune(c.SetupScript, 0):
+			msg = "invalid_setup_script: setupScript must be text of at most 64 KiB"
+		case fmsg != "":
+			msg = "invalid_files: " + fmsg
 		case hostedPortsMsg(c.HostedPorts, c.Count, c.FailFast) != "":
 			msg = hostedPortsMsg(c.HostedPorts, c.Count, c.FailFast)
 		case c.Count > maxBatch:
@@ -327,7 +333,7 @@ func (s *server) compatCreate(w http.ResponseWriter, r *http.Request, p *princip
 		}
 		if msg != "" {
 			code := "invalid_request"
-			if k, text, ok := strings.Cut(msg, ": "); ok && strings.HasSuffix(k, "hosted_ports") {
+			if k, text, ok := strings.Cut(msg, ": "); ok && (strings.HasSuffix(k, "hosted_ports") || k == "invalid_files" || k == "invalid_setup_script") {
 				code, msg = k, text // boat.dev's codes for hostedPorts
 			}
 			writeErr(w, r, 400, code, msg)
@@ -361,6 +367,7 @@ func (s *server) compatCreate(w http.ResponseWriter, r *http.Request, p *princip
 			json.Unmarshal(res.body.Bytes(), &many)
 			list := make([]any, len(many.VMs))
 			for i, vm := range many.VMs {
+				s.compatSetupVM(r, str(vm, "id"), files, c.SetupScript)
 				list[i] = s.sandbox(vm)
 			}
 			out["sandboxes"] = list
@@ -369,6 +376,7 @@ func (s *server) compatCreate(w http.ResponseWriter, r *http.Request, p *princip
 			}
 		} else {
 			json.Unmarshal(res.body.Bytes(), &one)
+			s.compatSetupVM(r, str(one, "id"), files, c.SetupScript)
 			out["sandbox"] = s.sandbox(one)
 			if len(c.HostedPorts) > 0 {
 				out["hostedPorts"] = s.compatHostedPorts(r, p, str(one, "id"), c.HostedPorts)
@@ -650,12 +658,16 @@ func (s *server) compatResume(w http.ResponseWriter, r *http.Request, p *princip
 	if !decode(w, r, &body) {
 		return
 	}
-	if body.Type != "" || body.Env != nil || body.Environment != "" || body.NoEnv {
-		writeErr(w, r, 400, "invalid_request", "resume with type, env, environment or noEnv is not supported by this server; use POST /v1/vms/{id}/resize")
+	if body.Environment != "" || body.NoEnv {
+		writeErr(w, r, 400, "invalid_request", "resume with environment or noEnv is not supported by this server: the VM keeps its create-time environment and secret selection")
+		return
+	}
+	if res := s.compatRetype(r, p, r.PathValue("id"), body.Type); res != nil {
+		res.relay(w)
 		return
 	}
 	s.stops.supersede(r.PathValue("id"))
-	s.compatAction(w, r, p, "POST /v1/vms/{id}/start", s.startVM, r.PathValue("id"), map[string]any{"fail_fast": body.FailFast}, "sandbox.resuming")
+	s.compatAction(w, r, p, "POST /v1/vms/{id}/start", s.startVM, r.PathValue("id"), map[string]any{"fail_fast": body.FailFast, "env": body.Env}, "sandbox.resuming")
 }
 
 func (s *server) compatFork(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -674,13 +686,60 @@ func (s *server) compatFork(w http.ResponseWriter, r *http.Request, p *principal
 		if !decode(w, r, &body) {
 			return
 		}
-		if body.Labels != nil || body.Env != nil || body.Environment != "" || body.NoEnv || body.Type != "" {
-			writeErr(w, r, 400, "invalid_request", "fork with labels, env, environment, noEnv or type is not supported by this server")
+		// ponytail: labels need boatd to set labels on a fork (it copies the parent's).
+		if body.Labels != nil || body.Environment != "" || body.NoEnv {
+			writeErr(w, r, 400, "invalid_request", "fork with labels, environment or noEnv is not supported by this server: a fork keeps the parent's labels, environment and secret selection")
 			return
 		}
-		s.compatAction(w, r, p, "POST /v1/vms/{id}/fork", s.forkVM, r.PathValue("id"),
-			map[string]any{"name": body.Name, "fail_fast": body.FailFast}, "sandbox.forking")
+		res := s.callNative(r, p, "POST /v1/vms/{id}/fork", s.forkVM, r.PathValue("id"),
+			map[string]any{"name": body.Name, "fail_fast": body.FailFast, "env": body.Env})
+		if !res.ok() {
+			res.relay(w)
+			return
+		}
+		var vm VM
+		json.Unmarshal(res.body.Bytes(), &vm)
+		if rs := s.compatRetype(r, p, str(vm, "id"), body.Type); rs != nil {
+			rs.relay(w) // the fork exists, but not with the asked type
+			return
+		}
+		if body.Type != "" {
+			s.boatd.call(r.Context(), "GET", vmPath(str(vm, "id")), nil, &vm)
+		}
+		sb := s.sandbox(vm)
+		writeCompat(w, http.StatusAccepted, "sandbox.forking", map[string]any{"id": sb["id"], "status": sb["state"], "sandbox": sb,
+			"forced": false, "operation": nil, "statusUrl": nil})
 	})
+}
+
+// compatRetype gives a VM boat.dev's type (a size here). boatd changes vCPU
+// or RAM only on a stopped VM, with a cold boot next start, so a running VM is
+// stopped, resized and started again. nil = done (or already that size, or
+// "default" on a host without a size of that name).
+func (s *server) compatRetype(r *http.Request, p *principal, id, typ string) *nativeAnswer {
+	if typ == "" {
+		return nil
+	}
+	var vm VM
+	if err := s.boatd.call(r.Context(), "GET", vmPath(id), nil, &vm); err != nil || str(vm, "size") == typ {
+		return nil // ownVM in the callers' native calls answers a missing VM
+	}
+	running := str(vm, "state") == "running"
+	if running {
+		if res := s.callNative(r, p, "POST /v1/vms/{id}/stop", s.stopVM, id, nil); !res.ok() {
+			return res
+		}
+	}
+	rs := s.callNative(r, p, "POST /v1/vms/{id}/resize", s.resizeVM, id, map[string]any{"size": typ, "discard_memory": true})
+	if !rs.ok() && !(typ == "default" && strings.Contains(rs.body.String(), "unknown size")) {
+		return rs
+	}
+	if running {
+		if res := s.callNative(r, p, "POST /v1/vms/{id}/start", s.startVM, id, nil); !res.ok() {
+			return res
+		}
+	}
+	return nil
 }
 
 // compatAction runs a native lifecycle call and answers boat.dev's
