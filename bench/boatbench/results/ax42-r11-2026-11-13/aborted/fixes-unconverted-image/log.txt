@@ -1,0 +1,38 @@
+02:45:53Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  02:45:53  up  22:46,  0 users,  load average: 0.81, 3.40, 2.77
+02:45:54Z created bb-fio-96ba70 vm-e4f00b5ba904, exec-ready in 1.03s
+02:45:54Z ubuntu-24.04: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4: 18915 extents found | ---------------------- /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 | 3.0G	/var/lib/boat/images/ubuntu-24.04/rootfs.ext4 | 3.0G	/var/lib/boat/images/ubuntu-24.04/rootfs.ext4
+02:45:54Z ubuntu-24.04: FICLONE (cp --reflink=always) #1: 3374 us
+02:45:54Z ubuntu-24.04: FICLONE (cp --reflink=always) #2: 3394 us
+02:45:54Z ubuntu-24.04: FICLONE (cp --reflink=always) #3: 2590 us
+02:45:54Z ubuntu-full: /var/lib/boat/images/ubuntu-full/rootfs.ext4: 1 extent found | ---------------C------ /var/lib/boat/images/ubuntu-full/rootfs.ext4 | 7.9G	/var/lib/boat/images/ubuntu-full/rootfs.ext4 | 7.9G	/var/lib/boat/images/ubuntu-full/rootfs.ext4
+02:45:54Z ubuntu-full: FICLONE (cp --reflink=always) #1: 2701 us
+02:45:54Z ubuntu-full: FICLONE (cp --reflink=always) #2: 3159 us
+02:45:54Z ubuntu-full: FICLONE (cp --reflink=always) #3: 3037 us
+02:45:54Z scratch removed: yes
+02:45:54Z guest boot: console=ttyS0 quiet reboot=k panic=1 pci=off root=/dev/vda rw ip=10.200.0.3::10.200.0.1:255.255.0.0:bb-fio-96ba70:eth0:off pci=off virtio_mmio.device=4K@0xc0001000:5 root=/dev/vda rw virtio_mmio.device=4K@0xc0002000:6 virtio_mmio.device=4K@0xc0003000:7 virtio_mmio.device=4K@0xc0004000:8
+
+boat-agent.service @332ms
+└─boat-growfs.service @178ms +153ms
+  └─local-fs.target @177ms
+    └─local-fs-pre.target @177ms
+      └─systemd-tmpfiles-setup-dev.service @169ms +7ms
+        └─systemd-tmpfiles-setup-dev-early.service @148ms +19ms
+          └─systemd-journald.socket @131ms
+no
+[    0.251157] Run /sbin/init as init process
+352
+
+02:46:01Z snapshot snap-60ededa75f55: 1.69s
+02:46:01Z journal: 2026/11/13 02:45:53 vm-e4f00b5ba904: create alloc=21ms materialize=75ms (rootfs.ext4=74 vmlinux=0 grow+chown=0)
+2026/11/13 02:45:53 vm-e4f00b5ba904: boot vmm+sock=37ms load=31ms
+2026/11/13 02:45:53 vm-e4f00b5ba904: boot=115ms net=17ms
+2026/11/13 02:45:54 vm-e4f00b5ba904: guest init agent=709ms identity=47ms clock+env=0ms
+2026/11/13 02:46:01 vm-e4f00b5ba904: snapshot (diff) sync=0ms pause=0ms write=1613ms written=1965MiB
+2026/11/13 02:46:01 vm-e4f00b5ba904: snapshot install merge=0ms
+2026/11/13 02:46:01 vm-e4f00b5ba904: freeze disk=75ms rest=2ms
+02:46:01Z snapshot mem: /var/lib/boat/snapshots/snap-60ededa75f55/mem: 109 extents found
+---------------------m /var/lib/boat/snapshots/snap-60ededa75f55/mem
+/var/lib/boat/teams/t_team_OWNER/snapshots/snap-60ededa75f55/mem: 109 extents found
+---------------------m /var/lib/boat/teams/t_team_OWNER/snapshots/snap-60ededa75f55/mem
+02:46:01Z deleted snapshot; GET /v1/snapshots now: {"snapshots":[]}
+02:46:02Z deleted vm-e4f00b5ba904; GET /v1/vms now: {"vms":[]}

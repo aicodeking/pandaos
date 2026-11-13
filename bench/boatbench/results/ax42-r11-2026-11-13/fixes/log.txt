@@ -1,0 +1,30 @@
+02:50:29Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  02:50:29  up  22:50,  0 users,  load average: 0.61, 2.20, 2.46
+02:50:30Z created bb-fio-aab749 vm-ec01b8dc4ac3, exec-ready in 0.91s
+02:50:30Z ubuntu-24.04: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4: 5 extents found | ---------------C------ /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 | 3.0G	/var/lib/boat/images/ubuntu-24.04/rootfs.ext4 | 3.0G	/var/lib/boat/images/ubuntu-24.04/rootfs.ext4
+02:50:30Z ubuntu-24.04: FICLONE (cp --reflink=always) #1: 3259 us
+02:50:30Z ubuntu-24.04: FICLONE (cp --reflink=always) #2: 3176 us
+02:50:30Z ubuntu-24.04: FICLONE (cp --reflink=always) #3: 4126 us
+02:50:30Z ubuntu-full: /var/lib/boat/images/ubuntu-full/rootfs.ext4: 1 extent found | ---------------C------ /var/lib/boat/images/ubuntu-full/rootfs.ext4 | 7.9G	/var/lib/boat/images/ubuntu-full/rootfs.ext4 | 7.9G	/var/lib/boat/images/ubuntu-full/rootfs.ext4
+02:50:30Z ubuntu-full: FICLONE (cp --reflink=always) #1: 3419 us
+02:50:30Z ubuntu-full: FICLONE (cp --reflink=always) #2: 3356 us
+02:50:30Z ubuntu-full: FICLONE (cp --reflink=always) #3: 3662 us
+02:50:30Z scratch removed: yes
+02:50:30Z guest boot: console=ttyS0 quiet reboot=k panic=1 pci=off root=/dev/vda rw ip=10.200.0.2::10.200.0.1:255.255.0.0:bb-fio-aab749:eth0:off pci=off virtio_mmio.device=4K@0xc0001000:5 root=/dev/vda rw virtio_mmio.device=4K@0xc0002000:6 virtio_mmio.device=4K@0xc0003000:7 virtio_mmio.device=4K@0xc0004000:8
+no
+[    0.246895] Run /sbin/init as init process
+360
+
+02:50:37Z snapshot snap-93de65c6033b: 1.59s
+02:50:37Z journal: 2026/11/13 02:50:29 vm-ec01b8dc4ac3: create alloc=20ms materialize=1ms (rootfs.ext4=0 vmlinux=0 grow+chown=0)
+2026/11/13 02:50:29 vm-ec01b8dc4ac3: boot vmm+sock=36ms load=24ms
+2026/11/13 02:50:29 vm-ec01b8dc4ac3: boot=110ms net=18ms
+2026/11/13 02:50:30 vm-ec01b8dc4ac3: guest init agent=688ms identity=30ms clock+env=0ms
+2026/11/13 02:50:37 vm-ec01b8dc4ac3: snapshot (diff) sync=0ms pause=0ms write=1580ms written=1961MiB
+2026/11/13 02:50:37 vm-ec01b8dc4ac3: snapshot install merge=0ms
+2026/11/13 02:50:37 vm-ec01b8dc4ac3: freeze disk=0ms rest=3ms
+02:50:37Z snapshot mem: /var/lib/boat/snapshots/snap-93de65c6033b/mem: 98 extents found
+---------------------m /var/lib/boat/snapshots/snap-93de65c6033b/mem
+/var/lib/boat/teams/t_team_OWNER/snapshots/snap-93de65c6033b/mem: 98 extents found
+---------------------m /var/lib/boat/teams/t_team_OWNER/snapshots/snap-93de65c6033b/mem
+02:50:37Z deleted snapshot; GET /v1/snapshots now: {"snapshots":[]}
+02:50:38Z deleted vm-ec01b8dc4ac3; GET /v1/vms now: {"vms":[]}

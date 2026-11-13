@@ -1,0 +1,246 @@
+02:50:29Z boatd image conversion: 2026/11/13 02:39:01 images: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 converted to NOCOW in 3555ms (flush 423ms), extents 22567 -> 4
+2026/11/13 02:39:10 images: /var/lib/boat/images/ubuntu-full/rootfs.ext4 converted to NOCOW in 9108ms (flush 1123ms), extents 39944 -> 1
+2026/11/13 02:49:26 images: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 converted to NOCOW in 3470ms (flush 388ms), extents 18932 -> 5
+02:50:29Z start: SRC=0d160dd8d05177f706faf3a9f68791dd92f387a7 /nix/store/gy3xg0a98apf0lksqvvrk3cglsig5w40-nixos-system-pandaos-26.05.20261026.718f670 governor performance vms {"vms":[]}
+02:50:29Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  02:50:29  up  22:50,  0 users,  load average: 0.61, 2.20, 2.46
+02:50:30Z created bb-fio-aab749 vm-ec01b8dc4ac3, exec-ready in 0.91s
+02:50:30Z ubuntu-24.04: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4: 5 extents found | ---------------C------ /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 | 3.0G	/var/lib/boat/images/ubuntu-24.04/rootfs.ext4 | 3.0G	/var/lib/boat/images/ubuntu-24.04/rootfs.ext4
+02:50:30Z ubuntu-24.04: FICLONE (cp --reflink=always) #1: 3259 us
+02:50:30Z ubuntu-24.04: FICLONE (cp --reflink=always) #2: 3176 us
+02:50:30Z ubuntu-24.04: FICLONE (cp --reflink=always) #3: 4126 us
+02:50:30Z ubuntu-full: /var/lib/boat/images/ubuntu-full/rootfs.ext4: 1 extent found | ---------------C------ /var/lib/boat/images/ubuntu-full/rootfs.ext4 | 7.9G	/var/lib/boat/images/ubuntu-full/rootfs.ext4 | 7.9G	/var/lib/boat/images/ubuntu-full/rootfs.ext4
+02:50:30Z ubuntu-full: FICLONE (cp --reflink=always) #1: 3419 us
+02:50:30Z ubuntu-full: FICLONE (cp --reflink=always) #2: 3356 us
+02:50:30Z ubuntu-full: FICLONE (cp --reflink=always) #3: 3662 us
+02:50:30Z scratch removed: yes
+02:50:30Z guest boot: console=ttyS0 quiet reboot=k panic=1 pci=off root=/dev/vda rw ip=10.200.0.2::10.200.0.1:255.255.0.0:bb-fio-aab749:eth0:off pci=off virtio_mmio.device=4K@0xc0001000:5 root=/dev/vda rw virtio_mmio.device=4K@0xc0002000:6 virtio_mmio.device=4K@0xc0003000:7 virtio_mmio.device=4K@0xc0004000:8
+no
+[    0.246895] Run /sbin/init as init process
+360
+
+02:50:37Z snapshot snap-93de65c6033b: 1.59s
+02:50:37Z journal: 2026/11/13 02:50:29 vm-ec01b8dc4ac3: create alloc=20ms materialize=1ms (rootfs.ext4=0 vmlinux=0 grow+chown=0)
+2026/11/13 02:50:29 vm-ec01b8dc4ac3: boot vmm+sock=36ms load=24ms
+2026/11/13 02:50:29 vm-ec01b8dc4ac3: boot=110ms net=18ms
+2026/11/13 02:50:30 vm-ec01b8dc4ac3: guest init agent=688ms identity=30ms clock+env=0ms
+2026/11/13 02:50:37 vm-ec01b8dc4ac3: snapshot (diff) sync=0ms pause=0ms write=1580ms written=1961MiB
+2026/11/13 02:50:37 vm-ec01b8dc4ac3: snapshot install merge=0ms
+2026/11/13 02:50:37 vm-ec01b8dc4ac3: freeze disk=0ms rest=3ms
+02:50:37Z snapshot mem: /var/lib/boat/snapshots/snap-93de65c6033b/mem: 98 extents found
+---------------------m /var/lib/boat/snapshots/snap-93de65c6033b/mem
+/var/lib/boat/teams/t_team_OWNER/snapshots/snap-93de65c6033b/mem: 98 extents found
+---------------------m /var/lib/boat/teams/t_team_OWNER/snapshots/snap-93de65c6033b/mem
+02:50:37Z deleted snapshot; GET /v1/snapshots now: {"snapshots":[]}
+02:50:38Z deleted vm-ec01b8dc4ac3; GET /v1/vms now: {"vms":[]}
+[02:50:38] r0 probe
+[02:50:38] r0 api_rtt
+[02:50:42] r0 exec_rtt
+[02:50:43] r0 snapshot
+[02:50:44] r0 fork
+[02:50:45] r0 stop_resume
+[02:50:46] delete snapshot snap-1d29fad78503: DELETE http://127.0.0.1:8740/v1/snapshots/snap-1d29fad78503: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_d8d75f5b9dec5122"}}
+
+[02:50:46] r0 done: {"create_ready_s": 0.31236044999968726, "api_rtt_p50_ms": 1.2676390033448115, "api_rtt_p95_ms": 1.4266318030422553, "exec_rtt_p50_ms": 2.3268810036825016, "exec_rtt_p95_ms": 2.8640130010899156, "snapshot_s": 0.3766618769877823, "from_snapshot_ready_s": 0.21844927698839456, "fork_ready_s": 0.3701484880002681, "stop_s": 0.38929445199028123, "resume_ready_s": 0.16209556099784095, "create_ready_s_net": 0.30982517199299764, "fork_ready_s_net": 0.3676132099935785, "resume_ready_s_net": 0.15956028299115133, "from_snapshot_ready_s_net": 0.21591399898170494, "stop_s_net": 0.3880268129869364, "snapshot_s_net": 0.3753942379844375, "exec_rtt_p50_ms_net": 1.0592420003376901}
+[02:50:46] r1 probe
+[02:50:46] r1 api_rtt
+[02:50:50] r1 exec_rtt
+[02:50:53] r1 snapshot
+[02:50:54] r1 fork
+[02:50:54] r1 stop_resume
+[02:50:55] delete snapshot snap-0780427ceed5: DELETE http://127.0.0.1:8740/v1/snapshots/snap-0780427ceed5: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_f371b3dc328a43c6"}}
+
+[02:50:55] r1 done: {"create_ready_s": 0.3178160840034252, "api_rtt_p50_ms": 1.2502699973993003, "api_rtt_p95_ms": 1.3306248001754284, "exec_rtt_p50_ms": 2.2138390049804, "exec_rtt_p95_ms": 4.367906050174497, "snapshot_s": 0.3965198319929186, "from_snapshot_ready_s": 0.2308274370006984, "fork_ready_s": 0.3540992209891556, "stop_s": 0.4020595679903636, "resume_ready_s": 0.16051725701254327, "create_ready_s_net": 0.3153155440086266, "fork_ready_s_net": 0.351598680994357, "resume_ready_s_net": 0.15801671701774467, "from_snapshot_ready_s_net": 0.2283268970058998, "stop_s_net": 0.4008092979929643, "snapshot_s_net": 0.3952695619955193, "exec_rtt_p50_ms_net": 0.9635690075810999}
+[02:50:56] r2 probe
+[02:50:56] r2 api_rtt
+[02:51:00] r2 exec_rtt
+[02:51:02] r2 snapshot
+[02:51:03] r2 fork
+[02:51:03] r2 stop_resume
+[02:51:04] delete snapshot snap-c7a6b7f4c61d: DELETE http://127.0.0.1:8740/v1/snapshots/snap-c7a6b7f4c61d: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_13196a18d0747a6e"}}
+
+[02:51:04] r2 done: {"create_ready_s": 0.3201371479954105, "api_rtt_p50_ms": 1.2487890053307638, "api_rtt_p95_ms": 1.3068279979052022, "exec_rtt_p50_ms": 2.2404100018320605, "exec_rtt_p95_ms": 4.475212949182604, "snapshot_s": 0.37628032099746633, "from_snapshot_ready_s": 0.22307076799916103, "fork_ready_s": 0.3638983019918669, "stop_s": 0.39795764500740916, "resume_ready_s": 0.1681508139881771, "create_ready_s_net": 0.31763956998474896, "fork_ready_s_net": 0.3614007239812054, "resume_ready_s_net": 0.16565323597751558, "from_snapshot_ready_s_net": 0.2205731899884995, "stop_s_net": 0.3967088560020784, "snapshot_s_net": 0.37503153199213557, "exec_rtt_p50_ms_net": 0.9916209965012968}
+/tmp/r11out/lifecycle-b/results-pandaos-2026-11-13T025038Z.json
+[02:51:04] r0 probe
+[02:51:05] r0 disk
+[02:57:00] r0 done: {"create_ready_s": 0.30948441599321086, "seq_write_mbps": 1661.0, "seq_read_mbps": 12592.3, "rand_write_iops": 225762.0, "rand_read_iops": 58261.0, "pts_rand_read_iops": 57951.0, "pts_rand_write_iops": 256978.0, "pts_seq_write_mibps": 1854.0, "fsync_rand_write_iops": 25902.0, "seq_write_endfsync_mbps": 1682.5}
+[02:57:00] r1 probe
+[02:57:00] r1 disk
+[03:02:55] r1 done: {"create_ready_s": 0.3139956539962441, "seq_write_mbps": 1634.5, "seq_read_mbps": 13478.1, "rand_write_iops": 227053.0, "rand_read_iops": 216751.0, "pts_rand_read_iops": 216255.0, "pts_rand_write_iops": 261468.0, "pts_seq_write_mibps": 1776.7, "fsync_rand_write_iops": 25371.0, "seq_write_endfsync_mbps": 1865.5}
+[03:02:55] r2 probe
+[03:02:55] r2 disk
+[03:08:49] r2 done: {"create_ready_s": 0.3160475869954098, "seq_write_mbps": 1578.8, "seq_read_mbps": 9428.8, "rand_write_iops": 226283.0, "rand_read_iops": 216905.0, "pts_rand_read_iops": 216285.0, "pts_rand_write_iops": 260018.0, "pts_seq_write_mibps": 1725.3, "fsync_rand_write_iops": 25630.0, "seq_write_endfsync_mbps": 1948.6}
+/tmp/r11out/disk-d/results-pandaos-2026-11-13T025104Z.json
+03:08:49Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:08:49  up  23:09,  0 users,  load average: 1.80, 1.96, 2.08
+03:08:49Z created bb-fio-ab2699 vm-adacba0a57b3, exec-ready in 0.33s
+03:09:09Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:09:34Z seqw-unsafe-async-t1: 1742 IOPS, 1745.3 MiB/s
+03:09:59Z seqw-unsafe-async-t2: 1748 IOPS, 1750.9 MiB/s
+03:10:25Z seqw-unsafe-async-t3: 1778 IOPS, 1780.9 MiB/s
+03:10:25Z deleted vm-adacba0a57b3; GET /v1/vms now: {"vms":[]}
+03:10:28Z boatd: active config: .diskCache = "Writeback" 2026/11/13 03:10:25 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+[03:10:29] r0 probe
+[03:10:29] r0 disk
+[03:16:22] r0 done: {"create_ready_s": 0.33230208700115327, "seq_write_mbps": 1570.3, "seq_read_mbps": 12045.0, "rand_write_iops": 226863.0, "rand_read_iops": 217870.0, "pts_rand_read_iops": 217240.0, "pts_rand_write_iops": 260767.0, "pts_seq_write_mibps": 1809.1, "fsync_rand_write_iops": 26053.0, "seq_write_endfsync_mbps": 1717.4}
+[03:16:22] r1 probe
+[03:16:22] r1 disk
+[03:22:17] r1 done: {"create_ready_s": 0.3165350240014959, "seq_write_mbps": 1685.8, "seq_read_mbps": 13179.9, "rand_write_iops": 226147.0, "rand_read_iops": 219073.0, "pts_rand_read_iops": 215109.0, "pts_rand_write_iops": 256530.0, "pts_seq_write_mibps": 1696.3, "fsync_rand_write_iops": 25822.0, "seq_write_endfsync_mbps": 1969.4}
+[03:22:17] r2 probe
+[03:22:17] r2 disk
+[03:28:11] r2 done: {"create_ready_s": 0.3279874599975301, "seq_write_mbps": 1583.1, "seq_read_mbps": 10538.7, "rand_write_iops": 225745.0, "rand_read_iops": 217753.0, "pts_rand_read_iops": 217122.0, "pts_rand_write_iops": 258340.0, "pts_seq_write_mibps": 1798.4, "fsync_rand_write_iops": 25749.0, "seq_write_endfsync_mbps": 1964.4}
+/tmp/r11out/disk-d-writeback/results-pandaos-2026-11-13T031029Z.json
+03:28:12Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:28:12  up  23:28,  0 users,  load average: 1.71, 1.97, 2.04
+03:28:12Z created bb-fio-c2bfdf vm-9be9b184d858, exec-ready in 0.33s
+03:28:32Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:28:57Z seqw-writeback-async-t1: 1740 IOPS, 1743.5 MiB/s
+03:29:22Z seqw-writeback-async-t2: 1732 IOPS, 1734.8 MiB/s
+03:29:48Z seqw-writeback-async-t3: 1809 IOPS, 1812.6 MiB/s
+03:29:48Z deleted vm-9be9b184d858; GET /v1/vms now: {"vms":[]}
+03:29:52Z boatd: active config: .diskEngine = "Sync" 2026/11/13 03:29:49 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+03:29:52Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:29:52  up  23:30,  0 users,  load average: 1.61, 1.84, 1.99
+03:29:52Z created bb-fio-b69d42 vm-efcf3df32ec6, exec-ready in 0.34s
+03:30:13Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:30:39Z seqw-unsafe-sync-t1: 1681 IOPS, 1684.5 MiB/s
+03:31:04Z seqw-unsafe-sync-t2: 1732 IOPS, 1735.3 MiB/s
+03:31:29Z seqw-unsafe-sync-t3: 1745 IOPS, 1747.8 MiB/s
+03:31:30Z deleted vm-efcf3df32ec6; GET /v1/vms now: {"vms":[]}
+03:31:33Z boatd: active config: installed 2026/11/13 03:31:30 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+03:31:33Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:31:33  up  23:31,  0 users,  load average: 1.76, 1.79, 1.96
+03:31:34Z created bb-fio-76c82b vm-ac2b21ad5a4f, exec-ready in 0.32s
+03:31:54Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:31:54Z guest /proc/interrupts (virtio):
+ 26:          0          0         61          0   IO-APIC   5-edge      virtio0
+ 27:          0          0          0      28839   IO-APIC   6-edge      virtio1
+ 28:       6804          0          0          0   IO-APIC   7-edge      virtio2
+ 29:          0        187          0          0   IO-APIC   8-edge      virtio3
+
+03:31:54Z virtio-blk IRQ 27, smp_affinity_list as booted: 0-3, 4 vCPUs
+03:32:20Z irq-t1-booted: 214265 IOPS, 837.0 MiB/s
+03:32:45Z irq-t1-off0: 213793 IOPS, 835.1 MiB/s
+03:33:10Z irq-t2-booted: 213920 IOPS, 835.6 MiB/s
+03:33:35Z irq-t2-off0: 217612 IOPS, 850.1 MiB/s
+03:34:01Z irq-t3-booted: 216092 IOPS, 844.1 MiB/s
+03:34:26Z irq-t3-off0: 217839 IOPS, 850.9 MiB/s
+03:34:51Z irq-t4-booted: 216281 IOPS, 844.9 MiB/s
+03:35:17Z irq-t4-off0: 214525 IOPS, 838.0 MiB/s
+03:35:42Z irq-t5-booted: 215896 IOPS, 843.4 MiB/s
+03:36:07Z irq-t5-off0: 216598 IOPS, 846.1 MiB/s
+03:36:33Z irq-t6-booted: 78727 IOPS, 307.5 MiB/s
+03:36:58Z irq-t6-off0: 216308 IOPS, 845.0 MiB/s
+03:37:23Z irq-t7-booted: 217530 IOPS, 849.7 MiB/s
+03:37:49Z irq-t7-off0: 58766 IOPS, 229.6 MiB/s
+03:38:14Z irq-t8-booted: 215901 IOPS, 843.4 MiB/s
+03:38:39Z irq-t8-off0: 58411 IOPS, 228.2 MiB/s
+03:38:39Z guest /proc/interrupts after:
+ 26:          0          0         62          0   IO-APIC   5-edge      virtio0
+ 27:          0          0          0   19179934   IO-APIC   6-edge      virtio1
+ 28:       6812          0          0          0   IO-APIC   7-edge      virtio2
+ 29:          0        498          0          0   IO-APIC   8-edge      virtio3
+
+03:38:40Z deleted vm-ac2b21ad5a4f; GET /v1/vms now: {"vms":[]}
+03:38:40Z end: vms {"vms":[]} snapshots {"snapshots":[]} drop-ins ls: cannot access '/run/systemd/system/boatd.service.d': No such file or directory
+03:41:40Z boatd image conversion: 2026/11/13 02:39:01 images: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 converted to NOCOW in 3555ms (flush 423ms), extents 22567 -> 4
+2026/11/13 02:39:10 images: /var/lib/boat/images/ubuntu-full/rootfs.ext4 converted to NOCOW in 9108ms (flush 1123ms), extents 39944 -> 1
+2026/11/13 02:49:26 images: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 converted to NOCOW in 3470ms (flush 388ms), extents 18932 -> 5
+03:41:40Z start (cold): SRC=0d160dd8d05177f706faf3a9f68791dd92f387a7 /nix/store/gy3xg0a98apf0lksqvvrk3cglsig5w40-nixos-system-pandaos-26.05.20261026.718f670 governor performance vms {"vms":[]}
+03:41:43Z boatd: active config: .warmPool = false 2026/11/13 03:41:40 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+[03:41:44] r0 probe
+[03:41:44] r0 api_rtt
+[03:41:48] r0 exec_rtt
+[03:41:49] r0 snapshot
+[03:41:50] r0 fork
+[03:41:50] r0 stop_resume
+[03:41:51] delete snapshot snap-0579f483251f: DELETE http://127.0.0.1:8740/v1/snapshots/snap-0579f483251f: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_7a370584f1fe8aaa"}}
+
+[03:41:51] r0 done: {"create_ready_s": 0.8724146099993959, "api_rtt_p50_ms": 1.257647993043065, "api_rtt_p95_ms": 1.3286040019011125, "exec_rtt_p50_ms": 2.0396309992065653, "exec_rtt_p95_ms": 2.4830859983921982, "snapshot_s": 0.4772311190026812, "from_snapshot_ready_s": 0.19330420000187587, "fork_ready_s": 0.3091256629995769, "stop_s": 0.352775102990563, "resume_ready_s": 0.14603586299926974, "create_ready_s_net": 0.8698993140133098, "fork_ready_s_net": 0.30661036701349076, "resume_ready_s_net": 0.1435205670131836, "from_snapshot_ready_s_net": 0.19078890401578974, "stop_s_net": 0.35151745499751996, "snapshot_s_net": 0.47597347100963816, "exec_rtt_p50_ms_net": 0.7819830061635002}
+[03:41:52] r1 probe
+[03:41:52] r1 api_rtt
+[03:41:56] r1 exec_rtt
+[03:41:58] r1 snapshot
+[03:41:59] r1 fork
+[03:42:00] r1 stop_resume
+[03:42:01] delete snapshot snap-24ff46b68b27: DELETE http://127.0.0.1:8740/v1/snapshots/snap-24ff46b68b27: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_fc6399633fbc029d"}}
+
+[03:42:01] r1 done: {"create_ready_s": 0.8996090430009644, "api_rtt_p50_ms": 1.2490380031522363, "api_rtt_p95_ms": 1.3668327970663086, "exec_rtt_p50_ms": 2.0613160013454035, "exec_rtt_p95_ms": 3.4056376985972716, "snapshot_s": 0.47769904100277927, "from_snapshot_ready_s": 0.18948116499814205, "fork_ready_s": 0.29218407200824004, "stop_s": 0.33415024098940194, "resume_ready_s": 0.16000740199524444, "create_ready_s_net": 0.89711096699466, "fork_ready_s_net": 0.28968599600193556, "resume_ready_s_net": 0.15750932598893996, "from_snapshot_ready_s_net": 0.18698308899183758, "stop_s_net": 0.3329012029862497, "snapshot_s_net": 0.47645000299962703, "exec_rtt_p50_ms_net": 0.8122779981931672}
+[03:42:01] r2 probe
+[03:42:02] r2 api_rtt
+[03:42:05] r2 exec_rtt
+[03:42:07] r2 snapshot
+[03:42:08] r2 fork
+[03:42:09] r2 stop_resume
+[03:42:10] delete snapshot snap-c4e1283d03d2: DELETE http://127.0.0.1:8740/v1/snapshots/snap-c4e1283d03d2: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_9fd6677ebfd94946"}}
+
+[03:42:10] r2 done: {"create_ready_s": 0.8868321490008384, "api_rtt_p50_ms": 1.2282880052225664, "api_rtt_p95_ms": 1.3373306050198153, "exec_rtt_p50_ms": 2.0774215008714236, "exec_rtt_p95_ms": 3.2067512547655466, "snapshot_s": 0.5467827600077726, "from_snapshot_ready_s": 0.2010584370000288, "fork_ready_s": 0.29538067399698775, "stop_s": 0.29831083900353406, "resume_ready_s": 0.1473157930013258, "create_ready_s_net": 0.8843755729903933, "fork_ready_s_net": 0.2929240979865426, "resume_ready_s_net": 0.14485921699088067, "from_snapshot_ready_s_net": 0.19860186098958366, "stop_s_net": 0.2970825509983115, "snapshot_s_net": 0.54555447200255, "exec_rtt_p50_ms_net": 0.8491334956488572}
+/tmp/r11out/lifecycle-b-cold/results-pandaos-2026-11-13T034143Z.json
+03:42:13Z boatd: active config: installed 2026/11/13 03:42:10 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+03:42:13Z end: vms {"vms":[]} snapshots {"snapshots":[]} drop-ins ls: cannot access '/run/systemd/system/boatd.service.d': No such file or directory
+03:45:00Z boatd image conversion: 2026/11/13 02:39:01 images: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 converted to NOCOW in 3555ms (flush 423ms), extents 22567 -> 4
+2026/11/13 02:39:10 images: /var/lib/boat/images/ubuntu-full/rootfs.ext4 converted to NOCOW in 9108ms (flush 1123ms), extents 39944 -> 1
+2026/11/13 02:49:26 images: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 converted to NOCOW in 3470ms (flush 388ms), extents 18932 -> 5
+03:45:00Z start (flush): vms {"vms":[]}
+03:45:01Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:45:01  up  23:45,  0 users,  load average: 0.00, 0.66, 1.46
+03:45:01Z created bb-fio-fa0804 vm-ab977725c30a, exec-ready in 0.34s
+03:45:20Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:45:41Z flush-unsafe: 26484 IOPS, 103.5 MiB/s
+03:45:41Z nvme0n1 flushes during the run: 1 (writes completed: 15420)
+03:45:41Z deleted vm-ab977725c30a; GET /v1/vms now: {"vms":[]}
+03:45:45Z boatd: active config: .diskCache = "Writeback" 2026/11/13 03:45:42 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+03:45:45Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:45:45  up  23:46,  0 users,  load average: 0.77, 0.77, 1.46
+03:45:45Z created bb-fio-928013 vm-676e5d903706, exec-ready in 0.31s
+03:46:05Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:46:25Z flush-writeback: 26549 IOPS, 103.7 MiB/s
+03:46:25Z nvme0n1 flushes during the run: 1 (writes completed: 14082)
+03:46:26Z deleted vm-676e5d903706; GET /v1/vms now: {"vms":[]}
+03:46:29Z boatd: active config: installed 2026/11/13 03:46:26 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+03:46:29Z end: vms {"vms":[]} drop-ins ls: cannot access '/run/systemd/system/boatd.service.d': No such file or directory
+03:48:27Z boatd image conversion: 2026/11/13 02:39:01 images: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 converted to NOCOW in 3555ms (flush 423ms), extents 22567 -> 4
+2026/11/13 02:39:10 images: /var/lib/boat/images/ubuntu-full/rootfs.ext4 converted to NOCOW in 9108ms (flush 1123ms), extents 39944 -> 1
+2026/11/13 02:49:26 images: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 converted to NOCOW in 3470ms (flush 388ms), extents 18932 -> 5
+03:48:27Z start (no warm pool): vms {"vms":[]}
+03:48:31Z boatd: active config: .warmPool = false 2026/11/13 03:48:28 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+03:48:31Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:48:31  up  23:48,  0 users,  load average: 1.46, 1.68, 1.73
+03:48:32Z created bb-fio-ae9a25 vm-57ad211e64a4, exec-ready in 0.92s
+03:48:51Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:49:12Z flush-unsafe-cold: 26748 IOPS, 104.5 MiB/s
+03:49:12Z nvme0n1 flushes during the run: 1 (writes completed: 15688)
+03:49:12Z deleted vm-57ad211e64a4; GET /v1/vms now: {"vms":[]}
+03:49:12Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:49:12  up  23:49,  0 users,  load average: 1.52, 1.66, 1.72
+03:49:13Z created bb-fio-a8ec87 vm-c3681fbf3025, exec-ready in 0.93s
+03:49:34Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:50:00Z seqw-unsafe-async-cold-t1: 1789 IOPS, 1792.0 MiB/s
+03:50:25Z seqw-unsafe-async-cold-t2: 1775 IOPS, 1778.4 MiB/s
+03:50:50Z seqw-unsafe-async-cold-t3: 1694 IOPS, 1697.5 MiB/s
+03:50:51Z deleted vm-c3681fbf3025; GET /v1/vms now: {"vms":[]}
+03:50:54Z boatd: active config: .warmPool = false | .diskCache = "Writeback" 2026/11/13 03:50:51 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+03:50:54Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:50:54  up  23:51,  0 users,  load average: 1.54, 1.63, 1.71
+03:50:55Z created bb-fio-413dd3 vm-49510bdce4c3, exec-ready in 0.99s
+03:51:21Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:51:41Z flush-writeback-cold: 84 IOPS, 0.3 MiB/s
+03:51:41Z nvme0n1 flushes during the run: 3361 (writes completed: 38823)
+03:51:41Z deleted vm-49510bdce4c3; GET /v1/vms now: {"vms":[]}
+[03:51:43] r0 probe
+[03:51:43] r0 disk
+[03:57:43] r0 done: {"create_ready_s": 1.7593564730050275, "seq_write_mbps": 1652.4, "seq_read_mbps": 12976.4, "rand_write_iops": 211011.0, "rand_read_iops": 216583.0, "pts_rand_read_iops": 215627.0, "pts_rand_write_iops": 247347.0, "pts_seq_write_mibps": 1722.6, "fsync_rand_write_iops": 84.0, "seq_write_endfsync_mbps": 1551.7}
+[03:57:44] r1 probe
+[03:57:44] r1 disk
+[04:03:47] r1 done: {"create_ready_s": 1.0212580039951717, "seq_write_mbps": 1691.0, "seq_read_mbps": 13354.0, "rand_write_iops": 209273.0, "rand_read_iops": 58976.0, "pts_rand_read_iops": 212359.0, "pts_rand_write_iops": 244571.0, "pts_seq_write_mibps": 1791.2, "fsync_rand_write_iops": 84.0, "seq_write_endfsync_mbps": 1752.2}
+[04:03:48] r2 probe
+[04:03:48] r2 disk
+[04:09:49] r2 done: {"create_ready_s": 0.9533200019941432, "seq_write_mbps": 1599.4, "seq_read_mbps": 7753.4, "rand_write_iops": 213512.0, "rand_read_iops": 213865.0, "pts_rand_read_iops": 216170.0, "pts_rand_write_iops": 247476.0, "pts_seq_write_mibps": 1722.4, "fsync_rand_write_iops": 83.0, "seq_write_endfsync_mbps": 1611.7}
+/tmp/r11out/disk-d-writeback/results-pandaos-2026-11-13T035142Z.json
+04:09:49Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  04:09:49  up 1 day  0:10,  0 users,  load average: 1.43, 1.80, 1.82
+04:09:50Z created bb-fio-56455f vm-1ae6c8653cff, exec-ready in 1.01s
+04:10:17Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+04:10:43Z seqw-writeback-async-cold-t1: 1625 IOPS, 1628.5 MiB/s
+04:11:08Z seqw-writeback-async-cold-t2: 1645 IOPS, 1648.0 MiB/s
+04:11:33Z seqw-writeback-async-cold-t3: 1673 IOPS, 1676.3 MiB/s
+04:11:34Z deleted vm-1ae6c8653cff; GET /v1/vms now: {"vms":[]}
+04:11:37Z boatd: active config: .warmPool = false | .diskEngine = "Sync" 2026/11/13 04:11:34 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+04:11:37Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  04:11:37  up 1 day  0:12,  0 users,  load average: 1.31, 1.66, 1.77
+04:11:38Z created bb-fio-d37f41 vm-e8c24c0a8aab, exec-ready in 0.91s
+04:11:58Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+04:12:23Z seqw-unsafe-sync-cold-t1: 1678 IOPS, 1681.2 MiB/s
+04:12:49Z seqw-unsafe-sync-cold-t2: 1718 IOPS, 1721.7 MiB/s
+04:13:14Z seqw-unsafe-sync-cold-t3: 1739 IOPS, 1742.0 MiB/s
+04:13:14Z deleted vm-e8c24c0a8aab; GET /v1/vms now: {"vms":[]}
+04:13:18Z boatd: active config: installed 2026/11/13 04:13:15 boatd 0.1.0 listening on /run/boat/boatd.sock (0 VMs)
+04:13:18Z end: vms {"vms":[]} snapshots {"snapshots":[]} drop-ins ls: cannot access '/run/systemd/system/boatd.service.d': No such file or directory

@@ -1,0 +1,33 @@
+02:28:31Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  02:28:31  up  22:28,  0 users,  load average: 1.41, 1.08, 0.53
+02:28:33Z created bb-fio-ca3d00 vm-ab856cc0b9f2, exec-ready in 1.57s
+02:28:52Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+02:28:52Z guest /proc/interrupts (virtio):
+ 26:          0          0         59          0   IO-APIC   5-edge      virtio0
+ 27:          0          0          0      14045   IO-APIC   6-edge      virtio1
+ 28:       5723          0          0          0   IO-APIC   7-edge      virtio2
+ 29:          0        158          0          0   IO-APIC   8-edge      virtio3
+
+02:28:52Z virtio-blk IRQ 27, smp_affinity_list as booted: 0-3, 4 vCPUs
+02:29:17Z irq-t1-booted: 59075 IOPS, 230.8 MiB/s
+02:29:42Z irq-t1-off0: 59436 IOPS, 232.2 MiB/s
+02:30:08Z irq-t2-booted: 220657 IOPS, 862.0 MiB/s
+02:30:33Z irq-t2-off0: 218934 IOPS, 855.2 MiB/s
+02:30:58Z irq-t3-booted: 59306 IOPS, 231.7 MiB/s
+02:31:24Z irq-t3-off0: 59060 IOPS, 230.7 MiB/s
+02:31:49Z irq-t4-booted: 59265 IOPS, 231.5 MiB/s
+02:32:14Z irq-t4-off0: 219736 IOPS, 858.4 MiB/s
+02:32:40Z irq-t5-booted: 218678 IOPS, 854.2 MiB/s
+02:33:05Z irq-t5-off0: 217824 IOPS, 850.9 MiB/s
+02:33:30Z irq-t6-booted: 59284 IOPS, 231.6 MiB/s
+02:33:56Z irq-t6-off0: 216814 IOPS, 846.9 MiB/s
+02:34:21Z irq-t7-booted: 218258 IOPS, 852.6 MiB/s
+02:34:46Z irq-t7-off0: 217988 IOPS, 851.5 MiB/s
+02:35:12Z irq-t8-booted: 217246 IOPS, 848.6 MiB/s
+02:35:37Z irq-t8-off0: 215853 IOPS, 843.2 MiB/s
+02:35:37Z guest /proc/interrupts after:
+ 26:          0          0         62          0   IO-APIC   5-edge      virtio0
+ 27:          0          0          0   17563061   IO-APIC   6-edge      virtio1
+ 28:       5731          0          0          0   IO-APIC   7-edge      virtio2
+ 29:          0        470          0          0   IO-APIC   8-edge      virtio3
+
+02:35:37Z deleted vm-ab856cc0b9f2; GET /v1/vms now: {"vms":[]}

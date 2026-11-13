@@ -1,0 +1,121 @@
+{
+ "driver": "pandaos",
+ "run_id": "7c23cc",
+ "size": "default",
+ "started": "2026-11-13T02:51:04Z",
+ "host": {
+  "desc": "-"
+ },
+ "boatd_options": "-",
+ "preset": "pandaos-install",
+ "fc_cache_type": "unknown (boatd source not found)",
+ "run_url": null,
+ "source_commit": "0d160dd8d05177f706faf3a9f68791dd92f387a7",
+ "client": {
+  "cpu_model": "AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16",
+  "os": "Linux-6.18.57-x86_64-with-glibc2.44",
+  "egress": "HEL DE"
+ },
+ "parts": "d",
+ "repeats": [
+  {
+   "index": 0,
+   "metrics": {
+    "create_ready_s": 0.30948441599321086,
+    "seq_write_mbps": 1661.0,
+    "seq_read_mbps": 12592.3,
+    "rand_write_iops": 225762.0,
+    "rand_read_iops": 58261.0,
+    "pts_rand_read_iops": 57951.0,
+    "pts_rand_write_iops": 256978.0,
+    "pts_seq_write_mibps": 1854.0,
+    "fsync_rand_write_iops": 25902.0,
+    "seq_write_endfsync_mbps": 1682.5
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "disk_tool": "fio",
+   "disk_errors": null
+  },
+  {
+   "index": 1,
+   "metrics": {
+    "create_ready_s": 0.3139956539962441,
+    "seq_write_mbps": 1634.5,
+    "seq_read_mbps": 13478.1,
+    "rand_write_iops": 227053.0,
+    "rand_read_iops": 216751.0,
+    "pts_rand_read_iops": 216255.0,
+    "pts_rand_write_iops": 261468.0,
+    "pts_seq_write_mibps": 1776.7,
+    "fsync_rand_write_iops": 25371.0,
+    "seq_write_endfsync_mbps": 1865.5
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "disk_tool": "fio",
+   "disk_errors": null
+  },
+  {
+   "index": 2,
+   "metrics": {
+    "create_ready_s": 0.3160475869954098,
+    "seq_write_mbps": 1578.8,
+    "seq_read_mbps": 9428.8,
+    "rand_write_iops": 226283.0,
+    "rand_read_iops": 216905.0,
+    "pts_rand_read_iops": 216285.0,
+    "pts_rand_write_iops": 260018.0,
+    "pts_seq_write_mibps": 1725.3,
+    "fsync_rand_write_iops": 25630.0,
+    "seq_write_endfsync_mbps": 1948.6
+   },
+   "errors": {},
+   "probe": {
+    "nproc": 4,
+    "cpu_count": 4,
+    "mem_mib": 7965,
+    "disk_gib": 50.7,
+    "cpu_model": "AMD EPYC",
+    "kernel": "6.1.191",
+    "os": "Ubuntu 24.04.5 LTS",
+    "virt": "kvm",
+    "system_node": "v26.13.0",
+    "user": "dev",
+    "home_fs": "ext2/ext3",
+    "egress_colo": "HEL",
+    "egress_country": "FI"
+   },
+   "disk_tool": "fio",
+   "disk_errors": null
+  }
+ ]
+}

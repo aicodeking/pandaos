@@ -1,0 +1,19 @@
+02:21:46Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  02:21:46  up  22:22,  0 users,  load average: 0.32, 0.08, 0.02
+02:21:47Z created bb-fio-a411e7 vm-aac48f7f8d19, exec-ready in 1.56s
+02:22:10Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+02:22:35Z seqw-t1-booted: 1685 IOPS, 1688.5 MiB/s
+02:23:00Z seqw-t1-sched-none: 1719 IOPS, 1722.2 MiB/s
+02:23:26Z seqw-t1-sched-mq-deadline: 1677 IOPS, 1680.6 MiB/s
+02:23:51Z seqw-t1-max-sectors-hw: 1710 IOPS, 1712.9 MiB/s
+02:24:17Z seqw-t1-nr-requests-1024: 1780 IOPS, 1783.5 MiB/s
+02:24:42Z seqw-t2-booted: 1715 IOPS, 1718.5 MiB/s
+02:25:07Z seqw-t2-sched-none: 1721 IOPS, 1724.5 MiB/s
+02:25:33Z seqw-t2-sched-mq-deadline: 1670 IOPS, 1672.8 MiB/s
+02:25:58Z seqw-t2-max-sectors-hw: 1608 IOPS, 1611.3 MiB/s
+02:26:24Z seqw-t2-nr-requests-1024: 1694 IOPS, 1697.3 MiB/s
+02:26:49Z seqw-t3-booted: 1706 IOPS, 1709.5 MiB/s
+02:27:14Z seqw-t3-sched-none: 1700 IOPS, 1703.3 MiB/s
+02:27:40Z seqw-t3-sched-mq-deadline: 1615 IOPS, 1618.6 MiB/s
+02:28:05Z seqw-t3-max-sectors-hw: 1693 IOPS, 1696.3 MiB/s
+02:28:30Z seqw-t3-nr-requests-1024: 1650 IOPS, 1653.6 MiB/s
+02:28:31Z deleted vm-aac48f7f8d19; GET /v1/vms now: {"vms":[]}

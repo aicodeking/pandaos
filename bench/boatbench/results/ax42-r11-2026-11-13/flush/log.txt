@@ -1,0 +1,24 @@
+03:45:01Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:45:01  up  23:45,  0 users,  load average: 0.00, 0.66, 1.46
+03:45:01Z created bb-fio-fa0804 vm-ab977725c30a, exec-ready in 0.34s
+03:45:20Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:45:41Z flush-unsafe: 26484 IOPS, 103.5 MiB/s
+03:45:41Z nvme0n1 flushes during the run: 1 (writes completed: 15420)
+03:45:41Z deleted vm-ab977725c30a; GET /v1/vms now: {"vms":[]}
+03:45:45Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:45:45  up  23:46,  0 users,  load average: 0.77, 0.77, 1.46
+03:45:45Z created bb-fio-928013 vm-676e5d903706, exec-ready in 0.31s
+03:46:05Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:46:25Z flush-writeback: 26549 IOPS, 103.7 MiB/s
+03:46:25Z nvme0n1 flushes during the run: 1 (writes completed: 14082)
+03:46:26Z deleted vm-676e5d903706; GET /v1/vms now: {"vms":[]}
+03:48:31Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:48:31  up  23:48,  0 users,  load average: 1.46, 1.68, 1.73
+03:48:32Z created bb-fio-ae9a25 vm-57ad211e64a4, exec-ready in 0.92s
+03:48:51Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:49:12Z flush-unsafe-cold: 26748 IOPS, 104.5 MiB/s
+03:49:12Z nvme0n1 flushes during the run: 1 (writes completed: 15688)
+03:49:12Z deleted vm-57ad211e64a4; GET /v1/vms now: {"vms":[]}
+03:50:54Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | config /run/r11-boatd.json | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  03:50:54  up  23:51,  0 users,  load average: 1.54, 1.63, 1.71
+03:50:55Z created bb-fio-413dd3 vm-49510bdce4c3, exec-ready in 0.99s
+03:51:21Z guest queue: scheduler=[none] mq-deadline kyber bfq  nr_requests=128 max_sectors_kb=1280 max_hw_sectors_kb=2147483647 max_segments=1 read_ahead_kb=128 rq_affinity=1 nomerges=0 
+03:51:41Z flush-writeback-cold: 84 IOPS, 0.3 MiB/s
+03:51:41Z nvme0n1 flushes during the run: 3361 (writes completed: 38823)
+03:51:41Z deleted vm-49510bdce4c3; GET /v1/vms now: {"vms":[]}

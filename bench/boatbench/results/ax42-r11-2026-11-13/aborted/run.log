@@ -1,0 +1,90 @@
+02:45:53Z start: SRC=0d160dd8d05177f706faf3a9f68791dd92f387a7 /nix/store/gy3xg0a98apf0lksqvvrk3cglsig5w40-nixos-system-pandaos-26.05.20261026.718f670 governor performance vms {"vms":[]}
+02:45:53Z host: 6.18.57 | 26.05.20261026.718f670 (Yarara) | performance | performance | {"diskCache":null,"diskEngine":null,"untrustedTenants":null} | btrfs rw,noatime,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/ |  02:45:53  up  22:46,  0 users,  load average: 0.81, 3.40, 2.77
+02:45:54Z created bb-fio-96ba70 vm-e4f00b5ba904, exec-ready in 1.03s
+02:45:54Z ubuntu-24.04: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4: 18915 extents found | ---------------------- /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 | 3.0G	/var/lib/boat/images/ubuntu-24.04/rootfs.ext4 | 3.0G	/var/lib/boat/images/ubuntu-24.04/rootfs.ext4
+02:45:54Z ubuntu-24.04: FICLONE (cp --reflink=always) #1: 3374 us
+02:45:54Z ubuntu-24.04: FICLONE (cp --reflink=always) #2: 3394 us
+02:45:54Z ubuntu-24.04: FICLONE (cp --reflink=always) #3: 2590 us
+02:45:54Z ubuntu-full: /var/lib/boat/images/ubuntu-full/rootfs.ext4: 1 extent found | ---------------C------ /var/lib/boat/images/ubuntu-full/rootfs.ext4 | 7.9G	/var/lib/boat/images/ubuntu-full/rootfs.ext4 | 7.9G	/var/lib/boat/images/ubuntu-full/rootfs.ext4
+02:45:54Z ubuntu-full: FICLONE (cp --reflink=always) #1: 2701 us
+02:45:54Z ubuntu-full: FICLONE (cp --reflink=always) #2: 3159 us
+02:45:54Z ubuntu-full: FICLONE (cp --reflink=always) #3: 3037 us
+02:45:54Z scratch removed: yes
+02:45:54Z guest boot: console=ttyS0 quiet reboot=k panic=1 pci=off root=/dev/vda rw ip=10.200.0.3::10.200.0.1:255.255.0.0:bb-fio-96ba70:eth0:off pci=off virtio_mmio.device=4K@0xc0001000:5 root=/dev/vda rw virtio_mmio.device=4K@0xc0002000:6 virtio_mmio.device=4K@0xc0003000:7 virtio_mmio.device=4K@0xc0004000:8
+
+boat-agent.service @332ms
+└─boat-growfs.service @178ms +153ms
+  └─local-fs.target @177ms
+    └─local-fs-pre.target @177ms
+      └─systemd-tmpfiles-setup-dev.service @169ms +7ms
+        └─systemd-tmpfiles-setup-dev-early.service @148ms +19ms
+          └─systemd-journald.socket @131ms
+no
+[    0.251157] Run /sbin/init as init process
+352
+
+02:46:01Z snapshot snap-60ededa75f55: 1.69s
+02:46:01Z journal: 2026/11/13 02:45:53 vm-e4f00b5ba904: create alloc=21ms materialize=75ms (rootfs.ext4=74 vmlinux=0 grow+chown=0)
+2026/11/13 02:45:53 vm-e4f00b5ba904: boot vmm+sock=37ms load=31ms
+2026/11/13 02:45:53 vm-e4f00b5ba904: boot=115ms net=17ms
+2026/11/13 02:45:54 vm-e4f00b5ba904: guest init agent=709ms identity=47ms clock+env=0ms
+2026/11/13 02:46:01 vm-e4f00b5ba904: snapshot (diff) sync=0ms pause=0ms write=1613ms written=1965MiB
+2026/11/13 02:46:01 vm-e4f00b5ba904: snapshot install merge=0ms
+2026/11/13 02:46:01 vm-e4f00b5ba904: freeze disk=75ms rest=2ms
+02:46:01Z snapshot mem: /var/lib/boat/snapshots/snap-60ededa75f55/mem: 109 extents found
+---------------------m /var/lib/boat/snapshots/snap-60ededa75f55/mem
+/var/lib/boat/teams/t_team_OWNER/snapshots/snap-60ededa75f55/mem: 109 extents found
+---------------------m /var/lib/boat/teams/t_team_OWNER/snapshots/snap-60ededa75f55/mem
+02:46:01Z deleted snapshot; GET /v1/snapshots now: {"snapshots":[]}
+02:46:02Z deleted vm-e4f00b5ba904; GET /v1/vms now: {"vms":[]}
+[02:46:03] r0 probe
+[02:46:03] r0 api_rtt
+[02:46:03] r0 exec_rtt
+[02:46:07] r0 snapshot
+[02:46:08] r0 fork
+[02:46:09] r0 stop_resume
+[02:46:10] delete snapshot snap-dd5965ad027a: DELETE http://127.0.0.1:8740/v1/snapshots/snap-dd5965ad027a: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_99846ed19001fda1"}}
+
+[02:46:10] r0 done: {"create_ready_s": 0.3783131219970528, "api_rtt_p50_ms": 0.25500399351585656, "api_rtt_p95_ms": 0.3936260007321835, "exec_rtt_p50_ms": 2.366786509810481, "exec_rtt_p95_ms": 3.7890856467129193, "snapshot_s": 0.5316599670040887, "from_snapshot_ready_s": 0.3422886379994452, "fork_ready_s": 0.5420425970078213, "stop_s": 0.45691616999101825, "resume_ready_s": 0.15049565200752113, "create_ready_s_net": 0.3778031140100211, "fork_ready_s_net": 0.5415325890207896, "resume_ready_s_net": 0.14998564402048942, "from_snapshot_ready_s_net": 0.3417786300124135, "stop_s_net": 0.4566611659975024, "snapshot_s_net": 0.5314049630105728, "exec_rtt_p50_ms_net": 2.1117825162946247}
+[02:46:10] r1 probe
+[02:46:11] r1 api_rtt
+[02:46:11] r1 exec_rtt
+[02:46:16] r1 snapshot
+[02:46:17] r1 fork
+[02:46:17] r1 stop_resume
+[02:46:19] delete snapshot snap-507ec960965c: DELETE http://127.0.0.1:8740/v1/snapshots/snap-507ec960965c: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_e8311f082d2fcc3b"}}
+
+[02:46:19] r1 done: {"create_ready_s": 0.3913995140028419, "api_rtt_p50_ms": 0.28170399309601635, "api_rtt_p95_ms": 0.5418383982032539, "exec_rtt_p50_ms": 2.3234260006574914, "exec_rtt_p95_ms": 3.9650181068282104, "snapshot_s": 0.47803882500738837, "from_snapshot_ready_s": 0.3270984350092476, "fork_ready_s": 0.4453417519980576, "stop_s": 0.4896095119911479, "resume_ready_s": 0.156953921992681, "create_ready_s_net": 0.39083610601664986, "fork_ready_s_net": 0.44477834401186556, "resume_ready_s_net": 0.15639051400648896, "from_snapshot_ready_s_net": 0.3265350270230556, "stop_s_net": 0.48932780799805187, "snapshot_s_net": 0.47775712101429235, "exec_rtt_p50_ms_net": 2.041722007561475}
+[02:46:19] r2 probe
+[02:46:19] r2 api_rtt
+[02:46:19] r2 api_rtt FAILED: GET http://127.0.0.1:8740/v1/vms/vm-b81dca4641d9: HTTP 429: {"error":{"code":"rate_limited","message":"rate limit exceeded for this key","request_id":"req_eceb2991dd1d97d0"}}
+
+Traceback (most recent call last):
+  File "/tmp/bbr11/boatbench.py", line 98, in step
+    fn()
+    ~~^^
+  File "/tmp/bbr11/boatbench.py", line 119, in <lambda>
+    self.step("api_rtt", lambda: self.api_rtt(a))
+                                 ~~~~~~~~~~~~^^^
+  File "/tmp/bbr11/boatbench.py", line 164, in api_rtt
+    self.d.ping(vm)
+    ~~~~~~~~~~~^^^^
+  File "/tmp/bbr11/drivers.py", line 129, in ping
+    self._j("GET", f"/v1/vms/{vm}")
+    ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/bbr11/drivers.py", line 74, in _j
+    out = _http(method, self.url + path, self.key, body)
+  File "/tmp/bbr11/drivers.py", line 49, in _http
+    raise ApiError(e.code, e.read().decode("utf-8", "replace"), f"{method} {url}") from None
+drivers.ApiError: GET http://127.0.0.1:8740/v1/vms/vm-b81dca4641d9: HTTP 429: {"error":{"code":"rate_limited","message":"rate limit exceeded for this key","request_id":"req_eceb2991dd1d97d0"}}
+
+[02:46:19] r2 exec_rtt
+[02:46:24] r2 snapshot
+[02:46:25] r2 fork
+[02:46:26] r2 stop_resume
+[02:46:27] delete snapshot snap-54a10579733d: DELETE http://127.0.0.1:8740/v1/snapshots/snap-54a10579733d: HTTP 404: {"error":{"code":"not_found","message":"snapshot not found","request_id":"req_5d77e4c8236b39d7"}}
+
+[02:46:27] r2 done: {"create_ready_s": 0.3909482669987483, "exec_rtt_p50_ms": 2.2515895034302957, "exec_rtt_p95_ms": 4.775714051356772, "snapshot_s": 0.4645241869875463, "from_snapshot_ready_s": 0.28825805899396073, "fork_ready_s": 0.4491232900036266, "stop_s": 0.47240446700016037, "resume_ready_s": 0.15853076499479357}
+/tmp/r11out/lifecycle-b/results-pandaos-2026-11-13T024602Z.json
+[02:46:28] r0 probe
+[02:46:28] r0 disk
