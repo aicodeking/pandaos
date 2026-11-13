@@ -229,6 +229,42 @@ class Options(unittest.TestCase):
         r["repeats"][0]["metrics"]["pts_rand_read_iops"] = 40000
         self.assertIn("40,000", report.render([r], None, report.load_published()).split("## Published")[1])
 
+    def test_rand_read_is_run_pinned_on_and_off_the_irq_vcpu(self):
+        src = W.DISK.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        ns = {}
+        exec(src.split("def blk_irq_cpus", 1)[1].split("\nif out[", 1)[0].join(["import os\ndef blk_irq_cpus", ""]), ns)
+        with tempfile.TemporaryDirectory() as t:
+            f = os.path.join(t, "f")
+            open(f, "w").close()
+            st = os.stat(f)
+            dev = os.path.join(t, "devices", "virtio1")
+            os.makedirs(os.path.join(dev, "block", "vda", "vda1"))
+            os.symlink("../../../virtio1", os.path.join(dev, "block", "vda", "device"))
+            open(os.path.join(dev, "block", "vda", "vda1", "partition"), "w").close()
+            os.makedirs(os.path.join(t, "dev", "block"))
+            os.symlink(os.path.join(dev, "block", "vda", "vda1"),
+                       os.path.join(t, "dev", "block", f"{os.major(st.st_dev)}:{os.minor(st.st_dev)}"))
+            irq = os.path.join(t, "interrupts")
+            with open(irq, "w") as fh:
+                fh.write("  CPU0  CPU1  CPU2  CPU3\n"
+                         " 26:  0  0  60  0  IO-APIC  5-edge  virtio0\n"
+                         " 27:  9  7  0  80563  IO-APIC  6-edge  virtio1\n"
+                         " 28:  6883  0  0  0  IO-APIC  7-edge  virtio2\n")
+            self.assertEqual(ns["blk_irq_cpus"](f, t, irq), (3, 2))
+            with open(irq, "w") as fh:  # no interrupt yet, or not virtio: no pinned runs
+                fh.write("  CPU0  CPU1\n 27:  0  0  IO-APIC  6-edge  virtio1\n")
+            self.assertEqual(ns["blk_irq_cpus"](f, t, irq), (None, None))
+            self.assertEqual(ns["blk_irq_cpus"](f, os.path.join(t, "none"), irq), (None, None))
+        self.assertIn('f"--cpus_allowed={cpu}"', W.DISK)
+        r = result("pandaos", [[10]], [1])
+        r["repeats"][0]["metrics"].update(rand_read_iops=60000, rand_read_irq_cpu_iops=59000,
+                                          rand_read_other_cpu_iops=219000)
+        md = report.render([r])
+        for row in ("fio unpinned | IOPS | higher | 60,000", "virtio-blk IRQ | IOPS | higher | 59,000",
+                    "off that vCPU | IOPS | higher | 219,000"):
+            self.assertIn(row, md)
+        self.assertNotIn("virtio-blk IRQ", report.render([result("pandaos", [[10]], [1])]))
+
 
 class Prices(unittest.TestCase):
     """VM counts come from boatd's admission with its constants read from the Go source."""

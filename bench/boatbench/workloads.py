@@ -81,6 +81,37 @@ BBD=$D python3 - <<'PY'
 import json, os, re, shutil, subprocess
 d = os.environ["BBD"]; f = os.path.join(d, "f")
 out = {"tool": "fio" if shutil.which("fio") else "dd"}
+def run(key, cmd, field, unit):
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+    try:
+        job = json.loads(r.stdout[r.stdout.index("{"):])["jobs"][0][field]
+        out[key] = {"bw": round(job["bw_bytes"] / 1e6, 1), "mib": round(job["bw_bytes"] / 2**20, 1),
+                    "iops": round(job["iops"], 0)}[unit]
+    except Exception:
+        out[key] = None
+        out.setdefault("errors", []).append(f"{key}: {r.stderr.strip()[-200:]}")
+def blk_irq_cpus(path, sys="/sys", interrupts="/proc/interrupts"):
+    # (CPU taking most of the virtio-blk interrupts of path's disk, CPU taking fewest), or (None, None)
+    # off virtio, on one CPU, or before any interrupt.
+    try:
+        st = os.stat(path)
+        sysd = os.path.realpath(f"{sys}/dev/block/{os.major(st.st_dev)}:{os.minor(st.st_dev)}")
+        if os.path.exists(os.path.join(sysd, "partition")):
+            sysd = os.path.dirname(sysd)
+        dev = os.path.basename(os.path.realpath(os.path.join(sysd, "device")))
+        with open(interrupts) as fh:
+            rows = [l.split() for l in fh]
+        n = len(rows[0])
+        counts = [0] * n
+        for r in rows[1:]:
+            if dev.startswith("virtio") and r and (r[-1] == dev or r[-1].startswith(dev + "-")):
+                counts = [c + int(x) for c, x in zip(counts, r[1:1 + n])]
+    except (OSError, ValueError, IndexError):
+        return None, None
+    if n < 2 or not any(counts):
+        return None, None
+    irq = counts.index(max(counts))
+    return irq, min((c, i) for i, c in enumerate(counts) if i != irq)[1]
 if out["tool"] == "fio":
     common = ["fio", "--direct=1", "--ioengine=libaio", "--numjobs=1", "--time_based", "--group_reporting",
               "--output-format=json"]
@@ -101,14 +132,14 @@ if out["tool"] == "fio":
                                            ("pts_seq_write_mibps", "write", "1M", "write", "mib", pts),
                                            ("fsync_rand_write_iops", "randwrite", "4k", "write", "iops", fsync4k),
                                            ("seq_write_endfsync_mbps", "write", "1M", "write", "bw", endfsync)]:
-        r = subprocess.run(base + [f"--rw={rw}", f"--bs={bs}"], capture_output=True, text=True, timeout=240)
-        try:
-            job = json.loads(r.stdout[r.stdout.index("{"):])["jobs"][0][field]
-            out[key] = {"bw": round(job["bw_bytes"] / 1e6, 1), "mib": round(job["bw_bytes"] / 2**20, 1),
-                        "iops": round(job["iops"], 0)}[unit]
-        except Exception:
-            out[key] = None
-            out.setdefault("errors", []).append(f"{rw}: {r.stderr.strip()[-200:]}")
+        run(key, base + [f"--rw={rw}", f"--bs={bs}"], field, unit)
+    # Rand read moves 4x with the vCPU fio lands on (AX42: 59k on the vCPU taking the virtio-blk
+    # interrupt, 219k off it), so the unpinned number above is decided by chance: run it pinned too.
+    irq_cpu, other_cpu = blk_irq_cpus(f)
+    out["blk_irq_cpu"] = irq_cpu
+    for key, cpu in (("rand_read_irq_cpu_iops", irq_cpu), ("rand_read_other_cpu_iops", other_cpu)):
+        if cpu is not None:
+            run(key, ours + ["--rw=randread", "--bs=4k", f"--cpus_allowed={cpu}"], "read", "iops")
 else:
     def dd(args):
         r = subprocess.run(["dd"] + args, capture_output=True, text=True, timeout=300)

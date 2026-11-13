@@ -45,8 +45,8 @@ median [IQR q1-q3] n=samples; the verdict compares medians and notes overlapping
 | (d) disk seq write 1M † | MB/s | higher | 351.1 [334.1-359.9] n=3 | - | - | only one side measured |
 | (d) disk seq read 1M | MB/s | higher | 5,265 [4,366-5,830] n=3 | - | - | only one side measured |
 | (d) disk rand write 4k † | IOPS | higher | 84,281 [82,666-85,408] n=3 | - | - | only one side measured |
-| (d) disk rand read 4k | IOPS | higher | 200,768 [199,228-202,214] n=3 | - | - | only one side measured |
-| (d) PTS fio job: rand read 4k | IOPS | higher | 202,589 [129,914-206,160] n=3 | - | - | only one side measured |
+| (d) disk rand read 4k, fio unpinned | IOPS | higher | 200,768 [199,228-202,214] n=3 | - | - | only one side measured |
+| (d) PTS fio job: rand read 4k, fio unpinned | IOPS | higher | 202,589 [129,914-206,160] n=3 | - | - | only one side measured |
 | (d) PTS fio job: rand write 4k † | IOPS | higher | 159,704 [158,989-160,201] n=3 | - | - | only one side measured |
 | (d) PTS fio job: seq write 1M † | MiB/s | higher | 2,476 [2,220-2,504] n=3 | - | - | only one side measured |
 | (d) rand write 4k, fsync after every write, iodepth 1 † | IOPS | higher | 25,190 [25,098-25,370] n=3 | - | - | only one side measured |
@@ -102,8 +102,8 @@ Identical scripts. Host: Hetzner AX42, Ryzen 7 PRO 8700GE (Zen 4, 8c/16t), 64 GB
 | (d) disk seq write 1M | MB/s | 4,250 [4,239-4,264] n=3 | 351.1 [334.1-359.9] n=3 | 0.083 |
 | (d) disk seq read 1M | MB/s | 7,591 [7,174-7,769] n=3 | 5,265 [4,366-5,830] n=3 | 0.694 |
 | (d) disk rand write 4k | IOPS | 123,432 [121,996-123,450] n=3 | 84,281 [82,666-85,408] n=3 | 0.683 |
-| (d) disk rand read 4k | IOPS | 246,344 [246,143-246,844] n=3 | 200,768 [199,228-202,214] n=3 | 0.815 |
-| (d) PTS fio job: rand read 4k | IOPS | 247,222 [247,036-247,308] n=3 | 202,589 [129,914-206,160] n=3 | 0.819 |
+| (d) disk rand read 4k, fio unpinned | IOPS | 246,344 [246,143-246,844] n=3 | 200,768 [199,228-202,214] n=3 | 0.815 |
+| (d) PTS fio job: rand read 4k, fio unpinned | IOPS | 247,222 [247,036-247,308] n=3 | 202,589 [129,914-206,160] n=3 | 0.819 |
 | (d) PTS fio job: rand write 4k | IOPS | 122,329 [122,108-122,381] n=3 | 159,704 [158,989-160,201] n=3 | 1.31 |
 | (d) PTS fio job: seq write 1M | MiB/s | 4,137 [3,970-4,157] n=3 | 2,476 [2,220-2,504] n=3 | 0.599 |
 | (d) rand write 4k, fsync after every write, iodepth 1 | IOPS | 77.00 [76.50-78.00] n=3 | 25,190 [25,098-25,370] n=3 | 327.1 |

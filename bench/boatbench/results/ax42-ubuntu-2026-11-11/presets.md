@@ -17,9 +17,9 @@ Each column is a separate run on the harness-declared host(s) below, so run-to-r
 | (d) disk seq write 1M | MB/s | higher | 1,863 [1,811-2,053] n=3 | - | 2,819 [2,728-3,330] n=3 | 351.1 [334.1-359.9] n=3 |
 | (d) disk seq read 1M | MB/s | higher | 5,903 [5,175-6,859] n=3 | - | 9,959 [8,706-10,415] n=3 | 5,265 [4,366-5,830] n=3 |
 | (d) disk rand write 4k | IOPS | higher | 147,933 [147,926-148,402] n=3 | - | 143,135 [141,590-144,300] n=3 | 84,281 [82,666-85,408] n=3 |
-| (d) disk rand read 4k | IOPS | higher | 82,523 [81,494-129,108] n=3 | - | 174,697 [174,570-175,520] n=3 | 200,768 [199,228-202,214] n=3 |
+| (d) disk rand read 4k, fio unpinned | IOPS | higher | 82,523 [81,494-129,108] n=3 | - | 174,697 [174,570-175,520] n=3 | 200,768 [199,228-202,214] n=3 |
 | (d) PTS fio job: rand write 4k | IOPS | higher | 171,442 [171,064-171,514] n=3 | - | 168,718 [168,028-169,090] n=3 | 159,704 [158,989-160,201] n=3 |
-| (d) PTS fio job: rand read 4k | IOPS | higher | 155,795 [119,692-166,690] n=3 | - | 179,819 [178,664-179,845] n=3 | 202,589 [129,914-206,160] n=3 |
+| (d) PTS fio job: rand read 4k, fio unpinned | IOPS | higher | 155,795 [119,692-166,690] n=3 | - | 179,819 [178,664-179,845] n=3 | 202,589 [129,914-206,160] n=3 |
 | (d) rand write 4k, fsync after every write, iodepth 1 | IOPS | higher | 23,942 [23,907-24,044] n=3 | - | 38.00 [38.00-38.50] n=3 | 25,190 [25,098-25,370] n=3 |
 | (d) seq write 1M, fsync at the end | MB/s | higher | 2,640 [2,494-2,683] n=3 | - | 3,517 [2,854-4,036] n=3 | 686.9 [624.8-1,014] n=3 |
 | (e) download Go 1.25.0 tarball, 59.7 MB (dl.google.com) | Mbit/s | higher | 812.4 [698.3-837.6] n=3 | - | - | 519.0 [489.3-651.0] n=3 |
