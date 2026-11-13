@@ -245,6 +245,7 @@ func (m *Manager) chownRoot(v VM) error {
 
 // bootNew starts a freshly materialized VM and gives the guest its identity.
 func (m *Manager) bootNew(ctx context.Context, v VM, restore bool, env map[string]string) (VM, error) {
+	defer m.bootIO()()
 	t0 := time.Now()
 	if err := m.syncNet(); err != nil { // anti-spoof rules are in force before its first frame
 		return m.fail(v.ID, err)
@@ -490,6 +491,7 @@ func (m *Manager) stop(ctx context.Context, id, reason string, force bool) (VM, 
 	}
 	t1 := time.Now()
 	m.killWait(id, v.PID)
+	m.dumpDone(id) // its cgroup is gone with the VMM; no setMemLimits follows a stop
 	t2 := time.Now()
 	if snap {
 		// Now, not behind the call: the next merge would wait for this writeback, and it
@@ -550,6 +552,7 @@ func (m *Manager) Start(ctx context.Context, id string, env map[string]string) (
 	v, _ := m.get(id)
 	root := m.root(id)
 	restore := exists(filepath.Join(root, vmstate)) && exists(filepath.Join(root, memFile))
+	defer m.bootIO()()
 	v, err = m.boot(ctx, v, restore)
 	if err != nil && restore {
 		log.Printf("%s: restore failed, cold booting: %v", id, err)

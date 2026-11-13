@@ -51,6 +51,8 @@ type Manager struct {
 	reapWG        sync.WaitGroup
 	teamVolMu     sync.Mutex
 
+	dio dumpIO // dumps capped while VMs boot (writeback.go)
+
 	ctFlushErrs atomic.Int64 // conntrack flushes that failed: stale flows may survive
 
 	statfs func(path string) (free, total uint64, err error)

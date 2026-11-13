@@ -242,6 +242,7 @@ func (m *Manager) writeCgroup(v VM, file, val string) {
 // by that and no further: a resumed guest may write to its disk during the window, and
 // a tenant can keep the window open by snapshotting in a loop.
 func (m *Manager) liftMemLimits(v VM) {
+	m.dumpStarted(v.ID)
 	if m.cfg.cgroupLimits {
 		_, hard := m.cfg.memLimits(v)
 		limit := strconv.FormatInt(hard+int64(v.MemMiB)<<20, 10)
@@ -261,6 +262,7 @@ var memMaxWait = 30 * time.Second
 // memory.reclaim pushes the usage down meanwhile. Past memMaxWait the max stays lifted
 // (by at most the VM's RAM, see liftMemLimits) and memory.high still bounds the VM.
 func (m *Manager) setMemLimits(v VM) {
+	m.dumpDone(v.ID)
 	if !m.cfg.cgroupLimits {
 		return
 	}

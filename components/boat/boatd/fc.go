@@ -258,21 +258,35 @@ func (p realProcs) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 // setIOMax writes the VM cgroup's io.max. It is not a --cgroup flag because the
 // jailer rejects values that contain "=".
 func (p realProcs) setIOMax(id string) {
-	c := p.cfg
-	if !c.cgroupLimits || c.stateDisk == "" || (c.IOMaxMBps == 0 && c.IOMaxIOPS == 0) {
+	val, limited := p.cfg.ioMax(0)
+	if !limited {
 		return
 	}
-	val := c.stateDisk
-	if c.IOMaxMBps > 0 {
-		b := int64(c.IOMaxMBps) << 20
-		val += fmt.Sprintf(" rbps=%d wbps=%d", b, b)
-	}
-	if c.IOMaxIOPS > 0 {
-		val += fmt.Sprintf(" riops=%d wiops=%d", c.IOMaxIOPS, c.IOMaxIOPS)
-	}
-	if err := os.WriteFile(filepath.Join(cgroupRoot, c.CgroupParent, id, "io.max"), []byte(val), 0); err != nil {
+	if err := os.WriteFile(filepath.Join(cgroupRoot, p.cfg.CgroupParent, id, "io.max"), []byte(val), 0); err != nil {
 		log.Printf("%s: io.max: %v", id, err)
 	}
+}
+
+// ioMax is a VM's io.max line on stateDir's disk: ioMaxMBps / ioMaxIOPS, with writes capped
+// at capWbps too if that is lower (0: no cap). limited: some value is not "max". "" without
+// cgroup limits or a known disk.
+func (c Config) ioMax(capWbps int64) (line string, limited bool) {
+	if !c.cgroupLimits || c.stateDisk == "" {
+		return "", false
+	}
+	rb, wb := int64(c.IOMaxMBps)<<20, int64(c.IOMaxMBps)<<20
+	if capWbps > 0 && (wb == 0 || capWbps < wb) {
+		wb = capWbps
+	}
+	v := func(n int64) string {
+		if n <= 0 {
+			return "max"
+		}
+		limited = true
+		return strconv.FormatInt(n, 10)
+	}
+	iops := int64(c.IOMaxIOPS)
+	return fmt.Sprintf("%s rbps=%s wbps=%s riops=%s wiops=%s", c.stateDisk, v(rb), v(wb), v(iops), v(iops)), limited
 }
 
 // jailerArgs: per-VM uid/gid, chroot, netns, new pid ns and a cgroup with

@@ -736,3 +736,20 @@ func TestBootWaitsForSlowAPISocket(t *testing.T) {
 		t.Fatalf("slow socket: %v %+v", err, v)
 	}
 }
+
+func TestReplaceMemKeepsNoStageAndSwapsContent(t *testing.T) {
+	d := t.TempDir()
+	stage, mem := filepath.Join(d, memStage), filepath.Join(d, memFile)
+	for _, c := range []struct{ old, want string }{{"", "new"}, {"old", "newer"}} { // no mem yet, then one to replace
+		if c.old != "" {
+			os.WriteFile(mem, []byte(c.old), 0o600)
+		}
+		os.WriteFile(stage, []byte(c.want), 0o600)
+		if err := replaceMem(stage, mem); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(mem); string(b) != c.want || exists(stage) {
+			t.Fatalf("mem %q (want %q), stage left: %v", b, c.want, exists(stage))
+		}
+	}
+}

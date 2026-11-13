@@ -108,7 +108,7 @@ func (m *Manager) installSnapshot(v VM, diff bool) (VM, error) {
 		err = sealMem(stage)
 	}
 	if err == nil {
-		err = os.Rename(stage, filepath.Join(root, memFile))
+		err = replaceMem(stage, filepath.Join(root, memFile))
 	}
 	if err != nil {
 		return m.failSnapshot(v), err
@@ -118,6 +118,18 @@ func (m *Manager) installSnapshot(v VM, diff bool) (VM, error) {
 		return v, nil // vm.json's fsync took 4.3 s with the dump in writeback, under the global lock
 	}
 	return m.update(v.ID, "", func(x *VM) { x.DiffOK = m.cfg.DiffSnapshots })
+}
+
+// replaceMem renames stage over mem. Unlinking the last name of an 8 GiB memory file
+// frees its extents in the caller, which took about 0.6 s of a fork's freeze on the CI
+// runner (a fork's "install merge" past its merge, when the previous fork that shared
+// the file was gone). An open descriptor to the old file moves that to its Close.
+func replaceMem(stage, mem string) error {
+	old, err := openJail(mem, os.O_RDONLY)
+	if err == nil {
+		defer func() { go old.Close() }()
+	}
+	return os.Rename(stage, mem)
 }
 
 // mergeDiff makes dst the VM's full memory: the data extents of the sparse

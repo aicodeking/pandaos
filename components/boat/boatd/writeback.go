@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"sync"
 	"time"
 )
 
@@ -41,5 +42,77 @@ func kickFile(path string) {
 	defer f.Close()
 	if st, err := f.Stat(); err == nil && st.Mode().IsRegular() {
 		kickWriteback(f)
+	}
+}
+
+// A dump's writeback (2 GiB+, the merge then fsyncs it) fills a slow disk's queue, and a VM
+// that boots meanwhile waits for its boot reads behind it: a cold create took 7.7-12.6 s
+// instead of 2.3-4.3 on the CI runner (loop file on a throttled cloud disk; r11, r12). While
+// any VM boots, every dumping VM's writes are capped with io.max on stateDir's disk. r12's
+// probe, a create 1 s into a 2 GiB dump, 8 tries each: uncapped 2.92-8.47 s (3 slow), the
+// dump capped at 150 MiB/s for all of it 3.14-3.50 s (dump 16.1-16.7 s instead of 13.1-18.0),
+// at 50 MiB/s 2.88-3.29 s but a 44 s dump. Capping only during boots keeps a dump with nobody
+// booting at full speed. On the AX42's NVMe an 8 GiB writeback moved another cgroup's 4k reads
+// from 56 to 62 us (bench/boatbench/results/ax42-r12-2026-11-13): there the cap costs a dump a
+// few hundred ms per boot and changes nothing else.
+const dumpWbpsWhileBooting = 150 << 20
+
+// dumpIO tracks dumping VMs and booting ones, under its own lock (taken inside m.mu never).
+type dumpIO struct {
+	mu      sync.Mutex
+	booting int
+	dumping map[string]bool
+}
+
+// dumpStarted: v's memory is being dumped (liftMemLimits). Capped at once if a VM boots.
+func (m *Manager) dumpStarted(id string) {
+	m.dio.mu.Lock()
+	defer m.dio.mu.Unlock()
+	if m.dio.dumping == nil {
+		m.dio.dumping = map[string]bool{}
+	}
+	m.dio.dumping[id] = true
+	if m.dio.booting > 0 {
+		m.capDump(id, true)
+	}
+}
+
+// dumpDone: v's dump is on disk (setMemLimits, or a stop's flush). Its cap goes.
+func (m *Manager) dumpDone(id string) {
+	m.dio.mu.Lock()
+	defer m.dio.mu.Unlock()
+	if m.dio.dumping[id] {
+		delete(m.dio.dumping, id)
+		m.capDump(id, false)
+	}
+}
+
+// bootIO marks a VM boot until the returned func: dumps are capped meanwhile.
+func (m *Manager) bootIO() (done func()) {
+	m.dio.mu.Lock()
+	defer m.dio.mu.Unlock()
+	if m.dio.booting++; m.dio.booting == 1 {
+		for id := range m.dio.dumping {
+			m.capDump(id, true)
+		}
+	}
+	return func() {
+		m.dio.mu.Lock()
+		defer m.dio.mu.Unlock()
+		if m.dio.booting--; m.dio.booting == 0 {
+			for id := range m.dio.dumping {
+				m.capDump(id, false)
+			}
+		}
+	}
+}
+
+func (m *Manager) capDump(id string, on bool) {
+	limit := int64(0)
+	if on {
+		limit = dumpWbpsWhileBooting
+	}
+	if val, _ := m.cfg.ioMax(limit); val != "" {
+		m.writeCgroup(VM{ID: id}, "io.max", val)
 	}
 }

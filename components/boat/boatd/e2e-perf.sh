@@ -31,6 +31,7 @@ PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-5}
 # copy 2.3-10.5 -> 0.1-0.6 s) 2.73/7.84/2.41/4.26. Gate: 12.56 x 1.2 -> 15, against a stall
 # without bound, not the known slow mode.
 PERF_CREATE_DUMP_MAX=${E2E_PERF_CREATE_DUMP_MAX:-15}
+PERF_COLD_CREATE_MAX=${E2E_PERF_COLD_CREATE_MAX:-8}
 PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-13}    # 4.93-9.44 s; 10 x 4 vCPU on 4 host CPUs -> 13 (1.4x)
 PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 527-530 MiB -> 700
 PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 259-280 MiB -> 450
@@ -111,7 +112,9 @@ echo "ceiling: seq write $((c_sw / 1000000)) MB/s, rand write ${c_rw%.*} IOPS, r
 
 log "perf e2e: disk (fio in the VM, boatbench's settings)"
 perf_cfg '.' base
-pv=$(perf_vm pv)
+sudo sync # nothing of the ceiling's fio left to write back: the create alone
+t=$(now); pv=$(perf_vm pv); bx "$pv" true >/dev/null; cold_s=$(secs "$t" "$(now)")
+echo "cold create -> exec-ready ${cold_s}s: $(sudo grep -E "$pv: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$pv"': //' | tr '\n' ' ')"
 guest_blk=$(bx "$pv" 'printf "sched=%s discard_max=%s" "$(cat /sys/block/vda/queue/scheduler)" "$(cat /sys/block/vda/queue/discard_max_bytes)"')
 echo "guest: $guest_blk"
 # Guest boot, for the record; the image's /etc/.updated keeps ldconfig off every first boot.
@@ -321,6 +324,7 @@ ksm_each=$((ksm_sharing / 4)) # pages_sharing is the saving
 fit_cold=$((8192 / b_rss)) fit_warm=$((8192 / warm_rss)) fit_ksm=$((8192 / (k_rss - ksm_each)))
 echo "8 GiB budget: $fit_cold idle cold-booted VMs, $fit_warm warm, $fit_ksm cold with KSM (saves $ksm_each MiB each)"
 d() { jq -r ".$1" <<<"$disk"; }
+check_max perf_cold_create "$cold_s" "$PERF_COLD_CREATE_MAX"
 check_max perf_snapshot "$kvm_snap" "$PERF_SNAPSHOT_MAX"
 check_max perf_from_snap "$kvm_from" "$PERF_FROM_MAX"
 check_max perf_fork "$kvm_fork" "$PERF_FORK_MAX"
@@ -347,8 +351,8 @@ echo "METRIC $(jq -nc --argjson disk "$disk" --argjson disks "$disk_sync" --argj
   --argjson nbr "$nb_rss" --argjson nbc "$nb_cg" --argjson br "$b_rss" --argjson bc "$b_cg" \
   --argjson dnq "$disk_noq" --argjson nqs "$noq_snap" --argjson nqf "$noq_from" --argjson nqk "$noq_fork" \
   --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fc "$fit_cold" --argjson fw "$fit_warm" --argjson fk "$fit_ksm" --argjson ca "${cold_async:-0}" --argjson cs "${cold_sync:-0}" \
-  --argjson ct "$cold_ten" --argjson wt "$warm_ten" --argjson wr "$warm_rss" \
+  --argjson cc "$cold_s" --argjson ct "$cold_ten" --argjson wt "$warm_ten" --argjson wr "$warm_rss" \
   '{test: "boat-perf", disk: $disk, diskSync: $disks, diskAsyncIoUringGroup: $diskiou, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
     snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2, createDuringDumpS: $kcd, noQuotas: {disk: $dnq, snapshotS: $nqs, fromSnapshotS: $nqf, forkS: $nqk},
     idleRssMiB: {noBalloon: $nbr, balloon: $br, ksm: $kr, warm: $wr}, idleCgroupMiB: {noBalloon: $nbc, balloon: $bc},
-    ksmDedupMiB: $ksm, fitsIn8GiB: {cold: $fc, warm: $fw, coldKsm: $fk}, coldRandReadIops: {async: $ca, sync: $cs}, tenCreatesS: {cold: $ct, warm: $wt}}')"
+    ksmDedupMiB: $ksm, fitsIn8GiB: {cold: $fc, warm: $fw, coldKsm: $fk}, coldRandReadIops: {async: $ca, sync: $cs}, coldCreateS: $cc, tenCreatesS: {cold: $ct, warm: $wt}}')"
