@@ -153,6 +153,15 @@ func TestWarmTemplate(t *testing.T) {
 	if b.Team != "t" || b.FromSnapshot != "" {
 		t.Fatalf("warm VM: %+v", b)
 	}
+	// A changed drive config makes it stale: a restore keeps the template's cache_type.
+	m.cfg.DiskCache = "Writeback"
+	if m.warmTemplate(img, size) != "" {
+		t.Fatal("a template booted with an Unsafe drive used under diskCache Writeback")
+	}
+	m.cfg.DiskCache = "Unsafe"
+	if m.warmTemplate(img, size) == "" {
+		t.Fatal("template lost")
+	}
 	// A changed image makes the template stale.
 	if err := os.Chtimes(filepath.Join(m.imageDir(img), diskFile), b.CreatedAt, b.CreatedAt); err != nil {
 		t.Fatal(err)

@@ -441,7 +441,12 @@ func (m *Manager) warmStamp(image string) string {
 			s += fmt.Sprintf("%d-%d;", st.Size(), st.ModTime().UnixNano())
 		}
 	}
-	return s
+	// The VM config a restore inherits: diskCache Writeback on a host with templates
+	// from before kept handing out Unsafe drives (AX42 r11: one NVMe flush in 20 s
+	// of guest fsyncs).
+	c := m.cfg
+	return s + fmt.Sprintf("drive=%s/%s/%d/%d;args=%s;balloon=%t;diff=%t", c.DiskCache, c.DiskEngine, c.DiskMBps, c.DiskIOPS,
+		c.BootArgs, c.Balloon, c.DiffSnapshots)
 }
 
 func (m *Manager) warmDir(image, size string) string {
