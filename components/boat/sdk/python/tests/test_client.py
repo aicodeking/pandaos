@@ -9,8 +9,10 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from boat import Boat, BoatError, VM as VMRecord, verify_webhook  # noqa: E402
@@ -41,6 +43,18 @@ class Mock(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != "Bearer " + TOKEN:
             return self._send(401, {"error": {"code": "unauthorized", "message": "bad key", "request_id": "req_1"}})
         p, m = self.path, self.command
+        if p.startswith("/v1/vms/silent/"):
+            raw = b'{"stream":"stdout","data_b64":"bGF0ZQ=="}\n{"exit":0}\n'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            time.sleep(0.6)
+            try:
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # The timeout regression closes the connection before the event.
+            return
         if (m, p) == ("POST", "/v1/vms") and json.loads(body).get("count", 1) > 1:
             req = json.loads(body)
             return self._send(201, {"vms": [dict(VM, id="vm%d" % i, name="%s-%d" % (req["name"], i))
@@ -134,6 +148,45 @@ class ClientTest(unittest.TestCase):
     def setUp(self):
         Mock.log.clear()
         self.b = Boat(self.url, TOKEN)
+
+    def test_open_timeout_selection(self):
+        self.b.timeout = 1.5
+        for kwargs, expected in (({}, 1.5), ({"timeout": 0.75}, 0.75),
+                                 ({"timeout": 0}, 0), ({"timeout": None}, None)):
+            with self.subTest(kwargs=kwargs), patch("boat.client.urllib.request.urlopen",
+                                                   return_value=io.BytesIO()) as transport:
+                with self.b._open("GET", "/v1/me", **kwargs):
+                    pass
+                self.assertEqual(transport.call_args.kwargs["timeout"], expected)
+
+    def test_streaming_paths_disable_transport_timeout(self):
+        calls = (
+            ("exec", lambda: list(self.b.exec("vm1", ["true"]))),
+            ("prompt", lambda: list(self.b.prompt("vm1", "go"))),
+            ("follow_command", lambda: list(self.b.follow_command("vm1", "c_1"))),
+            ("follow_prompt", lambda: list(self.b.follow_prompt("vm1", "prm_1"))),
+            ("download_snapshot", lambda: self.b.download_snapshot("vm1", "s1", io.BytesIO())),
+            ("import_snapshot", lambda: self.b.import_snapshot(b"ARCHIVE")),
+        )
+        for name, call in calls:
+            with self.subTest(name=name), patch("boat.client.urllib.request.urlopen",
+                                               return_value=io.BytesIO(b'{"exit":0}\n')) as transport:
+                call()
+                self.assertIsNone(transport.call_args.kwargs["timeout"])
+
+    def test_silent_streams_outlast_client_timeout(self):
+        self.b.timeout = 0.2
+        streams = (
+            ("exec", self.b.exec("silent", ["true"])),
+            ("prompt", self.b.prompt("silent", "go")),
+            ("follow_command", self.b.follow_command("silent", "c_1")),
+            ("follow_prompt", self.b.follow_prompt("silent", "prm_1")),
+        )
+        for name, stream in streams:
+            with self.subTest(name=name):
+                events = list(stream)
+                self.assertEqual(events[0].data, b"late")
+                self.assertEqual(events[-1].exit_code, 0)
 
     def test_create_prompt_fork_stop(self):
         vm = self.b.create_vm(name="dev", size="small", ttl_s=3600)

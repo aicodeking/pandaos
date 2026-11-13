@@ -36,18 +36,24 @@ wait_http() { for _ in $(seq 50); do curl -fs --max-time 2 -o /dev/null "$1" && 
 mbps() { awk -v b="$1" 'BEGIN { printf "%.0f", b * 8 / 1000000 }'; }
 
 log "limits e2e: default size (4 vCPU, 8 GiB, dirty memory)"
-t=$(now); d1=$(newvm '{"name":"d1","team":"lim","size":"default"}'); dcreate_s=$(secs "$t" "$(now)")
+t=$(now); d1=$(newvm '{"name":"d1","team":"lim","size":"default"}')
+bx "$d1" true >/dev/null || fail "default create first exec failed"
+dcreate_s=$(secs "$t" "$(now)")
 [ "$(vmf "$d1" vcpu) $(vmf "$d1" mem_mib) $(vmf "$d1" agent_ready)" = "4 8192 true" ] || fail "d1: $(bd GET "/v1/vms/$d1")"
 bx "$d1" 'mkdir -p /dev/shm/d; head -c 2G /dev/urandom >/dev/shm/d/dirty; sync'
 dsum=$(bx "$d1" 'sha256sum /dev/shm/d/dirty | cut -c1-64')
 t=$(now); bd POST "/v1/vms/$d1/stop" >/dev/null; dstop_s=$(secs "$t" "$(now)")
 [ "$(vmf "$d1" has_snapshot)" = true ] || fail "d1 stop without snapshot"
-t=$(now); bd POST "/v1/vms/$d1/start" '{}' >/dev/null; dresume_s=$(secs "$t" "$(now)")
+t=$(now); bd POST "/v1/vms/$d1/start" '{}' >/dev/null
+bx "$d1" true >/dev/null || fail "default resume first exec failed"
+dresume_s=$(secs "$t" "$(now)")
 [ "$(bx "$d1" 'sha256sum /dev/shm/d/dirty | cut -c1-64')" = "$dsum" ] || fail "d1 lost 2 GiB of memory across stop/start"
 bx "$d1" 'head -c 200M /dev/urandom >/dev/shm/d/dirty2'
 t=$(now); bd POST "/v1/vms/$d1/stop" >/dev/null; dstop2_s=$(secs "$t" "$(now)")
 bd POST "/v1/vms/$d1/start" '{}' >/dev/null
-t=$(now); d2=$(bd POST "/v1/vms/$d1/fork" '{"name":"d2"}' | jq -r .id); dfork_s=$(secs "$t" "$(now)")
+t=$(now); d2=$(bd POST "/v1/vms/$d1/fork" '{"name":"d2"}' | jq -r .id)
+bx "$d2" true >/dev/null || fail "default fork first exec failed"
+dfork_s=$(secs "$t" "$(now)")
 [ "$(bx "$d2" 'sha256sum /dev/shm/d/dirty | cut -c1-64')" = "$dsum" ] || fail "fork lost the parent's memory"
 echo "default size: create ${dcreate_s}s, first stop ${dstop_s}s (2 GiB dirty), resume ${dresume_s}s, stop ${dstop2_s}s (200 MiB dirty), fork ${dfork_s}s"
 grep -E "$d1: (snapshot \(|stop \()" "$WORK/boatd.log" | head -4 || true # where each stop's time went

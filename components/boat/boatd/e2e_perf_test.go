@@ -113,3 +113,64 @@ done
 		})
 	}
 }
+
+func TestDefaultLifecycleIncludesFirstExec(t *testing.T) {
+	for _, failure := range []string{"none", "create", "resume", "fork"} {
+		t.Run(failure, func(t *testing.T) {
+			runPerfShell(t, strings.ReplaceAll(`
+WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+export WORK
+export EXEC_FAILURE=FAILURE_CASE
+if bash -eu -o pipefail >"$WORK/result" 2>&1 <<'SH'
+eval "$(sed -n '/^perf_numbers()/,/^}/p' e2e-host.sh)"
+eval "$(sed -n '/^check_max()/,/^}/p' e2e-host.sh)"
+eval "$(sed -n '/^newvm()/p' e2e-host.sh)"
+echo 0 >"$WORK/clock"
+touch "$WORK/boatd.log"
+tick() { local n; n=$(cat "$WORK/clock"); echo "$((n + $1))" >"$WORK/clock"; }
+now() { cat "$WORK/clock"; }
+secs() { echo "$(($2 - $1))"; }
+log() { :; }
+fail() { echo "$1" >&2; exit 1; }
+vmf() { case "$2" in vcpu) echo 4;; mem_mib) echo 8192;; *) echo true;; esac; }
+bd() {
+  tick 1
+  case "$2" in
+    /v1/vms) echo create >"$WORK/pending-d1"; echo '{"id":"d1"}';;
+    */start) echo resume >"$WORK/pending-d1";;
+    */fork) echo fork >"$WORK/pending-d2"; echo '{"id":"d2"}';;
+  esac
+}
+bx() {
+  if [ -f "$WORK/pending-$1" ]; then
+    tick 7
+    if [ "$2" = true ] && [ "$(cat "$WORK/pending-$1")" = "$EXEC_FAILURE" ]; then return 1; fi
+    rm "$WORK/pending-$1"
+  fi
+  case "$2" in *sha256sum*) echo checksum;; esac
+}
+perf_fail=''
+E2E_DEFAULT_CREATE_MAX=5 RESUME_MAX=5 FORK_MAX=4
+eval "$(sed -n '/^DEFAULT_CREATE_MAX=/,/^# Nested KVM spike:/p' e2e-limits.sh)"
+errors=0
+for metric in dcreate_s dresume_s dfork_s; do
+  value=${!metric}
+  if [ "$value" != 8 ]; then echo "$metric=$value: first successful exec delay was not counted"; errors=$((errors + 1)); fi
+done
+[ "$errors" = 0 ] || fail "default lifecycle timers missed guest readiness"
+for gate in default_create default_resume default_fork; do
+  [[ "$perf_fail" = *"$gate took 8s > 5s; "* ]] || fail "$gate did not reject delayed first exec: $perf_fail"
+done
+[[ "$perf_fail" != *default_stop* ]] || fail "stop gates changed: $perf_fail"
+SH
+then
+  [ "$EXEC_FAILURE" = none ] || { cat "$WORK/result"; echo "failed $EXEC_FAILURE exec was accepted"; exit 1; }
+else
+  cat "$WORK/result"
+  [ "$EXEC_FAILURE" != none ] || exit 1
+  grep -Fx "default $EXEC_FAILURE first exec failed" "$WORK/result"
+fi
+`, "FAILURE_CASE", failure))
+		})
+	}
+}

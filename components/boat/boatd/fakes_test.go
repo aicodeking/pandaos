@@ -493,6 +493,14 @@ func (f *fakeFC) agentConn(c net.Conn) {
 			f.idents = append(f.idents, q)
 			f.mu.Unlock()
 			send(map[string]bool{"ok": true})
+		case "get_env":
+			f.mu.Lock()
+			vars := map[string]any{}
+			for k, v := range f.env {
+				vars[k] = v
+			}
+			f.mu.Unlock()
+			send(map[string]any{"ok": true, "vars": vars})
 		case "set_env":
 			f.mu.Lock()
 			f.env = q["vars"].(map[string]any)

@@ -34,7 +34,7 @@ func (m *Manager) routes() *http.ServeMux {
 			}
 			code := http.StatusOK
 			if r.Method == "POST" && (strings.HasSuffix(pattern, "/v1/vms") || strings.HasSuffix(pattern, "/fork") ||
-				strings.HasSuffix(pattern, "snapshots") || strings.HasSuffix(pattern, "/import") || strings.HasSuffix(pattern, "/ports")) {
+				strings.HasSuffix(pattern, "snapshots") || strings.HasSuffix(pattern, "/prepare") || strings.HasSuffix(pattern, "/import") || strings.HasSuffix(pattern, "/ports")) {
 				code = http.StatusCreated
 			}
 			writeJSON(w, code, v)
@@ -58,9 +58,25 @@ func (m *Manager) routes() *http.ServeMux {
 		return m.Create(r.Context(), req)
 	})
 	h("GET /v1/vms", func(r *http.Request) (any, error) {
-		return map[string]any{"vms": m.list(r.URL.Query().Get("team"))}, nil
+		vms := m.list(r.URL.Query().Get("team"))
+		if r.URL.Query().Get("include_pending") != "true" {
+			visible := vms[:0]
+			for _, v := range vms {
+				if !v.PendingCopy {
+					visible = append(visible, v)
+				}
+			}
+			vms = visible
+		}
+		return map[string]any{"vms": vms}, nil
 	})
-	h("GET /v1/vms/{id}", func(r *http.Request) (any, error) { return m.get(r.PathValue("id")) })
+	h("GET /v1/vms/{id}", func(r *http.Request) (any, error) {
+		v, err := m.get(r.PathValue("id"))
+		if v.PendingCopy {
+			return nil, errNotFound
+		}
+		return v, err
+	})
 	h("PATCH /v1/vms/{id}", func(r *http.Request) (any, error) {
 		var b PatchReq
 		if err := decode(r, &b); err != nil {
@@ -97,7 +113,7 @@ func (m *Manager) routes() *http.ServeMux {
 		}
 		return v, err
 	})
-	h("POST /v1/vms/{id}/fork", func(r *http.Request) (any, error) {
+	fork := func(r *http.Request) (any, error) {
 		var b struct {
 			Name     string            `json:"name"`
 			Team     string            `json:"team"`
@@ -107,11 +123,25 @@ func (m *Manager) routes() *http.ServeMux {
 		if err := decode(r, &b); err != nil {
 			return nil, err
 		}
-		v, err := m.Fork(r.Context(), r.PathValue("id"), b.Name, b.Team, b.Labels)
+		v, err := m.fork(r.Context(), r.PathValue("id"), b.Name, b.Team, b.Labels, strings.HasSuffix(r.URL.Path, "/prepare"))
 		if b.FailFast {
 			err = failFast(err)
 		}
 		return v, err
+	}
+	h("POST /v1/vms/{id}/fork", fork)
+	h("POST /v1/vms/{id}/fork/prepare", fork)
+	h("POST /v1/vms/{id}/release", func(r *http.Request) (any, error) {
+		var b struct {
+			Env map[string]string `json:"env"`
+		}
+		if err := decode(r, &b); err != nil {
+			return nil, err
+		}
+		return m.releaseCopy(r.Context(), r.PathValue("id"), b.Env)
+	})
+	h("GET /v1/vms/{id}/env", func(r *http.Request) (any, error) {
+		return m.agentPass(r, map[string]string{"op": "get_env"})
 	})
 	h("POST /v1/vms/{id}/env", func(r *http.Request) (any, error) {
 		var b struct {
@@ -167,23 +197,31 @@ func (m *Manager) routes() *http.ServeMux {
 		return map[string]bool{"ok": true}, m.RemovePort(r.PathValue("id"), port)
 	})
 	h("GET /v1/vms/{id}/snapshots", func(r *http.Request) (any, error) {
-		if _, err := m.get(r.PathValue("id")); err != nil {
+		if v, err := m.get(r.PathValue("id")); err != nil || v.PendingCopy {
+			if err == nil {
+				err = errNotFound
+			}
 			return nil, err
 		}
-		return map[string]any{"snapshots": m.Snapshots(r.PathValue("id"))}, nil
+		return map[string]any{"snapshots": visibleSnapshots(m.Snapshots(r.PathValue("id")), r)}, nil
 	})
-	h("POST /v1/vms/{id}/snapshots", func(r *http.Request) (any, error) {
+	snapshot := func(r *http.Request) (any, error) {
 		var b struct{ Name string }
 		if err := decode(r, &b); err != nil {
 			return nil, err
 		}
-		return m.CreateSnapshot(r.Context(), r.PathValue("id"), b.Name)
+		return m.createSnapshot(r.Context(), r.PathValue("id"), b.Name, strings.HasSuffix(r.URL.Path, "/prepare"))
+	}
+	h("POST /v1/vms/{id}/snapshots", snapshot)
+	h("POST /v1/vms/{id}/snapshots/prepare", snapshot)
+	h("POST /v1/vms/{id}/snapshots/{sid}/release", func(r *http.Request) (any, error) {
+		return m.releaseSnapshot(r.PathValue("id"), r.PathValue("sid"))
 	})
 	h("DELETE /v1/vms/{id}/snapshots/{sid}", func(r *http.Request) (any, error) {
 		return map[string]bool{"ok": true}, m.DeleteSnapshot(r.PathValue("id"), r.PathValue("sid"))
 	})
 	h("GET /v1/snapshots", func(r *http.Request) (any, error) {
-		return map[string]any{"snapshots": m.snapshotsOfTeam(r.URL.Query().Get("team"))}, nil
+		return map[string]any{"snapshots": visibleSnapshots(m.snapshotsOfTeam(r.URL.Query().Get("team")), r)}, nil
 	})
 	h("POST /v1/snapshots/import", func(r *http.Request) (any, error) {
 		q := r.URL.Query()
@@ -212,6 +250,19 @@ func (m *Manager) routes() *http.ServeMux {
 	mux.HandleFunc("PUT /v1/vms/{id}/files", m.putFileHandler)
 	mux.HandleFunc("GET /v1/events", m.eventsHandler)
 	return mux
+}
+
+func visibleSnapshots(snaps []Snapshot, r *http.Request) []Snapshot {
+	if r.URL.Query().Get("include_pending") == "true" {
+		return snaps
+	}
+	visible := snaps[:0]
+	for _, s := range snaps {
+		if !s.PendingCopy {
+			visible = append(visible, s)
+		}
+	}
+	return visible
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

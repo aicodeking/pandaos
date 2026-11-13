@@ -141,6 +141,7 @@ rm -f -- "$1" 2>/dev/null || sudo -n rm -f -- "$1"
 # run_job has no limit by default; the agent's default exec timeout is 600 s.
 _NO_LIMIT_S = 30 * 24 * 60 * 60
 _JOB_IDLE_STOP_S = 15 * 60
+_DEFAULT_TIMEOUT = object()
 
 
 def _push_files(folder: str) -> List[str]:
@@ -182,14 +183,14 @@ class Boat:
     # ---- transport ----
 
     def _open(self, method: str, path: str, body: Optional[bytes] = None,
-              ctype: Optional[str] = None, timeout: Optional[float] = None):
+              ctype: Optional[str] = None, timeout: Any = _DEFAULT_TIMEOUT):
         req = urllib.request.Request(self.url + path, data=body, method=method)
         req.add_header("Authorization", "Bearer " + self.key)
         req.add_header("User-Agent", "boat-python/0.1.0")
         if ctype:
             req.add_header("Content-Type", ctype)
         try:
-            return urllib.request.urlopen(req, timeout=timeout if timeout is not None else self.timeout)
+            return urllib.request.urlopen(req, timeout=self.timeout if timeout is _DEFAULT_TIMEOUT else timeout)
         except urllib.error.HTTPError as e:
             raw = e.read()
             try:

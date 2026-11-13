@@ -124,13 +124,22 @@ func TestR15CopiesWithholdOnRotationPersistenceError(t *testing.T) {
 			}
 			st, out := e.do(e.owner, "POST", path, nil)
 			errObj, _ := out["error"].(map[string]any)
-			if st != 500 || out["id"] != nil || errObj["code"] != "store_error" {
+			wantCode, wantVMs := "store_error", 1
+			if action == "fork" {
+				wantCode, wantVMs = "cleanup_failed", 2
+			} // retirement must persist before deletion too
+			if st != 500 || out["id"] != nil || errObj["code"] != wantCode {
 				t.Errorf("copy exposed without durable rotation: %d %v", st, out)
 			}
 			e.boatd.mu.Lock()
 			defer e.boatd.mu.Unlock()
-			if len(e.boatd.vms) != 1 || e.boatd.vms[vm] == nil {
-				t.Error("failed fork did not preserve only the parent")
+			if len(e.boatd.vms) != wantVMs || e.boatd.vms[vm] == nil {
+				t.Error("failed fork lost the parent or leaked an unexpected VM")
+			}
+			for id, child := range e.boatd.vms {
+				if id != vm && (child["pending_copy"] != true || child["state"] == "running") {
+					t.Error("failed copy escaped its pending fence")
+				}
 			}
 			wantSnaps := 0
 			if action == "share" {
@@ -188,6 +197,18 @@ func TestR15CopyCleanupFailureIsReported(t *testing.T) {
 			if st != 500 || errObj["code"] != "cleanup_failed" || out["id"] != nil {
 				t.Errorf("cleanup failure hidden or copy returned: %d %v", st, out)
 			}
+			e.boatd.mu.Lock()
+			for id, child := range e.boatd.vms {
+				if id != vm && (child["pending_copy"] != true || child["state"] == "running") {
+					t.Errorf("failed cleanup left an active copy: %v", child)
+				}
+			}
+			for _, snap := range e.boatd.snaps {
+				if snap["pending_copy"] != true {
+					t.Errorf("failed cleanup published snapshot: %v", snap)
+				}
+			}
+			e.boatd.mu.Unlock()
 		})
 	}
 }

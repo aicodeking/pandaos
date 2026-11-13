@@ -374,7 +374,7 @@ func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request, p *principal
 	var list struct {
 		VMs []VM `json:"vms"`
 	}
-	if err := s.boatd.call(r.Context(), "GET", "/v1/vms?team="+url.QueryEscape(id), nil, &list); err != nil {
+	if err := s.boatd.call(r.Context(), "GET", "/v1/vms?include_pending=true&team="+url.QueryEscape(id), nil, &list); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
@@ -424,7 +424,12 @@ func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request, p *principal
 		}
 		for k, v := range st.AIVMs {
 			if v.TeamID == id {
-				delete(st.AIVMs, k)
+				retireCredentials(st, k)
+			}
+		}
+		for vm, tok := range st.VMTokens {
+			if tok.TeamID == id {
+				retireCredentials(st, vm)
 			}
 		}
 		for k, sh := range st.SnapShares {
@@ -452,7 +457,7 @@ func (s *server) deleteSnapshotsOf(r *http.Request, team string) error {
 	var list struct {
 		Snapshots []map[string]any `json:"snapshots"`
 	}
-	if err := s.boatd.call(r.Context(), "GET", "/v1/snapshots?team="+url.QueryEscape(team), nil, &list); err != nil {
+	if err := s.boatd.call(r.Context(), "GET", "/v1/snapshots?include_pending=true&team="+url.QueryEscape(team), nil, &list); err != nil {
 		return err
 	}
 	for _, sn := range list.Snapshots {

@@ -624,6 +624,99 @@ class DensityTests(unittest.TestCase):
         self.assertEqual(d.setups, 4)  # fresh VMs, each set up: no forks
         self.assertEqual(d.live, set())
 
+    def test_failed_density_worker_is_excluded_and_warned(self):
+        d = FakeDriver()
+        d.name = "pandaos"
+        original = d.exec
+
+        def execute(vm, cmd, timeout=600):
+            if cmd == density.RUN and vm == "vm2":
+                raise RuntimeError("injected worker failure")
+            return original(vm, cmd, timeout)
+
+        d.exec = execute
+        rec, metrics = self.run_density(d, (1, 2))
+        failed = rec["levels"][1]
+        self.assertEqual(failed["vms_measured"], 1)
+        self.assertIsNone(failed["host_runs_s"])
+        self.assertNotIn("loops_per_cpu", failed)
+        self.assertFalse(any(k.endswith("_n2") for k in metrics))
+        self.assertEqual(d.live, set())
+        result = {"driver": "pandaos", "repeats": [{"index": 0, "density": rec}]}
+        self.assertEqual(set(report.density_levels(result)), {1})
+        md = report.render([result], report.load_prices(os.path.join(report.HERE, "prices.json")))
+        self.assertIn("incomplete density", md)
+        self.assertIn("injected worker failure", md)
+        self.assertIn("n=2", md)
+        self.assertNotIn("| 2 |", "\n".join(report.density_section({"pandaos": result}, None)))
+        host_result = dict(result, driver="host")
+        host_md = report.render([host_result])
+        self.assertIn("host: r0: incomplete density", host_md)
+        self.assertIn("injected worker failure", host_md)
+
+    def test_second_pass_failure_and_bad_output_exclude_trial(self):
+        for bad_output in (None, "Geometric mean: 0 runs/s\nBB_CPU 1 1 0",
+                           "Geometric mean: 10 runs/s", "Geometric mean: 10 runs/s\nBB_CPU 0 1 0"):
+            with self.subTest(output=bad_output):
+                d = FakeDriver()
+                d.name = "pandaos"
+                original = d.exec
+                calls = []
+
+                def execute(vm, cmd, timeout=600):
+                    if cmd == density.RUN and vm == "vm2":
+                        calls.append(vm)
+                        if len(calls) == 2:
+                            if bad_output is None:
+                                raise RuntimeError("second pass failed")
+                            return 0, bad_output, ""
+                    return original(vm, cmd, timeout)
+
+                d.exec = execute
+                rec, metrics = self.run_density(d, (1, 2))
+                self.assertEqual(d.live, set())
+                self.assertTrue(rec["errors"])
+                self.assertFalse(any(k.endswith("_n2") for k in metrics))
+                self.assertEqual(set(report.density_levels({"repeats": [{"density": rec}]})), {1})
+
+    def test_partial_and_invalid_density_passes_are_excluded(self):
+        for passes in ([[(10.0, 1.2), (10.0, 1.2)], [(10.0, 1.2)]],
+                       [[(10.0, 1.2)] * 2, [(None, 1.2)] * 2],
+                       [[(10.0, 1.2)] * 2, [(float("nan"), 1.2)] * 2],
+                       [[(10.0, 1.2)] * 2, [(10.0, None)] * 2]):
+            with self.subTest(passes=passes):
+                lv = density.summarize_level(2, passes, 4)
+                self.assertIsNone(lv["host_runs_s"])
+                self.assertEqual(density.metrics_of(density.finish([lv])), {})
+
+    def test_legacy_incomplete_density_is_not_admitted(self):
+        d = FakeDriver()
+        d.name = "pandaos"
+        rec, _ = self.run_density(d, (1, 2))
+        for lv in rec["levels"]:
+            for key in ("complete", "pass_counts", "passes_required"):
+                del lv[key]  # actual historical shape
+        complete = json.loads(json.dumps(rec))
+        rec["levels"][1]["vms_measured"] = 1
+        rec["levels"][1]["per_vm_each"] = [10.0]
+        rec["errors"] = ["n=2: RuntimeError: legacy worker failure"]
+        result = {"driver": "pandaos", "repeats": [{"index": 0, "density": rec}]}
+        self.assertEqual(set(report.density_levels(result)), {1})
+        self.assertIn("legacy worker failure", " ".join(report.auto_caveats({"pandaos": result})))
+        result["repeats"].append({"index": 1, "density": complete})
+        self.assertEqual(report.density_levels(result)[2]["host_runs_s"]["n"], 1)
+        complete["errors"] = ["n=2: RuntimeError: partial passes"]
+        result["repeats"] = [{"index": 1, "density": complete}]
+        self.assertEqual(set(report.density_levels(result)), {1})
+        complete["errors"] = []
+        # An invalid solo baseline must not supply derived efficiencies at other N.
+        complete["levels"][0]["vms_measured"] = 0
+        result["repeats"] = [{"index": 1, "density": complete}]
+        lv = report.density_levels(result)
+        self.assertNotIn(1, lv)
+        self.assertNotIn("efficiency", lv[2])
+        self.assertIsNone(report.density_projection(lv, {"vms": 15, "cpus": 16}))
+
     def test_capacity_refusal_leaves_vms_out(self):
         d = FakeDriver(max_vms=2)
         d.name = "boatdev"

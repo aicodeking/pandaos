@@ -62,6 +62,8 @@ type VM struct {
 	IdleStopS    int               `json:"idle_stop_s,omitempty"`
 	ExpiresAt    *time.Time        `json:"expires_at,omitempty"`
 	ParentID     string            `json:"parent_id,omitempty"`
+	PendingCopy  bool              `json:"pending_copy,omitempty"`
+	CopyReady    bool              `json:"copy_ready,omitempty"`
 	FromSnapshot string            `json:"from_snapshot,omitempty"`
 	CreatedAt    time.Time         `json:"created_at"`
 	StartedAt    *time.Time        `json:"started_at,omitempty"`
@@ -83,18 +85,19 @@ func (v VM) clone() VM {
 // Snapshot is a frozen copy of disk (+ mem/vmstate when taken from a running
 // or snapshot-stopped VM). Persisted as snapshots/<id>/snap.json.
 type Snapshot struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	VMID      string    `json:"vm_id"`
-	Team      string    `json:"team"`
-	Image     string    `json:"image"`
-	Size      string    `json:"size"`
-	VCPU      int       `json:"vcpu"`
-	MemMiB    int       `json:"mem_mib"`
-	DiskGiB   int       `json:"disk_gib"`
-	HasMem    bool      `json:"has_mem"`
-	Unsynced  bool      `json:"unsynced,omitempty"` // memory not fsynced yet: lost in a host crash
-	CreatedAt time.Time `json:"created_at"`
+	PendingCopy bool      `json:"pending_copy,omitempty"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	VMID        string    `json:"vm_id"`
+	Team        string    `json:"team"`
+	Image       string    `json:"image"`
+	Size        string    `json:"size"`
+	VCPU        int       `json:"vcpu"`
+	MemMiB      int       `json:"mem_mib"`
+	DiskGiB     int       `json:"disk_gib"`
+	HasMem      bool      `json:"has_mem"`
+	Unsynced    bool      `json:"unsynced,omitempty"` // memory not fsynced yet: lost in a host crash
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 func newID(prefix string) string {
@@ -117,6 +120,15 @@ func writeJSONNoSync(path string, v any, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func syncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func writeJSONAtomic(path string, v any, mode os.FileMode) error {
@@ -145,7 +157,10 @@ func writeJSONAtomic(path string, v any, mode os.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
 }
 
 func readJSON(path string, v any) error {

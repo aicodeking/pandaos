@@ -123,21 +123,19 @@ def run(argv, check=True):
     return r
 
 
-def read_env_file(path=None):
+def read_env_file(path=None, *, required=False):
     path = path or ENV_FILE
     env = {}
     try:
         with open(path) as f:
-            for line in f:
-                parts = shlex.split(line, comments=True)
-                if parts and parts[0] == "export":
-                    parts = parts[1:]
-                for p in parts:
-                    k, sep, v = p.partition("=")
-                    if sep and ENV_KEY.match(k):
-                        env[k] = v
+            # set_env quotes whole values, including literal newlines.
+            for p in shlex.split(f.read(), comments=True):
+                k, sep, v = p.partition("=")
+                if sep and ENV_KEY.match(k):
+                    env[k] = v
     except FileNotFoundError:
-        pass
+        if required:
+            raise
     return env
 
 
@@ -587,6 +585,10 @@ def restore_identity():
         log("restore identity: %s" % e)
 
 
+def op_get_env(req, send):
+    send({"ok": True, "vars": read_env_file(required=True)})
+
+
 def op_set_env(req, send):
     env = req.get("vars")
     if not isinstance(env, dict):
@@ -823,6 +825,7 @@ OPS = {"cmd_start": op_cmd_start, "cmd_list": boat_ops.op_cmd_list,
        "file_delete": boat_ops.op_file_delete, "file_move": boat_ops.op_file_move,
        "file_search": boat_ops.op_file_search, "health": op_health, "exec": op_exec, "exec_attach": op_exec_attach, "put_file": op_put_file,
        "get_file": boat_ops.op_get_file, "set_identity": op_set_identity, "set_env": op_set_env,
+       "get_env": op_get_env,
        "desktop": op_desktop, "shutdown": op_shutdown, "reseed": op_reseed, "sync": op_sync,
        "set_clock": op_set_clock}
 

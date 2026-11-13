@@ -54,10 +54,13 @@ boatd also writes `/run/boat/routes.json` for boat-gateway (see the last section
 | `POST /v1/vms/{id}/start` | `{env?, fail_fast?}` | VM (running) |
 | `POST /v1/vms/{id}/stop` | `{force?}` | VM (stopped) |
 | `POST /v1/vms/{id}/fork` | `{name?, team?, fail_fast?}` | 201, child VM |
+| `POST /v1/vms/{id}/fork/prepare` | `{name?, team?, fail_fast?, labels?}` | 201, pending unbooted child (boat-api only) |
+| `POST /v1/vms/{id}/release` | `{env?}` | 200, authorized child; idempotent (boat-api only) |
 | `POST /v1/vms/{id}/delete` or `DELETE /v1/vms/{id}` | | VM with `"state":"deleted"` |
 | `POST /v1/vms/{id}/exec` | `{argv` (or `cmd`)`, env?, cwd?, stdin_b64?, timeout_s?` (600)`, tty?, user?}` | NDJSON stream (see below) |
 | `PUT /v1/vms/{id}/files?path=/abs&mode=644` | raw bytes | `{"ok":true,"path":…,"bytes":N}` |
 | `GET /v1/vms/{id}/files?path=/abs` | | raw bytes (404 if missing) |
+| `GET /v1/vms/{id}/env` | | `{"ok":true,"vars":{K:V}}`, authoritative guest env (internal only) |
 | `POST /v1/vms/{id}/env` | `{vars:{K:V}}` | agent reply (`/etc/boat/env`) |
 | `POST /v1/vms/{id}/desktop` | `{action:"start\|stop\|status", token?}` | agent reply |
 | `POST /v1/vms/{id}/agent` | `{op, ...}`, allowlisted guest ops (see section 2) | guest's final reply |
@@ -66,6 +69,8 @@ boatd also writes `/run/boat/routes.json` for boat-gateway (see the last section
 | `DELETE /v1/vms/{id}/ports?port=N` | | `{"ok":true}` |
 | `GET /v1/vms/{id}/snapshots` | | `{"snapshots":[Snapshot…]}` |
 | `POST /v1/vms/{id}/snapshots` | `{name?}` | 201, Snapshot |
+| `POST /v1/vms/{id}/snapshots/prepare` | `{name?}` | 201, pending snapshot (boat-api only) |
+| `POST /v1/vms/{id}/snapshots/{sid}/release` | | 200, authorized snapshot; idempotent (boat-api only) |
 | `DELETE /v1/vms/{id}/snapshots/{sid}` | | `{"ok":true}` |
 | `GET /v1/vms/{id}/snapshots/{sid}/download` | | tar.zst stream |
 | `GET /v1/snapshots[?team=]` | | `{"snapshots":[Snapshot…]}` |
@@ -106,6 +111,39 @@ Notes:
   - Stopped parent: boatd copies the stop snapshot, or only the disk if there is none.
   - Then boatd restores the child on its own tap and sends `set_identity` with the child's IP, MAC and hostname. The agent also regenerates machine-id and ssh host keys.
   - `team`, if given, must equal the parent's team, else 404.
+- **Managed-credential copy boundary:** boat-api uses the distinct prepare routes above,
+  waits for immutable capture, durably records required child policy and revokes both
+  source self and AI generations, then explicitly releases the copy. Prepare never boots
+  a child; pending snapshots cannot be exported or used by single/batch create. Default
+  VM/snapshot lists and VM GET hide pending copies, while `include_pending=true` on list
+  routes retains operator cleanup visibility. Pending copies reserve quota and storage;
+  deleting a parent also removes its pending snapshots. `pending_copy` is persisted
+  separately from lifecycle state; `copy_ready` records completed child materialization.
+  Reconcile never adopts or automatically resumes pending copies, and explicit release
+  rejects incomplete capture. Unsynced memory retains the normal cold-boot fallback.
+  Background snapshot sync preserves the current authorization metadata.
+  A registry/revocation failure leaves the copy pending even if deletion fails. A lost
+  prepare response leaves an inaccessible copy. After explicit release, a lost response
+  can leave an authorized running child or published snapshot; captured parent tokens are
+  already durably revoked. The original `Fork`/`CreateSnapshot` methods and immediate
+  routes remain for trusted host callers that own credential handling; they do not revoke
+  boat-api credentials. The new API never falls back to them when prepare is unavailable.
+  Do not downgrade either component after migration: older binaries do not enforce
+  pending markers, signing epochs, or credential retirement.
+  Before listeners start, boat-api durably upgrades managed tokens to the `copy-v1|`
+  HMAC signing domain, versions generation-bound link minters, and bumps known generations
+  once; missing historical first-generation records cannot revive legacy tokens. Every
+  startup reconfirms durable state and reconciles missed outside-API deletions. Running
+  guests receive refreshed env files; processes holding old tokens must reload them.
+  Refresh obtains `vars` through the guest `get_env` operation, not VM metadata; it
+  preserves custom/user-supplied values and only replaces managed token values. Missing,
+  unreadable, malformed or unsupported getters fail without an env write. Older guest
+  agents need upgrading for automatic refresh; captured-token revocation still holds.
+  The getter is on boatd's private socket and is not a public boat-api route. Both first
+  managed-token issuance and later revocations are durable before publication.
+  This boundary covers managed synthetic tokens; raw/user-supplied secrets deliberately
+  present on disk or in memory are still copied.
+
 - **resize**: vCPU and RAM change only on a stopped VM (409 while running), and only through a cold boot. A memory snapshot cannot change shape, so a VM with a stop snapshot also needs `discard_memory:true` (409 otherwise). The disk grows at any time and never shrinks: `disk_gib` below the current size is 400, and a `size` with a smaller disk keeps the larger one. A running guest sees the new disk at once (`PATCH /drives`, `resize2fs`); a stopped one on its next start. If the guest's online `resize2fs` does not finish within 50 s the answer is 504 `resize_timeout` (boat-api passes it on as such): the disk is already grown and recorded on the host, and `disk_gib` at the current size retries the guest side. Known issue (2026-11-12, cause unproven): in 1 of 14 boat-e2e runs (43313462575, attempt 2) `resize2fs` hung after `PATCH /drives` and ignored SIGKILL, so it was stuck in uninterruptible I/O on `/dev/vda`. boatd now logs the guest's blocked tasks (`sysrq w` + `dmesg`) and the end of `firecracker.log` as `resize diag:` lines, and the agent answers a process that survives SIGKILL instead of waiting on it.
 - **snapshot export/import**: `download` streams GNU sparse tar.zst, manifest first. Firecracker does not validate `vmstate`, so memory crosses only under an HMAC from this host's key (`stateDir/export.key`, covering the snapshot metadata and the SHA-256 of vmstate, mem and kernel). Anything else is treated as a tenant upload: the disk is kept (only the guest kernel parses it), vmstate, memory and kernel are dropped, and the snapshot cold-boots on the local image's kernel (`image`, `size` choose it). Import accepts only the expected regular files, each once and within a size cap; other members are 400. It stops below the free-space floor. Imported snapshots have an empty `vm_id` and outlive VM deletes. boatd trusts `team`: boat-api enforces it.
 - **delete** kills the VM and removes its dir, its tap and its snapshots.

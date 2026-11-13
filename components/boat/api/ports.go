@@ -290,9 +290,8 @@ func revokeLinksOf(st *State, gone func(keyID string) bool) {
 
 // keyAlive says whether the key that minted a signed URL still stands: it
 // exists in team, has not expired, its user is still a member, and (scope
-// != "") it still holds scope. A VM's own token (vm_<id>@<gen>) stands while
-// the VM's token is still at that generation; a legacy vm_<id> while the
-// VM's token record exists.
+// != "") it still holds scope. A generation minter stands only in its signing
+// epoch and generation; durable vm_<id> grants stand until the VM is retired.
 func (s *server) keyAlive(keyID, team, scope string, now time.Time) bool {
 	return keyAliveIn(s.store.Snapshot(), keyID, team, scope, now)
 }
@@ -301,7 +300,14 @@ func keyAliveIn(st *State, keyID, team, scope string, now time.Time) bool {
 	if rest, ok := strings.CutPrefix(keyID, "vm_"); ok {
 		vm, gen, hasGen := strings.Cut(rest, "@")
 		t := st.VMTokens[vm]
-		return t != nil && t.TeamID == team && (!hasGen || gen == strconv.Itoa(t.Gen)) &&
+		if t == nil {
+			return false
+		}
+		expected := strconv.Itoa(t.Gen)
+		if st.CopyCredentialsV1 {
+			expected = "copy-v1." + expected
+		}
+		return !t.Retired && st.Teams[team] != nil && t.TeamID == team && (!hasGen || gen == expected) &&
 			(scope == "" || slices.Contains(selfScopes, scope))
 	}
 	k, t := st.Keys[keyID], st.Teams[team]

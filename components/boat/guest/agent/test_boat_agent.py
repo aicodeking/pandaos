@@ -218,6 +218,24 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(out, b"it's \"quoted\" $x")
         self.assertIn("error", self.c.call({"op": "set_env", "vars": {"BAD-KEY": "x"}}))
 
+    def test_get_env_roundtrip_preserves_values(self):
+        values = {"BOAT_ID": "vm-own", "BOAT_API_KEY": "user-key",
+                  "QUOTED": "it's \"quoted\" $HOME # literal",
+                  "MULTILINE": "first line\nsecond line", "EMPTY": ""}
+        self.assertTrue(self.c.call({"op": "set_env", "vars": values})["ok"])
+        self.assertEqual(self.c.call({"op": "get_env"}).get("vars"), values)
+        out, _, end = self.c.exec(argv=["sh", "-c", 'printf %s "$MULTILINE"'], timeout_s=10)
+        self.assertEqual((out, end["exit"]), (b"first line\nsecond line", 0))
+
+    def test_get_env_refuses_missing_or_unreadable_file(self):
+        self.assertIn("error", self.c.call({"op": "get_env"}))
+        os.mkdir(agent.ENV_FILE)
+        self.assertIn("error", self.c.call({"op": "get_env"}))
+        os.rmdir(agent.ENV_FILE)
+        with open(agent.ENV_FILE, "w") as f:
+            f.write("export SECRET='unterminated")
+        self.assertIn("error", self.c.call({"op": "get_env"}))
+
     def test_put_get_file_chunked(self):
         path = os.path.join(self.tmp, "sub", "dir", "f.bin")
         blob = os.urandom(2_500_000)

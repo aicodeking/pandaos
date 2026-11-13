@@ -281,15 +281,16 @@ func (m *Manager) syncSaved(s Snapshot) {
 			return // deleted meanwhile
 		}
 	}
-	s.Unsynced = false
 	m.snapDirMu.Lock()
 	defer m.snapDirMu.Unlock()
 	m.mu.Lock()
-	_, ok := m.snaps[s.ID]
+	cur, ok := m.snaps[s.ID]
 	m.mu.Unlock()
 	if !ok {
 		return // deleted while its files were synced: the dir is gone or going
 	}
+	s = cur // release may have changed PendingCopy since the sync started
+	s.Unsynced = false
 	if err := writeJSONAtomic(filepath.Join(dir, "snap.json"), s, 0o600); err != nil {
 		log.Printf("%s: %v", s.ID, err)
 		return
@@ -423,6 +424,10 @@ func (m *Manager) Snapshots(vmID string) []Snapshot {
 }
 
 func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapshot, error) {
+	return m.createSnapshot(ctx, vmID, name, false)
+}
+
+func (m *Manager) createSnapshot(ctx context.Context, vmID, name string, pending bool) (Snapshot, error) {
 	if len(name) > 128 {
 		return Snapshot{}, errf(400, "name too long")
 	}
@@ -435,10 +440,10 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if v.State != Running && v.State != Stopped {
+	if v.PendingCopy || (v.State != Running && v.State != Stopped) {
 		return Snapshot{}, errf(http.StatusConflict, "vm is %s", v.State)
 	}
-	s := Snapshot{ID: newID("snap-"), Name: name, VMID: v.ID, Team: v.Team, Image: v.Image, Size: v.Size,
+	s := Snapshot{PendingCopy: pending, ID: newID("snap-"), Name: name, VMID: v.ID, Team: v.Team, Image: v.Image, Size: v.Size,
 		VCPU: v.VCPU, MemMiB: v.MemMiB, DiskGiB: v.DiskGiB, CreatedAt: m.now(), HasMem: v.State == Running || v.HasSnapshot}
 	res, err := m.reserve(v.Team, 1, snapCommit(s)) // held while the dump runs, other VMs of the team included
 	if err != nil {
@@ -456,7 +461,11 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 	s.Unsynced = s.HasMem
 	if err == nil {
 		// No fsync here: 3-4 s behind a dump in writeback. syncSaved persists it.
-		err = writeJSONNoSync(filepath.Join(dir, "snap.json"), s, 0o600)
+		if pending {
+			err = writeJSONAtomic(filepath.Join(dir, "snap.json"), s, 0o600)
+		} else {
+			err = writeJSONNoSync(filepath.Join(dir, "snap.json"), s, 0o600)
+		}
 	}
 	if err != nil {
 		m.removeStoreDir(dir)
@@ -469,7 +478,30 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 	if s.HasMem {
 		go m.syncSaved(s)
 	}
-	m.ev.publish(Event{Type: "snapshot.created", VMID: v.ID, SnapID: s.ID, Team: v.Team})
+	if !pending {
+		m.ev.publish(Event{Type: "snapshot.created", VMID: v.ID, SnapID: s.ID, Team: v.Team})
+	}
+	return s, nil
+}
+
+func (m *Manager) releaseSnapshot(vmID, sid string) (Snapshot, error) {
+	m.snapDirMu.Lock()
+	defer m.snapDirMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.snaps[sid]
+	if !ok || s.VMID != vmID {
+		return Snapshot{}, errNotFound
+	}
+	if !s.PendingCopy {
+		return s, nil
+	}
+	s.PendingCopy = false
+	if err := writeJSONAtomic(filepath.Join(m.snapDir(sid), "snap.json"), s, 0o600); err != nil {
+		return Snapshot{}, err
+	}
+	m.snaps[sid] = s
+	m.ev.publish(Event{Type: "snapshot.created", VMID: vmID, SnapID: sid, Team: s.Team})
 	return s, nil
 }
 

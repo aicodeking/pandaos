@@ -273,6 +273,10 @@ func serve(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	s.ctx = ctx
+	if err := s.reconcileCopyCredentials(ctx); err != nil {
+		log.Printf("boat-api: copied credential startup barrier: %v", err)
+		return 1
+	}
 	go s.hooks.watch(ctx)
 	go s.otel.run(ctx)
 	go s.aiMeterLoop(ctx)

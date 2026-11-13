@@ -38,14 +38,17 @@ type fakeBoatd struct {
 	resizeTimeout bool   // the guest's resize2fs times out (boatd answers 504 resize_timeout)
 	refuse        string // non-empty: lifecycle POSTs answer 503 with this code (host full)
 	// discardPuts counts file uploads instead of keeping them (memory tests).
-	discardPuts bool
-	putBytes    int64
-	afterCopy   func() // inject a failure after boatd copied a disk
-	cleanupErr  bool   // refuse VM/snapshot deletion
+	discardPuts   bool
+	putBytes      int64
+	afterCopy     func() // inject a failure after boatd copied a disk
+	cleanupErr    bool   // refuse VM/snapshot deletion
+	noPrepare     bool
+	beforeRelease func(kind, id string)
+	copyEnvs      map[string]map[string]any
 }
 
 func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
-	f := &fakeBoatd{vms: map[string]VM{}, files: map[string][]byte{}, snaps: map[string]map[string]any{}, cmds: map[string]*fakeCmd{}, events: make(chan string, 16)}
+	f := &fakeBoatd{copyEnvs: map[string]map[string]any{}, vms: map[string]VM{}, files: map[string][]byte{}, snaps: map[string]map[string]any{}, cmds: map[string]*fakeCmd{}, events: make(chan string, 16)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/vms", func(w http.ResponseWriter, r *http.Request) {
 		var in map[string]any
@@ -96,7 +99,7 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		vm := VM{"id": id, "name": in["name"], "size": in["size"], "image": in["image"], "team": in["team"],
 			"state": "running", "env": in["env"], "ip": "10.0.0.5", "ports": []any{}, "from_snapshot": in["snapshot"], "labels": in["labels"]}
 		if sid, _ := in["snapshot"].(string); sid != "" {
-			if sn := f.snaps[sid]; sn == nil || sn["team"] != in["team"] {
+			if sn := f.snaps[sid]; sn == nil || sn["pending_copy"] == true || sn["team"] != in["team"] {
 				f.mu.Unlock()
 				writeJSON(w, 404, map[string]string{"error": "no such snapshot"})
 				return
@@ -115,8 +118,8 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		defer f.mu.Unlock()
 		out := []VM{}
 		for _, vm := range f.vms {
-			if t := r.URL.Query().Get("team"); t == "" || vm["team"] == t {
-				out = append(out, vm)
+			if t := r.URL.Query().Get("team"); (t == "" || vm["team"] == t) && (vm["pending_copy"] != true || r.URL.Query().Get("include_pending") == "true") {
+				out = append(out, fakeVMMetadata(vm))
 			}
 		}
 		writeJSON(w, 200, map[string]any{"vms": out})
@@ -132,14 +135,25 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 	}
 	mux.HandleFunc("GET /v1/vms/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if vm := get(w, r); vm != nil {
-			f.mu.Lock() // a copy: other handlers change the VM under f.mu while this one writes
-			cp := VM{}
-			for k, v := range vm {
-				cp[k] = v
-			}
+			f.mu.Lock()
+			cp := fakeVMMetadata(vm)
 			f.mu.Unlock()
+			if cp["pending_copy"] == true {
+				writeJSON(w, 404, map[string]string{"error": "pending copy"})
+				return
+			}
 			writeJSON(w, 200, cp)
 		}
+	})
+	mux.HandleFunc("GET /v1/vms/{id}/env", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		vm := f.vms[r.PathValue("id")]
+		if vm == nil || vm["pending_copy"] == true || vm["state"] != "running" {
+			writeJSON(w, 409, map[string]string{"error": "VM is not running"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "vars": fakeCopyEnv(vm)})
 	})
 	// PATCH like boatd's: rename, ttl_s (deadline now+ttl), extend_s (deadline +extend).
 	mux.HandleFunc("PATCH /v1/vms/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +190,7 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		}
 		writeJSON(w, 200, vm)
 	})
-	mux.HandleFunc("POST /v1/vms/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
+	action := func(w http.ResponseWriter, r *http.Request) {
 		vm := get(w, r)
 		if vm == nil {
 			return
@@ -187,6 +201,10 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		defer f.mu.Unlock()
 		if f.refuse != "" && (r.PathValue("action") == "start" || r.PathValue("action") == "fork") {
 			writeJSON(w, 503, map[string]string{"error": "host is full", "code": f.refuse})
+			return
+		}
+		if vm["pending_copy"] == true && r.PathValue("action") != "delete" && r.PathValue("action") != "release" {
+			writeJSON(w, 409, map[string]string{"error": "pending copy"})
 			return
 		}
 		switch r.PathValue("action") {
@@ -209,7 +227,23 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 				}
 			}
 			vm["state"] = "deleted"
+		case "release":
+			if vm["pending_copy"] == true {
+				if f.beforeRelease != nil {
+					f.beforeRelease("fork", vm["id"].(string))
+				}
+				delete(vm, "pending_copy")
+				vm["state"] = "running"
+				if vars, ok := in["env"]; ok {
+					vm["env"] = vars
+					f.envOps = append(f.envOps, map[string]any{"vm": vm["id"], "vars": vars})
+				}
+			}
 		case "fork":
+			if strings.HasSuffix(r.URL.Path, "/prepare") && f.noPrepare {
+				writeJSON(w, 404, map[string]string{"error": "no prepare route"})
+				return
+			}
 			f.forks = append(f.forks, in)
 			f.n++
 			id := fmt.Sprintf("vm%d", f.n)
@@ -217,9 +251,16 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			if l, ok := in["labels"]; ok {
 				labels = l
 			}
-			f.vms[id] = VM{"id": id, "name": in["name"], "team": in["team"], "state": "running", "labels": labels}
+			f.vms[id] = VM{"id": id, "name": in["name"], "team": in["team"], "state": "running", "labels": labels, "env": vm["env"]}
+			f.copyEnvs[id] = fakeCopyEnv(vm)
+			if strings.HasSuffix(r.URL.Path, "/prepare") {
+				f.vms[id]["pending_copy"], f.vms[id]["state"] = true, "forking"
+			}
 			if f.afterCopy != nil {
-				f.afterCopy()
+				after := f.afterCopy
+				f.mu.Unlock()
+				after()
+				f.mu.Lock()
 			}
 			writeJSON(w, 201, f.vms[id])
 			return
@@ -307,16 +348,44 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			writeJSON(w, 201, p)
 			return
 		case "snapshots":
+			if strings.HasSuffix(r.URL.Path, "/prepare") && f.noPrepare {
+				writeJSON(w, 404, map[string]string{"error": "no prepare route"})
+				return
+			}
 			f.n++
 			sid := fmt.Sprintf("snap%d", f.n)
 			f.snaps[sid] = map[string]any{"id": sid, "name": in["name"], "vm_id": vm["id"], "team": vm["team"]}
+			f.copyEnvs[sid] = fakeCopyEnv(vm)
+			if strings.HasSuffix(r.URL.Path, "/prepare") {
+				f.snaps[sid]["pending_copy"] = true
+			}
 			if f.afterCopy != nil {
-				f.afterCopy()
+				after := f.afterCopy
+				f.mu.Unlock()
+				after()
+				f.mu.Lock()
 			}
 			writeJSON(w, 201, f.snaps[sid])
 			return
 		}
 		writeJSON(w, 200, vm)
+	}
+	mux.HandleFunc("POST /v1/vms/{id}/{action}", action)
+	mux.HandleFunc("POST /v1/vms/{id}/fork/prepare", func(w http.ResponseWriter, r *http.Request) { r.SetPathValue("action", "fork"); action(w, r) })
+	mux.HandleFunc("POST /v1/vms/{id}/snapshots/prepare", func(w http.ResponseWriter, r *http.Request) { r.SetPathValue("action", "snapshots"); action(w, r) })
+	mux.HandleFunc("POST /v1/vms/{id}/snapshots/{sid}/release", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		sn := f.snaps[r.PathValue("sid")]
+		if sn == nil || sn["vm_id"] != r.PathValue("id") {
+			writeJSON(w, 404, map[string]string{"error": "snapshot not found"})
+			return
+		}
+		if sn["pending_copy"] == true && f.beforeRelease != nil {
+			f.beforeRelease("snapshots", r.PathValue("sid"))
+		}
+		delete(sn, "pending_copy")
+		writeJSON(w, 200, sn)
 	})
 	mux.HandleFunc("GET /v1/vms/{id}/files", func(w http.ResponseWriter, r *http.Request) {
 		if get(w, r) == nil {
@@ -376,7 +445,7 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 	mux.HandleFunc("GET /v1/vms/{id}/snapshots/{sid}/download", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if sn := f.snaps[r.PathValue("sid")]; sn != nil && sn["vm_id"] == r.PathValue("id") {
+		if sn := f.snaps[r.PathValue("sid")]; sn != nil && sn["pending_copy"] != true && sn["vm_id"] == r.PathValue("id") {
 			fmt.Fprintf(w, "ARCHIVE:%s", sn["id"])
 			return
 		}
@@ -387,7 +456,7 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		defer f.mu.Unlock()
 		out := []any{}
 		for _, sn := range f.snaps {
-			if t := r.URL.Query().Get("team"); t == "" || sn["team"] == t {
+			if t := r.URL.Query().Get("team"); (t == "" || sn["team"] == t) && (sn["pending_copy"] != true || r.URL.Query().Get("include_pending") == "true") {
 				out = append(out, sn)
 			}
 		}
@@ -417,7 +486,7 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		defer f.mu.Unlock()
 		out := []any{}
 		for _, sn := range f.snaps {
-			if sn["vm_id"] == r.PathValue("id") {
+			if sn["vm_id"] == r.PathValue("id") && (sn["pending_copy"] != true || r.URL.Query().Get("include_pending") == "true") {
 				out = append(out, sn)
 			}
 		}
@@ -584,4 +653,24 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 	default:
 		writeJSON(w, 400, map[string]string{"error": "unknown op"})
 	}
+}
+
+func fakeCopyEnv(vm VM) map[string]any {
+	out := map[string]any{}
+	if vars, ok := vm["env"].(map[string]any); ok {
+		for k, v := range vars {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func fakeVMMetadata(vm VM) VM {
+	out := VM{}
+	for k, v := range vm {
+		if k != "env" {
+			out[k] = v
+		}
+	}
+	return out
 }

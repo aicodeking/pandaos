@@ -4,6 +4,8 @@ import os
 import re
 import statistics
 
+import density
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SIDES = ("pandaos", "boatdev")
 
@@ -314,6 +316,21 @@ def auto_caveats(res):
         errs = [f"r{rep.get('index')}:{k}" for rep in r.get("repeats", []) for k in (rep.get("errors") or {})]
         if errs:
             out.append(f"{side}: failed steps (see raw JSON): {', '.join(errs[:20])}.")
+    return out + density_caveats(res)
+
+
+def density_caveats(res):
+    out = []
+    for side, r in res.items():
+        for rep in r.get("repeats", []):
+            trial = rep.get("density") or {}
+            rejected = [str(lv.get("n")) for lv in trial.get("levels", []) if not density_trial_complete(lv, trial)]
+            if rejected:
+                out.append(f"{side}: r{rep.get('index')}: incomplete density excluded at n={', n='.join(rejected)} "
+                           "from throughput, efficiency, cost and projections.")
+            if trial.get("errors"):
+                evidence = "; ".join(str(e).replace("\n", " ") for e in trial["errors"])
+                out.append(f"{side}: r{rep.get('index')}: density failures (see raw JSON): {evidence}.")
     return out
 
 
@@ -503,7 +520,7 @@ def render(results, prices=None, published=None):
     out += density_section(res, prices, published)
     out += host_density_lines(host_results, res.get("pandaos"))
     out += cost_section(summ, prices, res, published)
-    out += ["", "## Caveats", ""] + [f"- {c}" for c in caveats(host_results + results) + auto_caveats(res)]
+    out += ["", "## Caveats", ""] + [f"- {c}" for c in caveats(host_results + results) + auto_caveats(res) + density_caveats({"host": merged(host_results)} if host_results else {})]
     return "\n".join(out) + "\n"
 
 
@@ -518,12 +535,26 @@ GUEST_VCPUS = 4
 DENSITY_FIELDS = ("per_vm_runs_s", "host_runs_s", "efficiency", "cpu_per_loop", "loops_per_cpu", "host_cpus")
 
 
+def density_trial_complete(lv, trial):
+    # Older collectors kept planned N even after a worker failed. Setup refusals
+    # ("vm i:") do not invalidate smaller, fully measured levels.
+    return density.level_complete(lv) and not any(
+        str(e).startswith(f"n={lv.get('n')}:") for e in trial.get("errors", []))
+
+
 def density_levels(result):
     """{n: {field: summary}} pooled over the repeats of one result."""
     by_n = {}
     for rep in result.get("repeats", []):
-        for lv in (rep.get("density") or {}).get("levels", []):
+        trial = rep.get("density") or {}
+        levels = trial.get("levels", [])
+        solo_ok = any(lv.get("n") == 1 and density_trial_complete(lv, trial) for lv in levels)
+        for lv in levels:
+            if not density_trial_complete(lv, trial):
+                continue
             for f in DENSITY_FIELDS:
+                if f in ("efficiency", "loops_per_cpu") and not solo_ok:
+                    continue
                 if lv.get(f) is not None:
                     by_n.setdefault(lv["n"], {}).setdefault(f, []).append(lv[f])
     return {n: {f: summarize(v) for f, v in fs.items()} for n, fs in sorted(by_n.items())}

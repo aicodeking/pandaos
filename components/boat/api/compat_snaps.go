@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -50,32 +51,65 @@ func (s *server) snapshotSummary(team string, sn map[string]any) map[string]any 
 }
 
 // snapshotPage sorts (sort=asc|desc, default desc), applies limit (1-200,
-// default 50) and answers boat.dev's snapshot.list. All on one page.
+// default 100) and answers boat.dev's snapshot.list with a scoped continuation.
 func (s *server) snapshotPage(w http.ResponseWriter, r *http.Request, team string, list []map[string]any) {
 	q := r.URL.Query()
-	limit, err := strconv.Atoi(orDefault(q.Get("limit"), "50"))
+	limit, err := strconv.Atoi(orDefault(q.Get("limit"), "100"))
 	order := orDefault(q.Get("sort"), "desc")
 	if err != nil || limit < 1 || limit > 200 || (order != "asc" && order != "desc") {
 		writeErr(w, r, 400, "invalid_query", "limit 1-200, sort asc or desc")
 		return
 	}
-	sort.SliceStable(list, func(i, j int) bool {
-		a, b := str(list[i], "created_at"), str(list[j], "created_at")
-		if order == "asc" {
-			return a < b
+	// Scope the opaque cursor to the team, listing route and order. The last
+	// (timestamp, native id) pair makes ties stable even if boatd changes order.
+	type cursorKey struct {
+		Team    string `json:"team"`
+		Path    string `json:"path"`
+		Order   string `json:"order"`
+		Created string `json:"created"`
+		ID      string `json:"id"`
+	}
+	key := func(sn map[string]any) string { return str(sn, "created_at") + "\x00" + str(sn, "id") }
+	after := ""
+	if raw := q.Get("cursor"); raw != "" {
+		var c cursorKey
+		data, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil || len(raw) > 8192 || json.Unmarshal(data, &c) != nil || c.Team != team || c.Path != r.URL.Path || c.Order != order || c.ID == "" {
+			writeErr(w, r, 400, "invalid_query", "invalid or mismatched snapshot cursor")
+			return
 		}
-		return a > b
+		after = c.Created + "\x00" + c.ID
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if order == "asc" {
+			return key(list[i]) < key(list[j])
+		}
+		return key(list[i]) > key(list[j])
 	})
-	more := len(list) > limit
+	start := 0
+	if after != "" {
+		start = sort.Search(len(list), func(i int) bool {
+			if order == "asc" {
+				return key(list[i]) > after
+			}
+			return key(list[i]) < after
+		})
+	}
+	end := min(start+limit, len(list))
+	more := end < len(list)
+	list = list[start:end]
+	var next any
 	if more {
-		list = list[:limit]
+		last := list[len(list)-1]
+		data, _ := json.Marshal(cursorKey{team, r.URL.Path, order, str(last, "created_at"), str(last, "id")})
+		next = base64.RawURLEncoding.EncodeToString(data)
 	}
 	out := make([]map[string]any, len(list))
 	for i, sn := range list {
 		out[i] = s.snapshotSummary(team, sn)
 	}
 	writeCompat(w, 200, "snapshot.list", map[string]any{"snapshots": out,
-		"pageInfo": map[string]any{"nextCursor": nil, "hasMore": more, "limit": limit}})
+		"pageInfo": map[string]any{"nextCursor": next, "hasMore": more, "limit": limit}})
 }
 
 func (s *server) vmSnapshots(r *http.Request, p *principal, vmID string) ([]map[string]any, *nativeAnswer) {

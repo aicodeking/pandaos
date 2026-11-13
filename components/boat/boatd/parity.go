@@ -252,7 +252,7 @@ func (m *Manager) exportHandler(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	s, ok := m.snaps[r.PathValue("sid")]
 	m.mu.Unlock()
-	if !ok || s.VMID != r.PathValue("id") {
+	if !ok || s.PendingCopy || s.VMID != r.PathValue("id") {
 		writeErr(w, errf(404, "snapshot not found"))
 		return
 	}

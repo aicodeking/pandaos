@@ -104,7 +104,7 @@ Every VM gets `BOAT_ID` in its env at create, fork and start. With `-vm-api-url`
 `BOAT_API_KEY`, a token for that VM alone, so `boat self …` and `host …` work in the guest
 without a team key. A team that stores its own `BOAT_API_KEY` secret keeps it.
 
-- **Token:** `boatself_<gen>_<hex(HMAC-SHA256(vmKey, "self|<vmid>|<gen>"))>_<vmid>`, `vmKey`
+- **Token:** `boatself_<gen>_<hex(HMAC-SHA256(vmKey, "copy-v1|self|<vmid>|<gen>"))>_<vmid>`, `vmKey`
   derived from the master key. Valid while the VM exists and its generation is `<gen>`.
 - **Reach:** only routes under `/v1/vms/<that id>/` with `vms:read`, `vms:write`, `exec`
   (read, exec, files, ports, stop/start, fork, snapshots, delete). Every other route, and
@@ -113,8 +113,39 @@ without a team key. A team that stores its own `BOAT_API_KEY` secret keeps it.
   whenever its disk is copied (fork, snapshot, share), because the copy holds the token.
   A running source VM gets the new token pushed to `/etc/boat/env`; a process that read
   the old one holds a dead token. Delete ends it.
-- **Crash:** the generation is written without waiting for the disk (see Store), so a crash
-  can make an older token of the same VM valid again, never one of another VM.
+- **Copies:** fork and saved-snapshot captures stay pending in boatd until the API has
+  durably recorded required child policy and revoked both captured self and AI tokens.
+  A failed store write or failed cleanup leaves an unbooted, unexportable pending copy.
+  Concurrent captures and delayed source-token refreshes cannot change the immutable copy.
+- **Crash:** revocations wait for the state file and directory fsync. Pending copies remain
+  pending after restart; they are never adopted, resumed, exported, or restored automatically.
+  Deletion retains retired credential records, so a late request cannot recreate generation 1;
+  durable VM-minted links also stop working. If retirement cannot persist, API deletion fails
+  before the VM is deleted. A failed boatd deletion leaves its credentials retired; retry
+  deletion with a team key.
+- **Upgrade:** before either API listener starts, one durable migration revokes all existing
+  managed self and AI tokens, including tokens retained by historical unsafe copies. It
+  switches both token HMAC messages to the `copy-v1|` signing domain and versions the
+  generation-bound link minter IDs, so a lost legacy generation cannot become valid again.
+  Token shapes stay the same. Boatd must be reachable and state writable. Every startup
+  confirms durable state; later starts also reconcile missed outside-API deletions.
+  Parent refresh uses the guest's authoritative `get_env` operation; VM metadata contains
+  no environment. It preserves custom variables and user-supplied keys, replacing only
+  managed self/AI token values. Getter failures (including older agents without `get_env`)
+  leave the env file untouched and are logged without its contents; upgrade those guest
+  agents for automatic refresh. The durable copy fence still revokes captured tokens.
+  Existing processes retain dead cached tokens until restarted or reloaded. This does not sanitize archives or revoke arbitrary team keys,
+  raw provider keys (proxy off), browser sessions, or other user secrets in copied disk/RAM.
+- **Pending cleanup:** pending copies reserve quota and storage. Host operators can inspect
+  boatd's `GET /v1/vms?include_pending=true` and `GET /v1/snapshots?include_pending=true`,
+  then use its normal deletion endpoints. Public API lists and GETs hide pending copies.
+  There is no public release endpoint or automatic release during recovery. A lost release
+  response may leave an authorized copy running or a snapshot published, with captured
+  source credentials already revoked. Upgrade boatd before boat-api; the new API refuses
+  an older boatd's missing prepare routes and never falls back to an immediate copy.
+  Keep both upgraded binaries after migration: older boatd ignores pending markers, and
+  older boat-api ignores the signing epoch and retirement rules. A binary downgrade
+  therefore does not preserve this security boundary.
 
 - **Token:** `boat_<16 hex id>_<64 hex secret>`, i.e. 256 random bits.
 - **Hash:** `hex(HMAC-SHA256(pepper, salt ‖ 0x00 ‖ secret))` with a 16-byte salt per key.
@@ -327,15 +358,14 @@ All state lives in a single `state.json`, sealed under the master key:
 
 - Each write takes one mutex, deep-copies the state, applies the change, writes it
   atomically (temp file + fsync + rename + dir fsync), and then swaps it in.
-- The VM lifecycle paths (create, fork, start) do not wait for that fsync: they use
-  `Store.Apply`, which swaps the change in and leaves the write to a background flusher.
-  An fsync can take seconds when the disk is busy writing a snapshot (boatbench
-  41652606509: 1.9 s of a 2.73 s new-from-snapshot). What must survive a crash goes
-  somewhere durable instead: the secret selection is the VM's `boat.secrets` label in
-  boatd. Losing the rest (environment name, AI and VM token generations, copied
-  conversations) is harmless. `latency_test.go` fails if a lifecycle call waits for an
-  fsync again. Each create, fork, stop and start logs one
-  `<vm>: api <op> step=…ms … total=…ms` line.
+- Rebuildable lifecycle metadata uses `Store.Apply`, leaving persistence to the background
+  flusher. Secret selections also live durably on boatd's `boat.secrets` labels. Credential
+  revocation, self-token issuance, foreign-disk policy, retirement, and the startup barrier
+  use `Store.Update` and propagate file/directory sync failures before publishing access.
+  First AI-token issuance also waits for durable state: a guest can survive an API crash,
+  and reusing a lost first generation could revive a token captured by a later copy.
+  These required writes can wait behind snapshot I/O. `latency_test.go` checks cacheable
+  lifecycle metadata; each create, fork, stop and start logs its phases and total time.
 - Readers, authentication included, get immutable snapshots and never wait for a write.
 - Per team: 200 secrets and 2 MiB of sealed values, 100 live shares, 4 MiB of environment
   scripts and vars, 200 ssh keys. See `limits.go`.

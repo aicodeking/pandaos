@@ -20,6 +20,7 @@ A host's cost per run is its price per hour over host_runs_s, not over one
 uncontended VM's speed.
 """
 import concurrent.futures
+import math
 import os
 import re
 import statistics
@@ -64,24 +65,45 @@ def parse_cpu(out):
     return (user + sys_) / real if real > 0 else None
 
 
+def positive_finite(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+
+
+def level_complete(lv):
+    """Admit complete trials, including historical summaries without pass counts."""
+    n = lv.get("n")
+    each = lv.get("per_vm_each", [])
+    return (isinstance(n, int) and not isinstance(n, bool) and n > 0
+            and lv.get("complete", True) is True and lv.get("vms_measured") == n
+            and len(each) == n and all(positive_finite(x) for x in each)
+            and all(positive_finite(lv.get(k)) for k in ("per_vm_runs_s", "host_runs_s", "cpu_per_loop"))
+            and ("pass_counts" not in lv or lv["pass_counts"] == [lv.get("passes_required")] * n
+                 and positive_finite(lv.get("passes_required"))))
+
+
 def summarize_level(n, passes, cpus):
-    """passes: one list per VM of (runs_s, cpu_per_loop) tuples."""
-    per_vm = [statistics.median(r for r, _ in vm) for vm in passes if vm]
-    cpu = [c for vm in passes for _, c in vm if c is not None]
-    return {"n": n, "vms_measured": len(per_vm), "per_vm_runs_s": statistics.median(per_vm) if per_vm else None,
-            "per_vm_each": per_vm, "host_runs_s": sum(per_vm) if per_vm else None,
-            "cpu_per_loop": statistics.median(cpu) if cpu else None, "host_cpus": cpus}
+    """Only full sets of valid passes may supply an N-worker measurement."""
+    valid = [vm for vm in passes if len(vm) == DENSITY_PASSES
+             and all(positive_finite(r) and positive_finite(c) for r, c in vm)]
+    per_vm = [statistics.median(r for r, _ in vm) for vm in valid]
+    cpu = [c for vm in valid for _, c in vm]
+    complete = len(passes) == n and len(valid) == n
+    return {"n": n, "vms_measured": len(valid), "complete": complete,
+            "pass_counts": [len(vm) for vm in passes], "passes_required": DENSITY_PASSES,
+            "per_vm_runs_s": statistics.median(per_vm) if complete else None,
+            "per_vm_each": per_vm, "host_runs_s": sum(per_vm) if complete else None,
+            "cpu_per_loop": statistics.median(cpu) if complete else None, "host_cpus": cpus}
 
 
 def finish(levels):
     """Add efficiency and loops_per_cpu relative to the n=1 level."""
-    solo = next((lv for lv in levels if lv["n"] == 1 and lv.get("per_vm_runs_s")), None)
+    solo = next((lv for lv in levels if lv["n"] == 1 and level_complete(lv)), None)
     out = []
     for lv in levels:
         e = dict(lv)
-        if solo and lv.get("per_vm_runs_s"):
+        if solo and level_complete(lv):
             e["efficiency"] = lv["per_vm_runs_s"] / solo["per_vm_runs_s"]
-        if solo and solo.get("cpu_per_loop") and lv.get("host_cpus"):
+        if solo and level_complete(lv) and positive_finite(lv.get("host_cpus")):
             e["loops_per_cpu"] = lv["n"] * solo["cpu_per_loop"] / lv["host_cpus"]
         out.append(e)
     return out
@@ -90,6 +112,8 @@ def finish(levels):
 def metrics_of(levels):
     m = {}
     for lv in levels:
+        if not level_complete(lv):
+            continue
         n = lv["n"]
         for k in ("host_runs_s", "per_vm_runs_s", "efficiency", "cpu_per_loop"):
             if lv.get(k) is not None:
@@ -140,7 +164,10 @@ class Density:
             out = []
             for _ in range(DENSITY_PASSES):
                 o = self.gexec(self.d, vm, RUN, PASS_TIMEOUT_S)
-                out.append((W.parse_geomean(o), parse_cpu(o)))
+                sample = (W.parse_geomean(o), parse_cpu(o))
+                if not all(positive_finite(x) for x in sample):
+                    raise ValueError("invalid density throughput or CPU measurement")
+                out.append(sample)
             return out
 
         t = time.monotonic()

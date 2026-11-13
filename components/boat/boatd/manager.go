@@ -77,7 +77,7 @@ type Manager struct {
 // each fsync ran under the global lock: 5.1 s with a memory dump in writeback (run 41600185173).
 func saveVMState(dir string, v VM) error {
 	path := filepath.Join(dir, "vm.json")
-	if v.State == Stopped || v.State == Error {
+	if v.State == Stopped || v.State == Error || v.PendingCopy {
 		return writeJSONAtomic(path, v, 0o600)
 	}
 	return writeJSONNoSync(path, v, 0o600)
@@ -214,7 +214,16 @@ func (m *Manager) commitLocked(old, nv VM, reason string) error {
 	if nv.State == Running && old.State != Running {
 		nv.StartedAt = &now
 	}
-	if err := m.saveState(m.vmDir(nv.ID), nv); errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
+	var err error
+	if old.PendingCopy && !nv.PendingCopy {
+		err = writeJSONAtomic(filepath.Join(m.vmDir(nv.ID), "vm.json"), nv, 0o600)
+	} else {
+		err = m.saveState(m.vmDir(nv.ID), nv)
+	}
+	if err != nil && (old.PendingCopy || nv.PendingCopy) {
+		return err // authorization transitions must never use the disk-full fallback
+	}
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
 		// A full disk or team quota (a tenant can cause either) must not lock anyone out
 		// of stopping or deleting a VM: memory stays right, flushDirty retries the file.
 		log.Printf("%s: state not persisted, disk full", nv.ID)
@@ -230,7 +239,7 @@ func (m *Manager) commitLocked(old, nv VM, reason string) error {
 			log.Printf("usage: %v", err)
 		}
 	}
-	if old.State != nv.State {
+	if old.State != nv.State && !nv.PendingCopy {
 		m.ev.publish(Event{Type: "vm.state", VMID: nv.ID, Team: nv.Team, Size: nv.Size, State: nv.State, Prev: old.State, Reason: reason})
 	}
 	return nil
@@ -469,7 +478,7 @@ func (m *Manager) sock(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if v.State != Running {
+	if v.PendingCopy || v.State != Running {
 		return "", errf(http.StatusConflict, "vm is %s, not running", v.State)
 	}
 	m.touch(id)
@@ -509,6 +518,25 @@ func (m *Manager) reconcile() error {
 		}
 	}
 	for _, v := range vms {
+		if v.PendingCopy {
+			if v.PID > 0 && m.procs.Alive(v.PID, v.ID) {
+				m.procs.Kill(v.PID)
+			}
+			nv := v.clone()
+			nv.State, nv.PID, nv.AgentReady, nv.ResumeOnBoot = Forking, 0, false, false
+			if nv.HasSnapshot && !nv.SnapSynced {
+				os.Remove(filepath.Join(m.root(v.ID), vmstate))
+				os.Remove(filepath.Join(m.root(v.ID), memFile))
+				nv.HasSnapshot = false
+			}
+			m.mu.Lock()
+			err := m.commitLocked(v, nv, "")
+			m.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		if v.State == Stopped && v.HasSnapshot && !v.SnapSynced {
 			// Maybe a host crash before the fsync: the memory file cannot be trusted.
 			log.Printf("%s: stop snapshot was not synced; the next start cold-boots", v.ID)
@@ -720,7 +748,7 @@ func (m *Manager) resumeAll(ctx context.Context) {
 		}
 	}
 	for _, v := range m.list("") {
-		if v.ResumeOnBoot && v.State == Stopped {
+		if !v.PendingCopy && v.ResumeOnBoot && v.State == Stopped {
 			m.update(v.ID, "", func(x *VM) { x.ResumeOnBoot = false })
 			go func() {
 				if _, err := m.Start(ctx, v.ID, nil); err != nil {

@@ -150,7 +150,7 @@ func (m *Manager) prepareCreate(ctx context.Context, r CreateReq, warm string) (
 		m.mu.Lock()
 		sn, ok := m.snaps[r.Snapshot]
 		m.mu.Unlock()
-		if !ok || sn.Team != r.Team {
+		if !ok || sn.PendingCopy || sn.Team != r.Team {
 			return createPlan{}, errf(404, "snapshot not found")
 		}
 		base.Image, base.Size, base.VCPU, base.MemMiB, base.DiskGiB = sn.Image, sn.Size, sn.VCPU, sn.MemMiB, sn.DiskGiB
@@ -533,6 +533,8 @@ func (m *Manager) Start(ctx context.Context, id string, env map[string]string) (
 	switch {
 	case !ok:
 		err = errNotFound
+	case old.PendingCopy:
+		err = errf(http.StatusConflict, "copy is awaiting authorization")
 	case old.State == Running:
 		m.mu.Unlock()
 		return old.clone(), nil
@@ -573,6 +575,10 @@ func (m *Manager) Start(ctx context.Context, id string, env map[string]string) (
 // Fork clones a running (paused for the snapshot) or stopped VM. labels nil:
 // the child copies the parent's; otherwise it gets exactly these.
 func (m *Manager) Fork(ctx context.Context, id, name, team string, labels map[string]string) (VM, error) {
+	return m.fork(ctx, id, name, team, labels, false)
+}
+
+func (m *Manager) fork(ctx context.Context, id, name, team string, labels map[string]string, pending bool) (VM, error) {
 	if name != "" && !reName.MatchString(name) {
 		return VM{}, errf(400, "invalid name")
 	}
@@ -592,14 +598,14 @@ func (m *Manager) Fork(ctx context.Context, id, name, team string, labels map[st
 	if err == nil && team != "" && p.Team != team {
 		err = errNotFound
 	}
-	if err == nil && p.State != Running && p.State != Stopped {
+	if err == nil && (p.PendingCopy || (p.State != Running && p.State != Stopped)) {
 		err = errf(http.StatusConflict, "vm is %s", p.State)
 	}
 	if err != nil {
 		unlockP()
 		return VM{}, err
 	}
-	base := VM{Name: name, Team: p.Team, Image: p.Image, Size: p.Size, VCPU: p.VCPU, MemMiB: p.MemMiB,
+	base := VM{PendingCopy: pending, Name: name, Team: p.Team, Image: p.Image, Size: p.Size, VCPU: p.VCPU, MemMiB: p.MemMiB,
 		DiskGiB: p.DiskGiB, Labels: p.Labels, TTLS: p.TTLS, IdleStopS: p.IdleStopS, ParentID: p.ID}
 	if labels != nil {
 		base.Labels = labels
@@ -626,11 +632,49 @@ func (m *Manager) Fork(ctx context.Context, id, name, team string, labels map[st
 	if err != nil {
 		return m.fail(c.ID, err)
 	}
+	if pending {
+		c, err = m.update(c.ID, "", func(x *VM) { x.CopyReady, x.HasSnapshot = true, withMem })
+		if err == nil && withMem {
+			go m.syncSnapshot(c.ID)
+		}
+		return c, err
+	}
 	t3, cid := time.Now(), c.ID
 	c, err = m.bootNew(ctx, c, withMem, nil)
 	log.Printf("%s: fork of %s alloc=%dms freeze=%dms disk=%dms boot+init=%dms", cid, p.ID, t1.Sub(t0).Milliseconds(),
 		t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), time.Since(t3).Milliseconds())
 	return c, err
+}
+
+// releaseCopy is internal: the API has durably revoked the captured credentials.
+func (m *Manager) releaseCopy(ctx context.Context, id string, env map[string]string) (VM, error) {
+	if err := validEnv(env); err != nil {
+		return VM{}, err
+	}
+	unlock := m.lock(id)
+	defer unlock()
+	v, err := m.get(id)
+	if err != nil {
+		return v, err
+	}
+	if !v.PendingCopy {
+		return v, nil
+	} // an acknowledged or lost release is never replayed
+	if !v.CopyReady || v.State != Forking {
+		return VM{}, errf(409, "copy is incomplete")
+	}
+	m.mu.Lock()
+	err = m.quotaLocked(v.Team, Size{v.VCPU, v.MemMiB, v.DiskGiB}, v.ID)
+	m.mu.Unlock()
+	if err != nil {
+		return VM{}, err
+	}
+	restore := v.HasSnapshot
+	v, err = m.update(id, "", func(x *VM) { x.PendingCopy, x.CopyReady = false, false })
+	if err != nil {
+		return VM{}, err
+	}
+	return m.bootNew(ctx, v, restore, env)
 }
 
 func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {

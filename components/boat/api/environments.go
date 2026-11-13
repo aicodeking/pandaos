@@ -267,8 +267,10 @@ func (s *server) deleteEnv(w http.ResponseWriter, r *http.Request, p *principal)
 		return
 	}
 	if cur.Build != nil && cur.Build.VMID != "" {
-		if err := s.boatd.call(r.Context(), "POST", vmPath(cur.Build.VMID, "delete"), nil, nil); err != nil {
+		if err := s.discardCopyVM(cur.Build.VMID); err != nil {
 			log.Printf("%s: delete env builder %s: %v", info(r).id, cur.Build.VMID, err)
+			writeErr(w, r, 500, "cleanup_failed", "environment removed but its builder could not be retired and deleted")
+			return
 		}
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -333,7 +335,7 @@ func (s *server) runEnvBuild(env Environment, team string) {
 			}
 		} else if prev != "" && prev != vmID {
 			go func() {
-				if derr := s.boatd.call(s.baseCtx(), "POST", vmPath(prev, "delete"), nil, nil); derr != nil {
+				if derr := s.discardCopyVM(prev); derr != nil {
 					log.Printf("env %s: delete old builder %s: %v", env.ID, prev, derr)
 				}
 			}()
@@ -359,7 +361,7 @@ func (s *server) envBuildSteps(ctx context.Context, env Environment, team string
 	}
 	vmID = str(vm, "id")
 	fail := func(e error) (string, string, error) {
-		if derr := s.boatd.call(ctx, "POST", vmPath(vmID, "delete"), nil, nil); derr != nil {
+		if derr := s.discardCopyVM(vmID); derr != nil {
 			log.Printf("env %s: delete failed builder %s: %v", env.ID, vmID, derr)
 		}
 		return "", "", e
@@ -377,8 +379,8 @@ func (s *server) envBuildSteps(ctx context.Context, env Environment, team string
 			return fail(fmt.Errorf("setup exited %d: %s", exit, strings.TrimSpace(stderr)))
 		}
 	}
-	var snap map[string]any
-	if err := s.boatd.call(ctx, "POST", vmPath(vmID, "snapshots"), map[string]any{"name": fmt.Sprintf("env-%s-v%d", env.Name, env.Version)}, &snap); err != nil {
+	snap, err := s.captureSnapshot(ctx, vmID, team, fmt.Sprintf("env-%s-v%d", env.Name, env.Version))
+	if err != nil {
 		return fail(fmt.Errorf("snapshot: %w", err))
 	}
 	if err := s.boatd.call(ctx, "POST", vmPath(vmID, "stop"), nil, nil); err != nil {

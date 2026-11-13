@@ -777,6 +777,17 @@ func (s *server) compatRetype(r *http.Request, p *principal, id, typ string) *na
 	if typ == "" {
 		return nil
 	}
+	if !reVMName.MatchString(typ) {
+		res := &nativeAnswer{h: http.Header{}}
+		writeErr(res, r, 400, "invalid_request", "invalid type")
+		return res
+	}
+	// Check resize permission before stopping: stop and resize have distinct scopes.
+	if msg := s.nativeRefusal(p, "POST /v1/vms/{id}/resize"); msg != "" {
+		res := &nativeAnswer{h: http.Header{}}
+		writeErr(res, r, 403, "forbidden", msg)
+		return res
+	}
 	var vm VM
 	if err := s.boatd.call(r.Context(), "GET", vmPath(id), nil, &vm); err != nil || str(vm, "size") == typ {
 		return nil // ownVM in the callers' native calls answers a missing VM
@@ -788,7 +799,15 @@ func (s *server) compatRetype(r *http.Request, p *principal, id, typ string) *na
 		}
 	}
 	rs := s.callNative(r, p, "POST /v1/vms/{id}/resize", s.resizeVM, id, map[string]any{"size": typ, "discard_memory": true})
-	if !rs.ok() && !(typ == "default" && strings.Contains(rs.body.String(), "unknown size")) {
+	if !rs.ok() && !(typ == "default" && rs.status == 400 && strings.Contains(rs.body.String(), "unknown size")) {
+		if running {
+			// A rejected resize must not leave a previously running VM stopped.
+			if restore := s.callNative(r, p, "POST /v1/vms/{id}/start", s.startVM, id, nil); !restore.ok() {
+				res := &nativeAnswer{h: http.Header{}}
+				writeErr(res, r, 500, "restore_failed", "resize failed and the previously running VM could not be restarted")
+				return res
+			}
+		}
 		return rs
 	}
 	if running {

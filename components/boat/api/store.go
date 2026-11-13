@@ -170,6 +170,9 @@ type State struct {
 	// CommandSeq: the last ProcessID given out per VM.
 	CommandSeq map[string]int `json:"command_seq"`
 
+	// One-time generation upgrade; startup still confirms durability every run.
+	CopyCredentialsV1 bool `json:"copy_credentials_v1,omitempty"`
+
 	seq uint64 // in memory: bumped per change, so the flusher never writes an older state over a newer one
 }
 
@@ -273,6 +276,7 @@ type AIVM struct {
 	TeamID  string `json:"team_id"`
 	Gen     int    `json:"gen"`
 	Blocked bool   `json:"blocked,omitempty"`
+	Retired bool   `json:"retired,omitempty"`
 }
 
 type AIUsageRow struct {
@@ -411,6 +415,8 @@ type Store struct {
 	path string
 	cur  atomic.Pointer[State]
 	kr   *Keyring // nil = plaintext state.json (tests)
+
+	credentialPushes sync.Map // VM id -> *sync.Mutex, same lifetime as its token records
 
 	wmu     sync.Mutex // disk writes
 	written uint64     // seq of the state on disk; under wmu
@@ -667,9 +673,10 @@ func writeAtomicMode(path string, data []byte, mode os.FileMode) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	if d, err := os.Open(dir); err == nil {
-		syncFile(d)
-		d.Close()
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
 	}
-	return nil
+	defer d.Close()
+	return syncFile(d)
 }

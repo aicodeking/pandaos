@@ -152,6 +152,16 @@ func labeledSelection(vm VM) ([]string, bool) {
 // opens it. labeled: the selection is on the VM's boatd labels already, so
 // the store is only a cache and need not wait for the disk.
 func (s *server) recordVM(vmID, team string, only []string, foreign, labeled bool) error {
+	cur := s.store.Snapshot()
+	if cur.Teams[team] == nil {
+		return errors.New("VM team no longer exists")
+	}
+	if tok := cur.VMTokens[vmID]; tok != nil && (tok.Retired || tok.TeamID != team) {
+		return errors.New("VM credentials are retired")
+	}
+	if ai := cur.AIVMs[vmID]; ai != nil && (ai.Retired || ai.TeamID != team) {
+		return errors.New("VM credentials are retired")
+	}
 	if only == nil && !foreign {
 		return nil
 	}
@@ -160,12 +170,24 @@ func (s *server) recordVM(vmID, team string, only []string, foreign, labeled boo
 		write = s.store.Apply
 	}
 	return write(func(st *State) error {
+		if st.Teams[team] == nil {
+			return errors.New("VM team no longer exists")
+		}
+		if tok := st.VMTokens[vmID]; tok != nil && (tok.Retired || tok.TeamID != team) {
+			return errors.New("VM credentials are retired")
+		}
+		if ai := st.AIVMs[vmID]; ai != nil && (ai.Retired || ai.TeamID != team) {
+			return errors.New("VM credentials are retired")
+		}
 		if only != nil {
 			st.VMSecrets[vmID] = append([]string{}, only...)
 		}
 		if foreign {
 			st.ForeignVMs[vmID] = true
-			st.AIVMs[vmID] = &AIVM{TeamID: team, Blocked: true}
+			if st.AIVMs[vmID] == nil {
+				st.AIVMs[vmID] = &AIVM{TeamID: team}
+			}
+			st.AIVMs[vmID].Blocked = true
 		}
 		return nil
 	})
@@ -483,8 +505,16 @@ func (s *server) createVM(w http.ResponseWriter, r *http.Request, p *principal) 
 			// Fail loudly: without the record a later start would inject all secrets.
 			// All or none, like boatd's batch.
 			log.Printf("%s: record secret selection for %s: %v; deleting %v", info(r).id, id, err, ids)
+			cleanupFailed := false
 			for _, x := range ids {
-				s.boatd.call(r.Context(), "POST", vmPath(x, "delete"), nil, nil)
+				if cleanup := s.discardCopyVM(x); cleanup != nil {
+					log.Printf("%s: rollback VM %s: %v", info(r).id, x, cleanup)
+					cleanupFailed = true
+				}
+			}
+			if cleanupFailed {
+				writeErr(w, r, 500, "cleanup_failed", "could not record policy or clean up the new VMs")
+				return
 			}
 			writeErr(w, r, 500, "store_error", "could not record the secret selection")
 			return
@@ -683,6 +713,10 @@ func (s *server) stopVM(w http.ResponseWriter, r *http.Request, p *principal) {
 
 func (s *server) deleteVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	if _, ok := s.ownVM(w, r, p); ok {
+		if err := s.retireVM(r.PathValue("id")); err != nil {
+			s.storeErr(w, r, err)
+			return
+		}
 		if s.vmAction(w, r, "delete", nil) {
 			s.forgetVM(r.PathValue("id"))
 			s.syncJumpKeys(r.Context())
@@ -739,7 +773,7 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 		}
 		fin["labels"] = labels
 	}
-	if err := s.boatd.call(r.Context(), "POST", vmPath(parent, "fork"), fin, &child); err != nil {
+	if err := s.boatd.call(r.Context(), "POST", vmPath(parent, "fork", "prepare"), fin, &child); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
@@ -766,38 +800,47 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 		return
 	}
 	t.mark("record")
-	// The child's disk holds the parent's token; give it its own. Its native
-	// agent sessions came along too, so its conversations do as well.
-	// Its own VM token too, and the parent's token on the copied disk dies.
-	if err := s.rotateSelf(parent); err != nil {
-		log.Printf("%s: %v", info(r).id, err)
+	// The immutable child is still unbooted. Both captured identities must die before release.
+	if err := s.revokeCopiedCredentials(r.Context(), parent, p.Team.ID); err != nil {
+		log.Printf("%s: revoke copied credentials: %v", info(r).id, err)
 		if cleanup := s.discardCopyVM(childID); cleanup != nil {
-			log.Printf("%s: delete unsafe fork %s: %v", info(r).id, childID, cleanup)
-			writeErr(w, r, 500, "cleanup_failed", "token rotation failed and the new VM "+childID+" could not be deleted")
+			writeErr(w, r, 500, "cleanup_failed", "credential revocation failed; the pending VM "+childID+" could not be deleted")
 			return
 		}
-		writeErr(w, r, 500, "store_error", "could not persist VM token rotation")
+		writeErr(w, r, 500, "store_error", "could not persist copied credential revocation")
 		return
 	}
-	// Its AI proxy token too: the copy is the child's now, and may be shared.
-	if err := s.rotateAIToken(r, parent, p.Team.ID); err != nil {
-		log.Printf("%s: rotate AI token of %s after fork: %v", info(r).id, parent, err)
-	}
-	if vars, err := s.teamEnv(p.Team.ID, s.vmSecrets(childID)); err != nil {
-		log.Printf("%s: env for fork %s: %v", info(r).id, childID, err)
-	} else {
+	vars, err := s.teamEnv(p.Team.ID, s.vmSecrets(childID))
+	if err == nil {
 		for k, v := range body.Env {
 			vars[k] = v
 		}
 		extra := s.guestEnv(childID, p.Team.ID, vars)
-		if ai, err := s.aiEnvNewVM(childID, p.Team.ID); err != nil {
-			log.Printf("%s: AI env for fork %s: %v", info(r).id, childID, err)
-		} else {
-			for k, v := range ai {
-				extra[k] = v
-			}
+		if s.vmAPIURL() != "" && vars["BOAT_API_KEY"] == "" && extra["BOAT_API_KEY"] == "" {
+			err = errors.New("cannot persist the child token")
 		}
-		s.pushEnv(r, childID, vars, extra)
+		for k, v := range extra {
+			vars[k] = v
+		}
+		var ai map[string]string
+		if err == nil {
+			ai, err = s.aiEnvNewVM(childID, p.Team.ID)
+		}
+		for k, v := range ai {
+			vars[k] = v
+		}
+	}
+	if err != nil {
+		if cleanup := s.discardCopyVM(childID); cleanup != nil {
+			writeErr(w, r, 500, "cleanup_failed", "credential preparation failed; the pending VM "+childID+" could not be deleted")
+			return
+		}
+		writeErr(w, r, 500, "store_error", "cannot prepare the child credentials")
+		return
+	}
+	if err := s.boatd.call(r.Context(), "POST", vmPath(childID, "release"), map[string]any{"env": vars}, &child); err != nil {
+		writeUpstream(w, r, err)
+		return
 	}
 	t.mark("env")
 	s.copyConversations(parent, childID)
@@ -807,6 +850,9 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 
 // discardCopyVM cleans up a new copy even if its originating request was canceled.
 func (s *server) discardCopyVM(id string) error {
+	if err := s.retireVM(id); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(s.baseCtx(), 30*time.Second)
 	defer cancel()
 	if err := s.boatd.call(ctx, "POST", vmPath(id, "delete"), nil, nil); err != nil {
@@ -837,8 +883,8 @@ func (s *server) copyConversations(parent, child string) {
 // forgetVM drops boat-api state tied to a deleted VM.
 func (s *server) forgetVM(id string) {
 	err := s.store.Update(func(st *State) error {
+		retireCredentials(st, id)
 		delete(st.VMSecrets, id)
-		delete(st.AIVMs, id)
 		delete(st.Commands, id)
 		delete(st.Prompts, id)
 		delete(st.Conversations, id)
@@ -848,7 +894,6 @@ func (s *server) forgetVM(id string) {
 		delete(st.PortMinters, id)
 		delete(st.DesktopVMs, id)
 		forgetStops(st, id)
-		delete(st.VMTokens, id)
 		forgetCompatID(st, id)
 		delete(st.CommandSeq, id)
 		delete(st.CompatSetups, id)
@@ -861,6 +906,8 @@ func (s *server) forgetVM(id string) {
 	})
 	if err != nil {
 		log.Printf("forget vm %s: %v", id, err)
+		// Outside-API deletes can arrive while persistence is unavailable; startup reconciles these too.
+		s.store.Apply(func(st *State) error { retireCredentials(st, id); return nil })
 	}
 }
 
@@ -1177,6 +1224,7 @@ func (s *server) proxySnapshots(w http.ResponseWriter, r *http.Request, p *princ
 		path += "/" + url.PathEscape(sid)
 	}
 	var in any
+	name := ""
 	if r.Method == "POST" {
 		var body struct {
 			Name string `json:"name"`
@@ -1184,46 +1232,72 @@ func (s *server) proxySnapshots(w http.ResponseWriter, r *http.Request, p *princ
 		if !decode(w, r, &body) {
 			return
 		}
-		in = body
+		name = body.Name
 	}
 	if _, ok := s.ownVM(w, r, p); !ok {
 		return
 	}
 	var out any
+	if r.Method == "POST" {
+		snap, err := s.captureSnapshot(r.Context(), r.PathValue("id"), p.Team.ID, name)
+		if err != nil {
+			switch {
+			case errors.Is(err, errCopyCleanup):
+				writeErr(w, r, 500, "cleanup_failed", err.Error())
+			case errors.Is(err, errCopyCredentials):
+				writeErr(w, r, 500, "store_error", "could not persist copied credential revocation")
+			default:
+				writeUpstream(w, r, err)
+			}
+			return
+		}
+		writeJSON(w, 201, snap)
+		return
+	}
 	if err := s.boatd.call(r.Context(), r.Method, path, in, &out); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
-	status := 200
-	if r.Method == "POST" {
-		status = 201
-		if err := s.rotateSelf(r.PathValue("id")); err != nil { // the snapshot holds the VM's token
-			log.Printf("%s: %v", info(r).id, err)
-			sn, _ := out.(map[string]any)
-			sid := str(sn, "id")
-			ctx, cancel := context.WithTimeout(s.baseCtx(), 30*time.Second)
-			defer cancel()
-			if sid == "" {
-				writeErr(w, r, 500, "cleanup_failed", "token rotation failed and the new snapshot has no id for deletion")
-				return
-			}
-			if cleanup := s.boatd.call(ctx, "DELETE", path+"/"+url.PathEscape(sid), nil, nil); cleanup != nil {
-				log.Printf("%s: delete unsafe snapshot %s: %v", info(r).id, sid, cleanup)
-				writeErr(w, r, 500, "cleanup_failed", "token rotation failed and the new snapshot "+sid+" could not be deleted")
-				return
-			}
-			writeErr(w, r, 500, "store_error", "could not persist VM token rotation")
-			return
-		}
-		// and its AI proxy token: a later share or import must not carry a live one.
-		if err := s.rotateAIToken(r, r.PathValue("id"), p.Team.ID); err != nil {
-			log.Printf("%s: rotate AI token of %s after snapshot: %v", info(r).id, r.PathValue("id"), err)
-		}
-	}
 	if out == nil {
 		out = map[string]any{"ok": true}
 	}
-	writeJSON(w, status, out)
+	writeJSON(w, 200, out)
+}
+
+var (
+	errCopyCredentials = errors.New("copied credentials could not be revoked")
+	errCopyCleanup     = errors.New("pending snapshot could not be deleted")
+)
+
+func (s *server) revokeCopiedCredentials(ctx context.Context, id, team string) error {
+	if err := s.rotateSelf(id); err != nil {
+		return err
+	}
+	return s.rotateAIToken((&http.Request{}).WithContext(ctx), id, team)
+}
+
+func (s *server) captureSnapshot(ctx context.Context, id, team, name string) (VM, error) {
+	var snap VM
+	path := vmPath(id, "snapshots")
+	if err := s.boatd.call(ctx, "POST", path+"/prepare", map[string]string{"name": name}, &snap); err != nil {
+		return nil, err
+	}
+	if err := s.revokeCopiedCredentials(ctx, id, team); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(s.baseCtx(), 30*time.Second)
+		defer cancel()
+		sid := str(snap, "id")
+		if sid == "" {
+			return nil, errCopyCleanup
+		}
+		if cleanup := s.boatd.call(cleanupCtx, "DELETE", path+"/"+url.PathEscape(sid), nil, nil); cleanup != nil {
+			return nil, fmt.Errorf("%w: %s", errCopyCleanup, sid)
+		}
+		return nil, fmt.Errorf("%w: %v", errCopyCredentials, err)
+	}
+	if err := s.boatd.call(ctx, "POST", path+"/"+url.PathEscape(str(snap, "id"))+"/release", nil, &snap); err != nil {
+		return nil, err
+	}
+	return snap, nil
 }
 
 // ---- ssh & desktop ----

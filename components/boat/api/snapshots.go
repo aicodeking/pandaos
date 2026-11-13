@@ -287,25 +287,9 @@ func (s *server) rotateAIToken(r *http.Request, vmID, team string) error {
 	if _, err := s.aiBumpVM(vmID, team, true); err != nil {
 		return err
 	}
-	ai, err := s.aiEnv(vmID, team, false)
-	if err != nil {
-		return err
+	if err := s.refreshCredentials(r.Context(), vmID); err != nil {
+		log.Printf("vm %s: refresh rotated AI credentials: %v", vmID, err)
 	}
-	var vm VM
-	if err := s.boatd.call(r.Context(), "GET", vmPath(vmID), nil, &vm); err != nil {
-		return err
-	}
-	if str(vm, "state") != "running" || len(ai) == 0 {
-		return nil // the next start gets a fresh token
-	}
-	base := map[string]string{}
-	cur, _ := vm["env"].(map[string]any)
-	for k, v := range cur {
-		if sv, ok := v.(string); ok {
-			base[k] = sv
-		}
-	}
-	s.pushEnv(r, vmID, base, ai)
 	return nil
 }
 

@@ -24,8 +24,8 @@ import (
 // key. The proxy swaps the token for the key, sends the request only to that
 // provider's fixed host, and meters tokens per VM.
 //
-// A token is boatvm_<vmid>_<hex(HMAC(aiKey, "<vmid>.<gen>"))>. Gen changes at
-// every start and stop, so a copied token dies with the run it came from.
+// A token is boatvm_<vmid>_<hex(HMAC(aiKey, "copy-v1|<vmid>.<gen>"))>. Gen changes at
+// every start, stop and source copy, so a copied token dies before its copy is released.
 
 type aiProvider struct {
 	Upstream string // fixed target; never taken from the request
@@ -48,7 +48,11 @@ var aiProviders = map[string]aiProvider{
 func aiCredKey(team, provider string) string { return team + "/" + provider }
 
 func (s *server) aiToken(vmID string, gen int) string {
-	return "boatvm_" + vmID + "_" + signHex(s.keys.aiKey, fmt.Sprintf("%s.%d", vmID, gen))
+	message := fmt.Sprintf("%s.%d", vmID, gen)
+	if s.store.Snapshot().CopyCredentialsV1 {
+		message = "copy-v1|" + message
+	}
+	return "boatvm_" + vmID + "_" + signHex(s.keys.aiKey, message)
 }
 
 var reAIToken = regexp.MustCompile(`^boatvm_([A-Za-z0-9_.-]{1,64})_([0-9a-f]{64})$`)
@@ -59,8 +63,9 @@ func (s *server) aiCheckToken(tok string) (string, *AIVM, bool) {
 	if m == nil {
 		return "", nil, false
 	}
-	vm := s.store.Snapshot().AIVMs[m[1]]
-	if vm == nil || !hmac.Equal([]byte(s.aiToken(m[1], vm.Gen)), []byte(tok)) {
+	st := s.store.Snapshot()
+	vm := st.AIVMs[m[1]]
+	if vm == nil || vm.Retired || st.Teams[vm.TeamID] == nil || !hmac.Equal([]byte(s.aiToken(m[1], vm.Gen)), []byte(tok)) {
 		return "", nil, false
 	}
 	return m[1], vm, true
@@ -74,7 +79,13 @@ func (s *server) aiBumpVM(vmID, team string, wait bool) (int, error) {
 		write = s.store.Apply
 	}
 	err := write(func(st *State) error {
+		if st.Teams[team] == nil {
+			return fmt.Errorf("VM team no longer exists")
+		}
 		vm := st.AIVMs[vmID]
+		if vm != nil && (vm.Retired || vm.TeamID != team) {
+			return fmt.Errorf("VM credentials are retired")
+		}
 		if vm == nil {
 			vm = &AIVM{TeamID: team}
 			st.AIVMs[vmID] = vm
@@ -93,15 +104,19 @@ func (s *server) aiEnv(vmID, team string, bump bool) (map[string]string, error) 
 	return s.aiEnvGen(vmID, team, bump, true)
 }
 
-// aiEnvNewVM is aiEnv for a VM that was just created or forked: its first
-// generation need not wait for the disk, as losing it in a crash only means
-// the same generation is handed out again to the same VM.
+// First issuance must be durable too: the guest can outlive an API crash and be copied.
 func (s *server) aiEnvNewVM(vmID, team string) (map[string]string, error) {
-	return s.aiEnvGen(vmID, team, true, false)
+	return s.aiEnv(vmID, team, true)
 }
 
 func (s *server) aiEnvGen(vmID, team string, bump, wait bool) (map[string]string, error) {
 	st := s.store.Snapshot()
+	if st.Teams[team] == nil {
+		return nil, fmt.Errorf("VM team no longer exists")
+	}
+	if vm := st.AIVMs[vmID]; vm != nil && (vm.Retired || vm.TeamID != team) {
+		return nil, fmt.Errorf("VM credentials are retired")
+	}
 	var creds []*AICredential
 	for _, c := range st.AICreds {
 		if c.TeamID == team {
@@ -294,7 +309,13 @@ func (s *server) setAIAccess(w http.ResponseWriter, r *http.Request, p *principa
 	}
 	id := r.PathValue("id")
 	err := s.store.Update(func(st *State) error {
+		if st.Teams[p.Team.ID] == nil {
+			return fmt.Errorf("VM credentials are unavailable")
+		}
 		vm := st.AIVMs[id]
+		if vm != nil && vm.Retired {
+			return fmt.Errorf("VM credentials are unavailable")
+		}
 		if vm == nil {
 			vm = &AIVM{TeamID: p.Team.ID}
 			st.AIVMs[id] = vm
