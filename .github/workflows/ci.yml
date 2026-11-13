@@ -63,6 +63,37 @@ jobs:
       - run: shellcheck components/desktop/bin/* components/desktop/*.sh bench/cubench/os/*.sh
       - run: python3 -m py_compile components/computer-use/*.py
 
+  # The drift checks the manual boatbench workflow ran, on every push: committed reports
+  # must regenerate byte for byte from their raw results, and docs/cost.md must carry
+  # what `boatbench.py costs` prints today.
+  bench-drift:
+    permissions:
+      contents: read
+    name: boatbench unit tests + results/docs drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: python3 bench/boatbench/test_boatbench.py
+      - run: python3 bench/boatbench/test_boatdev.py
+      - name: results/regen.sh leaves the tree unchanged
+        run: |
+          sh bench/boatbench/results/regen.sh
+          git diff --exit-code
+          [ -z "$(git status --porcelain)" ] || { git status --porcelain; exit 1; }
+      - name: boatbench.py costs matches docs/cost.md
+        run: |
+          python3 bench/boatbench/boatbench.py costs >/tmp/costs.md
+          python3 - <<'PY'
+          doc = open("docs/cost.md").read()
+          # Every table and note it prints; its headings are reworded in the doc.
+          blocks = [b.strip() for b in open("/tmp/costs.md").read().split("\n\n") if b.strip() and not b.startswith("#")]
+          stale = [b for b in blocks if b not in doc]
+          for b in stale:
+              print("docs/cost.md lacks this `boatbench.py costs` output (paste it in):\n" + b + "\n")
+          raise SystemExit(1 if stale or not blocks else 0)
+          PY
+
   cubench:
     permissions:
       contents: read
