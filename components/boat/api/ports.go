@@ -77,6 +77,10 @@ func (s *server) addPort(w http.ResponseWriter, r *http.Request, p *principal) {
 		return
 	}
 	public := body.Auth == "public"
+	if public && p.VMID != "" && !p.Team.SelfToken.PublicPorts {
+		writeErr(w, r, 403, "forbidden", "a VM's own token cannot open public ports; use a team key, or a team admin can allow it (PUT /v1/teams/{id}/self-token)")
+		return
+	}
 	if _, ok := s.ownVM(w, r, p); !ok {
 		return
 	}

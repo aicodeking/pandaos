@@ -11673,6 +11673,51 @@
      }
     }
    }
+  },
+  "/v1/teams/{id}/self-token": {
+   "put": {
+    "summary": "What a VM's own token (BOAT_API_KEY inside the VM) may do on its VM beyond the default: open auth=public ports, add ssh keys. Both off by default.",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Teams"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "team id"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SelfTokenPolicy"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SelfTokenPolicy"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
   }
  },
  "components": {
@@ -12797,6 +12842,9 @@
       "items": {
        "type": "string"
       }
+     },
+     "self_token": {
+      "$ref": "#/components/schemas/SelfTokenPolicy"
      }
     },
     "required": [
@@ -19435,6 +19483,17 @@
      "user_id",
      "unowned"
     ]
+   },
+   "SelfTokenPolicy": {
+    "type": "object",
+    "properties": {
+     "public_ports": {
+      "type": "boolean"
+     },
+     "ssh": {
+      "type": "boolean"
+     }
+    }
    }
   },
   "responses": {

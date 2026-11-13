@@ -44,6 +44,14 @@ type Team struct {
 	Created time.Time `json:"created"`
 	// AcceptSharesFrom: teams whose snapshot grants this team sees and takes.
 	AcceptSharesFrom []string `json:"accept_shares_from,omitempty"`
+	// SelfToken: what a VM's own token may do beyond the default (selftoken.go).
+	SelfToken SelfTokenPolicy `json:"self_token,omitzero"`
+}
+
+// SelfTokenPolicy: off by default; a team admin opts in.
+type SelfTokenPolicy struct {
+	PublicPorts bool `json:"public_ports"` // open auth=public ports on its own VM
+	SSH         bool `json:"ssh"`          // add ssh keys to its own VM
 }
 
 func (t *Team) role(userID string) string {
@@ -244,6 +252,9 @@ type SnapShare struct {
 	Expires    *time.Time `json:"expires,omitempty"`
 	Uses       int        `json:"uses"`
 	Created    time.Time  `json:"created"`
+	// KeyID minted a code link: the link dies with it (keyAlive). Empty on
+	// links from before this field; those keep their expiry (at most 30 days).
+	KeyID string `json:"key_id,omitempty"`
 }
 
 type AICredential struct {

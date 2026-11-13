@@ -398,6 +398,7 @@ func (s *server) routes() {
 	s.route("DELETE /v1/teams/{id}", "admin", s.deleteTeam)
 	s.route("POST /v1/teams/{id}/members", "admin", s.addMember)
 	s.route("PUT /v1/teams/{id}/share-allowlist", "admin", s.setShareAllowlist)
+	s.route("PUT /v1/teams/{id}/self-token", "admin", s.setSelfTokenPolicy)
 	s.route("DELETE /v1/teams/{id}/members/{user}", "admin", s.removeMember)
 
 	s.route("GET /v1/keys", "", s.listKeys)

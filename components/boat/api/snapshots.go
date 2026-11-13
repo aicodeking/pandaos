@@ -233,6 +233,7 @@ func (s *server) createShare(w http.ResponseWriter, r *http.Request, p *principa
 		secret := randHex(32)
 		sh.CodeSalt = randHex(16)
 		sh.CodeHash = s.keys.HashSecret(sh.CodeSalt, secret)
+		sh.KeyID = p.Key.ID
 		view.Code = "bsh_" + sh.ID + "_" + secret
 		if s.cfg.PublicURL != "" {
 			view.URL = strings.TrimRight(s.cfg.PublicURL, "/") + "/v1/snapshot-links/" + view.Code + "/download"
@@ -365,7 +366,8 @@ func (s *server) shareByCode(code string) *SnapShare {
 	}
 	sh := s.store.Snapshot().SnapShares[m[1]]
 	if sh == nil || sh.CodeHash == "" || !shareLive(sh) ||
-		!constEq(s.keys.HashSecret(sh.CodeSalt, m[2]), sh.CodeHash) {
+		!constEq(s.keys.HashSecret(sh.CodeSalt, m[2]), sh.CodeHash) ||
+		(sh.KeyID != "" && !s.keyAlive(sh.KeyID, sh.TeamID, time.Now())) {
 		return nil
 	}
 	return sh

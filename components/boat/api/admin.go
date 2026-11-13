@@ -210,6 +210,7 @@ type teamView struct {
 	Created time.Time `json:"created"`
 	// AcceptSharesFrom is shown to the team's own members only.
 	AcceptSharesFrom []string `json:"accept_shares_from,omitempty"`
+	SelfToken        *SelfTokenPolicy `json:"self_token,omitempty"`
 }
 
 func (s *server) listTeams(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -229,7 +230,35 @@ func (s *server) getTeam(w http.ResponseWriter, r *http.Request, p *principal) {
 		writeErr(w, r, 404, "not_found", "team not found")
 		return
 	}
-	writeJSON(w, 200, teamView{ID: t.ID, Name: t.Name, Role: t.role(p.User.ID), Members: t.Members, Created: t.Created, AcceptSharesFrom: t.AcceptSharesFrom})
+	writeJSON(w, 200, teamView{ID: t.ID, Name: t.Name, Role: t.role(p.User.ID), Members: t.Members, Created: t.Created, AcceptSharesFrom: t.AcceptSharesFrom, SelfToken: &t.SelfToken})
+}
+
+// setSelfTokenPolicy: PUT /v1/teams/{id}/self-token. Lets VM tokens open
+// public ports or add ssh keys on their own VM (both refused by default).
+func (s *server) setSelfTokenPolicy(w http.ResponseWriter, r *http.Request, p *principal) {
+	var body SelfTokenPolicy
+	if !decode(w, r, &body) {
+		return
+	}
+	t, _, ok := s.teamAdmin(w, r, p)
+	if !ok {
+		return
+	}
+	err := s.store.Update(func(st *State) error {
+		team := st.Teams[t.ID]
+		if team == nil {
+			return errConflict
+		}
+		nt := *team
+		nt.SelfToken = body
+		st.Teams[t.ID] = &nt
+		return nil
+	})
+	if err != nil {
+		s.storeErr(w, r, err)
+		return
+	}
+	writeJSON(w, 200, body)
 }
 
 const maxShareAllow = 64

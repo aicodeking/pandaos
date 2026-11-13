@@ -1158,6 +1158,10 @@ func (s *server) sshVM(w http.ResponseWriter, r *http.Request, p *principal) {
 		writeErr(w, r, 400, "invalid_request", "public_key must be a single OpenSSH public key line")
 		return
 	}
+	if pub != "" && p.VMID != "" && !p.Team.SelfToken.SSH {
+		writeErr(w, r, 403, "forbidden", "a VM's own token cannot add ssh keys; use a team key, or a team admin can allow it (PUT /v1/teams/{id}/self-token)")
+		return
+	}
 	vm, ok := s.ownVM(w, r, p)
 	if !ok {
 		return
