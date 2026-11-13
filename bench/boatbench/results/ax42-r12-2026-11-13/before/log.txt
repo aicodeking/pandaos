@@ -1,0 +1,58 @@
+09:06:11Z created bb-r12-3bf137 vm-1bb04170bcbc, exec-ready in 0.32s
+09:06:17Z virtio-blk virtio1 IRQ 27, smp_affinity_list 0-3, rq_affinity 1, 4 vCPUs; interrupts:  27:          0          0          0       7653   IO-APIC   6-edge      virtio1
+
+09:06:26Z r1 booted (affinity 0-3, rq_affinity 1): fio on vCPU 0: 219222 IOPS
+09:06:34Z r1 booted (affinity 0-3, rq_affinity 1): fio on vCPU 1: 216794 IOPS
+09:06:42Z r1 booted (affinity 0-3, rq_affinity 1): fio on vCPU 2: 216906 IOPS
+09:06:51Z r1 booted (affinity 0-3, rq_affinity 1): fio on vCPU 3: 58578 IOPS
+09:06:51Z r1 booted: interrupts per vCPU during the round: [0, 0, 0, 1495542]
+09:06:59Z r1 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 0: 213160 IOPS
+09:07:07Z r1 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 1: 58419 IOPS
+09:07:16Z r1 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 2: 216606 IOPS
+09:07:24Z r1 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 3: 215664 IOPS
+09:07:24Z r1 irq-moved: interrupts per vCPU during the round: [0, 1493173, 0, 1]
+09:07:32Z r1 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 0: 174692 IOPS
+09:07:40Z r1 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 1: 58775 IOPS
+09:07:49Z r1 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 2: 173363 IOPS
+09:07:57Z r1 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 3: 172322 IOPS
+09:07:57Z r1 rq-affinity-2: interrupts per vCPU during the round: [0, 1345775, 0, 0]
+09:08:05Z r2 booted (affinity 0-3, rq_affinity 1): fio on vCPU 0: 215724 IOPS
+09:08:14Z r2 booted (affinity 0-3, rq_affinity 1): fio on vCPU 1: 58916 IOPS
+09:08:22Z r2 booted (affinity 0-3, rq_affinity 1): fio on vCPU 2: 215935 IOPS
+09:08:30Z r2 booted (affinity 0-3, rq_affinity 1): fio on vCPU 3: 217033 IOPS
+09:08:30Z r2 booted: interrupts per vCPU during the round: [0, 1473923, 0, 0]
+09:08:39Z r2 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 0: 213989 IOPS
+09:08:47Z r2 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 1: 58846 IOPS
+09:08:55Z r2 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 2: 215881 IOPS
+09:09:04Z r2 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 3: 215549 IOPS
+09:09:04Z r2 irq-moved: interrupts per vCPU during the round: [0, 1474952, 0, 0]
+09:09:12Z r2 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 0: 174150 IOPS
+09:09:20Z r2 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 1: 58733 IOPS
+09:09:29Z r2 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 2: 172636 IOPS
+09:09:37Z r2 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 3: 171817 IOPS
+09:09:37Z r2 rq-affinity-2: interrupts per vCPU during the round: [0, 1340618, 0, 0]
+09:09:45Z r3 booted (affinity 0-3, rq_affinity 1): fio on vCPU 0: 215562 IOPS
+09:09:54Z r3 booted (affinity 0-3, rq_affinity 1): fio on vCPU 1: 58782 IOPS
+09:10:02Z r3 booted (affinity 0-3, rq_affinity 1): fio on vCPU 2: 213015 IOPS
+09:10:10Z r3 booted (affinity 0-3, rq_affinity 1): fio on vCPU 3: 215520 IOPS
+09:10:10Z r3 booted: interrupts per vCPU during the round: [0, 1474317, 0, 0]
+09:10:18Z r3 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 0: 214902 IOPS
+09:10:27Z r3 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 1: 57704 IOPS
+09:10:35Z r3 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 2: 216133 IOPS
+09:10:43Z r3 irq-moved (affinity 1, rq_affinity 1): fio on vCPU 3: 217623 IOPS
+09:10:43Z r3 irq-moved: interrupts per vCPU during the round: [0, 1468854, 0, 0]
+09:10:52Z r3 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 0: 173364 IOPS
+09:11:00Z r3 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 1: 58943 IOPS
+09:11:08Z r3 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 2: 171688 IOPS
+09:11:17Z r3 rq-affinity-2 (affinity 0-3, rq_affinity 2): fio on vCPU 3: 172264 IOPS
+09:11:17Z r3 rq-affinity-2: interrupts per vCPU during the round: [0, 1341060, 0, 0]
+09:11:17Z deleted vm-1bb04170bcbc; GET /v1/vms now: {"vms":[]}
+09:11:17Z /var/lib/boat/images/ubuntu-24.04/rootfs.ext4: /var/lib/boat/images/ubuntu-24.04/rootfs.ext4: 5 extents found | ---------------C------ /var/lib/boat/images/ubuntu-24.04/rootfs.ext4 | allocated 3.0G
+09:11:17Z FICLONE (cp --reflink=always, wall incl. process start) of rootfs.ext4 #1: 2998 us
+09:11:18Z FICLONE (cp --reflink=always, wall incl. process start) of rootfs.ext4 #2: 2513 us
+09:11:18Z FICLONE (cp --reflink=always, wall incl. process start) of rootfs.ext4 #3: 2873 us
+09:11:18Z /var/lib/boat/bb-r12-scratch/sparse.ext4: /var/lib/boat/bb-r12-scratch/sparse.ext4: 5 extents found | ---------------C------ /var/lib/boat/bb-r12-scratch/sparse.ext4 | allocated 3.0G
+09:11:18Z FICLONE (cp --reflink=always, wall incl. process start) of sparse.ext4 #1: 2762 us
+09:11:18Z FICLONE (cp --reflink=always, wall incl. process start) of sparse.ext4 #2: 3155 us
+09:11:18Z FICLONE (cp --reflink=always, wall incl. process start) of sparse.ext4 #3: 2816 us
+09:11:18Z scratch removed: yes

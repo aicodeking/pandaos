@@ -1,0 +1,10 @@
+09:11:57Z dev 259:0 [none] mq-deadline kyber  wbt_lat_usec=2000 6.18.57 Dirty: 51648 kB Writeback: 0 kB 
+09:12:18Z t1 alone: reader 17574 IOPS, clat mean 56 us, p99 67 us, max 8217 us | writer - | r io.latency: 
+09:12:34Z t1 none: reader 15953 IOPS, clat mean 62 us, p99 250 us, max 12520 us | writer 8192 MiB in 7.648 s incl. fsync | r io.latency: 
+09:12:52Z t1 iolat: reader 15952 IOPS, clat mean 62 us, p99 254 us, max 15974 us | writer 8192 MiB in 7.547 s incl. fsync | r io.latency: 259:0 target=10000 
+09:13:08Z t2 alone: reader 17607 IOPS, clat mean 56 us, p99 62 us, max 8188 us | writer - | r io.latency: 
+09:13:24Z t2 none: reader 15931 IOPS, clat mean 62 us, p99 252 us, max 16245 us | writer 8192 MiB in 7.55 s incl. fsync | r io.latency: 
+09:13:42Z t2 iolat: reader 15892 IOPS, clat mean 62 us, p99 252 us, max 8099 us | writer 8192 MiB in 7.572 s incl. fsync | r io.latency: 259:0 target=10000 
+09:13:58Z t3 alone: reader 17541 IOPS, clat mean 56 us, p99 62 us, max 8792 us | writer - | r io.latency: 
+09:14:14Z t3 none: reader 15971 IOPS, clat mean 62 us, p99 250 us, max 12427 us | writer 8192 MiB in 7.539 s incl. fsync | r io.latency: 
+09:14:32Z t3 iolat: reader 15922 IOPS, clat mean 62 us, p99 252 us, max 8117 us | writer 8192 MiB in 7.581 s incl. fsync | r io.latency: 259:0 target=10000 

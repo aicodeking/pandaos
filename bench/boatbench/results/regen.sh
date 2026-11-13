@@ -11,3 +11,4 @@ B=../boatbench.py
 (cd ax42-r11-2026-11-13 && python3 ../$B report lifecycle-b/results-*.json disk-d/results-*.json --server ax42 --out report.md >/dev/null
  python3 ../$B report lifecycle-b-cold/results-*.json --server ax42 --out report-cold.md >/dev/null
  python3 ../$B report disk-d-writeback/results-*.json --server ax42 --out report-writeback.md >/dev/null)
+(cd ax42-r12-2026-11-13 && python3 ../$B report disk-d-pinned/results-*.json --server ax42 --out report-disk-pinned.md >/dev/null)

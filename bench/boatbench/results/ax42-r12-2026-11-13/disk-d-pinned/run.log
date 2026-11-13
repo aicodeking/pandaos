@@ -1,0 +1,10 @@
+[08:41:53] r0 probe
+[08:41:54] r0 disk
+[08:48:19] r0 done: {"create_ready_s": 0.29836976301157847, "seq_write_mbps": 1571.2, "seq_read_mbps": 8925.4, "rand_write_iops": 224909.0, "rand_read_iops": 217575.0, "pts_rand_read_iops": 218278.0, "pts_rand_write_iops": 260108.0, "pts_seq_write_mibps": 1774.1, "fsync_rand_write_iops": 25883.0, "seq_write_endfsync_mbps": 1702.7, "blk_irq_cpu": 3, "rand_read_irq_cpu_iops": 58891.0, "rand_read_other_cpu_iops": 216963.0}
+[08:48:19] r1 probe
+[08:48:19] r1 disk
+[08:54:44] r1 done: {"create_ready_s": 0.31068049000168685, "seq_write_mbps": 1504.7, "seq_read_mbps": 8878.3, "rand_write_iops": 222559.0, "rand_read_iops": 215100.0, "pts_rand_read_iops": 59484.0, "pts_rand_write_iops": 259721.0, "pts_seq_write_mibps": 1622.2, "fsync_rand_write_iops": 26128.0, "seq_write_endfsync_mbps": 1584.4, "blk_irq_cpu": 3, "rand_read_irq_cpu_iops": 59341.0, "rand_read_other_cpu_iops": 217216.0}
+[08:54:44] r2 probe
+[08:54:45] r2 disk
+[09:01:09] r2 done: {"create_ready_s": 0.31560790100775193, "seq_write_mbps": 1603.4, "seq_read_mbps": 7322.8, "rand_write_iops": 228400.0, "rand_read_iops": 219617.0, "pts_rand_read_iops": 59143.0, "pts_rand_write_iops": 257104.0, "pts_seq_write_mibps": 1728.2, "fsync_rand_write_iops": 25754.0, "seq_write_endfsync_mbps": 1614.1, "blk_irq_cpu": 3, "rand_read_irq_cpu_iops": 59090.0, "rand_read_other_cpu_iops": 216919.0}
+/tmp/r12out/disk-d-pinned/results-pandaos-2026-11-13T084153Z.json
