@@ -55,6 +55,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: python3 bench/test_collect.py
       - run: python3 tests/test_closures.py
+      - run: bash tests/test-update-verify.sh
+      - run: shellcheck -s bash nixos/modules/update-verify.sh tests/test-update-verify.sh
       - run: bash components/agent-clis/test-agents-install.sh
       - run: sh components/desktop/test-agents-status.sh components/desktop/bin/panda-agents-status
       - run: sh components/desktop/test-config.sh

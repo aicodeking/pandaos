@@ -40,6 +40,8 @@ type fakeBoatd struct {
 	// discardPuts counts file uploads instead of keeping them (memory tests).
 	discardPuts bool
 	putBytes    int64
+	afterCopy   func() // inject a failure after boatd copied a disk
+	cleanupErr  bool   // refuse VM/snapshot deletion
 }
 
 func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
@@ -196,6 +198,10 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			vm["state"] = "stopped"
 			vm["has_snapshot"] = in["force"] != true
 		case "delete":
+			if f.cleanupErr {
+				writeJSON(w, 500, map[string]string{"error": "deletion refused"})
+				return
+			}
 			delete(f.vms, vm["id"].(string))
 			for k, sn := range f.snaps { // like boatd: a VM's snapshots go with it
 				if sn["vm_id"] == vm["id"] {
@@ -212,6 +218,9 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 				labels = l
 			}
 			f.vms[id] = VM{"id": id, "name": in["name"], "team": in["team"], "state": "running", "labels": labels}
+			if f.afterCopy != nil {
+				f.afterCopy()
+			}
 			writeJSON(w, 201, f.vms[id])
 			return
 		case "exec":
@@ -258,6 +267,12 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 				writeJSON(w, 409, map[string]string{"error": "stop snapshot cannot change shape; set discard_memory"})
 				return
 			}
+			switch in["size"] {
+			case "default", "small", "large", "xlarge":
+			default:
+				writeJSON(w, 400, map[string]string{"error": fmt.Sprintf("unknown size %q", in["size"])})
+				return
+			}
 			vm["size"] = in["size"]
 			f.resizes = append(f.resizes, in)
 		case "agent":
@@ -295,6 +310,9 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			f.n++
 			sid := fmt.Sprintf("snap%d", f.n)
 			f.snaps[sid] = map[string]any{"id": sid, "name": in["name"], "vm_id": vm["id"], "team": vm["team"]}
+			if f.afterCopy != nil {
+				f.afterCopy()
+			}
 			writeJSON(w, 201, f.snaps[sid])
 			return
 		}
@@ -348,6 +366,10 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 	mux.HandleFunc("DELETE /v1/vms/{id}/snapshots/{sid}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.cleanupErr {
+			writeJSON(w, 500, map[string]string{"error": "deletion refused"})
+			return
+		}
 		delete(f.snaps, r.PathValue("sid"))
 		writeJSON(w, 200, map[string]bool{"ok": true})
 	})

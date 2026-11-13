@@ -12,6 +12,7 @@ import (
 	"path"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // boat.dev's commands and files on the native exec and file calls.
@@ -153,6 +154,23 @@ func (s *server) compatSyncExec(w http.ResponseWriter, body io.Reader, cid, cwd 
 	writeCompat(w, 200, "command.finished", fields)
 }
 
+type compatUTF8Stream struct{ pending []byte }
+
+// text retains an incomplete codepoint until more bytes arrive or the stream ends.
+func (u *compatUTF8Stream) text(data []byte, final bool) string {
+	if len(u.pending) > 0 {
+		data = append(u.pending, data...)
+	}
+	n := 0
+	for n < len(data) && (final || utf8.FullRune(data[n:])) {
+		_, size := utf8.DecodeRune(data[n:])
+		n += size
+	}
+	text := strings.ToValidUTF8(string(data[:n]), "�")
+	u.pending = append(u.pending[:0], data[n:]...)
+	return text
+}
+
 // compatStreamExec relays the native frames as boat.dev's stream: started,
 // stdout/stderr {data}, then one exit or error.
 func (s *server) compatStreamExec(w http.ResponseWriter, body io.Reader, cid string) {
@@ -168,20 +186,33 @@ func (s *server) compatStreamExec(w http.ResponseWriter, body io.Reader, cid str
 		}
 	}
 	send(map[string]any{"type": "started", "commandId": cid})
+	streams := map[string]*compatUTF8Stream{"stdout": {}, "stderr": {}}
+	sendData := func(stream string, data []byte, final bool) {
+		if text := streams[stream].text(data, final); text != "" {
+			send(map[string]any{"type": stream, "data": text})
+		}
+	}
+	flush := func() {
+		sendData("stdout", nil, true)
+		sendData("stderr", nil, true)
+	}
 	ended := false
 	err := readFrames(body, func(fr execFrame) {
 		switch {
 		case fr.Stream == "stdout" || fr.Stream == "stderr":
 			data, _ := base64.StdEncoding.DecodeString(fr.DataB64)
-			send(map[string]any{"type": fr.Stream, "data": strings.ToValidUTF8(string(data), "�")})
+			sendData(fr.Stream, data, false)
 		case fr.Exit != nil:
+			flush()
 			ended = true
 			send(map[string]any{"type": "exit", "exitCode": *fr.Exit, "success": *fr.Exit == 0 && !fr.TimedOut, "timedOut": fr.TimedOut})
 		case fr.Error != "":
+			flush()
 			ended = true
 			send(map[string]any{"type": "error", "error": "command_failed", "message": fr.Error, "retryable": false})
 		}
 	})
+	flush()
 	if !ended {
 		msg := "the command's output ended without an exit status"
 		if err != nil {

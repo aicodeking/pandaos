@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import admission  # noqa: E402
@@ -520,6 +521,85 @@ class Runner(unittest.TestCase):
         self.assertEqual(len(each), 10)
         self.assertGreaterEqual(wall, each[-1])
         self.assertEqual(d.live, set())
+
+
+class CleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.d = FakeDriver()
+        self.d.live.add("unowned")
+        patch = mock.patch.object(self.d, "delete", wraps=self.d.delete)
+        self.delete = patch.start()
+        self.addCleanup(patch.stop)
+
+    def assert_cleaned(self):
+        self.assertEqual(self.d.live, {"unowned"})
+        self.assertCountEqual(self.delete.call_args_list,
+                              [mock.call(f"vm{i}") for i in range(1, self.d.n + 1)])
+        self.assertEqual(self.d.snaps, set())
+
+    @staticmethod
+    def partly_ready(d, vm, t0):
+        if vm != "vm1":
+            raise TimeoutError("readiness broke")
+        return 0.1
+
+    def test_repeat_create_timeout_cleans_owned_vm(self):
+        with mock.patch.object(boatbench, "READY_TIMEOUT_S", 0):
+            rec = boatbench.Repeat(self.d, "abc", 0, set()).run()
+        self.assertIn("TimeoutError:", rec["errors"]["create"])
+        self.assert_cleaned()
+
+    def test_repeat_fork_and_snapshot_timeouts_clean_owned_vms(self):
+        with mock.patch.object(boatbench, "wait_exec_ready", self.partly_ready):
+            rec = boatbench.Repeat(self.d, "abc", 0, set("b")).run()
+        self.assertEqual(rec["errors"], {"snapshot": "TimeoutError: readiness broke",
+                                         "fork": "TimeoutError: readiness broke"})
+        self.assert_cleaned()
+
+    def test_repeat_workload_failure_cleans_owned_vm(self):
+        with mock.patch.object(self.d, "exec", side_effect=RuntimeError("workload broke")):
+            rec = boatbench.Repeat(self.d, "abc", 0, set()).run()
+        self.assertEqual(rec["errors"], {"probe": "RuntimeError: workload broke"})
+        self.assert_cleaned()
+
+    def test_concurrent_timeouts_clean_all_owned_vms(self):
+        with mock.patch.object(boatbench, "READY_TIMEOUT_S", 0):
+            with self.assertRaisesRegex(RuntimeError, "3/3 creates failed: TimeoutError:"):
+                boatbench.concurrent_create(self.d, "abc", 0, n=3)
+        self.assert_cleaned()
+
+    def test_concurrent_partial_create_and_readiness_failure_clean_owned_vms(self):
+        self.d.max_vms = 3  # two new VMs plus the unrelated VM
+        with mock.patch.object(boatbench, "wait_exec_ready", self.partly_ready):
+            with self.assertRaisesRegex(RuntimeError, "2/3 creates failed:"):
+                boatbench.concurrent_create(self.d, "abc", 0, n=3)
+        self.assertEqual(self.d.n, 2)
+        self.assert_cleaned()
+
+    def test_density_readiness_failure_cleans_owned_vms(self):
+        with mock.patch.object(boatbench, "wait_exec_ready", self.partly_ready):
+            rec, _ = density.Density(self.d, "bb-x-0", (1, 2, 3), lambda m: None,
+                                     boatbench.gexec, boatbench.ready).run()
+        self.assertEqual(rec["max_vms"], 1)
+        self.assertEqual(len(rec["errors"]), 2)
+        self.assertTrue(all("TimeoutError: readiness broke" in e for e in rec["errors"]))
+        self.assert_cleaned()
+
+    def test_density_setup_and_workload_failures_clean_owned_vms(self):
+        execute = self.d.exec
+        for failed_script in (W.NODE_SETUP, density.RUN):
+            with self.subTest(script="setup" if failed_script == W.NODE_SETUP else "workload"):
+                def fail(vm, cmd, timeout=600):
+                    if cmd == failed_script:
+                        raise RuntimeError("workload broke")
+                    return execute(vm, cmd, timeout)
+
+                with mock.patch.object(self.d, "exec", side_effect=fail):
+                    rec, _ = density.Density(self.d, "bb-x-0", (1, 2, 3), lambda m: None,
+                                             boatbench.gexec, boatbench.ready).run()
+                self.assertTrue(rec["errors"])
+                self.assertTrue(all("RuntimeError: workload broke" in e for e in rec["errors"]))
+                self.assert_cleaned()
 
 
 class DensityTests(unittest.TestCase):

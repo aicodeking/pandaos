@@ -241,22 +241,23 @@ func (m *Manager) writeCgroup(v VM, file, val string) {
 // disk's speed (run 41584046201). A dump is at most the VM's RAM, so the limit moves up
 // by that and no further: a resumed guest may write to its disk during the window, and
 // a tenant can keep the window open by snapshotting in a loop.
-func (m *Manager) liftMemLimits(v VM) {
-	m.dumpStarted(v.ID)
+func (m *Manager) liftMemLimits(v VM) uint64 {
+	generation := m.dumpStarted(v.ID)
 	if m.cfg.cgroupLimits {
 		_, hard := m.cfg.memLimits(v)
 		limit := strconv.FormatInt(hard+int64(v.MemMiB)<<20, 10)
 		m.writeCgroup(v, "memory.max", limit)
 		m.writeCgroup(v, "memory.high", limit)
 	}
+	return generation
 }
 
 // memMaxWait bounds how long setMemLimits waits for a VM's usage to fit under memory.max.
 var memMaxWait = 30 * time.Second
 
-// setMemLimits gives a VM its limits back after a dump. memory.high first: it reclaims
-// and throttles, never kills. memory.max only once the usage fits under it: written
-// over a higher memory.current, the kernel OOM-kills the VMM as soon as reclaim stalls
+// setMemLimits requires the VM lock and gives its limits back after a dump.
+// memory.high first: it reclaims and throttles, never kills. memory.max only once
+// usage fits under it: over a higher memory.current, the kernel OOM-kills the VMM as soon as reclaim stalls
 // (the dump's page cache in writeback), which is how a VM died right after a refused
 // fork (boat-e2e 43224143615: firecracker gone without a word, no guest panic).
 // memory.reclaim pushes the usage down meanwhile. Past memMaxWait the max stays lifted

@@ -34,29 +34,34 @@ const (
 // an updated root/mem. The VM stays paused: callers resume (fork, snapshot)
 // or kill (stop) it.
 func (m *Manager) takeSnapshot(ctx context.Context, v VM, fsync bool) (VM, error) {
-	diff, err := m.dumpSnapshot(ctx, v, fsync)
+	diff, _, err := m.dumpSnapshot(ctx, v, fsync)
 	if err != nil {
 		return v, err
 	}
-	return m.installSnapshot(v, diff)
+	nv, err := m.installSnapshot(v, diff)
+	if err != nil {
+		m.setMemLimits(v)
+	}
+	return nv, err
 }
 
 // dumpSnapshot leaves the VM paused and root/snap.vmstate + its memory (a sparse
-// diff if the return is true) written, not yet installed as root/mem.
-func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, error) {
+// diff if the return is true) written, not yet installed as root/mem. The generation
+// owns cleanup of its lifted limits; zero means no dump remains to clean up.
+func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, uint64, error) {
 	root := m.root(v.ID)
 	t0 := time.Now()
 	m.guestSync(ctx, v)
 	t1 := time.Now()
 	fc := newFC(filepath.Join(root, apiSock))
 	if err := fc.pause(ctx); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	t2 := time.Now()
 	diff := m.cfg.DiffSnapshots && v.DiffOK
 	noCompress(root) // a VM from before makeStoreDir set it
 	os.Remove(filepath.Join(root, memNew))
-	m.liftMemLimits(v)
+	generation := m.liftMemLimits(v)
 	memPath, typ := memNew, "Full"
 	if diff {
 		memPath, typ = snapDiff, "Diff"
@@ -70,12 +75,12 @@ func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, err
 	if err != nil {
 		m.setMemLimits(v)
 		m.failSnapshot(v)
-		return false, err
+		return false, 0, err
 	}
 	written := allocatedBytes(filepath.Join(root, snapDiff)) + allocatedBytes(filepath.Join(root, memNew))
 	log.Printf("%s: snapshot (%s) sync=%dms pause=%dms write=%dms written=%dMiB", v.ID, map[bool]string{true: "diff", false: "full"}[diff],
 		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), time.Since(t2).Milliseconds(), written>>20)
-	return diff, nil
+	return diff, generation, nil
 }
 
 // failSnapshot drops a partial snapshot. Firecracker may have cleared its dirty
@@ -238,14 +243,16 @@ func (m *Manager) syncSnapshot(id string) {
 }
 
 // settleAfterDump starts the base's writeback now, so that the next merge finds
-// it clean, then gives the VM its memory limits back.
-func (m *Manager) settleAfterDump(v VM) {
+// it clean, then gives the VM its memory limits back only if this dump still owns them.
+func (m *Manager) settleAfterDump(v VM, generation uint64) {
 	if err := fsyncFile(filepath.Join(m.root(v.ID), memFile)); err != nil {
 		log.Printf("%s: flush mem: %v", v.ID, err)
 	}
 	unlock := m.lock(v.ID) // not lowering the limits under the next dump's lift
 	defer unlock()
-	m.setMemLimits(v)
+	if m.dumpGeneration(v.ID) == generation {
+		m.setMemLimits(v)
+	}
 }
 
 func allocatedBytes(path string) int64 {
@@ -347,7 +354,7 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 		}
 		return v.HasSnapshot, nil
 	}
-	diff, err := m.dumpSnapshot(ctx, v, false)
+	diff, generation, err := m.dumpSnapshot(ctx, v, false)
 	t0 := time.Now()
 	if err == nil {
 		err = m.cp(filepath.Join(root, diskFile), filepath.Join(dst, diskFile))
@@ -365,7 +372,9 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 	}
 	m.resets.fire(v.ID) // the snapshot reset the guest's vsock connections, now it runs again
 	if err != nil {
-		m.setMemLimits(v)
+		if generation != 0 {
+			m.setMemLimits(v)
+		}
 		return false, err
 	}
 	// The rest is immutable (root/mem is only ever renamed over): no need to stay paused.
@@ -380,7 +389,7 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 		err = m.cp(filepath.Join(root, snapState), filepath.Join(dst, vmstate)) // VM dirs may be subvolumes: no rename
 	}
 	os.Remove(filepath.Join(root, snapState))
-	go m.settleAfterDump(v)
+	go m.settleAfterDump(v, generation)
 	log.Printf("%s: freeze disk=%dms rest=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
 	return err == nil, err
 }

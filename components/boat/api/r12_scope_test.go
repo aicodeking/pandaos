@@ -153,7 +153,9 @@ func TestSelfTokenLinksDieOnRotate(t *testing.T) {
 	}
 	u := strings.TrimPrefix(d["url"].(string), e.api.URL)
 	gen := e.srv.store.Snapshot().RouteGens[vm]
-	e.srv.rotateSelf(vm)
+	if err := e.srv.rotateSelf(vm); err != nil {
+		t.Fatal(err)
+	}
 	if g := e.srv.store.Snapshot().RouteGens[vm]; g == gen {
 		t.Error("port links the old self token minted survive its rotation")
 	}

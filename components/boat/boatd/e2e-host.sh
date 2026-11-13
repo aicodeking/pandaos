@@ -54,9 +54,16 @@ vmf() { bd GET "/v1/vms/$1" | jq -r ".$2"; }
 newvm() { bd POST /v1/vms "$1" | jq -r .id; }
 fingerprint() { bx "$1" 'cat /etc/machine-id; cut -d" " -f2 /etc/ssh/ssh_host_ed25519_key.pub' | tr '\n' ' '; }
 perf_fail="" # timing misses fail the run after METRIC, so every phase still runs
+perf_numbers() { # reject missing, nonnumeric and nonfinite measurements or thresholds
+  jq -en --args '$ARGS.positional | all(.[]; try (tonumber | isfinite and (isnan | not)) catch false)' -- "$@" >/dev/null 2>&1
+}
 check_max() { # NAME SECONDS MAX
   printf 'e2e: %-12s %6ss (max %ss)\n' "$1" "$2" "$3"
-  awk -v a="$2" -v b="$3" 'BEGIN { exit !(a <= b) }' || perf_fail+="$1 took $2s > $3s; "
+  if ! perf_numbers "$2" "$3"; then
+    perf_fail+="$1 invalid metric or max: $2 / $3; "
+  else
+    awk -v a="$2" -v b="$3" 'BEGIN { exit !(a+0 <= b+0) }' || perf_fail+="$1 took $2s > $3s; "
+  fi
 }
 restart_boatd() { # CONFIG: SIGKILL boatd (no snapshot-all), start it with CONFIG
   sudo kill -9 "$(cat "$WORK/boatd.pid")"

@@ -44,6 +44,10 @@ nix flake update --refresh "$input" --flake "$flake_dir"
 new=$(field locked.rev)
 [ -n "$new" ] || refuse "the lock has no commit for input '$input'"
 if [ "$new" = "$old" ]; then
+  # The same revision can still name different fetched content or a different source.
+  jq -e --arg i "$input" --slurpfile before "$tmp/flake.lock.orig" \
+    '.nodes[$i] == $before[0].nodes[$i]' "$lock" >/dev/null ||
+    refuse "input '$input' changed without a new release commit"
   echo "panda-update: no new release (still $new)"
   exit 0
 fi

@@ -61,27 +61,36 @@ const dumpWbpsWhileBooting = 150 << 20
 type dumpIO struct {
 	mu      sync.Mutex
 	booting int
-	dumping map[string]bool
+	next    uint64
+	dumping map[string]uint64
 }
 
 // dumpStarted: v's memory is being dumped (liftMemLimits). Capped at once if a VM boots.
-func (m *Manager) dumpStarted(id string) {
+func (m *Manager) dumpStarted(id string) uint64 {
 	m.dio.mu.Lock()
 	defer m.dio.mu.Unlock()
 	if m.dio.dumping == nil {
-		m.dio.dumping = map[string]bool{}
+		m.dio.dumping = map[string]uint64{}
 	}
-	m.dio.dumping[id] = true
+	m.dio.next++
+	m.dio.dumping[id] = m.dio.next
 	if m.dio.booting > 0 {
 		m.capDump(id, true)
 	}
+	return m.dio.next
+}
+
+func (m *Manager) dumpGeneration(id string) uint64 {
+	m.dio.mu.Lock()
+	defer m.dio.mu.Unlock()
+	return m.dio.dumping[id]
 }
 
 // dumpDone: v's dump is on disk (setMemLimits, or a stop's flush). Its cap goes.
 func (m *Manager) dumpDone(id string) {
 	m.dio.mu.Lock()
 	defer m.dio.mu.Unlock()
-	if m.dio.dumping[id] {
+	if m.dio.dumping[id] != 0 {
 		delete(m.dio.dumping, id)
 		m.capDump(id, false)
 	}

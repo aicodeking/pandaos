@@ -105,8 +105,14 @@ class Density:
 
     def one_vm(self, i):
         vm = None
+
+        def start():
+            nonlocal vm
+            vm = self.d.create(f"{self.prefix}-g{i}")
+            return vm
+
         try:
-            vm, _ = self.ready(self.d, lambda: self.d.create(f"{self.prefix}-g{i}"))
+            vm, _ = self.ready(self.d, start)
             self.gexec(self.d, vm, W.NODE_SETUP)
             return vm
         except Exception as e:  # refused (capacity) or broken: measure without it

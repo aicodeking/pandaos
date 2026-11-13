@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 )
@@ -24,8 +23,8 @@ import (
 // token must not reach the parent. The running source VM gets its new token
 // pushed to /etc/boat/env; processes that read the old one keep a dead token.
 //
-// The generation is written with Store.Apply: a crash can lose a bump, which
-// only makes an older token of the same VM valid again.
+// Generations are persisted before publishing them: a disk copy must never
+// hold a token that becomes valid again after an API crash.
 
 type VMToken struct {
 	TeamID string `json:"team_id"`
@@ -113,11 +112,7 @@ func durableKeyID(p *principal) string {
 func (s *server) bumpSelf(vmID, team string) (int, error) {
 	gen := 0
 	mintedBySelf := func(keyID string) bool { return strings.HasPrefix(keyID, "vm_"+vmID+"@") }
-	apply := s.store.Apply
-	if slices.ContainsFunc(s.store.Snapshot().PortMinters[vmID], mintedBySelf) {
-		apply = s.store.Update // a revocation must not be lost
-	}
-	err := apply(func(st *State) error {
+	err := s.store.Update(func(st *State) error {
 		t := st.VMTokens[vmID]
 		if t == nil {
 			t = &VMToken{TeamID: team}
@@ -133,17 +128,17 @@ func (s *server) bumpSelf(vmID, team string) (int, error) {
 
 // rotateSelf kills the token a copy of vmID's disk holds (see the top) and,
 // in the background, gives the VM its new one if it is running.
-func (s *server) rotateSelf(vmID string) {
+func (s *server) rotateSelf(vmID string) error {
 	t := s.store.Snapshot().VMTokens[vmID]
 	if t == nil {
-		return // never had one
+		return nil // never had one
 	}
 	gen, err := s.bumpSelf(vmID, t.TeamID)
 	if err != nil {
-		log.Printf("vm %s: rotate token: %v", vmID, err)
-		return
+		return fmt.Errorf("rotate VM %s token: %w", vmID, err)
 	}
 	go s.pushSelf(s.baseCtx(), vmID, gen)
+	return nil
 }
 
 // pushSelf rewrites the running VM's env with token generation gen.

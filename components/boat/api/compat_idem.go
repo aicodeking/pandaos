@@ -51,7 +51,8 @@ func (c *idemCache) begin(key, hash string) (*IdemRecord, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := c.store.Snapshot()
-	if e := st.Idempotency[key]; e != nil && c.clock().Sub(e.At) <= idemTTL {
+	now := c.clock()
+	if e := st.Idempotency[key]; e != nil && now.Sub(e.At) <= idemTTL {
 		if e.Hash != hash {
 			return nil, "idempotency_key_reused"
 		}
@@ -62,6 +63,24 @@ func (c *idemCache) begin(key, hash string) (*IdemRecord, string) {
 			return nil, "idempotency_key_reused"
 		}
 		return nil, "idempotency_in_progress"
+	}
+	for _, e := range st.Idempotency {
+		if now.Sub(e.At) <= idemTTL {
+			continue
+		}
+		if err := c.store.Update(func(st *State) error {
+			for k, e := range st.Idempotency {
+				if now.Sub(e.At) > idemTTL {
+					delete(st.Idempotency, k)
+				}
+			}
+			return nil
+		}); err != nil {
+			log.Printf("idempotency purge: %v", err)
+			return nil, "store_error"
+		}
+		st = c.store.Snapshot()
+		break
 	}
 	if len(c.pending)+len(st.Idempotency) >= maxIdemEntries {
 		return nil, "rate_limited"
@@ -126,11 +145,13 @@ func (t *teeWriter) Write(b []byte) (int, error) {
 	return t.ResponseWriter.Write(b)
 }
 
-// idempotent runs fn once per (team, Idempotency-Key) and body.
-func (s *server) idempotent(w http.ResponseWriter, r *http.Request, p *principal, fn func(http.ResponseWriter)) {
+// idempotent authorizes every request before running or replaying its answer.
+func (s *server) idempotent(w http.ResponseWriter, r *http.Request, p *principal, authorize func() bool, fn func(http.ResponseWriter)) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
-		fn(w)
+		if authorize() {
+			fn(w)
+		}
 		return
 	}
 	if len(key) > maxIdemKey {
@@ -143,6 +164,9 @@ func (s *server) idempotent(w http.ResponseWriter, r *http.Request, p *principal
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(b))
+	if !authorize() {
+		return
+	}
 	sum := sha256.Sum256(append([]byte(r.Method+" "+r.URL.Path+"\n"), b...))
 	k := p.Team.ID + "\x00" + key
 	e, code := s.idem.begin(k, hex.EncodeToString(sum[:]))

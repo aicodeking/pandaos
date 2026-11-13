@@ -526,7 +526,13 @@ func (m *Manager) reconcile() error {
 		}
 		alive := v.PID > 0 && m.procs.Alive(v.PID, v.ID)
 		if alive && v.State == Running {
-			go m.setMemLimits(v)                 // a crash may have left them lifted for a dump
+			go func(v VM) { // a crash may have left them lifted; a new dump owns its limits
+				unlock := m.lock(v.ID)
+				defer unlock()
+				if m.dumpGeneration(v.ID) == 0 {
+					m.setMemLimits(v)
+				}
+			}(v)
 			for _, p := range l2Pins(m.cfg, v) { // a VM started by a boatd without them
 				if err := m.run("", p[0], p[1:]...); err != nil {
 					log.Printf("%s: %v", v.ID, err)

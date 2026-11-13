@@ -102,9 +102,10 @@ class Repeat:
             traceback.print_exc(file=sys.stderr)
 
     def new(self, start):
-        vm, s = ready(self.d, start)
+        t0 = time.monotonic()
+        vm = start()
         self.vms.append(vm)
-        return vm, s
+        return vm, wait_exec_ready(self.d, vm, t0)
 
     def run(self):
         m = self.rec["metrics"]
@@ -226,9 +227,11 @@ class Repeat:
 def concurrent_create(d, run_id, index, n=CONCURRENT_N):
     """Wall time from one shared start until all n VMs answer `true`."""
     t0 = time.monotonic()
+    created = []
 
     def one(i):
         vm = d.create(f"bb-{run_id}-{index}-c{i}")
+        created.append(vm)
         return vm, wait_exec_ready(d, vm, t0)
 
     out, errs = [], []
@@ -239,7 +242,7 @@ def concurrent_create(d, run_id, index, n=CONCURRENT_N):
             except Exception as e:
                 errs.append(f"{type(e).__name__}: {e}")
     wall = time.monotonic() - t0
-    for vm, _ in out:
+    for vm in created:
         try:
             d.delete(vm)
         except Exception as e:

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -756,7 +757,11 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	_, labeled := labeledSelection(child)
 	if err := s.recordVM(childID, p.Team.ID, sel, st.ForeignVMs[parent], labeled); err != nil {
 		log.Printf("%s: record secret selection for fork %s: %v; deleting it", info(r).id, childID, err)
-		s.boatd.call(r.Context(), "POST", vmPath(childID, "delete"), nil, nil)
+		if cleanup := s.discardCopyVM(childID); cleanup != nil {
+			log.Printf("%s: delete unsafe fork %s: %v", info(r).id, childID, cleanup)
+			writeErr(w, r, 500, "cleanup_failed", "could not record the secret selection or delete the new VM "+childID)
+			return
+		}
 		writeErr(w, r, 500, "store_error", "could not record the secret selection")
 		return
 	}
@@ -764,7 +769,16 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	// The child's disk holds the parent's token; give it its own. Its native
 	// agent sessions came along too, so its conversations do as well.
 	// Its own VM token too, and the parent's token on the copied disk dies.
-	s.rotateSelf(parent)
+	if err := s.rotateSelf(parent); err != nil {
+		log.Printf("%s: %v", info(r).id, err)
+		if cleanup := s.discardCopyVM(childID); cleanup != nil {
+			log.Printf("%s: delete unsafe fork %s: %v", info(r).id, childID, cleanup)
+			writeErr(w, r, 500, "cleanup_failed", "token rotation failed and the new VM "+childID+" could not be deleted")
+			return
+		}
+		writeErr(w, r, 500, "store_error", "could not persist VM token rotation")
+		return
+	}
 	// Its AI proxy token too: the copy is the child's now, and may be shared.
 	if err := s.rotateAIToken(r, parent, p.Team.ID); err != nil {
 		log.Printf("%s: rotate AI token of %s after fork: %v", info(r).id, parent, err)
@@ -789,6 +803,17 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	s.copyConversations(parent, childID)
 	t.mark("conversations")
 	writeJSON(w, 201, publicVM(child))
+}
+
+// discardCopyVM cleans up a new copy even if its originating request was canceled.
+func (s *server) discardCopyVM(id string) error {
+	ctx, cancel := context.WithTimeout(s.baseCtx(), 30*time.Second)
+	defer cancel()
+	if err := s.boatd.call(ctx, "POST", vmPath(id, "delete"), nil, nil); err != nil {
+		return err
+	}
+	s.forgetVM(id)
+	return nil
 }
 
 // copyConversations is history, so it does not wait for the disk.
@@ -1172,7 +1197,24 @@ func (s *server) proxySnapshots(w http.ResponseWriter, r *http.Request, p *princ
 	status := 200
 	if r.Method == "POST" {
 		status = 201
-		s.rotateSelf(r.PathValue("id")) // the snapshot holds the VM's token
+		if err := s.rotateSelf(r.PathValue("id")); err != nil { // the snapshot holds the VM's token
+			log.Printf("%s: %v", info(r).id, err)
+			sn, _ := out.(map[string]any)
+			sid := str(sn, "id")
+			ctx, cancel := context.WithTimeout(s.baseCtx(), 30*time.Second)
+			defer cancel()
+			if sid == "" {
+				writeErr(w, r, 500, "cleanup_failed", "token rotation failed and the new snapshot has no id for deletion")
+				return
+			}
+			if cleanup := s.boatd.call(ctx, "DELETE", path+"/"+url.PathEscape(sid), nil, nil); cleanup != nil {
+				log.Printf("%s: delete unsafe snapshot %s: %v", info(r).id, sid, cleanup)
+				writeErr(w, r, 500, "cleanup_failed", "token rotation failed and the new snapshot "+sid+" could not be deleted")
+				return
+			}
+			writeErr(w, r, 500, "store_error", "could not persist VM token rotation")
+			return
+		}
 		// and its AI proxy token: a later share or import must not carry a live one.
 		if err := s.rotateAIToken(r, r.PathValue("id"), p.Team.ID); err != nil {
 			log.Printf("%s: rotate AI token of %s after snapshot: %v", info(r).id, r.PathValue("id"), err)

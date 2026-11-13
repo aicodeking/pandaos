@@ -56,7 +56,11 @@ PERF_RAND_READ_RATIO_MIN=${E2E_PERF_RAND_READ_RATIO_MIN:-0.15} # 0.32-1.43 -> 0.
 PERF_SEQ_WRITE_RATIO_MIN=${E2E_PERF_SEQ_WRITE_RATIO_MIN:-0.5}  # 0.98-1.68 -> 0.5 (0.51x)
 check_min() { # NAME VALUE MIN
   printf 'e2e: %-14s %s (min %s)\n' "$1" "$2" "$3"
-  awk -v a="$2" -v b="$3" 'BEGIN { exit !(a >= b) }' || perf_fail+="$1 was $2 < $3; "
+  if ! perf_numbers "$2" "$3"; then
+    perf_fail+="$1 invalid metric or min: $2 / $3; "
+  else
+    awk -v a="$2" -v b="$3" 'BEGIN { exit !(a+0 >= b+0) }' || perf_fail+="$1 was $2 < $3; "
+  fi
 }
 
 disk_stuck() { # fio has 5 minutes: what the host was doing when it missed them
@@ -196,7 +200,7 @@ perf_cfg '.' again
 pv=$(perf_vm pv)
 
 log "perf e2e: snapshot, new-from-snapshot, fork (4/8, 2 GiB dirty + 1 GiB cache)"
-perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s fork_s fork2_s
+perf_snap() { # LABEL: snapshot API time; create/fork times run through first successful exec
   local v sn f; v=$(perf_vm "s$1")
   put_disk "$v"
   bx "$v" 'bash /tmp/disk.sh' 300 >/dev/null
@@ -204,31 +208,38 @@ perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s
   echo "$1: extents $(vm_extents "$v"), guest $(bx "$v" 'free -m | awk "/Mem:/ {print \"used=\"\$3,\"cache=\"\$6}"')"
   local t; t=$(now); sn=$(bd POST "/v1/vms/$v/snapshots" '{"name":"x"}' | jq -r .id); snap_s=$(secs "$t" "$(now)")
   echo "$1: snapshot ${snap_s}s: $(last_snap_log)"
-  t=$(now); f=$(bd POST /v1/vms "{\"name\":\"n$1\",\"team\":\"perf\",\"snapshot\":\"$sn\"}" | jq -r .id); fromsnap_s=$(secs "$t" "$(now)")
+  t=$(now); f=$(bd POST /v1/vms "{\"name\":\"n$1\",\"team\":\"perf\",\"snapshot\":\"$sn\"}" | jq -r .id)
+  bx "$f" true >/dev/null || fail "new-from-snapshot first exec failed"
+  fromsnap_s=$(secs "$t" "$(now)")
   [ "$(vmf "$f" agent_ready)" = true ] || fail "new-from-snapshot not ready"
-  echo "$1: new-from-snapshot ${fromsnap_s}s: $(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
-  t=$(now); bx "$f" true; echo "$1: its first exec, with the dump in writeback: $(secs "$t" "$(now)")s" # boatbench counts this
+  echo "$1: new-from-snapshot -> exec-ready ${fromsnap_s}s: $(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
   perf_del "$f"
   echo "$1: base before the fork: $(sudo filefrag "$STATE/vms/$v/firecracker/$v/root/mem" | sed 's/.*: //'), dirty+writeback $(awk '/^(Dirty|Writeback):/ {printf "%s=%dMiB ", $1, $2/1024}' /proc/meminfo)"
-  t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"f$1\"}" | jq -r .id); fork_s=$(secs "$t" "$(now)")
+  t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"f$1\"}" | jq -r .id)
+  bx "$f" true >/dev/null || fail "fork first exec failed"
+  fork_s=$(secs "$t" "$(now)")
   [ "$(vmf "$f" agent_ready)" = true ] || fail "fork not ready"
   [ "$(bx "$f" 'ls -l /dev/shm/d/dirty | wc -l')" = 1 ] || fail "fork lost tmpfs"
-  echo "$1: fork ${fork_s}s: $(last_snap_log)$(sudo grep -E "$f: (create|boot|guest|fork)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
+  echo "$1: fork -> exec-ready ${fork_s}s: $(last_snap_log)$(sudo grep -E "$f: (create|boot|guest|fork)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
   perf_del "$f"
   sudo sync # the same fork with the first dump on disk: what a fork costs without a flush to wait for
-  t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"g$1\"}" | jq -r .id); fork2_s=$(secs "$t" "$(now)")
-  echo "$1: fork, base clean ${fork2_s}s: $(last_snap_log)$(sudo grep -E "$f: fork" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //')"
+  t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"g$1\"}" | jq -r .id)
+  bx "$f" true >/dev/null || fail "clean-base fork first exec failed"
+  fork2_s=$(secs "$t" "$(now)")
+  echo "$1: fork, base clean -> exec-ready ${fork2_s}s: $(last_snap_log)$(sudo grep -E "$f: fork" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //')"
   perf_del "$f"
   if [ "$1" = p ]; then # a create on the same host while this VM's memory dump is being written
     bx "$v" 'head -c 2G /dev/urandom >/dev/shm/d/dirty' 300 # 2 GiB of fresh dirty pages to dump
     bd POST "/v1/vms/$v/snapshots" '{"name":"y"}' >"$WORK/tmp/dumpy.json" &
     local dpid=$! d0; d0=$(now)
     sleep 1
-    t=$(now); f=$(perf_vm cd); cdump_s=$(secs "$t" "$(now)")
+    t=$(now); f=$(perf_vm cd)
+    bx "$f" true >/dev/null || fail "create during a dump first exec failed"
+    cdump_s=$(secs "$t" "$(now)")
     [ "$(vmf "$f" agent_ready)" = true ] || fail "create during a dump not ready"
     local inflight=no; kill -0 "$dpid" 2>/dev/null && inflight=yes
     wait "$dpid" || fail "snapshot during a create failed"
-    echo "$1: create while a dump is in flight ${cdump_s}s (dump still running at the end: $inflight, dump took $(secs "$d0" "$(now)")s): $(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')$(last_snap_log)"
+    echo "$1: create while a dump is in flight -> exec-ready ${cdump_s}s (dump still running at the end: $inflight, dump took $(secs "$d0" "$(now)")s): $(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')$(last_snap_log)"
     perf_del "$f"
     bd DELETE "/v1/vms/$v/snapshots/$(jq -r .id "$WORK/tmp/dumpy.json")" >/dev/null
   fi
@@ -339,7 +350,11 @@ check_max perf_create_dump "$kvm_cdump" "$PERF_CREATE_DUMP_MAX"
 check_max perf_warm_ten "$warm_ten" "$PERF_WARM_TEN_MAX"
 check_mib() { # NAME MIB MAX
   printf 'e2e: %-14s %s MiB (max %s)\n' "$1" "$2" "$3"
-  [ "$2" -le "$3" ] || perf_fail+="$1 was $2 MiB > $3; "
+  if ! perf_numbers "$2" "$3"; then
+    perf_fail+="$1 invalid metric or max MiB: $2 / $3; "
+  else
+    awk -v a="$2" -v b="$3" 'BEGIN { exit !(a+0 <= b+0) }' || perf_fail+="$1 was $2 MiB > $3; "
+  fi
 }
 check_mib perf_rss "$b_rss" "$PERF_RSS_MAX"
 check_mib perf_warm_rss "$warm_rss" "$PERF_WARM_RSS_MAX"
@@ -347,9 +362,9 @@ check_mib perf_freed_rss "${back% *}" "$PERF_FREED_RSS_MAX"
 check_min perf_seq_write "$(d seq_write_mbps)" "$PERF_SEQ_WRITE_MIN"
 check_min perf_rand_read "$(d rand_read_iops)" "$PERF_RAND_READ_MIN"
 check_min perf_rand_write "$(d rand_write_iops)" "$PERF_RAND_WRITE_MIN"
-ratio() { awk -v g="$1" -v h="$2" 'BEGIN { printf "%.2f", (h > 0 ? g / h : 1) }'; } # GUEST HOST
+ratio() { if ! perf_numbers "$1" "$2"; then echo null; else awk -v g="$1" -v h="$2" -v scale="${3:-1}" 'BEGIN { if (h+0 > 0) printf "%.2f", g * scale / h; else print "null" }'; fi; } # GUEST HOST [GUEST_SCALE]
 check_min perf_rr_vs_host "$(ratio "$(d rand_read_iops)" "$c_rr")" "$PERF_RAND_READ_RATIO_MIN"
-check_min perf_sw_vs_host "$(ratio "$(d seq_write_mbps)" "$(awk -v b="$c_sw" 'BEGIN { print b / 1e6 }')")" "$PERF_SEQ_WRITE_RATIO_MIN"
+check_min perf_sw_vs_host "$(ratio "$(d seq_write_mbps)" "$c_sw" 1000000)" "$PERF_SEQ_WRITE_RATIO_MIN"
 restart_boatd "$WORK/boatd.json"
 
 echo "METRIC $(jq -nc --argjson disk "$disk" --argjson disks "$disk_sync" --argjson diskiou "$disk_iou" --arg blk "$guest_blk" \

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -62,8 +61,10 @@ func (s *server) compatAttach(w http.ResponseWriter, r *http.Request, p *princip
 	}
 	vmID := r.PathValue("id")
 	deadline := time.Now().Add(attachMaxOpen)
+	var stdout compatUTF8Stream
+	readOff := stdoutOff
 	for {
-		out, err := s.readLogs(r, vmID, rec.ID, stdoutOff, compatOutCap)
+		out, err := s.readLogs(r, vmID, rec.ID, readOff, compatOutCap)
 		if err != nil {
 			if r.Context().Err() == nil {
 				a.emit(offsets(map[string]any{"type": "error", "error": "agent_unavailable",
@@ -73,13 +74,22 @@ func (s *server) compatAttach(w http.ResponseWriter, r *http.Request, p *princip
 		}
 		b, _ := base64.StdEncoding.DecodeString(str(out, "data_b64"))
 		if len(b) > 0 {
-			stdoutOff += int64(len(b))
-			if !a.emit(map[string]any{"type": "stdout", "data": strings.ToValidUTF8(string(b), "�"), "nextOffset": stdoutOff}) {
+			readOff += int64(len(b))
+			text := stdout.text(b, false)
+			// Public offsets acknowledge emitted bytes; pending bytes must be replayed on reconnect.
+			stdoutOff = readOff - int64(len(stdout.pending))
+			if text != "" && !a.emit(map[string]any{"type": "stdout", "data": text, "nextOffset": stdoutOff}) {
 				return
 			}
 			continue // more may be waiting
 		}
 		if out["running"] != true {
+			if text := stdout.text(nil, true); text != "" {
+				stdoutOff = readOff
+				if !a.emit(map[string]any{"type": "stdout", "data": text, "nextOffset": stdoutOff}) {
+					return
+				}
+			}
 			a.emit(offsets(attachExit(out)))
 			return
 		}

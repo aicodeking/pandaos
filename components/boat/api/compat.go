@@ -338,13 +338,17 @@ func compatTTL(raw json.RawMessage) (int64, bool) {
 }
 
 func (s *server) compatCreate(w http.ResponseWriter, r *http.Request, p *principal) {
-	s.idempotent(w, r, p, func(w http.ResponseWriter) {
-		var c compatCreateReq
+	var c compatCreateReq
+	var ttl int64
+	var files []preparedFile
+	s.idempotent(w, r, p, func() bool {
 		if !decode(w, r, &c) {
-			return
+			return false
 		}
-		ttl, ok := compatTTL(c.TTLSeconds)
-		files, fmsg := s.prepareCompatFiles(c.Files)
+		var ok bool
+		var fmsg string
+		ttl, ok = compatTTL(c.TTLSeconds)
+		files, fmsg = s.prepareCompatFiles(c.Files)
 		msg := ""
 		switch {
 		case !ok:
@@ -364,18 +368,24 @@ func (s *server) compatCreate(w http.ResponseWriter, r *http.Request, p *princip
 				code, msg = k, text // boat.dev's codes for hostedPorts
 			}
 			writeErr(w, r, 400, code, msg)
-			return
+			return false
 		}
-		body := map[string]any{"name": c.Name, "size": c.Type, "ttl_s": ttl, "labels": c.Labels, "env": c.Env,
-			"no_env": c.NoEnv, "fail_fast": c.FailFast, "count": c.Count}
-		if c.Environment != "" && c.Environment != "base" { // boat.dev's default name: the team default here
-			body["environment"] = c.Environment
+		if (len(c.Files) > 0 || c.SetupScript != "") && !p.has("exec") {
+			writeErr(w, r, http.StatusForbidden, "forbidden", "files and setupScript require scope exec")
+			return false
 		}
 		if len(c.HostedPorts) > 0 {
 			if msg := s.nativeRefusal(p, hostPortRoutes...); msg != "" {
 				writeErr(w, r, http.StatusForbidden, "forbidden", "hostedPorts: "+msg)
-				return // before the VM exists
+				return false // before the VM exists, including a cached answer
 			}
+		}
+		return true
+	}, func(w http.ResponseWriter) {
+		body := map[string]any{"name": c.Name, "size": c.Type, "ttl_s": ttl, "labels": c.Labels, "env": c.Env,
+			"no_env": c.NoEnv, "fail_fast": c.FailFast, "count": c.Count}
+		if c.Environment != "" && c.Environment != "base" { // boat.dev's default name: the team default here
+			body["environment"] = c.Environment
 		}
 		if !s.compatFrom(w, r, p, c.From, body) {
 			return
@@ -704,25 +714,32 @@ func (s *server) compatResume(w http.ResponseWriter, r *http.Request, p *princip
 }
 
 func (s *server) compatFork(w http.ResponseWriter, r *http.Request, p *principal) {
-	s.idempotent(w, r, p, func(w http.ResponseWriter) {
-		var body struct {
-			Name        string            `json:"name"`
-			FailFast    bool              `json:"failFast"`
-			TTLSeconds  json.RawMessage   `json:"ttlSeconds"` // accepted; a fork keeps the parent's TTL here
-			Monitoring  *bool             `json:"monitoring"`
-			Labels      map[string]string `json:"labels"`
-			Env         map[string]string `json:"env"`
-			Environment string            `json:"environment"`
-			NoEnv       bool              `json:"noEnv"`
-			Type        string            `json:"type"`
-		}
+	var body struct {
+		Name        string            `json:"name"`
+		FailFast    bool              `json:"failFast"`
+		TTLSeconds  json.RawMessage   `json:"ttlSeconds"` // accepted; a fork keeps the parent's TTL here
+		Monitoring  *bool             `json:"monitoring"`
+		Labels      map[string]string `json:"labels"`
+		Env         map[string]string `json:"env"`
+		Environment string            `json:"environment"`
+		NoEnv       bool              `json:"noEnv"`
+		Type        string            `json:"type"`
+	}
+	s.idempotent(w, r, p, func() bool {
 		if !decode(w, r, &body) {
-			return
+			return false
 		}
 		if body.Environment != "" || body.NoEnv {
 			writeErr(w, r, 400, "invalid_request", "fork with environment or noEnv is not supported by this server: a fork keeps the parent's environment and secret selection")
-			return
+			return false
 		}
+		if body.Type != "" && !reVMName.MatchString(body.Type) {
+			writeErr(w, r, 400, "invalid_request", "invalid type")
+			return false
+		}
+		_, ok := s.ownVM(w, r, p)
+		return ok
+	}, func(w http.ResponseWriter) {
 		fin := map[string]any{"name": body.Name, "fail_fast": body.FailFast, "env": body.Env}
 		if body.Labels != nil {
 			fin["labels"] = body.Labels
@@ -735,7 +752,12 @@ func (s *server) compatFork(w http.ResponseWriter, r *http.Request, p *principal
 		var vm VM
 		json.Unmarshal(res.body.Bytes(), &vm)
 		if rs := s.compatRetype(r, p, str(vm, "id"), body.Type); rs != nil {
-			rs.relay(w) // the fork exists, but not with the asked type
+			if err := s.discardCopyVM(str(vm, "id")); err != nil {
+				log.Printf("%s: rollback fork %s: %v", info(r).id, str(vm, "id"), err)
+				writeErr(w, r, 500, "cleanup_failed", "fork retype failed and the new VM "+str(vm, "id")+" could not be deleted")
+				return
+			}
+			rs.relay(w)
 			return
 		}
 		if body.Type != "" {

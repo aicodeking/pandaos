@@ -1,11 +1,174 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestFailedStopReleasesDumpLimits(t *testing.T) {
+	for _, phase := range []string{"write", "install"} {
+		t.Run(phase, func(t *testing.T) {
+			oldRoot := cgroupRoot
+			cgroupRoot = t.TempDir()
+			defer func() { cgroupRoot = oldRoot }()
+			m, h := newTestManager(t, func(c *Config) { c.CgroupParent = "p" })
+			v, err := m.Create(context.Background(), CreateReq{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.cfg.cgroupLimits, m.cfg.stateDisk = true, "259:0"
+			cg := filepath.Join(cgroupRoot, "p", v.ID)
+			if err := os.MkdirAll(cg, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range []string{"memory.max", "memory.high", "io.max"} {
+				if err := os.WriteFile(filepath.Join(cg, f), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase == "write" {
+				h.mu.Lock()
+				h.failSnap = 1
+				h.mu.Unlock()
+			} else {
+				stage := filepath.Join(m.vmDir(v.ID), memStage)
+				if err := os.Mkdir(stage, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(stage, "block-rename"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bootDone := m.bootIO()
+			defer bootDone()
+			if got, err := m.Stop(context.Background(), v.ID, ""); err == nil || got.State != Running {
+				t.Fatalf("failed %s must keep the VM running: %+v %v", phase, got, err)
+			}
+			if generation := m.dumpGeneration(v.ID); generation != 0 {
+				t.Errorf("failed %s still owns dump generation %d", phase, generation)
+			}
+			high, hard := m.cfg.memLimits(v)
+			for f, want := range map[string]string{
+				"memory.high": strconv.FormatInt(high, 10), "memory.max": strconv.FormatInt(hard, 10),
+				"io.max": "259:0 rbps=max wbps=max riops=max wiops=max",
+			} {
+				if got, err := os.ReadFile(filepath.Join(cg, f)); err != nil || string(got) != want {
+					t.Errorf("failed %s: %s=%q, want %q: %v", phase, f, got, want, err)
+				}
+			}
+		})
+	}
+}
+
+func TestConcurrentDumpCleanupOwnership(t *testing.T) {
+	m := &Manager{cfg: Config{StateDir: t.TempDir()}, locks: map[string]*sync.Mutex{}}
+	var wg sync.WaitGroup
+	for i := range 8 {
+		v := VM{ID: "vm-" + strconv.Itoa(i)}
+		if err := os.MkdirAll(m.root(v.ID), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(m.root(v.ID), memFile), []byte("mem"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				unlock := m.lock(v.ID)
+				first := m.liftMemLimits(v)
+				m.setMemLimits(v) // completion must not allow this generation to be reused
+				second := m.liftMemLimits(v)
+				bootDone := m.bootIO()
+				finished := make(chan struct{})
+				go func() { m.settleAfterDump(v, first); close(finished) }()
+				unlock()
+				<-finished
+				if got := m.dumpGeneration(v.ID); got != second || second <= first {
+					t.Errorf("%s: stale generation %d reset current generation %d to %d", v.ID, first, second, got)
+				}
+				unlock = m.lock(v.ID)
+				m.setMemLimits(v)
+				unlock()
+				bootDone()
+			}
+		}()
+	}
+	wg.Wait()
+	if m.dio.booting != 0 || len(m.dio.dumping) != 0 {
+		t.Fatalf("unfinished I/O tracking: %d boots, %v dumps", m.dio.booting, m.dio.dumping)
+	}
+}
+
+func TestStaleDumpCleanupKeepsNewDumpLimits(t *testing.T) {
+	for _, missingMem := range []bool{false, true} {
+		t.Run(strconv.FormatBool(missingMem), func(t *testing.T) {
+			oldRoot := cgroupRoot
+			cgroupRoot = t.TempDir()
+			defer func() { cgroupRoot = oldRoot }()
+			m, _ := newTestManager(t, func(c *Config) { c.CgroupParent = "p" })
+			<-m.imagesReady
+			m.cfg.cgroupLimits, m.cfg.stateDisk = true, "259:0"
+			v := VM{ID: "vm-overlap", MemMiB: 1024}
+			cg := filepath.Join(cgroupRoot, "p", v.ID)
+			if err := os.MkdirAll(cg, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range []string{"memory.max", "memory.high", "io.max"} {
+				if err := os.WriteFile(filepath.Join(cg, f), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !missingMem {
+				if err := os.MkdirAll(m.root(v.ID), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(m.root(v.ID), memFile), []byte("old dump"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			unlock := m.lock(v.ID)
+			first := m.liftMemLimits(v)
+			finished := make(chan struct{})
+			go func() {
+				m.settleAfterDump(v, first)
+				close(finished)
+			}()
+			// The old cleanup cannot take the VM lock until a newer dump owns the limits.
+			second := m.liftMemLimits(v)
+			bootDone := m.bootIO()
+			unlock()
+			<-finished
+			read := func(f string) string {
+				b, err := os.ReadFile(filepath.Join(cg, f))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(b)
+			}
+			if got := read("io.max"); got != "259:0 rbps=max wbps=157286400 riops=max wiops=max" {
+				t.Errorf("stale cleanup uncapped the active dump: %s", got)
+			}
+			_, hard := m.cfg.memLimits(v)
+			lifted := strconv.FormatInt(hard+int64(v.MemMiB)<<20, 10)
+			for _, f := range []string{"memory.high", "memory.max"} {
+				if got := read(f); got != lifted {
+					t.Errorf("stale cleanup lowered %s to %s, want %s", f, got, lifted)
+				}
+			}
+			bootDone()
+			m.settleAfterDump(v, second)
+			if len(m.dio.dumping) != 0 || read("memory.max") != strconv.FormatInt(hard, 10) {
+				t.Fatal("current dump did not clean up")
+			}
+		})
+	}
+}
 
 // The dump appears after the snapshot call starts; a planted link is not followed;
 // stop returns once the last kick is done.
