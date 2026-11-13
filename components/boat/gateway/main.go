@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -357,28 +358,61 @@ func (g *gateway) ask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !g.certs.allow(v.Team, host, g.now()) {
-		http.Error(w, "too many new certificates for this team, retry later", http.StatusTooManyRequests)
+		http.Error(w, "too many new certificates (team or instance limit), retry later", http.StatusTooManyRequests)
 	}
 }
 
-// certQuota caps the new hostnames approved per team per window; a hostname
-// approved once is always approved again (renewals).
-// ponytail: in memory, so a restart forgets approvals and opens a fresh window;
-// persist it if restarts become frequent enough to matter.
+// certQuota caps the new hostnames approved per team per window, and across
+// all teams per global window (Let's Encrypt allows 50 new certificates per
+// registered domain per week); a hostname approved once is always approved
+// again (renewals). With a state path, approvals survive restarts.
 type certQuota struct {
-	limit  int
-	window time.Duration
+	limit        int // per team; 0 = none
+	window       time.Duration
+	globalLimit  int // all teams; 0 = none
+	globalWindow time.Duration
+	path         string // "" = in memory only
 
 	mu     sync.Mutex
 	issued map[string]bool
 	recent map[string][]time.Time // team -> approvals within the window
+	global []time.Time            // all approvals within the global window
 }
 
-func newCertQuota(limit int, window time.Duration) *certQuota {
-	if limit <= 0 {
-		return nil
+type certQuotaState struct {
+	Issued map[string]bool        `json:"issued"`
+	Recent map[string][]time.Time `json:"recent"`
+	Global []time.Time            `json:"global"`
+}
+
+func newCertQuota(limit int, window time.Duration, globalLimit int, globalWindow time.Duration, path string) (*certQuota, error) {
+	if limit <= 0 && globalLimit <= 0 {
+		return nil, nil
 	}
-	return &certQuota{limit: limit, window: window, issued: map[string]bool{}, recent: map[string][]time.Time{}}
+	q := &certQuota{limit: limit, window: window, globalLimit: globalLimit, globalWindow: globalWindow, path: path,
+		issued: map[string]bool{}, recent: map[string][]time.Time{}}
+	if path == "" {
+		return q, nil
+	}
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return q, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var st certQuotaState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if st.Issued != nil {
+		q.issued = st.Issued
+	}
+	if st.Recent != nil {
+		q.recent = st.Recent
+	}
+	q.global = st.Global
+	return q, nil
 }
 
 func (q *certQuota) allow(team, host string, now time.Time) bool {
@@ -391,13 +425,34 @@ func (q *certQuota) allow(team, host string, now time.Time) bool {
 		return true
 	}
 	kept := slices.DeleteFunc(slices.Clone(q.recent[team]), func(t time.Time) bool { return now.Sub(t) >= q.window })
-	if len(kept) >= q.limit {
-		q.recent[team] = kept
+	global := slices.DeleteFunc(slices.Clone(q.global), func(t time.Time) bool { return now.Sub(t) >= q.globalWindow })
+	q.recent[team], q.global = kept, global
+	if (q.limit > 0 && len(kept) >= q.limit) || (q.globalLimit > 0 && len(global) >= q.globalLimit) {
 		return false
 	}
 	q.recent[team] = append(kept, now)
+	q.global = append(global, now)
 	q.issued[host] = true
+	q.save()
 	return true
+}
+
+// save writes the state (inside q.mu). A failed write is logged: approvals
+// then only live in memory until the next successful one.
+func (q *certQuota) save() {
+	if q.path == "" {
+		return
+	}
+	b, err := json.Marshal(certQuotaState{Issued: q.issued, Recent: q.recent, Global: q.global})
+	if err == nil {
+		tmp := q.path + ".tmp"
+		if err = os.WriteFile(tmp, b, 0o600); err == nil {
+			err = os.Rename(tmp, q.path)
+		}
+	}
+	if err != nil {
+		log.Printf("cert quota state: %v", err)
+	}
 }
 
 func main() {
@@ -411,6 +466,9 @@ func main() {
 	api := flag.String("api", "", "boat-api base URL (http://127.0.0.1:8740), for port token revocations; empty disables them")
 	certLimit := flag.Int("ask-team-limit", 10, "new TLS hostnames approved per team per -ask-window (already approved ones always pass); 0 = unlimited")
 	certWindow := flag.Duration("ask-window", 24*time.Hour, "window of -ask-team-limit")
+	certGlobal := flag.Int("ask-global-limit", 40, "new TLS hostnames approved across all teams per -ask-global-window (Let's Encrypt: 50 per registered domain per week); 0 = unlimited")
+	certGlobalWindow := flag.Duration("ask-global-window", 7*24*time.Hour, "window of -ask-global-limit")
+	certState := flag.String("ask-state", "", "file keeping certificate approvals across restarts (empty = memory only)")
 	legacy := flag.Int64("legacy-hmac-until", 0, "accept tokens signed with the master key (from before per-purpose keys) that expire by this unix time; 0 = start + 8 days, -1 = never")
 	flag.Parse()
 	if *domain == "" {
@@ -424,7 +482,9 @@ func main() {
 	g := &gateway{
 		domain: d, vmDomain: strings.ToLower(*vmDomain), desktopDomain: strings.ToLower(*desktopDomain),
 		key: key, routes: &routes{path: *routesPath}, now: time.Now,
-		certs: newCertQuota(*certLimit, *certWindow),
+	}
+	if g.certs, err = newCertQuota(*certLimit, *certWindow, *certGlobal, *certGlobalWindow, *certState); err != nil {
+		log.Fatalf("cert quota: %v", err)
 	}
 	switch {
 	case *legacy == 0:

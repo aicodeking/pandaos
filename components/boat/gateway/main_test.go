@@ -417,7 +417,7 @@ func TestAskDesktopNeedsLinkAndTeamQuota(t *testing.T) {
 	g.gens = newRouteGens(api.URL)
 	now := time.Now()
 	g.now = func() time.Time { return now }
-	g.certs = newCertQuota(2, 24*time.Hour)
+	g.certs, _ = newCertQuota(2, 24*time.Hour, 0, 0, "")
 	ask := func(host string) int {
 		w := httptest.NewRecorder()
 		g.ask(w, httptest.NewRequest("GET", "/ask?domain="+host, nil))

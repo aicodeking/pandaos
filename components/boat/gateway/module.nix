@@ -209,7 +209,10 @@ in
             "-routes" "/run/boat/routes.json"
             "-desktop-key" "%d/boat-desktop-key"
             "-api" "http://127.0.0.1:${toString boat.apiPort}" # port token revocations
+            "-ask-state" "/var/lib/boat-gateway/cert-quota.json" # approvals survive restarts
           ];
+          StateDirectory = "boat-gateway";
+          StateDirectoryMode = "0700";
           # Faces the internet: its own uid, no access to boatd's socket or to
           # boat-api's data. It reads routes.json and this one credential, and
           # polls boat-api's loopback-only /internal/route-gens.
