@@ -57,12 +57,16 @@ func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, err
 	noCompress(root) // a VM from before makeStoreDir set it
 	os.Remove(filepath.Join(root, memNew))
 	m.liftMemLimits(v)
-	var err error
+	memPath, typ := memNew, "Full"
 	if diff {
-		err = fc.snapshot(ctx, "Diff", snapState, snapDiff, fsync)
-	} else {
-		err = fc.snapshot(ctx, "Full", snapState, memNew, fsync)
+		memPath, typ = snapDiff, "Diff"
 	}
+	stopWB := func() {}
+	if !fsync {
+		stopWB = startWriteback(filepath.Join(root, memPath))
+	}
+	err := fc.snapshot(ctx, typ, snapState, memPath, fsync)
+	stopWB()
 	if err != nil {
 		m.setMemLimits(v)
 		m.failSnapshot(v)

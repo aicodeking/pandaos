@@ -41,3 +41,18 @@ func TestGuestRefusalIs4xx(t *testing.T) {
 		t.Errorf("guest bad input: %d %v", st, out)
 	}
 }
+
+// boatd's 504 resize_timeout (the guest's resize2fs hung) reaches the caller as such,
+// not as a 502 "vm manager error", on both APIs.
+func TestResizeTimeoutIs504(t *testing.T) {
+	e := setup(t)
+	id := e.createVM()
+	e.boatd.mu.Lock()
+	e.boatd.resizeTimeout = true
+	e.boatd.mu.Unlock()
+	st, out := e.do(e.owner, "POST", "/v1/vms/"+id+"/resize", map[string]any{"disk_gib": 9})
+	er, _ := out["error"].(map[string]any)
+	if st != 504 || er["code"] != "resize_timeout" || !strings.Contains(er["message"].(string), "resize2fs") {
+		t.Errorf("native: %d %v", st, out)
+	}
+}

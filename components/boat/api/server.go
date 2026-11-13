@@ -515,6 +515,10 @@ func writeUpstream(w http.ResponseWriter, r *http.Request, err error) {
 			// The host is full (or, with fail_fast, still starting): the caller may retry later.
 			w.Header().Set("Retry-After", "10")
 			writeErr(w, r, 503, be.code(), be.message())
+		case be.Status == http.StatusGatewayTimeout && be.code() == "resize_timeout":
+			// The disk is grown on the host, the guest's resize2fs did not finish: the
+			// same disk_gib again retries it (PROTOCOL.md resize).
+			writeErr(w, r, 504, "resize_timeout", be.message())
 		case be.Status/100 == 4:
 			writeErr(w, r, be.Status, "bad_request", be.message())
 		case strings.HasPrefix(be.message(), guestPrefix):

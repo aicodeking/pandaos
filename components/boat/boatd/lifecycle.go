@@ -298,6 +298,7 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 		os.Remove(filepath.Join(root, memFile))
 	}
 	m.rmVCPUCgroup(v.ID) // the last run's: the jailer's cgroup goes back to a plain domain
+	t0 := time.Now()
 	pid, done, err := m.procs.Start(v, root, uid, gid)
 	if err != nil {
 		delVMNet(m.run, v)
@@ -314,6 +315,7 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 	// create in the state dir, which a btrfs commit with GiBs in writeback (a snapshot
 	// just dumped) stalls for longer than that. A dead firecracker still fails at once.
 	err = waitSock(filepath.Join(root, apiSock), done, time.Duration(m.cfg.BootTimeoutS)*time.Second)
+	t1 := time.Now()
 	fc := newFC(filepath.Join(root, apiSock))
 	if err == nil && restore {
 		if err = fc.restore(ctx, m.cfg.DiffSnapshots); err == nil {
@@ -328,6 +330,8 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 		delVMNet(m.run, v)
 		return v, err
 	}
+	// The socket wait is where a btrfs commit behind a dump's writeback shows (see writeback.go).
+	log.Printf("%s: boot vmm+sock=%dms load=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
 	if err := m.splitVCPUs(v, pid); err != nil {
 		log.Printf("%s: vCPU threads stay with the VMM thread: %v", v.ID, err)
 	}

@@ -35,6 +35,7 @@ type fakeBoatd struct {
 	stops         []map[string]any
 	forks         []map[string]any
 	deskErr       string // non-empty: the guest agent refuses desktop with this (boatd answers 502)
+	resizeTimeout bool   // the guest's resize2fs times out (boatd answers 504 resize_timeout)
 	refuse        string // non-empty: lifecycle POSTs answer 503 with this code (host full)
 	// discardPuts counts file uploads instead of keeping them (memory tests).
 	discardPuts bool
@@ -237,6 +238,10 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			enc.Encode(map[string]int{"exit": exit})
 			return
 		case "resize":
+			if f.resizeTimeout {
+				writeJSON(w, 504, map[string]string{"error": "resize: the disk is 9 GiB on the host, but the guest's resize2fs did not finish", "code": "resize_timeout"})
+				return
+			}
 			if in["size"] == "" { // disk growth works in any state
 				writeJSON(w, 200, vm)
 				return
