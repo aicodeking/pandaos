@@ -690,6 +690,8 @@ As of the AX42 runs (Ubuntu, 2026-11-11; PandaOS install, 2026-11-12), CI runs 4
 
 Also measured, without a boat.dev counterpart: SMT off costs untrusted mode 6% of host throughput at 7 VMs, and the CPU governor (`performance` vs `powersave` / `balance_performance`) changes nothing measurable.
 
+**Where this page is generous to PandaOS.** Every self-hosted figure prices **one host with no spare capacity**. The density and cost-per-run tables fill that host to boatd's admission limit and sell all of it, and the verdict compares that packed box with boat.dev's per-sandbox price. A service that offers what boat.dev's price includes cannot run that way. It needs somewhere to put tenants while the host is down for a kernel update (every VM stops on a reboot) or a hardware fault ([§5](#5-what-self-hosting-does-not-give-you)), and headroom so that a burst of creates is not refused by admission. With N+1 hosts at small scale (two AX42s to sell one AX42 of VMs), every per-VM-hour and per-run cost here doubles, and at 10 hosts it rises by about 10%. Our own 8–11 VM counts also assume the full RAM promise is sold and nothing is held back. None of this was measured; it is arithmetic on the same prices.
+
 **In one line:** per unit of CPU-bound work, self-hosted PandaOS on the AX42 costs about 1.5× boat.dev's published price. Per VM-hour it is cheaper only on a box kept more than about two-thirds full with free operator time and prompt deletion of stopped VMs. You self-host for control (kernels, images, data locality, no start or snapshot fees), not to undercut boat.dev.
 
 **What would change this verdict:**
