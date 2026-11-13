@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -197,6 +202,7 @@ func TestStartWriteback(t *testing.T) {
 // A dump is capped only while some VM boots, from whichever starts second, and its
 // configured io.max comes back after.
 func TestDumpCappedWhileAVMBoots(t *testing.T) {
+	logs := captureDumpLogs(t)
 	cgroupRoot = t.TempDir()
 	defer func() { cgroupRoot = "/sys/fs/cgroup" }()
 	m := &Manager{cfg: Config{cgroupLimits: true, stateDisk: "259:0", CgroupParent: "p", IOMaxIOPS: 1000}}
@@ -231,6 +237,13 @@ func TestDumpCappedWhileAVMBoots(t *testing.T) {
 		t.Fatalf("no boot left: %q, dumping %v", ioMax("b"), m.dio.dumping)
 	}
 	m.dumpDone("b")
+	for _, id := range []string{"a", "b"} {
+		for _, val := range []string{capped, open} {
+			if !strings.Contains(logs(), id+`: dump-cap dev=259:0 requested="`+val+`" actual="`+val+`" write_error=<nil> read_error=<nil>`) {
+				t.Errorf("missing applied/restored readback for %s: %s", id, logs())
+			}
+		}
+	}
 	m.dumpDone("never") // no dump: nothing written
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "p", "never")); err == nil || len(m.dio.dumping) != 0 {
 		t.Fatalf("dumping %v", m.dio.dumping)
@@ -254,5 +267,121 @@ func TestIOMaxLine(t *testing.T) {
 		if got, lim := c.cfg.ioMax(c.cap); got != c.want || lim != c.limited {
 			t.Errorf("%+v cap %d: %q %v, want %q %v", c.cfg, c.cap, got, lim, c.want, c.limited)
 		}
+	}
+}
+
+// Capture through a file: background manager logs can continue during assertions.
+func captureDumpLogs(t *testing.T) func() string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "dump-log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := log.Writer()
+	log.SetOutput(f)
+	t.Cleanup(func() { log.SetOutput(old); f.Close() })
+	return func() string {
+		b, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+}
+
+func TestDumpCapDiagnosticsFailures(t *testing.T) {
+	oldRoot := cgroupRoot
+	cgroupRoot = t.TempDir()
+	defer func() { cgroupRoot = oldRoot }()
+	logs := captureDumpLogs(t)
+	m := &Manager{cfg: Config{cgroupLimits: true, stateDisk: "259:0", CgroupParent: "p"}}
+	m.dumpStarted("missing")
+	done := m.bootIO()
+	defer done()
+	output := logs()
+	if !strings.Contains(output, "missing: dump-cap dev=259:0") ||
+		!strings.Contains(output, `requested="259:0 rbps=max wbps=157286400 riops=max wiops=max"`) ||
+		!strings.Contains(output, "booting=1 dumps=1 generation=1") ||
+		strings.Contains(output, "write_error=<nil>") || strings.Contains(output, "read_error=<nil>") {
+		t.Fatalf("failed cap must expose requested limits, both errors and context: %s", output)
+	}
+	// A successful write alone is insufficient: /dev/null discards it.
+	dir := filepath.Join(cgroupRoot, "p", "discard")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(os.DevNull, filepath.Join(dir, "io.max")); err != nil {
+		t.Fatal(err)
+	}
+	m.dumpStarted("discard")
+	output = logs()
+	if !strings.Contains(output, `discard: dump-cap dev=259:0 requested="259:0 rbps=max wbps=157286400 riops=max wiops=max" actual="" write_error=<nil> read_error=<nil>`) {
+		t.Fatalf("discarded write must expose actual empty readback: %s", output)
+	}
+}
+
+func TestDumpReadbackBounded(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "io.max")
+	if err := os.WriteFile(p, []byte(strings.Repeat("x", 8192)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := readDumpIOMax(p)
+	if len(actual) != 4096 || !errors.Is(err, io.ErrShortBuffer) {
+		t.Fatalf("unbounded readback: %d, %v", len(actual), err)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(p, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readDumpIOMax(p); err == nil {
+		t.Fatal("read error hidden")
+	}
+}
+
+func TestDumpWriteIntervals(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fail), func(t *testing.T) {
+			logs := captureDumpLogs(t)
+			m, h := newTestManager(t, nil)
+			v, err := m.Create(context.Background(), CreateReq{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fail {
+				h.mu.Lock()
+				h.failSnap = 1
+				h.mu.Unlock()
+			}
+			before := time.Now().UnixMilli()
+			_, generation, err := m.dumpSnapshot(context.Background(), v, false)
+			after := time.Now().UnixMilli()
+			if (err != nil) != fail {
+				t.Fatalf("snapshot failure=%t: %v", fail, err)
+			}
+			events := regexp.MustCompile(regexp.QuoteMeta(v.ID)+`: dump-write generation=([0-9]+) phase=(start|end) unix_ms=([0-9]+)`).FindAllStringSubmatch(logs(), -1)
+			if len(events) != 2 {
+				t.Fatalf("want one paired write interval: %s", logs())
+			}
+			start, _ := strconv.ParseInt(events[0][3], 10, 64)
+			end, _ := strconv.ParseInt(events[1][3], 10, 64)
+			if events[0][1] == "0" || events[0][1] != events[1][1] || events[0][2] != "start" || events[1][2] != "end" || start < before || end < start || end > after {
+				t.Fatalf("invalid actual write interval: %v", events)
+			}
+			if fail {
+				if generation != 0 || m.dumpGeneration(v.ID) != 0 {
+					t.Fatal("failed write kept dump ownership")
+				}
+				if !strings.Contains(logs(), "phase=end unix_ms="+events[1][3]+" error=firecracker") {
+					t.Fatalf("failed interval lost call error: %s", logs())
+				}
+			} else {
+				if strconv.FormatUint(generation, 10) != events[0][1] {
+					t.Fatal("interval generation differs from dump owner")
+				}
+				m.setMemLimits(v)
+			}
+		})
 	}
 }

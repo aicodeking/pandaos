@@ -200,6 +200,157 @@ perf_cfg '.' again
 pv=$(perf_vm pv)
 
 log "perf e2e: snapshot, new-from-snapshot, fork (4/8, 2 GiB dirty + 1 GiB cache)"
+perf_dump_overlap() { # SOURCE CREATE_START_S FIRSTEXEC_END_S; only NEW log lines on stdin
+  awk -v vm="$1" -v create="$2" -v ready="$3" '
+    { marker = vm ": dump-write "; at = index($0, marker)
+      if (!at || (at > 1 && substr($0, at-1, 1) !~ /[[:space:]]/)) next
+      event = substr($0, at + length(marker))
+      if (event !~ /^generation=[0-9]+ phase=(start unix_ms=[0-9]+|end unix_ms=[0-9]+ error=<nil>)$/) { bad=1; next }
+      split(event, a, " "); sub(/^generation=/, "", a[1]); sub(/^phase=/, "", a[2]); sub(/^unix_ms=/, "", a[3])
+      if (generation != "" && generation != a[1]) bad=1
+      if (a[2] == "end" && count["start"] != 1) bad=1
+      generation=a[1]; count[a[2]]++; stamp[a[2]]=a[3]+0
+    }
+    END {
+      create=int(create*1000); ready=int(ready*1000)
+      lo = stamp["start"] > create ? stamp["start"] : create
+      hi = stamp["end"] < ready ? stamp["end"] : ready
+      if (bad || generation+0 <= 0 || count["start"] != 1 || count["end"] != 1 ||
+          stamp["start"]+0 <= 0 || stamp["end"] <= stamp["start"] || ready <= create || hi <= lo) {
+        printf "invalid dump overlap: vm=%s generation=%s starts=%d ends=%d write=[%.0f,%.0f] create=[%.0f,%.0f]\n", vm, generation, count["start"], count["end"], stamp["start"], stamp["end"], create, ready
+        exit 1
+      }
+      printf "dump-write vm=%s generation=%s start_unix_ms=%.0f end_unix_ms=%.0f create_start_unix_ms=%.0f firstexec_end_unix_ms=%.0f overlap_ms=%.0f\n", vm, generation, stamp["start"], stamp["end"], create, ready, hi-lo
+    }'
+}
+
+perf_dump_diag() { # SOURCE: bounded host-only counters, no process argv or guest data
+  sudo -n timeout -k 1 40 python3 -u - "$STATE" "$WORK" "$1" <<'PY'
+import glob, json, os, stat, subprocess, sys, time
+state, work, source = sys.argv[1:]
+root = '/sys/fs/cgroup'
+stop = work + '/dump-diag.stop'
+def read(path, limit=4096):
+    try:
+        with open(path) as f:
+            value = f.read(limit+1)
+        return value[:limit].strip() + (' [truncated]' if len(value) > limit else '')
+    except OSError as e:
+        return 'unavailable: ' + str(e)
+def emit(phase, **data):
+    print('dump-diag ' + json.dumps(dict(unix_ms=time.time_ns()//1000000, phase=phase, **data), separators=(',', ':')))
+def command(args):
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=2)
+        return p.stdout[:4096].strip() if p.returncode == 0 else 'unavailable: command exit ' + str(p.returncode)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 'unavailable: ' + str(e)
+def cgroup(pid):
+    for line in read('/proc/' + pid + '/cgroup').splitlines():
+        if line.startswith('0::'):
+            return root + line[3:]
+    return root + '/unavailable-' + pid
+selected = set()
+def mount(path):
+    value = command(['findmnt', '-J', '-T', path, '-o', 'TARGET,SOURCE,FSTYPE,MAJ:MIN'])
+    emit('topology', path=path, mount=value)
+    try:
+        fs = json.loads(value)['filesystems'][0]
+        selected.add(fs['maj:min'])
+        # btrfs st_dev can be virtual: also follow its actual mount source.
+        device = fs['source'].split('[')[0]
+        st = os.stat(device)
+        if stat.S_ISBLK(st.st_mode):
+            selected.add(str(os.major(st.st_rdev)) + ':' + str(os.minor(st.st_rdev)))
+    except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
+        emit('topology', path=path, device_resolution='unavailable: ' + str(e))
+boatpid = read(work + '/boatd.pid')
+boatcg = cgroup(boatpid) if boatpid.isdigit() else root + '/unavailable-boatd'
+def counters(path, prefixes, limit=4096):
+    value = read(path, limit)
+    return value if value.startswith('unavailable:') else ';'.join(line for line in value.splitlines() if line.startswith(prefixes))
+def sample(phase):
+    groups = {'root': root, 'boat-parent': root + '/boat-e2e', 'boatd': boatcg, 'source': root + '/boat-e2e/' + source}
+    reader = read(work + '/dump-reader')
+    for path in sorted(glob.glob(root + '/boat-e2e/*'))[:16]:
+        if os.path.isdir(path) and os.path.basename(path) != source:
+            groups[('boot-reader:' if os.path.basename(path) == reader else 'candidate:') + os.path.basename(path)] = path
+    cg = {label: dict(path=path, **{name: read(path + '/' + name) for name in ('io.max', 'io.stat', 'io.pressure', 'cpu.pressure', 'cpu.stat')}) for label, path in groups.items()}
+    processes = {'boatd': boatpid}
+    for label, path in groups.items():
+        if label not in ('root', 'boat-parent', 'boatd'):
+            for pid in read(path + '/cgroup.procs').split()[:4]:
+                if pid.isdigit():
+                    processes[label + ':' + pid] = pid
+    proc = {label: dict(pid=pid, schedstat=read('/proc/' + pid + '/schedstat'), io=read('/proc/' + pid + '/io'), switches=';'.join(line for line in read('/proc/' + pid + '/status').splitlines() if 'ctxt_switches:' in line)) for label, pid in processes.items() if pid.isdigit()}
+    disks = []
+    try:
+        with open('/proc/diskstats') as f:
+            for line in f:
+                fields = line.split()
+                dev = ':'.join(fields[:2])
+                if dev in selected or (len(disks) < 32 and not fields[2].startswith(('loop', 'ram'))):
+                    disks.append(('selected ' if dev in selected else 'candidate ') + line.strip())
+    except OSError as e:
+        disks = ['unavailable: ' + str(e)]
+    emit(phase, diskstats=disks, cgroups=cg, processes=proc, memory=counters('/proc/meminfo', ('Dirty:', 'Writeback:')), cpu=counters('/proc/stat', ('cpu ', 'ctxt ', 'processes ', 'procs_running ', 'procs_blocked '), 65536), pressure={name: read('/proc/pressure/' + name) for name in ('cpu', 'io')})
+mount(state)
+sample('initial')
+for dev in list(selected):
+    sysdev = '/sys/dev/block/' + dev
+    backing = read(sysdev + '/loop/backing_file')
+    emit('topology', device=dev, sysfs=os.path.realpath(sysdev), loop_backing=backing, direct_io=read(sysdev + '/loop/dio'))
+    if not backing.startswith('unavailable:'):
+        mount('/' + backing.lstrip('/'))
+    chain = command(['lsblk', '-s', '-n', '-r', '-o', 'KNAME,MAJ:MIN,TYPE', '/dev/block/' + dev])
+    emit('topology', device=dev, parents=chain)
+    for line in chain.splitlines():
+        fields = line.split()
+        if len(fields) == 3 and fields[1].replace(':', '').isdigit():
+            selected.add(fields[1])
+for _ in range(30):
+    if os.path.exists(stop):
+        break
+    sample('sample')
+    time.sleep(1)
+sample('after')
+emit('stopped', reason='requested' if os.path.exists(stop) else '30 sample limit')
+PY
+}
+
+perf_dump_trial() ( # SOURCE: isolate sampler cleanup from the e2e harness EXIT trap
+  v=$1; diag_pid=
+  rm -f "$WORK/dump-diag.stop" "$WORK/dump-reader"
+  trap '
+    rc=$?
+    touch "$WORK/dump-diag.stop"
+    if [ -n "$diag_pid" ]; then wait "$diag_pid" || echo "dump-diag sampler unavailable/failed (exit $?)"; fi
+    cat "$WORK/tmp/dump-diag.log" || true
+    exit "$rc"
+  ' EXIT
+  perf_dump_diag "$v" >"$WORK/tmp/dump-diag.log" 2>&1 & diag_pid=$!
+  logline=$(sudo awk 'END {print NR+0}' "$WORK/boatd.log")
+  bd POST "/v1/vms/$v/snapshots" '{"name":"y"}' >"$WORK/tmp/dumpy.json" & dpid=$!
+  d0=$(now)
+  sleep 1
+  t=$(now); f=$(perf_vm cd)
+  bx "$f" true >/dev/null || fail "create during a dump first exec failed"
+  exec_end=$(now)
+  echo "dump-trial source=$v reader=$f create_start_unix_s=$t firstexec_end_unix_s=$exec_end"
+  echo "$f" >"$WORK/dump-reader"
+  [ "$(vmf "$f" agent_ready)" = true ] || fail "create during a dump not ready"
+  wait "$dpid" || fail "snapshot during a create failed"
+  sudo sed -n "$((logline + 1)),\$p" "$WORK/boatd.log" | perf_dump_overlap "$v" "$t" "$exec_end" || fail "create during a dump has no proven write overlap"
+  echo "p: create during a dump -> exec-ready $(secs "$t" "$exec_end")s (snapshot API took $(secs "$d0" "$(now)")s): $(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')$(last_snap_log)"
+  touch "$WORK/dump-diag.stop"
+  wait "$diag_pid" || echo "dump-diag sampler unavailable/failed (exit $?)"
+  diag_pid=
+  bx "$f" 'timeout 10 systemd-analyze; timeout 10 systemd-analyze critical-chain boat-agent.service boat-growfs.service; timeout 10 systemctl show boat-agent.service boat-growfs.service -p Id -p ActiveEnterTimestampMonotonic -p ExecMainStartTimestampMonotonic -p ExecMainExitTimestampMonotonic' 35 || echo 'dump-diag guest boot timing unavailable'
+  secs "$t" "$exec_end" >"$WORK/tmp/cdump_s"
+  perf_del "$f"
+  bd DELETE "/v1/vms/$v/snapshots/$(jq -r .id "$WORK/tmp/dumpy.json")" >/dev/null
+)
+
 perf_snap() { # LABEL: snapshot API time; create/fork times run through first successful exec
   local v sn f; v=$(perf_vm "s$1")
   put_disk "$v"
@@ -230,18 +381,8 @@ perf_snap() { # LABEL: snapshot API time; create/fork times run through first su
   perf_del "$f"
   if [ "$1" = p ]; then # a create on the same host while this VM's memory dump is being written
     bx "$v" 'head -c 2G /dev/urandom >/dev/shm/d/dirty' 300 # 2 GiB of fresh dirty pages to dump
-    bd POST "/v1/vms/$v/snapshots" '{"name":"y"}' >"$WORK/tmp/dumpy.json" &
-    local dpid=$! d0; d0=$(now)
-    sleep 1
-    t=$(now); f=$(perf_vm cd)
-    bx "$f" true >/dev/null || fail "create during a dump first exec failed"
-    cdump_s=$(secs "$t" "$(now)")
-    [ "$(vmf "$f" agent_ready)" = true ] || fail "create during a dump not ready"
-    local inflight=no; kill -0 "$dpid" 2>/dev/null && inflight=yes
-    wait "$dpid" || fail "snapshot during a create failed"
-    echo "$1: create while a dump is in flight -> exec-ready ${cdump_s}s (dump still running at the end: $inflight, dump took $(secs "$d0" "$(now)")s): $(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')$(last_snap_log)"
-    perf_del "$f"
-    bd DELETE "/v1/vms/$v/snapshots/$(jq -r .id "$WORK/tmp/dumpy.json")" >/dev/null
+    perf_dump_trial "$v"
+    cdump_s=$(cat "$WORK/tmp/cdump_s")
   fi
   bd DELETE "/v1/vms/$v/snapshots/$sn" >/dev/null
   perf_del "$v"

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"io"
+	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -122,6 +125,28 @@ func (m *Manager) capDump(id string, on bool) {
 		limit = dumpWbpsWhileBooting
 	}
 	if val, _ := m.cfg.ioMax(limit); val != "" {
-		m.writeCgroup(VM{ID: id}, "io.max", val)
+		// Keep the same write semantics as writeCgroup, but expose even ENOENT:
+		// a vanished cgroup must not look like a successfully applied cap.
+		path := filepath.Join(cgroupRoot, m.cfg.CgroupParent, id, "io.max")
+		writeErr := os.WriteFile(path, []byte(val), 0)
+		actual, readErr := readDumpIOMax(path)
+		log.Printf("%s: dump-cap dev=%s requested=%q actual=%q write_error=%v read_error=%v capped=%t booting=%d dumps=%d generation=%d",
+			id, m.cfg.stateDisk, val, actual, writeErr, readErr, on, m.dio.booting, len(m.dio.dumping), m.dio.dumping[id])
 	}
+}
+
+// readDumpIOMax bounds diagnostics even if the selected cgroup file is unexpected.
+// This is one small read per cap transition, never a polling loop.
+func readDumpIOMax(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	const maxReadback = 4096
+	b, err := io.ReadAll(io.LimitReader(f, maxReadback+1))
+	if len(b) > maxReadback {
+		return string(b[:maxReadback]), io.ErrShortBuffer
+	}
+	return string(b), err
 }

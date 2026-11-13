@@ -70,7 +70,9 @@ func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, uin
 	if !fsync {
 		stopWB = startWriteback(filepath.Join(root, memPath))
 	}
+	log.Printf("%s: dump-write generation=%d phase=start unix_ms=%d", v.ID, generation, time.Now().UnixMilli())
 	err := fc.snapshot(ctx, typ, snapState, memPath, fsync)
+	log.Printf("%s: dump-write generation=%d phase=end unix_ms=%d error=%v", v.ID, generation, time.Now().UnixMilli(), err)
 	stopWB()
 	if err != nil {
 		m.setMemLimits(v)
