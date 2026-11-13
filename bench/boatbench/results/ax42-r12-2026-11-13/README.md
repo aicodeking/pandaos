@@ -44,8 +44,8 @@ JSON was dropped; the three `host-nocow-*.json` files above ran with `chattr` fr
 ## `disk-d-pinned/`: workload d with the pinned random reads
 
 `boatbench.py run --driver pandaos --repeats 3 --only d` (08:41–09:01Z), `BOATBENCH_PRESET=pandaos-install`,
-`BOATBENCH_RUN_ID=r12` (VMs `bb-r12-0` … `bb-r12-2`, warm), from `bench/boatbench` at local commit `a8d1aba` (the
-`source_commit` in the JSON; the same tree is in this commit's history under its pushed SHA). `run.log` is the
+`BOATBENCH_RUN_ID=r12` (VMs `bb-r12-0` … `bb-r12-2`, warm), from `bench/boatbench` at `a8d1aba` (the `source_commit` in
+the JSON: a local commit, rebased onto main as `eead958` with the same `bench/` tree). `run.log` is the
 harness log. `sh ../regen.sh` writes `report-disk-pinned.md` byte for byte.
 
 | 4k rand read, iodepth 32, 15 s | repeat 1 | repeat 2 | repeat 3 |
