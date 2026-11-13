@@ -5489,6 +5489,10 @@
             "type": "null"
            }
           ]
+         },
+         "subdomain": {
+          "type": "string",
+          "description": "boat.dev's; refused here with 501 not_supported (port URLs are <port>-<vm id>.<vm domain>)"
          }
         }
        }

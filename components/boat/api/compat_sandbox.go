@@ -12,8 +12,15 @@ func (s *server) compatUpdate(w http.ResponseWriter, r *http.Request, p *princip
 	var body struct {
 		Name       *string         `json:"name"`
 		TTLSeconds json.RawMessage `json:"ttlSeconds"`
+		Subdomain  *string         `json:"subdomain"`
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	if body.Subdomain != nil {
+		writeErr(w, r, http.StatusNotImplemented, "not_supported", "subdomain is not supported on self-hosted boat: "+
+			"port URLs are <port>-<vm id>.<vm domain>, and the gateway's route tokens and TLS certificates are bound to that name; "+
+			"nothing was changed")
 		return
 	}
 	in := map[string]any{}

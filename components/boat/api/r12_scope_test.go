@@ -185,3 +185,16 @@ func TestCompatOpenAPIServed(t *testing.T) {
 		}
 	}
 }
+
+// PATCH subdomain: a clear 501, nothing changed (not a bare unknown-field 400).
+func TestCompatSubdomainRefused(t *testing.T) {
+	e := setup(t)
+	bx := e.newSandbox(nil)
+	st, out, _ := e.compat(e.owner, "PATCH", "/api/v1/sandboxes/"+bx, map[string]any{"subdomain": "acme-staging", "name": "x"}, nil)
+	if st != 501 || out["code"] != "not_supported" || !strings.Contains(out["message"].(string), "route tokens") {
+		t.Errorf("subdomain: %d %v", st, out)
+	}
+	if _, g, _ := e.compat(e.owner, "GET", "/api/v1/sandboxes/"+bx, nil, nil); g["sandbox"].(map[string]any)["name"] == "x" {
+		t.Error("a refused PATCH changed the name")
+	}
+}
