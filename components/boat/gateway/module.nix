@@ -2,7 +2,7 @@
 # `jump` user forwards ssh into VMs. Imported by ../module.nix.
 #
 #   api.<domain>                  -> boat-api (127.0.0.1:apiPort): /v1/*, /api/v1/* (boat.dev
-#                                    compatible), /healthz; /internal/* is never public
+#                                    compatible), /healthz, /openapi.{json,yaml}; /internal/* is never public
 #   desktop.<domain>/<vmid>?sig   -> 302 to <vmid>.desktop.<domain> (nothing served or set here)
 #   <vmid>.desktop.<domain>       -> boat-gateway -> VM desktop (signed link -> host-only cookie)
 #   <port>-<vmid>.<vmDomain>      -> boat-gateway -> VM ip:port; private unless the port is public
@@ -29,7 +29,7 @@ let
   acceptsOnDemand = lib.elem "on-demand-tls" boat.untrustedTenantsAcceptRisks;
   # The API's own paths; everything else is the dashboard, when there is one.
   # /api/v1/* is the boat.dev-compatible API (official boat.dev SDKs).
-  apiPaths = [ "/v1/*" "/api/v1/*" "/healthz" ];
+  apiPaths = [ "/v1/*" "/api/v1/*" "/healthz" "/openapi.json" "/openapi.yaml" ];
   apiProxy = "reverse_proxy 127.0.0.1:${toString boat.apiPort}";
   dashboardSite =
     if cfg.dashboardDir == null then

@@ -21,6 +21,33 @@ import (
 //go:embed openapi.json
 var openapiSpec []byte
 
+// compatSpec is openapiSpec's /api/v1 operations as boat.dev's spec: paths
+// relative to the server URL /api/v1.
+var compatSpec = mustCompatSpec(openapiSpec)
+
+func mustCompatSpec(native []byte) []byte {
+	var spec map[string]any
+	if err := json.Unmarshal(native, &spec); err != nil {
+		panic("openapi.json: " + err.Error())
+	}
+	paths := map[string]any{}
+	for p, op := range spec["paths"].(map[string]any) {
+		if rest, ok := strings.CutPrefix(p, compatPrefix); ok {
+			paths["/"+rest] = op
+		}
+	}
+	out := map[string]any{}
+	for k, v := range spec {
+		out[k] = v
+	}
+	out["paths"], out["servers"] = paths, []any{map[string]any{"url": "/api/v1"}}
+	b, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
 const usageText = `usage:
   boat-api [serve] [flags]          run the API server
   boat-api admin init [flags]       create the operator (first owner) + team, print its key
@@ -300,6 +327,15 @@ func (s *server) routes() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(openapiSpec)
 	})
+	// boat.dev's API surface alone, relative to /api/v1 (boat.dev publishes it
+	// as /openapi.yaml; JSON is YAML, so one document serves all three).
+	for path, ctype := range map[string]string{"/api/v1/openapi.json": "application/json",
+		"/openapi.json": "application/json", "/openapi.yaml": "application/yaml"} {
+		s.handle("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", ctype)
+			w.Write(compatSpec)
+		})
+	}
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, r, 404, "not_found", "no such endpoint") })
 	s.mux.HandleFunc("GET /internal/route-gens", s.routeGens) // boat-gateway; Caddy never publishes /internal/
 

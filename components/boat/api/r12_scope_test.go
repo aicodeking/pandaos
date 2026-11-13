@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -158,5 +159,29 @@ func TestSelfTokenLinksDieOnRotate(t *testing.T) {
 	}
 	if st, _ := e.raw("", "GET", u, nil); st != 404 {
 		t.Errorf("download URL survives the self token's rotation: %d", st)
+	}
+}
+
+// boat.dev's spec is served where its tools look: /api/v1/openapi.json and
+// the API root's /openapi.json and /openapi.yaml, paths relative to /api/v1.
+func TestCompatOpenAPIServed(t *testing.T) {
+	e := setup(t)
+	for _, p := range []string{"/api/v1/openapi.json", "/openapi.json", "/openapi.yaml"} {
+		st, b := e.raw("", "GET", p, nil)
+		var spec struct {
+			Servers []struct{ URL string }
+			Paths   map[string]any
+		}
+		if st != 200 || json.Unmarshal(b, &spec) != nil {
+			t.Fatalf("%s: %d", p, st)
+		}
+		if len(spec.Servers) != 1 || spec.Servers[0].URL != "/api/v1" || spec.Paths["/sandboxes"] == nil || spec.Paths["/sandboxes/{id}/host"] == nil {
+			t.Errorf("%s: servers %v, %d paths", p, spec.Servers, len(spec.Paths))
+		}
+		for k := range spec.Paths {
+			if strings.HasPrefix(k, "/v1/") || strings.HasPrefix(k, "/api/") {
+				t.Errorf("%s: native or unstripped path %s", p, k)
+			}
+		}
 	}
 }

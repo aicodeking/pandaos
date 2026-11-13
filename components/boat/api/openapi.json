@@ -67,6 +67,71 @@
     }
    }
   },
+  "/api/v1/openapi.json": {
+   "get": {
+    "summary": "boat.dev's API surface: the /api/v1 operations, paths relative to /api/v1",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/openapi.json": {
+   "get": {
+    "summary": "Same as /api/v1/openapi.json, at the API root",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/openapi.yaml": {
+   "get": {
+    "summary": "Same as /api/v1/openapi.json, as boat.dev publishes it (JSON is YAML)",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/yaml": {
+        "schema": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/v1/me": {
    "get": {
     "summary": "Caller identity, team, role and effective scopes",
