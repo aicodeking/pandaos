@@ -227,6 +227,12 @@ func (a *app) push(id, dir, to string) (pushResult, error) {
 	if err != nil {
 		return pushResult{}, err
 	}
+	return a.pushFiles(id, abs, files, to)
+}
+
+// pushFiles sends files (relative to abs) and unpacks them at `to`
+// (default ~/<base of abs>; relative = from home).
+func (a *app) pushFiles(id, abs string, files []string, to string) (pushResult, error) {
 	if to == "" {
 		to = filepath.Base(abs)
 	}

@@ -2,6 +2,23 @@
 
 ## Install and upgrade
 
+**No release exists yet**, so the curl/irm one-liners and `boat upgrade` below
+have nothing to download (they fail with a 404) until the first `v*` tag is
+published. Install one of these ways today:
+
+- **Build from source** (Go 1.22+):
+  ```
+  git clone https://github.com/aicodeking/pandaos && cd pandaos/components/boat/cli
+  go build -o ~/.local/bin/boat .      # Windows: go build -o boat.exe .
+  boat version
+  ```
+- **CI artifact:** run the `release` workflow by hand (Actions → release → Run
+  workflow; a dry run publishes nothing) and download its `boat-assets`
+  artifact (kept 7 days): `boat_<os>_<arch>` binaries plus `boat_SHA256SUMS`.
+  Check the sum, `chmod +x`, and put it on your PATH as `boat`.
+
+Once a release is published:
+
 ```
 curl -fsSL https://raw.githubusercontent.com/aicodeking/pandaos/main/components/boat/cli/install.sh | sh
 irm https://raw.githubusercontent.com/aicodeking/pandaos/main/components/boat/cli/install.ps1 | iex   # Windows
@@ -19,7 +36,6 @@ boat upgrade --version v0.3.0
 - **`boat upgrade`:** does the same check, then atomically replaces the running
   binary. If the binary's directory isn't writable (e.g. `/usr/local/bin`), run it
   with sudo or re-run install.sh.
-- **From source:** `cd components/boat/cli && go build -o ~/.local/bin/boat .`
 
 ```
 boat login --url https://boat.example --key boat_…     # writes ~/.config/boat/config.json (0600)
@@ -27,7 +43,7 @@ boat new --name dev --size large --ttl 8h
 boat prompt dev "add tests for the parser" --agent codex
 boat fork dev --name dev-try2 && boat stop dev
 boat ssh dev            # registers ~/.ssh/id_ed25519.pub, then execs ssh (ProxyCommand via the jump host if the server sets one)
-boat scp ./a.txt dev:/home/ubuntu/   # single files over the HTTP files API
+boat scp ./a.txt dev:a.txt;  boat scp -r ./dir dev:dir;  boat scp -r dev:out ./   # files API; relative = home
 boat exec dev -- make test           # exits with the remote exit code
 boat new --name ci --secrets GITHUB_TOKEN   # only this team secret goes in (--no-secrets: none)
 boat ports add dev 3000                # private: the gateway wants a token

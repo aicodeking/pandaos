@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -35,7 +36,16 @@ func compatVMPath(id string, rest ...string) string {
 
 // cmdStatus prints a VM's state.
 func cmdStatus(a *app, args []string) error {
-	vm, err := oneVM(a, args)
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	check := fs.Bool("check", false, "exit 1 when not logged in")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) == 0 { // boat.dev's boat status: the API, the key, the config
+		return cmdHealth(a, *check)
+	}
+	vm, err := oneVM(a, pos)
 	if err != nil {
 		return err
 	}
@@ -47,6 +57,11 @@ func cmdStatus(a *app, args []string) error {
 func cmdEvents(a *app, args []string) error {
 	fs := flag.NewFlagSet("events", flag.ContinueOnError)
 	limit := fs.Int("limit", 50, "")
+	follow := fs.Bool("f", false, "keep printing new events until interrupted")
+	fs.BoolVar(follow, "follow", false, "same as -f")
+	var convos multi
+	fs.Var(&convos, "convo", "only this conversation (or current); repeatable")
+	fs.Var(&convos, "conversation", "same as --convo")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -55,17 +70,44 @@ func cmdEvents(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
-	evs, err := listCall(a, compatVMPath(id, "events")+fmt.Sprintf("?limit=%d", *limit), "events")
-	if err != nil {
-		return err
-	}
-	if a.json {
-		for _, e := range evs {
-			a.emit(e, nil)
+	q := url.Values{"limit": {strconv.Itoa(*limit)}}
+	for _, c := range convos {
+		conv, err := a.conversation(id, c)
+		if err != nil {
+			return err
 		}
-		return nil
+		q.Add("conversation", convUUID(conv))
 	}
+	seen := map[string]bool{}
+	for {
+		evs, err := listCall(a, compatVMPath(id, "events")+"?"+q.Encode(), "events")
+		if err != nil {
+			return err
+		}
+		a.printEvents(evs, seen)
+		if !*follow {
+			return nil
+		}
+		time.Sleep(eventPoll)
+	}
+}
+
+// eventPoll is how often events --follow asks again.
+var eventPoll = 2 * time.Second
+
+// printEvents prints the events not yet in seen (a response event is new
+// again once it finishes: its id stays, so the key is id+type).
+func (a *app) printEvents(evs []obj, seen map[string]bool) {
 	for _, e := range evs {
+		k := s(e, "id") + "/" + fmt.Sprint(e["timestamp"])
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		if a.json {
+			a.emit(e, nil)
+			continue
+		}
 		at := ""
 		if ms, ok := e["timestamp"].(float64); ok {
 			at = time.UnixMilli(int64(ms)).UTC().Format(time.RFC3339)
@@ -74,7 +116,6 @@ func cmdEvents(a *app, args []string) error {
 		text := fmt.Sprint(orAny(d["prompt"], d["text"], d["status"]))
 		fmt.Fprintf(a.out, "%s\t%s\t%s\n", at, s(e, "type"), strings.TrimSpace(text))
 	}
-	return nil
 }
 
 func orAny(vs ...any) any {

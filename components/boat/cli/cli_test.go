@@ -297,7 +297,7 @@ func TestGolden(t *testing.T) {
 			got := fmt.Sprintf("$ boat %s\nexit %d\n--- stdout\n%s--- stderr\n%s--- requests\n%s",
 				strings.Join(c.args, " "), code, out.String(), errw.String(), reqs.String())
 			got = strings.ReplaceAll(got, home, "$HOME")
-			got = regexp.MustCompile(`(?s)--- stderr\nboat - persistent.*?\n--- requests`).ReplaceAllString(got, "--- stderr\n<usage>\n--- requests")
+			got = regexp.MustCompile(`(?s)\nboat - persistent.*?\n--- requests`).ReplaceAllString(got, "\n<usage>\n--- requests")
 			path := filepath.Join("testdata", c.name+".golden")
 			if *update {
 				os.WriteFile(path, []byte(got), 0o644)

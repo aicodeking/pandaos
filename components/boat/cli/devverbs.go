@@ -76,7 +76,9 @@ func cmdExtend(a *app, args []string) error {
 }
 
 func cmdLimits(a *app, args []string) error {
-	if _, _, err := parse(flag.NewFlagSet("limits", flag.ContinueOnError), args); err != nil {
+	fs := flag.NewFlagSet("limits", flag.ContinueOnError)
+	fs.Bool("all", false, "accepted: every limit is shown")
+	if _, _, err := parse(fs, args); err != nil {
 		return err
 	}
 	var out obj
@@ -98,6 +100,12 @@ func cmdLimits(a *app, args []string) error {
 // a name in use replaces it); boat snapshot rm NAME removes it. Other forms
 // are boat snapshots'.
 func cmdSnapshot(a *app, args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "latest", "tree", "pull", "delete", "share", "shares", "unshare":
+			return cmdSnapshotMore(a, args[0], args[1:])
+		}
+	}
 	if len(args) > 0 && (args[0] == "rm" || args[0] == "remove") {
 		pos, _, err := parse(flag.NewFlagSet("snapshot", flag.ContinueOnError), args[1:])
 		if err != nil {
@@ -139,9 +147,17 @@ func cmdHistory(a *app, args []string) error {
 	follow := fs.Bool("f", false, "")
 	fs.BoolVar(follow, "follow", false, "")
 	limit := fs.Int("limit", 20, "")
+	mode := fs.String("mode", "", "commands: only what you ran (the only split kept here)")
+	stderr := fs.Bool("stderr", false, "")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
+	}
+	if *stderr {
+		return errors.New("--stderr is not supported on self-hosted boat: a command keeps one combined log of stdout and stderr; omit --stderr")
+	}
+	if *mode != "" && *mode != "commands" {
+		return errors.New("--mode " + *mode + " is not supported on self-hosted boat: the history keeps commands you ran (--mode commands), prompts and setup runs, with no process/sync/stream/detached split")
 	}
 	if len(pos) == 2 {
 		rest := []string{"logs", pos[0], pos[1]}
@@ -161,7 +177,9 @@ func cmdHistory(a *app, args []string) error {
 	// newest first, at most --limit, as boat.dev's
 	out := make([]obj, 0, len(l))
 	for i := len(l) - 1; i >= 0 && len(out) < *limit; i-- {
-		out = append(out, l[i])
+		if *mode == "" || s(l[i], "kind") == "command" {
+			out = append(out, l[i])
+		}
 	}
 	return a.emitList(out, "id", "kind", "state", "exit", "started_at", "cmd")
 }
@@ -212,8 +230,12 @@ func cmdWebhook(a *app, args []string) error {
 		if err := a.c.call("POST", "/api/v1/webhooks", body, &out); err != nil {
 			return err
 		}
-		out.Webhook["secret"] = out.Secret
-		return a.show(out.Webhook, append(cols, "secret")...)
+		hook := obj{"secret": out.Secret}
+		for k, v := range out.Webhook {
+			hook[k] = v
+		}
+		hook["secret"] = out.Secret
+		return a.show(hook, append(cols, "secret")...)
 	case "rotate", "remove", "rm":
 		if len(pos) != 1 {
 			return fmt.Errorf("boat webhook %s ID: %w", op, errUsage)

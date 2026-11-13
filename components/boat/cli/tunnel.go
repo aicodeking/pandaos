@@ -4,7 +4,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -138,8 +137,14 @@ func cmdHost(a *app, args []string) error {
 	fl := flag.NewFlagSet("host", flag.ContinueOnError)
 	public := fl.Bool("public", false, "a URL that needs no token")
 	private := fl.Bool("private", false, "a URL with a token (default)")
+	fl.String("title", "", "accepted: hosted ports carry no title here")
+	var hit string
+	refuse(fl, &hit, "the port route reaches the VM's own address; listen on 0.0.0.0", "localhost")
 	pos, _, err := parse(fl, args)
 	if err != nil {
+		return err
+	}
+	if err := refusedErr(hit); err != nil {
 		return err
 	}
 	if err := need(pos, 2, "<vm> <port>"); err != nil {
@@ -148,28 +153,18 @@ func cmdHost(a *app, args []string) error {
 	if *public && *private {
 		return fmt.Errorf("--public and --private conflict: %w", errUsage)
 	}
-	port, err := portArg("port", pos[1])
-	if err != nil {
+	if _, err := portArg("port", pos[1]); err != nil {
 		return err
 	}
 	id, err := vmArg(a, pos[0])
 	if err != nil {
 		return err
 	}
-	access := "private"
-	if *public {
-		access = "public"
-	}
-	if err := a.c.call("POST", vmPath(id, "ports"), obj{"port": port, "auth": access}, nil); err != nil {
+	u, err := a.hostPort(id, pos[1], *public)
+	if err != nil {
 		return err
 	}
-	var u obj
-	path := vmPath(id, "ports", url.PathEscape(pos[1]), "url") + "?ttl_s=" + strconv.Itoa(hostURLTTLS)
-	if err := a.c.call("GET", path, nil, &u); err != nil {
-		return err
-	}
-	return a.okLine(obj{"sandboxId": id, "port": port, "url": s(u, "url"), "access": access,
-		"isProtected": access == "private", "localhost": false, "expires_at": u["expires_at"]}, s(u, "url"))
+	return a.okLine(u, s(u, "url"))
 }
 
 func portArg(name, v string) (int, error) {

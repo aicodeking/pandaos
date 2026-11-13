@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -56,8 +57,14 @@ func (a *app) login(args []string) error {
 	u := fs.String("url", "", "API base URL (default: the saved one, or BOAT_URL)")
 	k := fs.String("key", "", "API key: boat_..., the JSON boat-api admin init prints, or - for stdin")
 	fromStdin := fs.Bool("key-stdin", false, "read the key from standard input")
+	var hit string
+	refuse(fs, &hit, "self-hosted boat has no browser or email sign-in; use boat login --url https://api.<domain> KEY (the owner key from boat-api admin init)",
+		"google", "agentid", "email=")
 	pos, _, err := parse(fs, args)
 	if err != nil {
+		return err
+	}
+	if err := refusedErr(hit); err != nil {
 		return err
 	}
 	if len(pos) > 1 || (len(pos) == 1 && (*k != "" || *fromStdin)) || (*k != "" && *fromStdin) {
@@ -82,7 +89,7 @@ func (a *app) login(args []string) error {
 		*u = cfg.URL
 	}
 	if *u == "" || key == "" {
-		return fmt.Errorf("login needs --url and a key: %w", errUsage)
+		return fmt.Errorf("login needs --url and a key (self-hosted boat has no browser sign-in): boat login --url https://api.<domain> KEY: %w", errUsage)
 	}
 	base := apiOrigin(*u)
 	c := &client{base: base, key: key, hc: &http.Client{Timeout: 30 * time.Second}}
@@ -150,6 +157,9 @@ func cmdRename(a *app, args []string) error {
 // boat.dev's refusals of --ttl/--sandbox/--env), the rest is boat keys.
 func cmdAPIKey(a *app, args []string) error {
 	op, args := sub(args, "", "create", "list", "ls", "usage", "rotate", "revoke")
+	if op == "list" || op == "ls" || op == "usage" { // boat.dev's --all / --verbose: everything is shown here
+		args = slices.DeleteFunc(slices.Clone(args), func(x string) bool { return x == "--all" || x == "--verbose" })
+	}
 	switch op {
 	case "list", "ls":
 		return cmdKeys(a, append([]string{"ls"}, args...))

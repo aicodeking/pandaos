@@ -104,24 +104,49 @@ func cmdNew(a *app, args []string) error {
 	size := fs.String("size", "", "")
 	fs.StringVar(size, "type", "", "same as --size")
 	image := fs.String("image", "", "")
-	ttl := fs.Duration("ttl", 0, "")
+	var ttl secsFlag
+	fs.Var(&ttl, "ttl", "seconds (or a duration like 2h) until auto-stop")
+	noAuto := fs.Bool("no-auto-stop", false, "never auto-stop")
 	idle := fs.String("idle-stop", "", "auto-stop after this idle time (e.g. 30m), or never")
 	snap := fs.String("snapshot", "", "create from a snapshot id")
 	lab := labels{}
 	fs.Var(lab, "label", "")
 	secrets := fs.String("secrets", "", "comma-separated team secrets for this VM (default: the default-injected ones)")
 	noSecrets := fs.Bool("no-secrets", false, "inject no team secrets")
-	envName := fs.String("env", "", "environment name")
-	fs.StringVar(envName, "environment", "", "same as --env")
+	envName := fs.String("environment", "", "environment name")
+	envv := labels{}
+	fs.Var(envv, "e", "KEY=VALUE for the VM (repeatable)")
+	fs.Var(envFlag{envName, envv}, "env", "KEY=VALUE for the VM (boat.dev), or an environment name")
+	visibility := fs.String("visibility", "", "shared (every sandbox here is usable by its team)")
+	fs.Bool("personal", false, "accepted: self-hosted boat has no org wallets")
+	var extras newExtras
+	extras.register(fs)
+	var hit string
+	refuse(fs, &hit, "this server always snapshots on stop", "no-snapshots")
+	refuse(fs, &hit, "this server keeps command output and process samples", "no-monitoring")
 	noEnv := fs.Bool("no-env", false, "ignore the team's default environment")
 	from := fs.String("from", "", "a saved snapshot (id or name) or a share code bsh_...")
 	waitSetup := fs.Bool("wait-setup", false, "follow the environment's setup script; fail if it fails")
 	count := fs.Int("count", 1, fmt.Sprintf("create this many VMs (1-%d) in one request, all or none; --name x gives x-1 … x-N", maxBatch))
 	failFast := fs.Bool("fail-fast", false, "fail at once with no_ready_machine when the host is full")
-	envv := labels{}
-	fs.Var(envv, "e", "KEY=VALUE for the VM (repeatable)")
 	pos, _, err := parse(fs, args)
 	if err != nil {
+		return err
+	}
+	if err := refusedErr(hit); err != nil {
+		return err
+	}
+	if err := ttlConflict(ttl, *noAuto); err != nil {
+		return err
+	}
+	switch *visibility {
+	case "", "shared":
+	case "private":
+		return errors.New("--visibility private is not supported on self-hosted boat: every sandbox is usable by its whole team")
+	default:
+		return fmt.Errorf("--visibility is private or shared: %w", errUsage)
+	}
+	if err := extras.check(); err != nil {
 		return err
 	}
 	if len(pos) == 1 && *name == "" {
@@ -129,7 +154,7 @@ func cmdNew(a *app, args []string) error {
 	} else if len(pos) > 0 {
 		return fmt.Errorf("unexpected arguments %v: %w", pos, errUsage)
 	}
-	body := obj{"name": *name, "size": *size, "image": *image, "ttl_s": int64(ttl.Seconds())}
+	body := obj{"name": *name, "size": *size, "image": *image, "ttl_s": ttl.v} // 0: no auto-stop (--no-auto-stop)
 	if *idle == "never" {
 		body["idle_stop_s"] = -1
 	} else if *idle != "" {
@@ -167,6 +192,10 @@ func cmdNew(a *app, args []string) error {
 		return fmt.Errorf("--count must be 1-%d: %w", maxBatch, errUsage)
 	case *count > 1 && *waitSetup:
 		return fmt.Errorf("--count does not work with --wait-setup: %w", errUsage)
+	case *count > 1 && extras.used():
+		return fmt.Errorf("--count does not work with --host, --file or --setup-file: %w", errUsage)
+	case *failFast && len(extras.hosts) > 0:
+		return fmt.Errorf("--host does not work with --fail-fast: %w", errUsage)
 	}
 	if *failFast {
 		body["fail_fast"] = true
@@ -182,6 +211,9 @@ func cmdNew(a *app, args []string) error {
 		return err
 	}
 	a.setCurrent(s(vm, "id"))
+	if hosted := extras.apply(a, s(vm, "id")); len(hosted) > 0 {
+		vm["hostedPorts"] = hosted
+	}
 	// --json: boat.dev's JSON Lines end with {"event":"ready","id":…}; this API
 	// answers once the VM is up, so that one line (with every VM field) is all.
 	if !a.json {
@@ -231,6 +263,9 @@ func oneVM(a *app, args []string) (obj, error) {
 func cmdStop(a *app, args []string) error {
 	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
 	force := fs.Bool("force", false, "kill at once, no snapshot: the next start is a cold boot and loses unsynced writes")
+	status := fs.String("status", "", "read this stop operation (stop_...)")
+	fs.Bool("yes", false, "accepted: stop never asks")
+	fs.Bool("y", false, "same as --yes")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -238,6 +273,9 @@ func cmdStop(a *app, args []string) error {
 	vm, err := oneVM(a, pos)
 	if err != nil {
 		return err
+	}
+	if *status != "" {
+		return cmdStopStatus(a, s(vm, "id"), *status)
 	}
 	var body any
 	if *force {
@@ -273,8 +311,26 @@ func cmdFork(a *app, args []string) error {
 	fs := flag.NewFlagSet("fork", flag.ContinueOnError)
 	name := fs.String("name", "", "")
 	failFast := fs.Bool("fail-fast", false, "fail at once with no_ready_machine when the host is full")
+	var ttl secsFlag
+	fs.Var(&ttl, "ttl", "seconds until the fork auto-stops")
+	never := fs.Bool("no-auto-stop", false, "the fork never auto-stops")
+	envv := labels{}
+	fs.Var(envv, "e", "KEY=VALUE for the fork (repeatable)")
+	fs.Var(envv, "env", "same as -e")
+	fs.Bool("wait", false, "accepted: fork answers once the fork is up")
+	var hit string
+	refuse(fs, &hit, "a fork keeps its parent's size here; fork, stop, then boat resume --type", "type=")
+	refuse(fs, &hit, "a fork keeps its parent's environment and secret selection", "environment=", "no-env")
+	refuse(fs, &hit, "this server always snapshots on stop", "no-snapshots")
+	refuse(fs, &hit, "this server keeps command output and process samples", "no-monitoring")
 	pos, _, err := parse(fs, args)
 	if err != nil {
+		return err
+	}
+	if err := refusedErr(hit); err != nil {
+		return err
+	}
+	if err := ttlConflict(ttl, *never); err != nil {
 		return err
 	}
 	vm, err := oneVM(a, pos)
@@ -285,11 +341,17 @@ func cmdFork(a *app, args []string) error {
 	if *failFast {
 		body["fail_fast"] = true
 	}
+	if len(envv) > 0 {
+		body["env"] = envv
+	}
 	var out obj
 	if err := a.c.call("POST", vmPath(s(vm, "id"), "fork"), body, &out); err != nil {
 		return err
 	}
 	a.setCurrent(s(out, "id"))
+	if err := a.setTTL(s(out, "id"), ttl, *never); err != nil {
+		return fmt.Errorf("fork %s made; setting its auto-stop: %w", s(out, "id"), err)
+	}
 	return a.emitVM(out)
 }
 
@@ -300,9 +362,30 @@ func cmdExec(a *app, args []string) error {
 	timeout := fs.Int("timeout", 0, "seconds")
 	cwd := fs.String("cwd", "", "")
 	detach := fs.Bool("detach", false, "run in the background; prints the command id")
+	fs.Bool("stream", false, "accepted: output always streams as the command writes it")
+	status := fs.String("status", "", "status and output of a --detach command")
+	attach := fs.String("attach", "", "follow a --detach command's output to its end; exits with its code")
+	kill := fs.String("kill", "", "stop a --detach command")
 	pos, cmd, err := parse(fs, args)
 	if err != nil {
 		return err
+	}
+	if pid := *status + *attach + *kill; pid != "" {
+		if len(pos) > 1 {
+			pos = pos[:1] // boat exec <vm> --attach "$pid": nothing else to run
+		}
+		op := map[bool]string{*status != "": "status", *attach != "": "logs", *kill != "": "stop"}[true]
+		rest := []string{op, orStr(firstOr(pos, ""), "current"), pid}
+		if op == "logs" {
+			rest = append(rest, "-f")
+		}
+		if op == "status" && !a.json {
+			if err := cmdCommands(a, rest); err != nil {
+				return err
+			}
+			return cmdCommands(a, []string{"logs", rest[1], pid})
+		}
+		return cmdCommands(a, rest)
 	}
 	if len(pos) == 2 && len(cmd) == 0 { // boat exec vm "cmd string"
 		cmd, pos = []string{"bash", "-lc", pos[1]}, pos[:1]
@@ -329,6 +412,11 @@ func cmdPrompt(a *app, args []string) error {
 	agent := fs.String("agent", "claude", "")
 	fs.StringVar(agent, "provider", "claude", "same as --agent")
 	model := fs.String("model", "", "")
+	effort := fs.String("reasoning-effort", "", "accepted; each harness picks its own thinking level here")
+	fast := fs.Bool("fast", false, "accepted; there is no fast mode here")
+	var attach multi
+	fs.Var(&attach, "attach", "a file for the agent, saved under ~/attachments (repeatable)")
+	fs.Var(&attach, "image", "same as --attach")
 	cwd := fs.String("cwd", "", "")
 	timeout := fs.Int("timeout", 0, "seconds")
 	var turn promptFlags
@@ -351,6 +439,12 @@ func cmdPrompt(a *app, args []string) error {
 	}
 	vm, err := a.c.resolveVM(pos[0])
 	if err != nil {
+		return err
+	}
+	if *effort != "" || *fast {
+		fmt.Fprintln(a.errw, "boat: note: --reasoning-effort and --fast have no effect on self-hosted boat")
+	}
+	if text, err = a.attach(s(vm, "id"), attach, text); err != nil {
 		return err
 	}
 	if turn.used() {
@@ -446,9 +540,14 @@ func (a *app) publicKey(path string) (string, error) {
 func cmdSSH(a *app, args []string) error {
 	fs := flag.NewFlagSet("ssh", flag.ContinueOnError)
 	ident := fs.String("identity", "", "public key file")
+	tty := fs.Bool("t", false, "give the command a terminal (tmux, read -s)")
+	fs.BoolVar(tty, "tty", false, "same as -t")
 	pos, extra, err := parse(fs, args)
 	if err != nil {
 		return err
+	}
+	if len(pos) == 2 && len(extra) == 0 { // boat ssh <vm> "cmd": boat.dev's one-command form
+		pos, extra = pos[:1], []string{pos[1]}
 	}
 	vm, err := oneVM(a, orCurrent(pos, 1))
 	if err != nil {
@@ -458,7 +557,11 @@ func cmdSSH(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
-	argv := append(sshArgv(s(vm, "id"), info), extra...)
+	var opts []string
+	if *tty {
+		opts = []string{"-t"}
+	}
+	argv := append(sshArgv(s(vm, "id"), info, opts...), extra...)
 	if a.json {
 		info["argv"] = argv
 		return a.emit(info, nil)
@@ -474,79 +577,16 @@ func sshJumpArgs(j string) string {
 	return j
 }
 
-// cmdSCP copies one file through the files API: boat scp a.txt vm:/tmp/a.txt
-func cmdSCP(a *app, args []string) error {
-	if err := need(args, 2, "<src> <dst> with vm:/path on one side"); err != nil {
-		return err
-	}
-	src, dst := args[0], args[1]
-	srcVM, srcPath, srcRemote := splitRemote(src)
-	dstVM, dstPath, dstRemote := splitRemote(dst)
-	switch {
-	case srcRemote == dstRemote:
-		return fmt.Errorf("exactly one of src/dst must be vm:/path: %w", errUsage)
-	case dstRemote:
-		vm, err := a.c.resolveVM(dstVM)
-		if err != nil {
-			return err
-		}
-		f, err := os.Open(src)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		if strings.HasSuffix(dstPath, "/") {
-			dstPath += filepath.Base(src)
-		}
-		resp, err := a.c.request("PUT", vmPath(s(vm, "id"), "files")+"?path="+url.QueryEscape(dstPath), f, "application/octet-stream")
-		if err != nil {
-			return err
-		}
-		var out obj
-		json.NewDecoder(resp.Body).Decode(&out)
-		resp.Body.Close()
-		return a.emit(out, func() { fmt.Fprintf(a.out, "%s -> %s:%s (%v bytes)\n", src, dstVM, dstPath, out["bytes"]) })
-	default:
-		vm, err := a.c.resolveVM(srcVM)
-		if err != nil {
-			return err
-		}
-		resp, err := a.c.request("GET", vmPath(s(vm, "id"), "files")+"?path="+url.QueryEscape(srcPath), nil, "")
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if st, err := os.Stat(dst); err == nil && st.IsDir() {
-			dst = filepath.Join(dst, filepath.Base(srcPath))
-		}
-		f, err := os.Create(dst)
-		if err != nil {
-			return err
-		}
-		n, err := io.Copy(f, resp.Body)
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return err
-		}
-		return a.emit(obj{"ok": true, "path": dst, "bytes": n}, func() { fmt.Fprintf(a.out, "%s -> %s (%d bytes)\n", src, dst, n) })
-	}
-}
-
-func splitRemote(p string) (vm, path string, remote bool) {
-	vm, path, ok := strings.Cut(p, ":")
-	if !ok || vm == "" || strings.ContainsAny(vm, `/\`) || !strings.HasPrefix(path, "/") {
-		return "", p, false
-	}
-	return vm, path, true
-}
-
 func cmdDesktop(a *app, args []string) error {
 	fs := flag.NewFlagSet("desktop", flag.ContinueOnError)
 	noOpen := fs.Bool("no-open", false, "")
+	var hit string
+	refuse(fs, &hit, "browser opens the VM's desktop; start Chrome there with --user-data-dir", "profile=")
 	pos, _, err := parse(fs, args)
 	if err != nil {
+		return err
+	}
+	if err := refusedErr(hit); err != nil {
 		return err
 	}
 	vm, err := oneVM(a, pos)
@@ -639,8 +679,8 @@ func cmdPorts(a *app, args []string) error {
 }
 
 func cmdSnapshots(a *app, args []string) error {
-	if len(args) == 0 {
-		return cmdSnapshotsTeam(a, "team", nil)
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return cmdSnapshotsTeam(a, "team", args)
 	}
 	switch args[0] {
 	case "team", "shared", "import", "take", "delete":
@@ -660,6 +700,8 @@ func cmdSnapshots(a *app, args []string) error {
 	op, args := sub(args[1:], "ls", "ls", "create", "rm")
 	fs := flag.NewFlagSet("snapshots", flag.ContinueOnError)
 	name := fs.String("name", "", "")
+	limit := fs.Int("limit", 0, "at most this many, newest first")
+	fs.Bool("all", false, "accepted: every snapshot is listed")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -669,6 +711,9 @@ func cmdSnapshots(a *app, args []string) error {
 		l, err := listCall(a, vmPath(id, "snapshots"), "snapshots")
 		if err != nil {
 			return err
+		}
+		if *limit > 0 && len(l) > *limit {
+			l = l[len(l)-*limit:]
 		}
 		return a.emitList(l, "id", "name", "created", "size_bytes")
 	case "create":

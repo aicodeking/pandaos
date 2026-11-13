@@ -2,5 +2,6 @@ $ boat extend vm1
 exit 2
 --- stdout
 --- stderr
-<usage>
+boat: give one of --hours N, --ttl SECS, --no-auto-stop or --by DURATION
+  boat extend <vm> --hours N | --ttl SECS | --no-auto-stop | --by 2h   auto-stop: set the time left, or push it out
 --- requests

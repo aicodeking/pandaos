@@ -377,7 +377,11 @@ func cmdPrompts(a *app, args []string) error {
 }
 
 func cmdConversations(a *app, args []string) error {
-	vm, err := oneVM(a, args)
+	pos, _, err := parse(flag.NewFlagSet("conversations", flag.ContinueOnError), args)
+	if err != nil {
+		return err
+	}
+	vm, err := oneVM(a, orCurrent(pos, 1))
 	if err != nil {
 		return err
 	}
@@ -388,31 +392,17 @@ func cmdConversations(a *app, args []string) error {
 	return a.emitList(l, "id", "agent", "prompt_count", "running", "last_prompt")
 }
 
-// runningPrompt finds the turn to act on: the given id, or the newest running.
-func (a *app) runningPrompt(id, given string) (string, error) {
-	if given != "" {
-		return given, nil
-	}
-	l, err := listCall(a, vmPath(id, "prompts"), "prompts")
-	if err != nil {
-		return "", err
-	}
-	for i := len(l) - 1; i >= 0; i-- {
-		if s(l[i], "state") == "running" {
-			return s(l[i], "id"), nil
-		}
-	}
-	return "", errors.New("no turn is running on this VM")
-}
-
 // cmdSteer interrupts the running turn and resumes its session with the message.
 func cmdSteer(a *app, args []string) error {
 	fs := flag.NewFlagSet("steer", flag.ContinueOnError)
 	turn := fs.String("prompt-id", "", "the turn (default: the newest running one)")
+	convo := fs.String("convo", "", "steer this conversation (or current)")
+	fs.StringVar(convo, "conversation", "", "same as --convo")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
+	pos = orCurrent(pos, 2)
 	if err := need(pos, 2, `<vm> "message"`); err != nil {
 		return err
 	}
@@ -420,47 +410,88 @@ func cmdSteer(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
-	pid, err := a.runningPrompt(id, *turn)
+	pid, err := a.pickTurns(id, *turn, *convo, true)
 	if err != nil {
 		return err
 	}
 	var out obj
-	if err := a.c.call("POST", vmPath(id, "prompts", url.PathEscape(pid), "steer"), obj{"prompt": pos[1]}, &out); err != nil {
+	if err := a.c.call("POST", vmPath(id, "prompts", url.PathEscape(pid[0]), "steer"), obj{"prompt": pos[1]}, &out); err != nil {
 		return err
 	}
 	return a.show(out, promptCols...)
 }
 
+// cmdInterrupt stops every running turn (boat.dev), or one conversation's.
 func cmdInterrupt(a *app, args []string) error {
 	fs := flag.NewFlagSet("interrupt", flag.ContinueOnError)
-	turn := fs.String("prompt-id", "", "the turn (default: the newest running one)")
+	turn := fs.String("prompt-id", "", "only this turn")
+	convo := fs.String("convo", "", "only this conversation (or current)")
+	fs.StringVar(convo, "conversation", "", "same as --convo")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
-	if err := need(pos, 1, "<vm>"); err != nil {
+	if err := need(orCurrent(pos, 1), 1, "<vm>"); err != nil {
 		return err
 	}
-	id, err := vmArg(a, pos[0])
+	id, err := vmArg(a, orCurrent(pos, 1)[0])
 	if err != nil {
 		return err
 	}
-	pid, err := a.runningPrompt(id, *turn)
+	pids, err := a.pickTurns(id, *turn, *convo, false)
 	if err != nil {
 		return err
 	}
-	var out obj
-	if err := a.c.call("POST", vmPath(id, "prompts", url.PathEscape(pid), "interrupt"), nil, &out); err != nil {
-		return err
+	var rows []obj
+	for _, pid := range pids {
+		var out obj
+		if err := a.c.call("POST", vmPath(id, "prompts", url.PathEscape(pid), "interrupt"), nil, &out); err != nil {
+			return err
+		}
+		rows = append(rows, out)
 	}
-	return a.show(out, promptCols...)
+	return a.emitList(rows, promptCols...)
+}
+
+// pickTurns: the given turn, else the running turns of --convo (or of the
+// whole VM); newestOnly keeps the newest.
+func (a *app) pickTurns(id, turn, convo string, newestOnly bool) ([]string, error) {
+	if turn != "" {
+		return []string{turn}, nil
+	}
+	conv := ""
+	if convo != "" {
+		c, err := a.conversation(id, convo)
+		if err != nil {
+			return nil, err
+		}
+		conv = c
+	}
+	l, err := a.runningTurns(id, conv)
+	if err != nil || !newestOnly {
+		return l, err
+	}
+	return l[:1], nil
 }
 
 // ---- environments ----
 
 func cmdEnv(a *app, args []string) error {
-	op, args := sub(args, "ls", "ls", "new", "show", "set", "rm", "build", "default")
+	op, args := sub(args, "ls", "ls", "list", "new", "show", "info", "set", "rm", "build", "default",
+		"rename", "set-var", "rm-var", "set-file", "rm-file", "add-repo", "rm-repo", "upgrade", "access")
+	switch op {
+	case "list":
+		op = "ls"
+	case "info":
+		op = "show"
+	case "rename", "set-var", "rm-var", "set-file", "rm-file", "add-repo", "rm-repo", "upgrade", "access":
+		return cmdEnvMore(a, op, args)
+	}
 	fs := flag.NewFlagSet("env", flag.ContinueOnError)
+	var hit string
+	refuse(fs, &hit, "a self-hosted server has one team per key, no organizations", "org=")
+	refuse(fs, &hit, "this server's environments choose secrets by name (--secrets A,B); no per-kind injection switches",
+		"github=", "boat-credentials=", "agents-credentials=", "safe-for-third-parties=", "credential-profile=", "proxy-ai-credentials=")
 	image := fs.String("image", "", "")
 	size := fs.String("size", "", "")
 	setup := fs.String("setup", "", "setup script text")
@@ -471,6 +502,19 @@ func cmdEnv(a *app, args []string) error {
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
+	}
+	if err := refusedErr(hit); err != nil {
+		return err
+	}
+	if op == "set" && (*secrets == "true" || *secrets == "false") { // boat.dev's toggle
+		if err := need(pos, 1, "ENV"); err != nil {
+			return err
+		}
+		var out obj
+		if err := a.c.call("PUT", "/api/v1/environments/"+url.PathEscape(pos[0]), obj{"passSecrets": *secrets == "true"}, &out); err != nil {
+			return err
+		}
+		return a.okLine(out, "secrets "+map[string]string{"true": "on", "false": "off"}[*secrets]+" for "+pos[0])
 	}
 	cols := []string{"id", "name", "image", "size", "version", "is_default"}
 	body := obj{}
@@ -606,8 +650,23 @@ func cmdResume(a *app, args []string) error {
 	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
 	typ := fs.String("type", "", "resize first (drops a stop snapshot's memory)")
 	failFast := fs.Bool("fail-fast", false, "fail at once with no_ready_machine when the host is full")
+	var ttl secsFlag
+	fs.Var(&ttl, "ttl", "seconds until auto-stop")
+	never := fs.Bool("no-auto-stop", false, "never auto-stop")
+	fs.Bool("no-wait", false, "accepted: resume answers once the VM is up")
+	envv := labels{}
+	fs.Var(envv, "e", "KEY=VALUE for this run (repeatable)")
+	fs.Var(envv, "env", "same as -e")
+	var hit string
+	refuse(fs, &hit, "the VM keeps its create-time environment and secret selection", "environment=", "no-env")
 	pos, _, err := parse(fs, args)
 	if err != nil {
+		return err
+	}
+	if err := refusedErr(hit); err != nil {
+		return err
+	}
+	if err := ttlConflict(ttl, *never); err != nil {
 		return err
 	}
 	vm, err := oneVM(a, pos)
@@ -619,13 +678,23 @@ func cmdResume(a *app, args []string) error {
 			return err
 		}
 	}
-	var body any
+	body := obj{}
 	if *failFast {
-		body = obj{"fail_fast": true}
+		body["fail_fast"] = true
+	}
+	if len(envv) > 0 {
+		body["env"] = envv
 	}
 	var out obj
-	if err := a.c.call("POST", vmPath(s(vm, "id"), "start"), body, &out); err != nil {
+	var send any // no body when there is nothing to say (as before)
+	if len(body) > 0 {
+		send = body
+	}
+	if err := a.c.call("POST", vmPath(s(vm, "id"), "start"), send, &out); err != nil {
 		return err
+	}
+	if err := a.setTTL(s(vm, "id"), ttl, *never); err != nil {
+		return fmt.Errorf("resumed; setting auto-stop: %w", err)
 	}
 	return a.emitVM(out)
 }
@@ -639,6 +708,8 @@ func cmdSnapshotsTeam(a *app, op string, args []string) error {
 	size := fs.String("size", "", "")
 	shareID := fs.String("share", "", "")
 	code := fs.String("code", "", "")
+	limit := fs.Int("limit", 0, "at most this many (team list)")
+	fs.Bool("all", false, "accepted: every snapshot is listed")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -649,6 +720,9 @@ func cmdSnapshotsTeam(a *app, op string, args []string) error {
 		l, err := listCall(a, "/v1/snapshots", "snapshots")
 		if err != nil {
 			return err
+		}
+		if *limit > 0 && len(l) > *limit {
+			l = l[len(l)-*limit:]
 		}
 		return a.emitList(l, "id", "name", "vm_id", "created_at")
 	case "shared":
@@ -845,13 +919,25 @@ func cmdAI(a *app, args []string) error {
 		}
 		return a.show(out, "enabled", "available")
 	case "usage":
+		fs := flag.NewFlagSet("ai usage", flag.ContinueOnError)
+		days := fs.Int("days", 30, "")
+		pos, _, err := parse(fs, args[1:])
+		if err != nil {
+			return err
+		}
 		p := "/v1/ai/usage"
-		if len(args) == 2 {
-			id, err := vmArg(a, args[1])
+		if len(pos) > 1 {
+			return fmt.Errorf("boat ai usage [vm] [--days N]: %w", errUsage)
+		}
+		if len(pos) == 1 {
+			id, err := vmArg(a, pos[0])
 			if err != nil {
 				return err
 			}
 			p = vmPath(id, "ai-usage")
+		}
+		if *days != 30 {
+			fmt.Fprintln(a.errw, "boat: note: usage here is the running total; --days does not narrow it")
 		}
 		l, err := listCall(a, p, "usage")
 		if err != nil {
@@ -870,6 +956,8 @@ func cmdAI(a *app, args []string) error {
 			return err
 		}
 		return a.show(out, "id", "enabled")
+	case "profiles", "profile", "accounts", "switch", "add-account", "forget-account":
+		return cmdAIProfiles(a, args[0], args[1:])
 	}
 	return fmt.Errorf("unknown ai command %q: %w", args[0], errUsage)
 }

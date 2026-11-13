@@ -2,5 +2,6 @@ $ boat bogus
 exit 2
 --- stdout
 --- stderr
+boat: unknown command "bogus" (see boat help)
 <usage>
 --- requests
