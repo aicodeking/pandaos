@@ -17,21 +17,28 @@
 # IOPS move by a factor of 5 between runs. Worst green value -> gate:
 PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-18}    # 5.91-9.73 s (3.8 GiB to write) -> 18 (1.85x)
 PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-5}             # 0.75-2.48 s -> 5; red runs saw 3.18 (43151531250) and 4.07: the restore reads the mem file behind the dump's 3.8 GiB writeback
+# r12 (gate kept): main 0.99/1.11/1.29/7.02/1.24 s (7.02 in 43401898986), with the dump cap 1.65/0.71/1.69/5.24/0.74: a tail on both.
 # Fork right after that snapshot. 3 s failed unchanged code (3.12, 3.20 s), so 97c5515 set 5.
 # r11 split it (boatd's "fork of" line): 14 runs 2026-11-13 gave 1.70-3.33 s = alloc 0.05 +
 # freeze 0.4-1.9 (of it the base's merge reflink 0.09-1.24 s, uncorrelated with the base's
 # 1,020-70,604 extents and with Dirty/Writeback 0-25 MiB) + boot and guest init 0.8-1.0. No
-# single stall to remove; 3.33 s x 1.5 -> 5 stays, which 3 s cannot.
+# single stall to remove; 3.33 s x 1.5 -> 5 stays, which 3 s cannot. r12: the clean-base fork's
+# "install merge" past its merge (the unlink of the replaced, unshared mem) was 347-630 ms in 3
+# runs on main, 26-33 ms in 4 with replaceMem's deferred close.
 PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-5}
 # A cold create while another VM's 2 GiB memory dump is being written (the 7.39 s
-# new-from-snapshot of 43328227157 waited behind a dump's writeback). Bimodal on the runner,
-# 15 runs 2026-11-13: 2.29-4.26 s or 7.69-12.56 s, the slow mode its guest's boot I/O queued
-# behind the dump's flush of its diff (1.8-11.4 s). Without 18f19c2's writeback kick
-# 7.88/12.56/8.07/2.93/2.54, with it 7.69/9.60/2.36/2.29/2.56, with the merge's clone (r11,
-# copy 2.3-10.5 -> 0.1-0.6 s) 2.73/7.84/2.41/4.26. Gate: 12.56 x 1.2 -> 15, against a stall
-# without bound, not the known slow mode.
-PERF_CREATE_DUMP_MAX=${E2E_PERF_CREATE_DUMP_MAX:-15}
-PERF_COLD_CREATE_MAX=${E2E_PERF_COLD_CREATE_MAX:-8}
+# new-from-snapshot of 43328227157 waited behind a dump's writeback). Bimodal on the runner:
+# 2.29-4.26 s or 7.69-12.94 s, the slow mode its guest's boot reads queued behind the dump's
+# writeback (r11: 15 runs). r12 caps a dumping VM's writes at 150 MiB/s while another VM boots
+# (writeback.go), same day, same e2e: main (r12-before-1..5, 43401844976 43401863269 43401882636
+# 43401898986 43401915961) 8.55/11.84/3.01/12.94/12.36, with the cap (r12-after-1..5,
+# 43401855635 43401871401 43401890695 43401907836 43401924784) 4.25/5.92/4.63/5.42/3.66.
+# Gate: 5.92 x 1.5 -> 9.
+PERF_CREATE_DUMP_MAX=${E2E_PERF_CREATE_DUMP_MAX:-9}
+# A single cold create -> exec-ready, nothing else running (4/8, warm pool off, page cache of
+# the ceiling's fio flushed). r12-after-1..5: 2.33/1.46/2.29/2.44/1.72 s; e2e-limits' default_create
+# (same size, same runners) 1.41-2.42 s in all 10 r12 runs. Gate: 2.44 x 1.5 -> 4.
+PERF_COLD_CREATE_MAX=${E2E_PERF_COLD_CREATE_MAX:-4}
 PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-13}    # 4.93-9.44 s; 10 x 4 vCPU on 4 host CPUs -> 13 (1.4x)
 PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 527-530 MiB -> 700
 PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 259-280 MiB -> 450
