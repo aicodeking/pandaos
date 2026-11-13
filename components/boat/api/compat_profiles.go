@@ -246,9 +246,9 @@ func (s *server) compatCustomAPI(w http.ResponseWriter, r *http.Request, p *prin
 	}
 }
 
-// compatSnapshotDownload streams the native archive of a snapshot
-// (GET /v1/vms/{id}/snapshots/{sid}/download) instead of boat.dev's JSON of
-// signed chunk URLs.
+// compatSnapshotDownload answers boat.dev's JSON of signed chunk URLs with one
+// chunk: a file-download URL (no API key, dies with the key) streaming the
+// native archive of GET /v1/vms/{id}/snapshots/{sid}/download.
 func (s *server) compatSnapshotDownload(w http.ResponseWriter, r *http.Request, p *principal) {
 	list, fail := s.teamSnapshots(r, p)
 	if fail != nil {
@@ -264,10 +264,16 @@ func (s *server) compatSnapshotDownload(w http.ResponseWriter, r *http.Request, 
 			notSupported(w, r, "downloading an imported snapshot")
 			return
 		}
-		r2 := r.Clone(r.Context())
-		r2.SetPathValue("id", str(sn, "vm_id"))
-		r2.SetPathValue("sid", str(sn, "id"))
-		s.downloadSnapshot(w, r2, p)
+		// boat.dev's answer is a list of signed chunk URLs; here the archive is
+		// one chunk, served by a file-download token bound to the snapshot.
+		exp := time.Now().Add(fileURLDefaultTTL * time.Second).Truncate(time.Second)
+		tok := s.signFileGrant(fileGrant{Team: p.Team.ID, VM: str(sn, "vm_id"), Path: str(sn, "id"), Exp: exp.Unix(), Op: "snap", Key: p.Key.ID})
+		sum := s.snapshotSummary(p.Team.ID, sn)
+		writeCompat(w, 200, "snapshot.download", map[string]any{"snapshotId": sum["id"], "sandboxId": sum["sandboxId"],
+			"kind": "base", "generation": 1, "expiresInSeconds": fileURLDefaultTTL,
+			"reconstruct": "one chunk: the whole snapshot as a PandaOS archive (tar.zst); import it with POST /v1/snapshots/import",
+			"chunks": []map[string]any{{"snapshotId": sum["id"], "generation": 1, "chunkIndex": 0, "r2Key": str(sn, "id"),
+				"sizeBytes": sum["sizeBytes"], "sha256": nil, "signedUrl": s.publicBase(r) + fileDownloadPath + tok}}})
 		return
 	}
 	writeErr(w, r, 404, "snapshot_not_found", "no snapshot "+want)

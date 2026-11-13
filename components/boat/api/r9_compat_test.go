@@ -98,14 +98,25 @@ func toStrings(v any) []string {
 	return out
 }
 
-// GET /api/v1/snapshots/{id}/download streams the native archive.
+// GET /api/v1/snapshots/{id}/download answers boat.dev's JSON: one chunk
+// whose signed URL streams the native archive with no API key.
 func TestCompatSnapshotDownload(t *testing.T) {
 	e := setup(t)
 	id := e.createVM()
 	sid := e.snapshotOf(id)
 	for _, ref := range []string{snapshotUUID(e.teamID(), sid), sid} {
-		if st, b := e.raw(e.owner, "GET", "/api/v1/snapshots/"+ref+"/download", nil); st != 200 || string(b) != "ARCHIVE:"+sid {
-			t.Errorf("download %s: %d %q", ref, st, b)
+		st, out, _ := e.compat(e.owner, "GET", "/api/v1/snapshots/"+ref+"/download", nil, nil)
+		chunks, _ := out["chunks"].([]any)
+		if st != 200 || out["snapshotId"] != snapshotUUID(e.teamID(), sid) || len(chunks) != 1 {
+			t.Fatalf("download %s: %d %v", ref, st, out)
+		}
+		u := chunks[0].(map[string]any)["signedUrl"].(string)
+		path := u[strings.Index(u, fileDownloadPath):]
+		if st, b := e.raw("", "GET", path, nil); st != 200 || string(b) != "ARCHIVE:"+sid {
+			t.Errorf("chunk %s: %d %q", ref, st, b)
+		}
+		if st, _ := e.raw("", "GET", path+"x", nil); st != 404 {
+			t.Errorf("tampered chunk URL: %d", st)
 		}
 	}
 	if st, _, _ := e.compat(otherTeamKey(e), "GET", "/api/v1/snapshots/"+snapshotUUID(e.teamID(), sid)+"/download", nil, nil); st != 404 {

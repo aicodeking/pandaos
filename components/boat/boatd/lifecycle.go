@@ -567,10 +567,19 @@ func (m *Manager) Start(ctx context.Context, id string, env map[string]string) (
 	return m.initGuest(ctx, v, env, false, restore)
 }
 
-// Fork clones a running (paused for the snapshot) or stopped VM.
-func (m *Manager) Fork(ctx context.Context, id, name, team string) (VM, error) {
+// Fork clones a running (paused for the snapshot) or stopped VM. labels nil:
+// the child copies the parent's; otherwise it gets exactly these.
+func (m *Manager) Fork(ctx context.Context, id, name, team string, labels map[string]string) (VM, error) {
 	if name != "" && !reName.MatchString(name) {
 		return VM{}, errf(400, "invalid name")
+	}
+	if len(labels) > 64 {
+		return VM{}, errf(400, "too many labels")
+	}
+	for k, v := range labels {
+		if !reLabel.MatchString(k) || len(v) > 256 {
+			return VM{}, errf(400, "invalid label %q", k)
+		}
 	}
 	if m.cfg.HugePages {
 		return VM{}, errHugePages
@@ -589,6 +598,9 @@ func (m *Manager) Fork(ctx context.Context, id, name, team string) (VM, error) {
 	}
 	base := VM{Name: name, Team: p.Team, Image: p.Image, Size: p.Size, VCPU: p.VCPU, MemMiB: p.MemMiB,
 		DiskGiB: p.DiskGiB, Labels: p.Labels, TTLS: p.TTLS, IdleStopS: p.IdleStopS, ParentID: p.ID}
+	if labels != nil {
+		base.Labels = labels
+	}
 	t0 := time.Now()
 	err = m.checkFloor(uint64(p.MemMiB) << 20)
 	var c VM

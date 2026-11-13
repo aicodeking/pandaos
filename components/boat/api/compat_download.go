@@ -39,7 +39,7 @@ type fileGrant struct {
 	VM   string `json:"v"`
 	Path string `json:"p"`
 	Exp  int64  `json:"e"`
-	Op   string `json:"o,omitempty"` // "put": an upload URL (compat_extra.go)
+	Op   string `json:"o,omitempty"` // "put": an upload URL (compat_extra.go); "snap": a snapshot chunk
 	Key  string `json:"k"`           // the minting API key: the URL dies with it (keyAlive)
 }
 
@@ -116,7 +116,7 @@ func (s *server) compatFileDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g, ok := s.openFileGrant(r.PathValue("token"), time.Now())
-	if !ok || g.Op != "" {
+	if !ok || (g.Op != "" && g.Op != "snap") {
 		writeErr(w, r, 404, "not_found", "download URL not found or expired")
 		return
 	}
@@ -130,6 +130,11 @@ func (s *server) compatFileDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	if g.Op == "snap" { // a snapshot chunk URL (compatSnapshotDownload); Path is the snapshot id
+		w.Header().Set("Cache-Control", "no-store")
+		s.relayDownload(w, r, g.VM, g.Path)
+		return
+	}
 	resp, err := s.boatd.do(r.Context(), "GET", vmPath(g.VM, "files")+"?path="+url.QueryEscape(g.Path), nil, "")
 	if err != nil {
 		writeUpstream(w, r, err)

@@ -551,6 +551,13 @@
            "type": "string"
           },
           "description": "extra env vars over the team secrets (this run / the child); valid env names only"
+         },
+         "labels": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          },
+          "description": "the child's labels, replacing the parent's (absent: the parent's); at most 32, boat.* reserved and always carried over from the parent"
          }
         }
        }
@@ -10626,7 +10633,7 @@
   },
   "/api/v1/snapshots/{sid}/download": {
    "get": {
-    "summary": "boat.dev getSnapshotDownload: the snapshot archive itself (GET /v1/vms/{id}/snapshots/{sid}/download), not signed chunk URLs",
+    "summary": "boat.dev getSnapshotDownload: one chunk whose signed URL (no API key, 900 s) streams the whole archive (tar.zst) of GET /v1/vms/{id}/snapshots/{sid}/download",
     "operationId": "compat_getSnapshotDownload",
     "x-boat-scope": "exec",
     "tags": [
@@ -10645,12 +10652,11 @@
     ],
     "responses": {
      "200": {
-      "description": "The snapshot archive (tar.zst)",
+      "description": "One chunk: the whole snapshot archive",
       "content": {
-       "application/octet-stream": {
+       "application/json": {
         "schema": {
-         "type": "string",
-         "format": "binary"
+         "$ref": "#/components/schemas/BDSnapshotDownloadResponse"
         }
        }
       }

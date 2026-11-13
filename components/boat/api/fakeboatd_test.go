@@ -207,7 +207,11 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			f.forks = append(f.forks, in)
 			f.n++
 			id := fmt.Sprintf("vm%d", f.n)
-			f.vms[id] = VM{"id": id, "name": in["name"], "team": in["team"], "state": "running", "labels": vm["labels"]} // like boatd: labels are copied
+			labels := vm["labels"] // like boatd: labels are copied unless given
+			if l, ok := in["labels"]; ok {
+				labels = l
+			}
+			f.vms[id] = VM{"id": id, "name": in["name"], "team": in["team"], "state": "running", "labels": labels}
 			writeJSON(w, 201, f.vms[id])
 			return
 		case "exec":

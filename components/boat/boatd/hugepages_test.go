@@ -26,7 +26,7 @@ func TestHugePages(t *testing.T) {
 		t.Fatal(err)
 	}
 	var api *apiErr
-	if _, err := m.Fork(ctx, v.ID, "", ""); !errors.As(err, &api) || api.code != 409 {
+	if _, err := m.Fork(ctx, v.ID, "", "", nil); !errors.As(err, &api) || api.code != 409 {
 		t.Errorf("fork of a huge-page VM: %v", err)
 	}
 	if _, err := m.CreateSnapshot(ctx, v.ID, "s"); !errors.As(err, &api) || api.code != 409 {

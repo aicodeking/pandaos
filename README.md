@@ -24,18 +24,23 @@ approve agent tasks on it.
   Off unless `services.boat.enable`. Its `/api/v1` is a drop-in for the boat.dev SDK paths CI proves:
   boat.dev's official Python and TypeScript SDKs, with only the base URL changed, run on real VMs
   through the TLS edge in CI for sandboxes (create, list, get, rename, stop, resume, fork, delete),
-  sync and long commands (`run_command`/`follow_command`), files, find, download URLs, hosted ports,
-  ssh keys, the desktop, snapshots (saved, named, listings, share codes), secrets, the AI proxy
+  sync and long commands (`run_command`/`follow_command`), command records, logs and processes, files,
+  find, folders, moves, search and delete, download URLs, hosted ports,
+  ssh keys, the desktop, snapshots (saved, named, listings, downloads, share codes), secrets, the AI proxy
   switch, webhooks, API keys, environments and limits, plus telemetry, AI usage and access,
   environment vars, file replace, upload URLs, artifacts, share and recover. 100 of boat.dev's 122
   operations are mapped (credential profiles as one `default` profile per team, snapshot download
-  as the archive itself); the official SDKs also run prompt, steer, interrupt, events and
+  as one signed chunk URL; create `files` and `setupScript`; fork and resume `env` and
+  `type`, fork `labels`; `RateLimit` headers); the official SDKs also run prompt, steer, interrupt, events and
   conversations on real VMs (a stub agent without `ANTHROPIC_API_KEY`); `hostedPorts` is tested
   against a fake boatd only.
   The other 22 (orgs, repos, CI, data retention, more credential profiles and custom APIs,
   environment upgrades/repos/secret files, snapshot trees/files) answer 501 `not_supported`, as
-  does `unshare` (no private sandboxes here)
+  does `unshare` (no private sandboxes here). Snapshot trees/files would need host-side parsing of
+  tenant disk images, which is not safe; secret files have no place in the env-var secrets store
   ([list](docs/boat.md#boatdev-api-compatibility-apiv1)).
+  SSH grants and every signed link die with the API key that made them, and a VM's own token
+  cannot open public ports or add ssh keys unless its team allows it.
   **Pre-release:** not for untrusted tenants without the operator checklist and an external pentest;
   see [docs/boat.md](docs/boat.md).
 

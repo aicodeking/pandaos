@@ -99,14 +99,15 @@ func (m *Manager) routes() *http.ServeMux {
 	})
 	h("POST /v1/vms/{id}/fork", func(r *http.Request) (any, error) {
 		var b struct {
-			Name     string `json:"name"`
-			Team     string `json:"team"`
-			FailFast bool   `json:"fail_fast"`
+			Name     string            `json:"name"`
+			Team     string            `json:"team"`
+			FailFast bool              `json:"fail_fast"`
+			Labels   map[string]string `json:"labels"` // absent: the parent's
 		}
 		if err := decode(r, &b); err != nil {
 			return nil, err
 		}
-		v, err := m.Fork(r.Context(), r.PathValue("id"), b.Name, b.Team)
+		v, err := m.Fork(r.Context(), r.PathValue("id"), b.Name, b.Team, b.Labels)
 		if b.FailFast {
 			err = failFast(err)
 		}

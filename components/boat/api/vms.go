@@ -305,16 +305,8 @@ func (s *server) validateCreate(c *createReq) string {
 	if c.Snapshot != "" && !reID.MatchString(c.Snapshot) {
 		return "invalid snapshot id"
 	}
-	if len(c.Labels) > 32 {
-		return "at most 32 labels"
-	}
-	for k, v := range c.Labels {
-		if !reLabel.MatchString(k) || len(v) > maxLabelValue {
-			return "invalid label " + k
-		}
-		if strings.HasPrefix(k, reservedLabels) {
-			return "labels starting with " + reservedLabels + " are reserved"
-		}
+	if msg := validLabels(c.Labels); msg != "" {
+		return msg
 	}
 	for k := range c.Env {
 		if !reEnvName.MatchString(k) {
@@ -549,6 +541,22 @@ func (s *server) finishCreate(r *http.Request, p *principal, vm VM, vars map[str
 	return out
 }
 
+// validLabels checks a caller's labels: "" = fine.
+func validLabels(labels map[string]string) string {
+	if len(labels) > 32 {
+		return "at most 32 labels"
+	}
+	for k, v := range labels {
+		if !reLabel.MatchString(k) || len(v) > maxLabelValue {
+			return "invalid label " + k
+		}
+		if strings.HasPrefix(k, reservedLabels) {
+			return "labels starting with " + reservedLabels + " are reserved"
+		}
+	}
+	return ""
+}
+
 // withSelection adds the secret selection label to the caller's labels; false
 // when there is no selection to carry or it does not fit in a label.
 func withSelection(labels map[string]string, only []string) (map[string]string, bool) {
@@ -686,12 +694,19 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 		Name     string            `json:"name"`
 		FailFast bool              `json:"fail_fast"`
 		Env      map[string]string `json:"env"` // the child's extra env, over team secrets
+		// Labels replace the parent's (absent: the child keeps them); the
+		// parent's reserved boat.* labels always carry over.
+		Labels map[string]string `json:"labels"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
 	if body.Name != "" && !reVMName.MatchString(body.Name) {
 		writeErr(w, r, 400, "invalid_request", "invalid name")
+		return
+	}
+	if msg := validLabels(body.Labels); msg != "" {
+		writeErr(w, r, 400, "invalid_request", msg)
 		return
 	}
 	if msg := validEnv(body.Env); msg != "" {
@@ -710,6 +725,19 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	if body.FailFast {
 		fin["fail_fast"] = true
 	}
+	if body.Labels != nil {
+		labels := map[string]string{}
+		for k, v := range body.Labels {
+			labels[k] = v
+		}
+		pl, _ := pvm["labels"].(map[string]any)
+		for k, v := range pl {
+			if sv, ok := v.(string); ok && strings.HasPrefix(k, reservedLabels) {
+				labels[k] = sv
+			}
+		}
+		fin["labels"] = labels
+	}
 	if err := s.boatd.call(r.Context(), "POST", vmPath(parent, "fork"), fin, &child); err != nil {
 		writeUpstream(w, r, err)
 		return
@@ -718,8 +746,8 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 	childID := str(child, "id")
 	defer t.done("fork", childID)
 	// The child inherits the parent's disk, hence its secrets, so it keeps the
-	// parent's selection for later starts too, and its foreign mark. boatd
-	// copies the parent's labels, the selection label included.
+	// parent's selection for later starts too, and its foreign mark. The
+	// selection label comes along with the parent's boat.* labels.
 	st := s.store.Snapshot()
 	sel := s.vmSecretsOf(parent, pvm)
 	if sel != nil {

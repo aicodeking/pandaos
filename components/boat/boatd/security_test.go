@@ -109,7 +109,7 @@ func TestSnapshotRefusesPlantedFiles(t *testing.T) {
 	}
 	// A planted disk: a read-through-symlink would put the host file into the fork.
 	plant(t, filepath.Join(root, diskFile), secret)
-	if _, err := m.Fork(ctx, v.ID, "", ""); err == nil {
+	if _, err := m.Fork(ctx, v.ID, "", "", nil); err == nil {
 		t.Fatal("fork cloned a planted disk")
 	}
 	if _, err := m.Resize(ctx, v.ID, ResizeReq{DiskGiB: 9}); err == nil {

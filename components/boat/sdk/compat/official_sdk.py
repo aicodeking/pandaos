@@ -1,6 +1,7 @@
 """boat.dev's official Python SDK (boat-sdk, pinned in requirements.txt) against
 this server's /api/v1: create, get, list, rename, commands (sync, and long ones
 through the SDK's own run_command / follow_command helpers), files, find,
+folders, moves, search and delete, command records, logs and processes, recover,
 download URLs, hosted ports, ssh keys, the desktop (wait_for_desktop), stop,
 resume, fork, snapshot listings, saved and named snapshots, share codes,
 secrets, the AI proxy switch, webhooks, keys, environments, limits and delete,
@@ -47,6 +48,8 @@ from boat_sdk.models.telemetry_set_request import TelemetrySetRequest
 from boat_sdk.models.update_ai_proxy_request import UpdateAiProxyRequest
 from boat_sdk.models.saved_snapshot_save_request import SavedSnapshotSaveRequest
 from boat_sdk.models.file_permissions_request import FilePermissionsRequest
+from boat_sdk.models.file_folder_request import FileFolderRequest
+from boat_sdk.models.file_move_request import FileMoveRequest
 from boat_sdk.models.prompt_request import PromptRequest
 from boat_sdk.models.set_credential_key_request import SetCredentialKeyRequest
 from boat_sdk.models.steer_request import SteerRequest
@@ -197,6 +200,12 @@ try:
     hist = api.command_history(sid).commands
     check(any(c.process_id == det["processId"] for c in hist), "command history")
     check(api.stop_command(sid, det["processId"]).signaled, "stop a detached command")
+    rec = next(c for c in hist if c.process_id == pid)
+    check(api.get_command(sid, rec.command_id).command.command_id == rec.command_id, "get one command record")
+    logs = api.command_logs(sid, rec.command_id, stream="stdout")
+    check(logs.command_id == rec.command_id and (not REAL or ("out-1\n" in logs.data and "out-2\n" in logs.data and logs.done)), "command logs (%r)" % logs.data)
+    procs = api.processes(sid)
+    check(procs.total >= len(procs.processes) and (not REAL or (procs.live and procs.processes)), "processes (%d)" % procs.total)
 
     agent_steps(sid)
 
@@ -228,6 +237,14 @@ try:
         with urllib.request.urlopen(req, context=ssl.create_default_context(cafile=CA), timeout=30) as resp:
             check(resp.status == 200, "the upload URL takes a PUT with no API key")
         check(api.read_file(sid, path="compat/up.txt").content == "uploaded", "the uploaded file")
+    api.create_folder(sid, FileFolderRequest(path="compat/dir/sub"))
+    api.write_file(sid, FileWriteRequest(path="compat/m.txt", content="move me"))
+    mv = api.move_file(sid, FileMoveRequest(source="compat/m.txt", destination="compat/dir/sub/m.txt"))
+    check(mv.destination.endswith("compat/dir/sub/m.txt"), "create a folder and move a file into it")
+    hits = api.search_files(sid, pattern="m.txt", path="compat")
+    check(not REAL or any(f.endswith("compat/dir/sub/m.txt") for f in hits.files), "search files (%r)" % hits.files)
+    api.delete_file(sid, path="compat/dir", recursive=True)
+    check(not REAL or "dir" not in [f.name for f in api.list_files(sid, path="compat").files], "delete a folder")
     check(api.share(sid).sandbox.id == sid, "share with the team")
     check(api.get_sandbox_ai_usage(sid, days=7).sandbox_id == sid, "sandbox AI usage")
     acc = api.set_sandbox_ai_access(sid, SetSandboxAiAccessRequest(blocked=False))
@@ -273,10 +290,13 @@ try:
     ready(kid)
     if REAL:
         check(api.read_file(kid, path="compat/a.txt").content == payload, "the fork has the parent's file")
+    check(api.recover(kid).status == "recovering", "recover (power-cycle) the fork")
+    ready(kid)
 
     snap = api.save_saved_snapshot(SavedSnapshotSaveRequest(sandbox_id=sid, name=prefix.replace("_", "-")[:60] + "-s"))
     check(snap.snapshot.source_sandbox_id == sid, "save a snapshot")
     check(any(s.name == snap.snapshot.name for s in api.list_saved_snapshots().snapshots), "list saved snapshots")
+    check(api.get_saved_snapshot(snap.snapshot.name).snapshot.name == snap.snapshot.name, "get a saved snapshot")
     share = api.create_snapshot_share(snap.snapshot.name)
     check(share.share_code.startswith("bsh_") and share.share.status == "active", "share code")
     check([x.id for x in api.list_snapshot_shares(snap.snapshot.name).shares] == [share.share.id], "list share codes")
@@ -289,6 +309,8 @@ try:
     mine = api.list_sandbox_snapshots(sid).snapshots
     check(mine and all(str(x.sandbox_id) == sid for x in mine), "list the sandbox's snapshots (%d)" % len(mine))
     check(api.get_latest_sandbox_snapshot(sid).snapshot is not None, "latest snapshot")
+    down = api.get_snapshot_download(mine[0].id)
+    check(str(down.snapshot_id) == str(mine[0].id) and down.sandbox_id == sid and down.expires_in_seconds > 0, "snapshot download (%d chunks)" % len(down.chunks))
     check({str(x.id) for x in mine} <= {str(x.id) for x in api.list_snapshots(limit=200).snapshots}, "the team's snapshots")
     api.delete_named_snapshot(nname)
 
@@ -304,6 +326,7 @@ try:
     check(hook.secret.startswith("whsec_"), "create a webhook")
     api.update_webhook(hook.webhook.id, WebhookUpdateRequest(events=["sandbox.archived"]))
     check(api.rotate_webhook_signing_secret(hook.webhook.id).secret != hook.secret, "rotate its secret")
+    check(api.get_webhook(hook.webhook.id).webhook.events == ["sandbox.archived"], "get a webhook")
     check(any(h.id == hook.webhook.id for h in api.list_webhooks().webhooks), "list webhooks")
     api.delete_webhook(hook.webhook.id)
 

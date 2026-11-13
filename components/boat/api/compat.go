@@ -686,13 +686,15 @@ func (s *server) compatFork(w http.ResponseWriter, r *http.Request, p *principal
 		if !decode(w, r, &body) {
 			return
 		}
-		// ponytail: labels need boatd to set labels on a fork (it copies the parent's).
-		if body.Labels != nil || body.Environment != "" || body.NoEnv {
-			writeErr(w, r, 400, "invalid_request", "fork with labels, environment or noEnv is not supported by this server: a fork keeps the parent's labels, environment and secret selection")
+		if body.Environment != "" || body.NoEnv {
+			writeErr(w, r, 400, "invalid_request", "fork with environment or noEnv is not supported by this server: a fork keeps the parent's environment and secret selection")
 			return
 		}
-		res := s.callNative(r, p, "POST /v1/vms/{id}/fork", s.forkVM, r.PathValue("id"),
-			map[string]any{"name": body.Name, "fail_fast": body.FailFast, "env": body.Env})
+		fin := map[string]any{"name": body.Name, "fail_fast": body.FailFast, "env": body.Env}
+		if body.Labels != nil {
+			fin["labels"] = body.Labels
+		}
+		res := s.callNative(r, p, "POST /v1/vms/{id}/fork", s.forkVM, r.PathValue("id"), fin)
 		if !res.ok() {
 			res.relay(w)
 			return

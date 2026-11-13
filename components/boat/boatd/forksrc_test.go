@@ -24,7 +24,7 @@ func TestForkSourceResumedEveryTime(t *testing.T) {
 	}
 	fc := h.fcOf(t, m, v.ID)
 	for i := range 2 * fcMaxConns {
-		c, err := m.Fork(ctx, v.ID, fmt.Sprintf("c%d", i), "t1")
+		c, err := m.Fork(ctx, v.ID, fmt.Sprintf("c%d", i), "t1", nil)
 		if err != nil {
 			t.Fatalf("fork %d: %v", i, err)
 		}
@@ -59,21 +59,21 @@ func TestForkRetriesResume(t *testing.T) {
 	h.mu.Lock()
 	h.failResume = 2
 	h.mu.Unlock()
-	if _, err := m.Fork(ctx, v.ID, "c1", "t1"); err != nil || isPaused() {
+	if _, err := m.Fork(ctx, v.ID, "c1", "t1", nil); err != nil || isPaused() {
 		t.Fatalf("fork after 2 refused resumes: err=%v paused=%v", err, isPaused())
 	}
 
 	h.mu.Lock()
 	h.failResume = 100
 	h.mu.Unlock()
-	_, err = m.Fork(ctx, v.ID, "c2", "t1")
+	_, err = m.Fork(ctx, v.ID, "c2", "t1", nil)
 	if err == nil || !strings.Contains(err.Error(), "left paused") {
 		t.Fatalf("fork with the source stuck paused: %v", err)
 	}
 	h.mu.Lock()
 	h.failResume = 0
 	h.mu.Unlock()
-	if _, err := m.Fork(ctx, v.ID, "c3", "t1"); err != nil || isPaused() {
+	if _, err := m.Fork(ctx, v.ID, "c3", "t1", nil); err != nil || isPaused() {
 		t.Fatalf("fork once resumes work again: err=%v paused=%v", err, isPaused())
 	}
 }
@@ -139,5 +139,24 @@ func TestAgentDeadlineAfterHandshake(t *testing.T) {
 	}
 	if _, r, err := a.recv(); err != nil || !r.OK {
 		t.Fatalf("health after the handshake window: %+v %v", r, err)
+	}
+}
+
+// Fork labels: nil keeps the parent's, a map replaces them, bad keys are refused.
+func TestForkLabels(t *testing.T) {
+	m, _ := newTestManager(t, nil)
+	ctx := context.Background()
+	v, err := m.Create(ctx, CreateReq{Team: "t1", Labels: map[string]string{"p": "1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, err := m.Fork(ctx, v.ID, "", "t1", nil); err != nil || fmt.Sprint(c.Labels) != "map[p:1]" {
+		t.Fatalf("fork without labels: %v %v", c.Labels, err)
+	}
+	if c, err := m.Fork(ctx, v.ID, "", "t1", map[string]string{"c": "2"}); err != nil || fmt.Sprint(c.Labels) != "map[c:2]" {
+		t.Fatalf("fork with labels: %v %v", c.Labels, err)
+	}
+	if _, err := m.Fork(ctx, v.ID, "", "t1", map[string]string{"bad key": "x"}); err == nil {
+		t.Fatal("fork with an invalid label key")
 	}
 }

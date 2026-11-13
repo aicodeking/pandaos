@@ -88,7 +88,7 @@ func TestLifecycle(t *testing.T) {
 	}
 
 	// fork a running VM: parent resumed, child restored with new identity + disk copy.
-	c, err := m.Fork(ctx, v.ID, "b", "t1")
+	c, err := m.Fork(ctx, v.ID, "b", "t1", nil)
 	if err != nil || c.State != Running || c.IP != "10.200.0.3" || c.ParentID != v.ID {
 		t.Fatalf("fork: %+v %v", c, err)
 	}
@@ -108,7 +108,7 @@ func TestLifecycle(t *testing.T) {
 	if cfc.disk()["/home/dev/x"] != b64("hello") {
 		t.Fatal("child disk is not a copy of the parent's")
 	}
-	if _, err := m.Fork(ctx, v.ID, "c", "other-team"); !errors.Is(err, errNotFound) {
+	if _, err := m.Fork(ctx, v.ID, "c", "other-team", nil); !errors.Is(err, errNotFound) {
 		t.Fatalf("cross-team fork: %v", err)
 	}
 
@@ -129,7 +129,7 @@ func TestLifecycle(t *testing.T) {
 	if _, err := m.Stop(ctx, d.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	e, err := m.Fork(ctx, d.ID, "", "")
+	e, err := m.Fork(ctx, d.ID, "", "", nil)
 	if err != nil || e.State != Running || !h.fcOf(t, m, e.ID).called("PUT /snapshot/load") {
 		t.Fatalf("fork stopped: %+v %v", e, err)
 	}
@@ -185,7 +185,7 @@ func TestQuota(t *testing.T) {
 	if _, err := m.Create(ctx, CreateReq{Team: "t"}); !errors.As(err, &ae) || ae.code != 429 {
 		t.Fatalf("want 429, got %v", err)
 	}
-	if _, err := m.Fork(ctx, a.ID, "", ""); !errors.As(err, &ae) || ae.code != 429 {
+	if _, err := m.Fork(ctx, a.ID, "", "", nil); !errors.As(err, &ae) || ae.code != 429 {
 		t.Fatalf("fork past quota: %v", err)
 	}
 	m.Stop(ctx, a.ID, "")
@@ -360,7 +360,7 @@ func TestDiskFloor(t *testing.T) {
 	if _, err := m.Create(ctx, CreateReq{}); !errors.As(err, &ae) || ae.code != 507 {
 		t.Fatalf("create below floor: %v", err)
 	}
-	if _, err := m.Fork(ctx, v.ID, "", ""); !errors.As(err, &ae) || ae.code != 507 {
+	if _, err := m.Fork(ctx, v.ID, "", "", nil); !errors.As(err, &ae) || ae.code != 507 {
 		t.Fatalf("fork below floor: %v", err)
 	}
 	if _, err := m.CreateSnapshot(ctx, v.ID, ""); !errors.As(err, &ae) || ae.code != 507 {
@@ -423,7 +423,7 @@ func TestBtrfsQgroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A memory file stays one inode across the team's VM, snapshot and fork.
-	f, err := m.Fork(ctx, v.ID, "", "")
+	f, err := m.Fork(ctx, v.ID, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +574,7 @@ func TestRulesBeforeBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := m.Fork(ctx, a.ID, "", "")
+	f, err := m.Fork(ctx, a.ID, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

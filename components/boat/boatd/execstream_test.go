@@ -72,7 +72,7 @@ func TestExecSurvivesForksOfItsVM(t *testing.T) {
 	res := execAsync(t, srv, v.ID)
 	eventually(t, "the exec session", func() bool { fc.mu.Lock(); defer fc.mu.Unlock(); return len(fc.sessions) == 1 })
 	for i := range 3 {
-		if _, err := m.Fork(ctx, v.ID, fmt.Sprintf("c%d", i), "t1"); err != nil {
+		if _, err := m.Fork(ctx, v.ID, fmt.Sprintf("c%d", i), "t1", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -106,7 +106,7 @@ func TestExecLostInAResetIsResent(t *testing.T) {
 	defer srv.Close()
 	res := execAsync(t, srv, v.ID)
 	eventually(t, "the lost exec", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.loseExec == 0 })
-	if _, err := m.Fork(ctx, v.ID, "c", "t1"); err != nil {
+	if _, err := m.Fork(ctx, v.ID, "c", "t1", nil); err != nil {
 		t.Fatal(err)
 	}
 	select {

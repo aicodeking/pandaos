@@ -341,7 +341,7 @@ func TestMemFileHardLinkedWithinTeamOnly(t *testing.T) {
 		t.Fatal("two teams share a memory inode: page cache would cross the tenant boundary")
 	}
 	// A later diff replaces the file; the snapshot keeps the old inode, sealed and unchanged.
-	if _, err := m.Fork(ctx, p.ID, "", ""); err != nil {
+	if _, err := m.Fork(ctx, p.ID, "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if ino(filepath.Join(m.root(p.ID), memFile)) == ino(snapMem) {

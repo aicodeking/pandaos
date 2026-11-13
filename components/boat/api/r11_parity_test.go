@@ -88,8 +88,22 @@ func TestCompatForkResumeEnvType(t *testing.T) {
 	if size != "large" {
 		t.Errorf("fork type: size %v", size)
 	}
-	if st, _, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes/"+bx+"/fork", map[string]any{"labels": map[string]string{"a": "b"}}, nil); st != 400 {
-		t.Errorf("fork labels: %d", st)
+	// labels replace the parent's; its reserved boat.* labels carry over.
+	e.boatd.mu.Lock()
+	e.boatd.vms[e.nativeOf(bx)]["labels"] = map[string]any{"old": "1", secretsLabel: "S"}
+	e.boatd.mu.Unlock()
+	fork = e.ok("POST", "/api/v1/sandboxes/"+bx+"/fork", map[string]any{"labels": map[string]string{"a": "b"}}, 202)
+	child = e.nativeOf(fork["sandbox"].(map[string]any)["id"].(string))
+	e.boatd.mu.Lock()
+	labels := fmt.Sprint(e.boatd.vms[child]["labels"])
+	e.boatd.mu.Unlock()
+	if labels != "map[a:b boat.secrets:S]" {
+		t.Errorf("fork labels: %s", labels)
+	}
+	for _, bad := range []map[string]string{{secretsLabel: "x"}, {"bad key": "x"}} {
+		if st, _, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes/"+bx+"/fork", map[string]any{"labels": bad}, nil); st != 400 {
+			t.Errorf("fork labels %v: %d", bad, st)
+		}
 	}
 	e.ok("POST", "/api/v1/sandboxes/"+bx+"/stop", map[string]any{}, 202)
 	e.ok("POST", "/api/v1/sandboxes/"+bx+"/resume", map[string]any{"env": map[string]string{"RUN": "2"}, "type": "small"}, 202)
