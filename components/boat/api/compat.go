@@ -184,8 +184,35 @@ func (s *server) callNative(r *http.Request, p *principal, pattern string, h han
 	}
 	r2.URL.RawQuery = query
 	c := &nativeAnswer{h: http.Header{}}
+	if msg := s.nativeRefusal(p, pattern); msg != "" {
+		writeErr(c, r2, http.StatusForbidden, "forbidden", msg)
+		return c
+	}
+	if p.VMID != "" && !selfAllowed(pattern, r2, p.VMID) {
+		writeErr(c, r2, http.StatusNotFound, "not_found", "not found")
+		return c
+	}
+	if s.onNative != nil {
+		s.onNative(pattern, p)
+	}
 	h(c, r2, p)
 	return c
+}
+
+// nativeRefusal is why p may not run the native routes (callNative's scope
+// check: a compat route never reaches past its caller's scopes), or "".
+// An unregistered pattern is refused: the lookup fails closed.
+func (s *server) nativeRefusal(p *principal, patterns ...string) string {
+	for _, pattern := range patterns {
+		need, ok := s.routeScopes[pattern]
+		if !ok {
+			return "no native route " + pattern
+		}
+		if need != "" && !p.has(need) {
+			return "key lacks scope " + need
+		}
+	}
+	return ""
 }
 
 // ---- sandboxes ----
@@ -343,6 +370,12 @@ func (s *server) compatCreate(w http.ResponseWriter, r *http.Request, p *princip
 			"no_env": c.NoEnv, "fail_fast": c.FailFast, "count": c.Count}
 		if c.Environment != "" && c.Environment != "base" { // boat.dev's default name: the team default here
 			body["environment"] = c.Environment
+		}
+		if len(c.HostedPorts) > 0 {
+			if msg := s.nativeRefusal(p, hostPortRoutes...); msg != "" {
+				writeErr(w, r, http.StatusForbidden, "forbidden", "hostedPorts: "+msg)
+				return // before the VM exists
+			}
 		}
 		if !s.compatFrom(w, r, p, c.From, body) {
 			return

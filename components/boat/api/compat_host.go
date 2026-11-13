@@ -26,6 +26,9 @@ type compatHostReq struct {
 	Title     string `json:"title"`
 }
 
+// hostPortRoutes are the native routes hostPort runs.
+var hostPortRoutes = []string{"POST /v1/vms/{id}/ports", "GET /v1/vms/{id}/ports/{port}/url"}
+
 // hostPort exposes one port of vmID and returns boat.dev's entry for it, or
 // the native answer that refused it.
 func (s *server) hostPort(r *http.Request, p *principal, vmID string, c compatHostReq) (map[string]any, *nativeAnswer) {

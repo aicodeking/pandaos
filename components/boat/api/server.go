@@ -67,6 +67,10 @@ type server struct {
 	jumpMu     sync.Mutex
 	// routeTable lists every registered "METHOD /path" (OpenAPI drift test).
 	routeTable []string
+	// routeScopes maps every authenticated pattern to its scope ("" = any key);
+	// callNative checks it so a compat route never reaches past its caller.
+	routeScopes map[string]string
+	onNative    func(pattern string, p *principal) // scope test: each native call that ran
 	observe    func(pattern string, r *http.Request, status int) // OpenAPI drift test
 	idem       idemCache                                         // boat.dev Idempotency-Key (compat_idem.go)
 	deletions  deletions                                         // boat.dev deletion operations (compat.go)
@@ -484,6 +488,10 @@ func (s *server) handle(pattern string, h http.HandlerFunc) {
 
 func (s *server) route(pattern, scope string, h handlerFunc) {
 	s.routeTable = append(s.routeTable, pattern)
+	if s.routeScopes == nil {
+		s.routeScopes = map[string]string{}
+	}
+	s.routeScopes[pattern] = scope
 	audit := auditedReads[pattern]
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		info(r).audit = audit
