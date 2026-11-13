@@ -11,6 +11,7 @@ import (
 
 const (
 	ficloneIoctl    = 0x40049409
+	ficloneRange    = 0x4020940d // FICLONERANGE: _IOW(0x94, 13, struct file_clone_range)
 	atFdcwd         = -100
 	atSymlinkFollow = 0x400
 	oPath           = 0x200000
@@ -21,6 +22,15 @@ const (
 
 func ficlone(dst, src *os.File) error {
 	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, dst.Fd(), ficloneIoctl, src.Fd()); e != 0 {
+		return e
+	}
+	return nil
+}
+
+// cloneRange reflinks src's [off, off+n) to the same offset in dst.
+func cloneRange(dst, src *os.File, off, n int64) error {
+	arg := struct{ fd, srcOff, n, dstOff int64 }{int64(src.Fd()), off, n, off}
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, dst.Fd(), ficloneRange, uintptr(unsafe.Pointer(&arg))); e != 0 {
 		return e
 	}
 	return nil

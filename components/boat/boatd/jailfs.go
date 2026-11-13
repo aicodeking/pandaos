@@ -98,7 +98,11 @@ func cloneFile(src, dst, reflink string) error {
 
 // copySparse copies every data region of in (SEEK_DATA/SEEK_HOLE) to the same
 // offsets of out. Without hole support it copies the whole file.
-func copySparse(in, out *os.File, size int64) error {
+func copySparse(in, out *os.File, size int64) error { return copyData(in, out, size, false) }
+
+// copyData copies the data regions of in to the same offsets in out; with clone, as
+// reflinks where the filesystem can (no second write of data already on disk).
+func copyData(in, out *os.File, size int64, clone bool) error {
 	for off := int64(0); off < size; {
 		data, err := in.Seek(off, seekData)
 		if errors.Is(err, syscall.ENXIO) {
@@ -111,6 +115,11 @@ func copySparse(in, out *os.File, size int64) error {
 		if err != nil {
 			hole = size
 		}
+		if clone && cloneRange(out, in, data, hole-data) == nil {
+			off = hole
+			continue
+		}
+		clone = false // not this filesystem, or an unaligned range: copy from here on
 		if _, err := io.Copy(io.NewOffsetWriter(out, data), io.NewSectionReader(in, data, hole-data)); err != nil {
 			return err
 		}

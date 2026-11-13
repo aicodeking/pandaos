@@ -14,6 +14,8 @@ import (
 
 func ficlone(dst, src *os.File) error { return errors.ErrUnsupported }
 
+func cloneRange(dst, src *os.File, off, n int64) error { return errors.ErrUnsupported }
+
 func linkFile(f *os.File, dst string) error { return os.Link(f.Name(), dst) }
 
 func dialJail(ctx context.Context, path string) (net.Conn, error) {

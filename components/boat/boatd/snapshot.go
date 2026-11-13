@@ -143,7 +143,10 @@ func (m *Manager) mergeDiff(v VM, diff, dst string) error {
 	}
 	t1 := time.Now()
 	// SEEK_DATA walks a dirty file's delalloc: 1-2.5 s for a 17 MiB diff. Firecracker did not
-	// fsync it (the guest was paused then), and it is only ever a few MiB when a base exists.
+	// fsync it (the guest was paused then). A fork's diff is a few MiB; a second named
+	// snapshot's can be GiBs, and once flushed its extents are cloned below, not written
+	// again (boat-e2e r11: a 2 GiB diff's copy took 2.3-10.5 s on top of its 1.8-11.4 s
+	// flush, and a create meanwhile waited up to 12.6 s for its guest's disk).
 	if err := fsyncFile(diff); err != nil {
 		return err
 	}
@@ -202,7 +205,7 @@ func copyExtents(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	return copySparse(in, out, st.Size())
+	return copyData(in, out, st.Size(), true)
 }
 
 // syncSnapshot fsyncs a stop snapshot and records that it is durable. Stop
