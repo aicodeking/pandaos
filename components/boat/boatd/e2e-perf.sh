@@ -17,16 +17,20 @@
 # IOPS move by a factor of 5 between runs. Worst green value -> gate:
 PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-18}    # 5.91-9.73 s (3.8 GiB to write) -> 18 (1.85x)
 PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-5}             # 0.75-2.48 s -> 5; red runs saw 3.18 (43151531250) and 4.07: the restore reads the mem file behind the dump's 3.8 GiB writeback
-# Fork right after that snapshot, behind the same writeback as PERF_FROM_MAX. 3 s (1.5x
-# 1.10-2.03 s, green runs only) failed runs on unchanged code: 1.77 then 3.12 s
-# (43245323693, 43260234358: no boatd or guest change between), 1.63 then 3.20 s (two
-# attempts of 43295162352). 27 runs 2026-11-10..12, red ones too: 1.02-3.20 s, once
-# 5.18 (43180397483). Not slower since 9ab2c6f/59500a6: "fork, base clean" (dump on
-# disk first) is 1.25-2.73 s before, 1.12-2.88 s after. 3.20 s x 1.5 -> 5, as PERF_FROM_MAX.
+# Fork right after that snapshot. 3 s failed unchanged code (3.12, 3.20 s), so 97c5515 set 5.
+# r11 split it (boatd's "fork of" line): 14 runs 2026-11-13 gave 1.70-3.33 s = alloc 0.05 +
+# freeze 0.4-1.9 (of it the base's merge reflink 0.09-1.24 s, uncorrelated with the base's
+# 1,020-70,604 extents and with Dirty/Writeback 0-25 MiB) + boot and guest init 0.8-1.0. No
+# single stall to remove; 3.33 s x 1.5 -> 5 stays, which 3 s cannot.
 PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-5}
 # A cold create while another VM's 2 GiB memory dump is being written (the 7.39 s
-# new-from-snapshot of 43328227157 waited behind a dump's writeback).
-PERF_CREATE_DUMP_MAX=${E2E_PERF_CREATE_DUMP_MAX:-5}
+# new-from-snapshot of 43328227157 waited behind a dump's writeback). Bimodal on the runner,
+# 15 runs 2026-11-13: 2.29-4.26 s or 7.69-12.56 s, the slow mode its guest's boot I/O queued
+# behind the dump's flush of its diff (1.8-11.4 s). Without 18f19c2's writeback kick
+# 7.88/12.56/8.07/2.93/2.54, with it 7.69/9.60/2.36/2.29/2.56, with the merge's clone (r11,
+# copy 2.3-10.5 -> 0.1-0.6 s) 2.73/7.84/2.41/4.26. Gate: 12.56 x 1.2 -> 15, against a stall
+# without bound, not the known slow mode.
+PERF_CREATE_DUMP_MAX=${E2E_PERF_CREATE_DUMP_MAX:-15}
 PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-13}    # 4.93-9.44 s; 10 x 4 vCPU on 4 host CPUs -> 13 (1.4x)
 PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 527-530 MiB -> 700
 PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 259-280 MiB -> 450
