@@ -5,8 +5,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -200,6 +202,53 @@ func (l *limiter) allow(key string) (bool, time.Duration) {
 		return true, 0
 	}
 	return false, time.Duration((1 - b.tokens) / l.rate * float64(time.Second))
+}
+
+// peek reports a key's whole tokens left and the time until its bucket is full.
+func (l *limiter) peek(key string) (int, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	tokens := l.burst
+	if b := l.buckets[key]; b != nil {
+		tokens = min(l.burst, b.tokens+l.now().Sub(b.last).Seconds()*l.rate)
+	}
+	return int(tokens), time.Duration((l.burst - tokens) / l.rate * float64(time.Second))
+}
+
+// rateLimitHeaders sets boat.dev's RateLimit-Policy (every limit) and
+// RateLimit (the one with the fewest requests left), IETF draft syntax:
+//
+//	RateLimit-Policy: "key";q=<burst>;w=<seconds to refill>, "team";…
+//	RateLimit: "team";r=<left>;t=<seconds until full>
+func (s *server) rateLimitHeaders(w http.ResponseWriter, p *principal) {
+	var policies []string
+	best, bestLeft := "", -1
+	for _, x := range []struct {
+		name string
+		l    *limiter
+		key  string
+	}{{"key", s.limiter, p.Key.ID}, {"team", s.teamLim, p.Team.ID}} {
+		if x.l == nil || x.l.rate <= 0 {
+			continue
+		}
+		window := int(math.Ceil(x.l.burst / x.l.rate))
+		policies = append(policies, fmt.Sprintf("%q;q=%d;w=%d", x.name, int(x.l.burst), window))
+		left, reset := x.l.peek(x.key)
+		if bestLeft < 0 || left < bestLeft {
+			best, bestLeft = fmt.Sprintf("%q;r=%d;t=%d", x.name, left, int(math.Ceil(reset.Seconds()))), left
+		}
+	}
+	if len(policies) > 0 {
+		w.Header().Set("RateLimit-Policy", strings.Join(policies, ", "))
+		w.Header().Set("RateLimit", best)
+	}
+}
+
+// rateLimitedOps: boat.dev declares RateLimit headers on these answers (and every 429).
+var rateLimitedOps = map[string]bool{
+	"POST " + compatPrefix + "sandboxes":             true,
+	"POST " + compatPrefix + "sandboxes/{id}/fork":   true,
+	"POST " + compatPrefix + "sandboxes/{id}/resume": true,
 }
 
 // sweep drops refilled buckets: a new one would start the same, and keys can be
@@ -456,14 +505,19 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 		info(r).p = p
 		s.countKeyUse(p.Key.ID)
 		if ok, wait := s.limiter.allow(p.Key.ID); !ok {
+			s.rateLimitHeaders(w, p)
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 			writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded for this key")
 			return
 		}
 		if ok, wait := s.teamLim.allow(p.Team.ID); !ok {
+			s.rateLimitHeaders(w, p)
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 			writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded for this team")
 			return
+		}
+		if rateLimitedOps[pattern] {
+			s.rateLimitHeaders(w, p)
 		}
 		if scope != "" && !p.has(scope) {
 			writeErr(w, r, http.StatusForbidden, "forbidden", "key lacks scope "+scope)

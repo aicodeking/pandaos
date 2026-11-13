@@ -179,6 +179,11 @@ ROUTES = [
     ]
 ]
 
+# boat.dev declares RateLimit headers on these (2xx and 429); components/headers
+# in openapi.json defines them (this server's "key" and "team" limits).
+RATE_LIMITED = {("POST", "/api/v1/sandboxes"), ("POST", "/api/v1/sandboxes/{id}/fork"), ("POST", "/api/v1/sandboxes/{id}/resume")}
+RL_HEADERS = {"RateLimit-Policy": {"$ref": "#/components/headers/RateLimit-Policy"}, "RateLimit": {"$ref": "#/components/headers/RateLimit"}}
+
 # Operations whose 2xx answer differs in kind from boat.dev's.
 BINARY_200 = {("GET", "/api/v1/snapshots/{sid}/download")}
 
@@ -303,6 +308,12 @@ def main(src, dst):
                              "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}}
         resps["default"] = {"description": "boat.dev error envelope",
                             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}}
+        if (method, ours) in RATE_LIMITED:
+            for code in resps:
+                if code.startswith("2"):
+                    resps[code]["headers"] = dict(RL_HEADERS)
+            resps["429"] = {"description": "rate limited", "headers": dict(RL_HEADERS, **{"Retry-After": {"$ref": "#/components/headers/Retry-After"}}),
+                            "content": resps["default"]["content"]}
         out["responses"] = resps
         paths.setdefault(ours, {})[method.lower()] = out
     paths.update(copy.deepcopy(EXTRA))

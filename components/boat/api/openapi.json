@@ -5177,10 +5177,39 @@
          "$ref": "#/components/schemas/BDCreateSandboxResponse"
         }
        }
+      },
+      "headers": {
+       "RateLimit-Policy": {
+        "$ref": "#/components/headers/RateLimit-Policy"
+       },
+       "RateLimit": {
+        "$ref": "#/components/headers/RateLimit"
+       }
       }
      },
      "default": {
       "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "rate limited",
+      "headers": {
+       "RateLimit-Policy": {
+        "$ref": "#/components/headers/RateLimit-Policy"
+       },
+       "RateLimit": {
+        "$ref": "#/components/headers/RateLimit"
+       },
+       "Retry-After": {
+        "$ref": "#/components/headers/Retry-After"
+       }
+      },
       "content": {
        "application/json": {
         "schema": {
@@ -5698,10 +5727,39 @@
          "$ref": "#/components/schemas/BDSandboxActionResponse"
         }
        }
+      },
+      "headers": {
+       "RateLimit-Policy": {
+        "$ref": "#/components/headers/RateLimit-Policy"
+       },
+       "RateLimit": {
+        "$ref": "#/components/headers/RateLimit"
+       }
       }
      },
      "default": {
       "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "rate limited",
+      "headers": {
+       "RateLimit-Policy": {
+        "$ref": "#/components/headers/RateLimit-Policy"
+       },
+       "RateLimit": {
+        "$ref": "#/components/headers/RateLimit"
+       },
+       "Retry-After": {
+        "$ref": "#/components/headers/Retry-After"
+       }
+      },
       "content": {
        "application/json": {
         "schema": {
@@ -5810,10 +5868,39 @@
          "$ref": "#/components/schemas/BDSandboxActionResponse"
         }
        }
+      },
+      "headers": {
+       "RateLimit-Policy": {
+        "$ref": "#/components/headers/RateLimit-Policy"
+       },
+       "RateLimit": {
+        "$ref": "#/components/headers/RateLimit"
+       }
       }
      },
      "default": {
       "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "rate limited",
+      "headers": {
+       "RateLimit-Policy": {
+        "$ref": "#/components/headers/RateLimit-Policy"
+       },
+       "RateLimit": {
+        "$ref": "#/components/headers/RateLimit"
+       },
+       "Retry-After": {
+        "$ref": "#/components/headers/Retry-After"
+       }
+      },
       "content": {
        "application/json": {
         "schema": {
@@ -19519,6 +19606,26 @@
        "$ref": "#/components/schemas/Error"
       }
      }
+    }
+   }
+  },
+  "headers": {
+   "RateLimit-Policy": {
+    "description": "Every rate limit of this request: \"key\" (the API key) and \"team\", IETF draft syntax: \"key\";q=<burst>;w=<seconds to refill>. Absent when the operator runs without rate limits.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "RateLimit": {
+    "description": "The limit with the fewest requests left: \"team\";r=<left>;t=<seconds until full>.",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "Retry-After": {
+    "schema": {
+     "type": "integer",
+     "minimum": 1
     }
    }
   }

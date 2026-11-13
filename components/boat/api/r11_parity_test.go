@@ -101,3 +101,25 @@ func TestCompatForkResumeEnvType(t *testing.T) {
 		t.Errorf("resume type: size %v", size)
 	}
 }
+
+func TestRateLimitHeaders(t *testing.T) {
+	e := setup(t)
+	e.srv.limiter = newLimiter(1, 5)
+	e.srv.teamLim = newLimiter(10, 3)
+	st, _, h := e.compat(e.owner, "POST", "/api/v1/sandboxes", map[string]any{}, nil)
+	if st != 202 || h.Get("RateLimit-Policy") != `"key";q=5;w=5, "team";q=3;w=1` || !strings.HasPrefix(h.Get("RateLimit"), `"team";r=`) {
+		t.Fatalf("create: %d policy %q limit %q", st, h.Get("RateLimit-Policy"), h.Get("RateLimit"))
+	}
+	if _, _, h := e.compat(e.owner, "GET", "/api/v1/sandboxes", nil, nil); h.Get("RateLimit") != "" {
+		t.Error("list carries RateLimit (boat.dev declares it on create/fork/resume and 429)")
+	}
+	for i := 0; i < 10; i++ {
+		st, _, h = e.compat(e.owner, "GET", "/api/v1/limits", nil, nil)
+		if st == 429 {
+			break
+		}
+	}
+	if st != 429 || h.Get("RateLimit") == "" || h.Get("Retry-After") == "" {
+		t.Errorf("429: %d %q %q", st, h.Get("RateLimit"), h.Get("Retry-After"))
+	}
+}

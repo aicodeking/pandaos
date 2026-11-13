@@ -209,7 +209,7 @@ type teamView struct {
 	Members []Member  `json:"members,omitempty"`
 	Created time.Time `json:"created"`
 	// AcceptSharesFrom is shown to the team's own members only.
-	AcceptSharesFrom []string `json:"accept_shares_from,omitempty"`
+	AcceptSharesFrom []string         `json:"accept_shares_from,omitempty"`
 	SelfToken        *SelfTokenPolicy `json:"self_token,omitempty"`
 }
 
