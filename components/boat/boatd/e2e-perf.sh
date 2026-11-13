@@ -24,6 +24,9 @@ PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-5}             # 0.75-2.48 s -> 5; red runs s
 # 5.18 (43180397483). Not slower since 9ab2c6f/59500a6: "fork, base clean" (dump on
 # disk first) is 1.25-2.73 s before, 1.12-2.88 s after. 3.20 s x 1.5 -> 5, as PERF_FROM_MAX.
 PERF_FORK_MAX=${E2E_PERF_FORK_MAX:-5}
+# A cold create while another VM's 2 GiB memory dump is being written (the 7.39 s
+# new-from-snapshot of 43328227157 waited behind a dump's writeback).
+PERF_CREATE_DUMP_MAX=${E2E_PERF_CREATE_DUMP_MAX:-5}
 PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-13}    # 4.93-9.44 s; 10 x 4 vCPU on 4 host CPUs -> 13 (1.4x)
 PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 527-530 MiB -> 700
 PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 259-280 MiB -> 450
@@ -65,7 +68,7 @@ rss_mib() { # idle RSS of a VM's firecracker, and its cgroup's memory.current
   local pid; pid=$(vmf "$1" pid)
   echo "$(( $(sudo awk '/^VmRSS:/ {print $2}' "/proc/$pid/status") / 1024 )) $(( $(cat "/sys/fs/cgroup/boat-e2e/$1/memory.current") >> 20 ))"
 }
-last_snap_log() { sudo grep -E "snapshot |freeze " "$WORK/boatd.log" | tail -n 3 | sed -E 's/^[0-9/]+ [0-9:]+ //' | tr '\n' ' '; }
+last_snap_log() { sudo grep -E "snapshot |freeze |merge reflink" "$WORK/boatd.log" | tail -n 4 | sed -E 's/^[0-9/]+ [0-9:]+ //' | tr '\n' ' '; }
 sudo apt-get install -y -qq fio >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq fio >/dev/null; }
 # Without boatbench's three PTS jobs: 85 s each, for numbers not gated here, on 3 engines and configs.
 (cd "$HERE/../../bench/boatbench" && python3 -c '
@@ -192,20 +195,34 @@ perf_snap() { # LABEL: one measurement set on a fresh VM; sets snap_s fromsnap_s
   echo "$1: new-from-snapshot ${fromsnap_s}s: $(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
   t=$(now); bx "$f" true; echo "$1: its first exec, with the dump in writeback: $(secs "$t" "$(now)")s" # boatbench counts this
   perf_del "$f"
+  echo "$1: base before the fork: $(sudo filefrag "$STATE/vms/$v/firecracker/$v/root/mem" | sed 's/.*: //'), dirty+writeback $(awk '/^(Dirty|Writeback):/ {printf "%s=%dMiB ", $1, $2/1024}' /proc/meminfo)"
   t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"f$1\"}" | jq -r .id); fork_s=$(secs "$t" "$(now)")
   [ "$(vmf "$f" agent_ready)" = true ] || fail "fork not ready"
   [ "$(bx "$f" 'ls -l /dev/shm/d/dirty | wc -l')" = 1 ] || fail "fork lost tmpfs"
-  echo "$1: fork ${fork_s}s: $(last_snap_log)$(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
+  echo "$1: fork ${fork_s}s: $(last_snap_log)$(sudo grep -E "$f: (create|boot|guest|fork)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')"
   perf_del "$f"
   sudo sync # the same fork with the first dump on disk: what a fork costs without a flush to wait for
   t=$(now); f=$(bd POST "/v1/vms/$v/fork" "{\"name\":\"g$1\"}" | jq -r .id); fork2_s=$(secs "$t" "$(now)")
-  echo "$1: fork, base clean ${fork2_s}s: $(last_snap_log)"
+  echo "$1: fork, base clean ${fork2_s}s: $(last_snap_log)$(sudo grep -E "$f: fork" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //')"
   perf_del "$f"
+  if [ "$1" = p ]; then # a create on the same host while this VM's memory dump is being written
+    bx "$v" 'head -c 2G /dev/urandom >/dev/shm/d/dirty' 300 # 2 GiB of fresh dirty pages to dump
+    bd POST "/v1/vms/$v/snapshots" '{"name":"y"}' >"$WORK/tmp/dumpy.json" &
+    local dpid=$! d0; d0=$(now)
+    sleep 1
+    t=$(now); f=$(perf_vm cd); cdump_s=$(secs "$t" "$(now)")
+    [ "$(vmf "$f" agent_ready)" = true ] || fail "create during a dump not ready"
+    local inflight=no; kill -0 "$dpid" 2>/dev/null && inflight=yes
+    wait "$dpid" || fail "snapshot during a create failed"
+    echo "$1: create while a dump is in flight ${cdump_s}s (dump still running at the end: $inflight, dump took $(secs "$d0" "$(now)")s): $(sudo grep -E "$f: (create|boot|guest)" "$WORK/boatd.log" | sed -E 's/^.*'"$f"': //' | tr '\n' ' ')$(last_snap_log)"
+    perf_del "$f"
+    bd DELETE "/v1/vms/$v/snapshots/$(jq -r .id "$WORK/tmp/dumpy.json")" >/dev/null
+  fi
   bd DELETE "/v1/vms/$v/snapshots/$sn" >/dev/null
   perf_del "$v"
 }
 perf_snap p
-kvm_snap=$snap_s kvm_from=$fromsnap_s kvm_fork=$fork_s kvm_fork2=$fork2_s
+kvm_snap=$snap_s kvm_from=$fromsnap_s kvm_fork=$fork_s kvm_fork2=$fork2_s kvm_cdump=$cdump_s
 perf_del "$pv"
 
 log "perf e2e: the same with btrfs quotas off: what the default costs"
@@ -303,6 +320,7 @@ d() { jq -r ".$1" <<<"$disk"; }
 check_max perf_snapshot "$kvm_snap" "$PERF_SNAPSHOT_MAX"
 check_max perf_from_snap "$kvm_from" "$PERF_FROM_MAX"
 check_max perf_fork "$kvm_fork" "$PERF_FORK_MAX"
+check_max perf_create_dump "$kvm_cdump" "$PERF_CREATE_DUMP_MAX"
 check_max perf_warm_ten "$warm_ten" "$PERF_WARM_TEN_MAX"
 check_mib() { # NAME MIB MAX
   printf 'e2e: %-14s %s MiB (max %s)\n' "$1" "$2" "$3"
@@ -321,12 +339,12 @@ restart_boatd "$WORK/boatd.json"
 
 echo "METRIC $(jq -nc --argjson disk "$disk" --argjson disks "$disk_sync" --argjson diskiou "$disk_iou" --arg blk "$guest_blk" \
   --argjson csw "$c_sw" --argjson crw "$c_rw" --argjson crr "$c_rr" \
-  --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" --argjson kk2 "$kvm_fork2" \
+  --argjson ks "$kvm_snap" --argjson kf "$kvm_from" --argjson kk "$kvm_fork" --argjson kk2 "$kvm_fork2" --argjson kcd "$kvm_cdump" \
   --argjson nbr "$nb_rss" --argjson nbc "$nb_cg" --argjson br "$b_rss" --argjson bc "$b_cg" \
   --argjson dnq "$disk_noq" --argjson nqs "$noq_snap" --argjson nqf "$noq_from" --argjson nqk "$noq_fork" \
   --argjson kr "$k_rss" --argjson ksm "$ksm_sharing" --argjson fc "$fit_cold" --argjson fw "$fit_warm" --argjson fk "$fit_ksm" --argjson ca "${cold_async:-0}" --argjson cs "${cold_sync:-0}" \
   --argjson ct "$cold_ten" --argjson wt "$warm_ten" --argjson wr "$warm_rss" \
   '{test: "boat-perf", disk: $disk, diskSync: $disks, diskAsyncIoUringGroup: $diskiou, guestBlk: $blk, ceilingSeqWriteBps: $csw, ceilingRandWriteIops: $crw, ceilingRandReadIops: $crr,
-    snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2, noQuotas: {disk: $dnq, snapshotS: $nqs, fromSnapshotS: $nqf, forkS: $nqk},
+    snapshotS: $ks, fromSnapshotS: $kf, forkS: $kk, forkCleanS: $kk2, createDuringDumpS: $kcd, noQuotas: {disk: $dnq, snapshotS: $nqs, fromSnapshotS: $nqf, forkS: $nqk},
     idleRssMiB: {noBalloon: $nbr, balloon: $br, ksm: $kr, warm: $wr}, idleCgroupMiB: {noBalloon: $nbc, balloon: $bc},
     ksmDedupMiB: $ksm, fitsIn8GiB: {cold: $fc, warm: $fw, coldKsm: $fk}, coldRandReadIops: {async: $ca, sync: $cs}, tenCreatesS: {cold: $ct, warm: $wt}}')"

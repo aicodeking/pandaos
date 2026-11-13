@@ -589,6 +589,7 @@ func (m *Manager) Fork(ctx context.Context, id, name, team string) (VM, error) {
 	}
 	base := VM{Name: name, Team: p.Team, Image: p.Image, Size: p.Size, VCPU: p.VCPU, MemMiB: p.MemMiB,
 		DiskGiB: p.DiskGiB, Labels: p.Labels, TTLS: p.TTLS, IdleStopS: p.IdleStopS, ParentID: p.ID}
+	t0 := time.Now()
 	err = m.checkFloor(uint64(p.MemMiB) << 20)
 	var c VM
 	if err == nil {
@@ -600,15 +601,21 @@ func (m *Manager) Fork(ctx context.Context, id, name, team string) (VM, error) {
 	}
 	unlockC := m.lock(c.ID)
 	defer unlockC()
+	t1 := time.Now()
 	withMem, err := m.freeze(ctx, p, m.root(c.ID))
 	unlockP()
+	t2 := time.Now()
 	if err == nil {
 		err = m.finishDisk(c)
 	}
 	if err != nil {
 		return m.fail(c.ID, err)
 	}
-	return m.bootNew(ctx, c, withMem, nil)
+	t3, cid := time.Now(), c.ID
+	c, err = m.bootNew(ctx, c, withMem, nil)
+	log.Printf("%s: fork of %s alloc=%dms freeze=%dms disk=%dms boot+init=%dms", cid, p.ID, t1.Sub(t0).Milliseconds(),
+		t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), time.Since(t3).Milliseconds())
+	return c, err
 }
 
 func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
