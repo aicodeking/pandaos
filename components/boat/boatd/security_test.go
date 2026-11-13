@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -551,5 +553,53 @@ func TestQuotaFullDoesNotBlockStop(t *testing.T) {
 	m.saveState = func(string, VM) error { return &os.PathError{Op: "write", Path: "x", Err: syscall.EDQUOT} }
 	if got, err := m.Stop(ctx, v.ID, ""); err != nil || got.State != Stopped {
 		t.Fatalf("a team at its disk quota cannot stop a VM: %+v %v", got, err)
+	}
+}
+
+// A dump that fails (team quota: EDQUOT on the memory file) keeps the VM and its
+// memory: the stop answers 507, the guest runs on, and a retry snapshots it.
+func TestFailedDumpKeepsVMRunning(t *testing.T) {
+	m, h := newTestManager(t, nil)
+	srv := httptest.NewServer(m.routes())
+	defer srv.Close()
+	var v VM
+	call(t, srv, "POST", "/v1/vms", map[string]any{"team": "t1"}, &v)
+	h.mu.Lock()
+	h.failSnap = 1
+	h.mu.Unlock()
+	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/stop", nil, nil); c != http.StatusInsufficientStorage {
+		t.Fatalf("stop with a failed dump: %d, want 507", c)
+	}
+	call(t, srv, "GET", "/v1/vms/"+v.ID, nil, &v)
+	fc := h.fcOf(t, m, v.ID)
+	if v.State != Running || fc.called("agent shutdown") {
+		t.Fatalf("a failed dump shut the VM down: %+v", v)
+	}
+	fc.mu.Lock()
+	paused := fc.paused
+	fc.mu.Unlock()
+	if paused {
+		t.Fatal("a failed dump left the VM paused")
+	}
+	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/stop", nil, &v); c != 200 || v.State != Stopped || !v.HasSnapshot {
+		t.Fatalf("retry: %d %+v", c, v)
+	}
+	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/start", nil, &v); c != 200 || !h.fcOf(t, m, v.ID).called("PUT /snapshot/load") {
+		t.Fatalf("start after the retried stop did not resume: %d %+v", c, v)
+	}
+}
+
+// boatd exiting cannot wait for a retry: a failed dump falls back to a cold shutdown.
+func TestFailedDumpOnShutdownStopsCold(t *testing.T) {
+	m, h := newTestManager(t, nil)
+	v, err := m.Create(context.Background(), CreateReq{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.failSnap = 1
+	h.mu.Unlock()
+	if got, err := m.Stop(context.Background(), v.ID, shutdownReason); err != nil || got.State != Stopped || got.HasSnapshot {
+		t.Fatalf("%+v %v", got, err)
 	}
 }

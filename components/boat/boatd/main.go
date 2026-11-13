@@ -150,7 +150,7 @@ func serve(cfgPath string) error {
 	}
 	// The unit (KillMode=mixed) kills the whole cgroup once we exit, so
 	// snapshot every running VM first; they resume on the next start.
-	m.stopAll(context.Background(), "boatd shutdown")
+	m.stopAll(context.Background(), shutdownReason)
 	return nil
 }
 

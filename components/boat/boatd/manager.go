@@ -681,6 +681,9 @@ func rotateLog(path string) error {
 	return os.Truncate(path, 0)
 }
 
+// shutdownReason: a stop that cannot wait for a retry (stop falls back to a cold shutdown).
+const shutdownReason = "boatd shutdown"
+
 // stopAll snapshots every running VM in parallel (service stop / host reboot).
 func (m *Manager) stopAll(ctx context.Context, reason string) {
 	var wg sync.WaitGroup

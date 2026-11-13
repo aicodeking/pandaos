@@ -39,6 +39,7 @@ type fakeHost struct {
 	starts     int             // processes started
 	failStart  int             // fail the failStart-th process start (1-based; 0 = never)
 	failResume int             // refuse this many resumes (PATCH /vm Resumed) with 503
+	failSnap   int             // refuse this many snapshot creates like a full team quota (EDQUOT)
 	slowGo     chan struct{}   // "slow" execs (sessions) send their end once this is closed
 	loseExec   int             // ignore this many exec requests (lost in a vsock reset)
 	execKilled map[string]bool // execs (by argv[0]) the agent reports timed out and killed
@@ -300,6 +301,16 @@ func (f *fakeFC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		if !paused {
 			fault(w, "not paused")
+			return
+		}
+		f.h.mu.Lock()
+		quota := f.h.failSnap > 0
+		if quota {
+			f.h.failSnap--
+		}
+		f.h.mu.Unlock()
+		if quota {
+			fault(w, "Create snapshot error: Cannot perform open on the snapshot backing file: Quota exceeded (os error 122)")
 			return
 		}
 		f.mu.Lock()

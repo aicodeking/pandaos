@@ -452,12 +452,30 @@ func (m *Manager) stop(ctx context.Context, id, reason string, force bool) (VM, 
 		if m.cfg.HugePages {
 			err = errHugePages // a memory file it could not restore: shut down instead
 		}
+		dumped := false // tried and failed, as opposed to refused by the floor (which stops cold)
 		if err == nil {
 			v, err = m.takeSnapshot(ctx, v, true) // a stop's file is the next start's base: flushed now
+			dumped = true
 		}
 		snap = err == nil
+		if !snap && dumped && reason != shutdownReason && reason != "ttl" {
+			// Someone can retry (the caller, or the next idle tick): keep the guest and
+			// its memory rather than lose them to a full disk or team quota (EDQUOT).
+			// dumpSnapshot left it paused and its files dropped; failSnapshot makes the
+			// next one Full.
+			log.Printf("%s: stop (%s): memory not saved, VM kept running: %v", id, reason, err)
+			rerr := newFC(filepath.Join(root, apiSock)).resume(ctx)
+			if rerr == nil {
+				v, rerr = m.update(id, "", func(x *VM) { x.State = Running })
+			}
+			if rerr != nil {
+				log.Printf("%s: resume after a failed stop: %v", id, rerr)
+			}
+			return v, errf(http.StatusInsufficientStorage, "stop: memory not saved, the VM is still running (free disk space and retry, or stop with force to discard its memory): %v", err)
+		}
 		if !snap {
-			// No snapshot: let the guest flush its disk and reboot (= exit) instead.
+			// No snapshot and no retry (below the disk floor, huge pages, boatd exiting, a TTL):
+			// let the guest flush its disk and reboot (= exit) instead.
 			log.Printf("%s: no snapshot, shutting down cold: %v", id, err)
 			newFC(filepath.Join(root, apiSock)).resume(ctx)
 			agentCall(ctx, filepath.Join(root, vsockUDS), map[string]string{"op": "shutdown"})

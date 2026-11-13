@@ -256,6 +256,7 @@ echo "fork with qgroups ${forkq_s}s"
 bd DELETE "/v1/vms/$q2" >/dev/null
 # The kernel holds a guest to the limit: a low one, a guest writing past it, and another team unharmed.
 q3=$(newvm '{"name":"q3","team":"iso3"}')
+bx "$q1" 'cat /proc/sys/kernel/random/boot_id' >"$WORK/tmp/q1.boot"
 sudo btrfs qgroup limit -e 300M "$vol"
 sudo btrfs filesystem sync "$STATE"
 bx "$q1" 'head -c 1G /dev/urandom >/home/dev/q; sync' 300 >/dev/null 2>&1 || true
@@ -264,8 +265,19 @@ excl=$(sudo btrfs qgroup show --raw "$STATE" | awk -v q="0/$qid" '$1 == q {print
 echo "team past a 300 MiB limit: $((excl >> 20)) MiB exclusive"
 [ "$excl" -lt $((700 << 20)) ] || fail "a guest wrote $((excl >> 20)) MiB past a 300 MiB team limit"
 bx "$q3" 'head -c 500M /dev/urandom >/home/dev/q; sync' 300 >/dev/null || fail "another team's guest lost its disk to this team's limit"
-st=$(bd POST "/v1/vms/$q1/stop" | jq -r .state)
-[ "$st" = stopped ] || fail "a team at its limit cannot stop a VM: $st"
+# A memory dump past the limit fails (EDQUOT): the VM keeps running with its memory,
+# the stop answers 507, and a retry once there is room resumes it later (run 43328227157
+# shut such a VM down cold).
+code=$(bdcode POST "/v1/vms/$q1/stop")
+if [ "$code" = 507 ]; then
+  [ "$(vmf "$q1" state)" = running ] && [ "$(bx "$q1" 'cat /proc/sys/kernel/random/boot_id' 30)" = "$(cat "$WORK/tmp/q1.boot")" ] ||
+    fail "a failed dump did not leave the VM running: $(bd GET "/v1/vms/$q1")"
+  sudo btrfs qgroup limit -e none "$vol"
+  code=$(bdcode POST "/v1/vms/$q1/stop")
+  echo "team at its limit: stop 507 kept the VM, retry after lifting the limit $code"
+fi
+[ "$code" = 200 ] && [ "$(vmf "$q1" state)" = stopped ] || fail "a team at its limit cannot stop a VM: $code $(cat "$WORK/tmp/bd.out")"
+[ "$(vmf "$q1" has_snapshot)" = true ] || fail "the stop after a failed dump saved no memory"
 bd DELETE "/v1/vms/$q1" >/dev/null
 bd DELETE "/v1/vms/$q3" >/dev/null
 [ -z "$(sudo ls "$STATE/vms")" ] || fail "VM dirs left: $(sudo ls "$STATE/vms")"
