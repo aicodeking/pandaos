@@ -316,7 +316,7 @@ def client_info():
 
 def cmd_run(a):
     d = drivers.DRIVERS[a.driver]()
-    run_id = secrets.token_hex(3)
+    run_id = os.environ.get("BOATBENCH_RUN_ID") or secrets.token_hex(3)  # names the VMs bb-<run_id>-*
     parts = set(a.only.replace(",", ""))
     res = {"driver": a.driver, "run_id": run_id, "size": d.size,
            "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

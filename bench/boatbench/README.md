@@ -178,7 +178,7 @@ Workload g also runs on `--driver host`: N Node loops side by side directly on t
 The report puts that next to the VM curve, so CPU saturation can be told apart from virtualization overhead. On a
 host without an FHS loader (NixOS), set `BB_NODE_LOADER` to the glibc loader command
 (`/nix/store/...-glibc-*/lib/ld-linux-x86-64.so.2 --library-path <glibc>/lib:<gcc-lib>/lib`). The same pinned Node
-binary then runs through that loader. `BOATBENCH_CONCURRENT_N` sets how many VMs workload c creates at once (default
+binary then runs through that loader. `BOATBENCH_RUN_ID` replaces the random run ID that names the VMs (`bb-<run_id>-*`). `BOATBENCH_CONCURRENT_N` sets how many VMs workload c creates at once (default
 10), for example a team quota of 8.
 
 Raw results of server runs are committed under `results/` (one directory per run, with a README giving the hardware,
