@@ -339,7 +339,7 @@ func (s *server) compatUploadURL(w http.ResponseWriter, r *http.Request, p *prin
 		return
 	}
 	exp := time.Now().Add(time.Duration(ttl) * time.Second).Truncate(time.Second)
-	tok := s.signFileGrant(fileGrant{Team: p.Team.ID, VM: r.PathValue("id"), Path: file, Exp: exp.Unix(), Op: "put", Key: p.Key.ID})
+	tok := s.mintGrant(r, p, fileGrant{VM: r.PathValue("id"), Path: file, Exp: exp.Unix(), Op: "put"})
 	writeCompat(w, 200, "file.upload_url", map[string]any{"url": s.publicBase(r) + fileUploadPath + tok,
 		"method": "PUT", "path": file, "expiresAt": exp.UTC()})
 }

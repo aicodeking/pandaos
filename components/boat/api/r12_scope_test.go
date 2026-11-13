@@ -16,13 +16,13 @@ import (
 // scopeProbeBodies are bodies that get each route as far as its native calls.
 func scopeProbeBodies(bx string) map[string]any {
 	return map[string]any{
-		"POST /api/v1/sandboxes":                  map[string]any{"hostedPorts": []any{map[string]any{"port": 8080}}},
-		"POST /api/v1/sandboxes/{id}/host":        map[string]any{"port": 8080},
-		"POST /api/v1/saved-snapshots":            map[string]any{"sandboxId": bx, "name": "probe2"},
-		"POST /api/v1/named-snapshots":            map[string]any{"sandboxId": bx, "name": "probe3"},
-		"POST /api/v1/sandboxes/{id}/commands":    map[string]any{"command": "true"},
-		"POST /api/v1/sandboxes/{id}/prompt":      map[string]any{"prompt": "hi"},
-		"POST /api/v1/sandboxes/{id}/files/move":  map[string]any{"from": "/tmp/a", "to": "/tmp/b"},
+		"POST /api/v1/sandboxes":                   map[string]any{"hostedPorts": []any{map[string]any{"port": 8080}}},
+		"POST /api/v1/sandboxes/{id}/host":         map[string]any{"port": 8080},
+		"POST /api/v1/saved-snapshots":             map[string]any{"sandboxId": bx, "name": "probe2"},
+		"POST /api/v1/named-snapshots":             map[string]any{"sandboxId": bx, "name": "probe3"},
+		"POST /api/v1/sandboxes/{id}/commands":     map[string]any{"command": "true"},
+		"POST /api/v1/sandboxes/{id}/prompt":       map[string]any{"prompt": "hi"},
+		"POST /api/v1/sandboxes/{id}/files/move":   map[string]any{"from": "/tmp/a", "to": "/tmp/b"},
 		"POST /api/v1/sandboxes/{id}/files/folder": map[string]any{"path": "/tmp/d"},
 	}
 }
@@ -101,5 +101,62 @@ func TestCallNativePatternsRegistered(t *testing.T) {
 	}
 	if seen < 40 {
 		t.Fatalf("found only %d callNative patterns", seen)
+	}
+}
+
+// A download URL dies when its minting key no longer holds the scope minting
+// needed (exec), not only when the key is gone.
+func TestDownloadURLRechecksScope(t *testing.T) {
+	e := setup(t)
+	id := e.newSandbox(nil)
+	base := "/api/v1/sandboxes/" + id
+	e.ok("PUT", base+"/files", map[string]any{"path": "r.txt", "content": "x"}, 200)
+	tok := e.newKey("exec", "vms:read")
+	st, d, _ := e.compat(tok, "POST", base+"/files/download-url", map[string]any{"path": "r.txt"}, nil)
+	if st != 200 {
+		t.Fatalf("mint: %d %v", st, d)
+	}
+	u := strings.TrimPrefix(d["url"].(string), e.api.URL)
+	if st, _ := e.raw("", "GET", u, nil); st != 200 {
+		t.Fatalf("live: %d", st)
+	}
+	kid := keyID(e, tok)
+	e.srv.store.Update(func(st *State) error {
+		k := *st.Keys[kid]
+		k.Scopes = []string{"vms:read"}
+		st.Keys[kid] = &k
+		return nil
+	})
+	if st, _ := e.raw("", "GET", u, nil); st != 404 {
+		t.Errorf("URL outlived its key's exec scope: %d", st)
+	}
+}
+
+// Links a VM's own token minted die when that token rotates (fork, share, start).
+func TestSelfTokenLinksDieOnRotate(t *testing.T) {
+	e := setup(t)
+	e.srv.cfg.VMAPIURL = "https://boat.example/"
+	e.srv.cfg.VMDomain = "vm.example"
+	vm := e.createVM()
+	self := e.selfTokenOf(vm)
+	if st, _ := e.do(self, "POST", "/v1/vms/"+vm+"/ports", map[string]any{"port": 8081}); st != 201 {
+		t.Fatalf("port: %d", st)
+	}
+	if st, out := e.do(self, "GET", "/v1/vms/"+vm+"/ports/8081/url", nil); st != 200 || out["token"] == nil {
+		t.Fatalf("url: %d %v", st, out)
+	}
+	e.do(self, "PUT", "/v1/vms/"+vm+"/files?path=/tmp/r.txt", "x")
+	st, d := e.do(self, "POST", "/api/v1/sandboxes/"+vm+"/files/download-url", map[string]any{"path": "/tmp/r.txt"})
+	if st != 200 {
+		t.Fatalf("download-url: %d %v", st, d)
+	}
+	u := strings.TrimPrefix(d["url"].(string), e.api.URL)
+	gen := e.srv.store.Snapshot().RouteGens[vm]
+	e.srv.rotateSelf(vm)
+	if g := e.srv.store.Snapshot().RouteGens[vm]; g == gen {
+		t.Error("port links the old self token minted survive its rotation")
+	}
+	if st, _ := e.raw("", "GET", u, nil); st != 404 {
+		t.Errorf("download URL survives the self token's rotation: %d", st)
 	}
 }

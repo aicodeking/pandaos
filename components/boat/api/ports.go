@@ -257,9 +257,9 @@ func (s *server) portURL(w http.ResponseWriter, r *http.Request, p *principal) {
 
 // recordPortMinter notes that key minted a private link of vmID, so deleting
 // the key or removing its member revokes the VM's port links (revokeLinksOf).
-// A VM's own token (vm_ ids) is not recorded: it dies with the VM.
+// A VM's own token is recorded per generation: rotating it revokes (bumpSelf).
 func (s *server) recordPortMinter(vmID, keyID string) error {
-	if strings.HasPrefix(keyID, "vm_") || slices.Contains(s.store.Snapshot().PortMinters[vmID], keyID) {
+	if slices.Contains(s.store.Snapshot().PortMinters[vmID], keyID) {
 		return nil
 	}
 	return s.store.Update(func(st *State) error {
@@ -289,17 +289,25 @@ func revokeLinksOf(st *State, gone func(keyID string) bool) {
 }
 
 // keyAlive says whether the key that minted a signed URL still stands: it
-// exists in team, has not expired, and its user is still a member. A VM's own
-// token (vm_<id>) stands while the VM's token record does.
-func (s *server) keyAlive(keyID, team string, now time.Time) bool {
-	return keyAliveIn(s.store.Snapshot(), keyID, team, now)
+// exists in team, has not expired, its user is still a member, and (scope
+// != "") it still holds scope. A VM's own token (vm_<id>@<gen>) stands while
+// the VM's token is still at that generation; a legacy vm_<id> while the
+// VM's token record exists.
+func (s *server) keyAlive(keyID, team, scope string, now time.Time) bool {
+	return keyAliveIn(s.store.Snapshot(), keyID, team, scope, now)
 }
 
-func keyAliveIn(st *State, keyID, team string, now time.Time) bool {
-	if vm, ok := strings.CutPrefix(keyID, "vm_"); ok {
+func keyAliveIn(st *State, keyID, team, scope string, now time.Time) bool {
+	if rest, ok := strings.CutPrefix(keyID, "vm_"); ok {
+		vm, gen, hasGen := strings.Cut(rest, "@")
 		t := st.VMTokens[vm]
-		return t != nil && t.TeamID == team
+		return t != nil && t.TeamID == team && (!hasGen || gen == strconv.Itoa(t.Gen)) &&
+			(scope == "" || slices.Contains(selfScopes, scope))
 	}
 	k, t := st.Keys[keyID], st.Teams[team]
-	return k != nil && t != nil && k.TeamID == team && (k.Expires == nil || now.Before(*k.Expires)) && t.role(k.UserID) != ""
+	if k == nil || t == nil || k.TeamID != team || (k.Expires != nil && !now.Before(*k.Expires)) {
+		return false
+	}
+	role := t.role(k.UserID)
+	return role != "" && (scope == "" || slices.Contains(effectiveScopes(k.Scopes, role), scope))
 }

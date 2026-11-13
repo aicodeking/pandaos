@@ -60,7 +60,7 @@ func sshFingerprint(pub string) string {
 
 // grantAlive: an owned grant stands while its minting key does (keyAliveIn).
 func grantAlive(st *State, g *SSHGrant, now time.Time) bool {
-	return g.KeyID == "" || keyAliveIn(st, g.KeyID, g.TeamID, now)
+	return g.KeyID == "" || keyAliveIn(st, g.KeyID, g.TeamID, "", now)
 }
 
 // grantJump records (team, key, vm, minting key) and rewrites the jump keys file.
@@ -81,7 +81,7 @@ func (s *server) grantJump(r *http.Request, p *principal, vmID, pub string) erro
 			if n >= maxGrantsPerTeam {
 				return errLimit
 			}
-			g = &SSHGrant{TeamID: team, PublicKey: norm, KeyID: p.Key.ID, UserID: p.User.ID, Created: time.Now().UTC()}
+			g = &SSHGrant{TeamID: team, PublicKey: norm, KeyID: durableKeyID(p), UserID: p.User.ID, Created: time.Now().UTC()}
 			st.SSHGrants[k] = g
 		}
 		if !slices.Contains(g.VMs, vmID) {

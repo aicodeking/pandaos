@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -63,7 +64,7 @@ func (s *server) authenticateSelf(tok string) *principal {
 		return nil
 	}
 	id := "vm_" + vmID
-	return &principal{Key: &APIKey{ID: id, UserID: id, TeamID: team.ID, Name: "vm " + vmID, Scopes: selfScopes},
+	return &principal{Key: &APIKey{ID: selfKeyID(vmID, gen), UserID: id, TeamID: team.ID, Name: "vm " + vmID, Scopes: selfScopes},
 		User: &User{ID: id, Name: "vm " + vmID}, Team: team, Role: "member", Scopes: selfScopes, VMID: vmID}
 }
 
@@ -96,9 +97,27 @@ func (s *server) guestEnv(vmID, team string, vars map[string]string) map[string]
 	return out
 }
 
+// selfKeyID names generation gen of vmID's token as a link minter: links it
+// mints die with that generation (keyAliveIn, bumpSelf).
+func selfKeyID(vmID string, gen int) string { return fmt.Sprintf("vm_%s@%d", vmID, gen) }
+
+// durableKeyID is p's key id for grants that should outlive a VM token's
+// rotation (share codes, ssh grants): vm_<id>, alive while the VM's token is.
+func durableKeyID(p *principal) string {
+	if p.VMID != "" {
+		return p.User.ID
+	}
+	return p.Key.ID
+}
+
 func (s *server) bumpSelf(vmID, team string) (int, error) {
 	gen := 0
-	err := s.store.Apply(func(st *State) error {
+	mintedBySelf := func(keyID string) bool { return strings.HasPrefix(keyID, "vm_"+vmID+"@") }
+	apply := s.store.Apply
+	if slices.ContainsFunc(s.store.Snapshot().PortMinters[vmID], mintedBySelf) {
+		apply = s.store.Update // a revocation must not be lost
+	}
+	err := apply(func(st *State) error {
 		t := st.VMTokens[vmID]
 		if t == nil {
 			t = &VMToken{TeamID: team}
@@ -106,6 +125,7 @@ func (s *server) bumpSelf(vmID, team string) (int, error) {
 		}
 		t.Gen++
 		gen = t.Gen
+		revokeLinksOf(st, mintedBySelf) // the old token's port links
 		return nil
 	})
 	return gen, err

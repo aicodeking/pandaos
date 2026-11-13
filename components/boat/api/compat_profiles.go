@@ -267,7 +267,7 @@ func (s *server) compatSnapshotDownload(w http.ResponseWriter, r *http.Request, 
 		// boat.dev's answer is a list of signed chunk URLs; here the archive is
 		// one chunk, served by a file-download token bound to the snapshot.
 		exp := time.Now().Add(fileURLDefaultTTL * time.Second).Truncate(time.Second)
-		tok := s.signFileGrant(fileGrant{Team: p.Team.ID, VM: str(sn, "vm_id"), Path: str(sn, "id"), Exp: exp.Unix(), Op: "snap", Key: p.Key.ID})
+		tok := s.mintGrant(r, p, fileGrant{VM: str(sn, "vm_id"), Path: str(sn, "id"), Exp: exp.Unix(), Op: "snap"})
 		sum := s.snapshotSummary(p.Team.ID, sn)
 		writeCompat(w, 200, "snapshot.download", map[string]any{"snapshotId": sum["id"], "sandboxId": sum["sandboxId"],
 			"kind": "base", "generation": 1, "expiresInSeconds": fileURLDefaultTTL,

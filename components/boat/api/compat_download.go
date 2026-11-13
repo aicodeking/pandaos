@@ -41,6 +41,15 @@ type fileGrant struct {
 	Exp  int64  `json:"e"`
 	Op   string `json:"o,omitempty"` // "put": an upload URL (compat_extra.go); "snap": a snapshot chunk
 	Key  string `json:"k"`           // the minting API key: the URL dies with it (keyAlive)
+	// Scope the minting route required; the key must still hold it at use
+	// ("" on older URLs: exec, what every minting route requires).
+	Scope string `json:"s,omitempty"`
+}
+
+// mintGrant signs g for p as minted by r's route (its key and scope).
+func (s *server) mintGrant(r *http.Request, p *principal, g fileGrant) string {
+	g.Team, g.Key, g.Scope = p.Team.ID, p.Key.ID, s.routeScopes[info(r).pattern]
+	return s.signFileGrant(g)
 }
 
 func (s *server) signFileGrant(g fileGrant) string {
@@ -59,7 +68,7 @@ func (s *server) openFileGrant(token string, now time.Time) (fileGrant, bool) {
 	if err != nil || json.Unmarshal(b, &g) != nil || !now.Before(time.Unix(g.Exp, 0)) {
 		return g, false
 	}
-	return g, s.keyAlive(g.Key, g.Team, now)
+	return g, s.keyAlive(g.Key, g.Team, orDefault(g.Scope, "exec"), now)
 }
 
 // publicBase is this API's public base URL: -public-url, else what the request
@@ -99,7 +108,7 @@ func (s *server) compatDownloadURL(w http.ResponseWriter, r *http.Request, p *pr
 		return
 	}
 	exp := time.Now().Add(time.Duration(ttl) * time.Second).Truncate(time.Second)
-	tok := s.signFileGrant(fileGrant{Team: p.Team.ID, VM: r.PathValue("id"), Path: file, Exp: exp.Unix(), Key: p.Key.ID})
+	tok := s.mintGrant(r, p, fileGrant{VM: r.PathValue("id"), Path: file, Exp: exp.Unix()})
 	writeCompat(w, 200, "file.download_url", map[string]any{"url": s.publicBase(r) + fileDownloadPath + tok,
 		"method": "GET", "path": file, "expiresAt": exp.UTC()})
 }

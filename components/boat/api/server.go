@@ -70,11 +70,11 @@ type server struct {
 	// routeScopes maps every authenticated pattern to its scope ("" = any key);
 	// callNative checks it so a compat route never reaches past its caller.
 	routeScopes map[string]string
-	onNative    func(pattern string, p *principal) // scope test: each native call that ran
-	observe    func(pattern string, r *http.Request, status int) // OpenAPI drift test
-	idem       idemCache                                         // boat.dev Idempotency-Key (compat_idem.go)
-	deletions  deletions                                         // boat.dev deletion operations (compat.go)
-	stops      stopOps                                           // boat.dev stop operations (compat_stops.go)
+	onNative    func(pattern string, p *principal)                // scope test: each native call that ran
+	observe     func(pattern string, r *http.Request, status int) // OpenAPI drift test
+	idem        idemCache                                         // boat.dev Idempotency-Key (compat_idem.go)
+	deletions   deletions                                         // boat.dev deletion operations (compat.go)
+	stops       stopOps                                           // boat.dev stop operations (compat_stops.go)
 	// drawCompatID draws a bx_ id candidate (tests force collisions); nil = random.
 	drawCompatID func() string
 }
