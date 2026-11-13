@@ -272,7 +272,13 @@ code=$(bdcode POST "/v1/vms/$q1/stop")
 if [ "$code" = 507 ]; then
   [ "$(vmf "$q1" state)" = running ] && [ "$(bx "$q1" 'cat /proc/sys/kernel/random/boot_id' 30)" = "$(cat "$WORK/tmp/q1.boot")" ] ||
     fail "a failed dump did not leave the VM running: $(bd GET "/v1/vms/$q1")"
-  sudo btrfs qgroup limit -e none "$vol"
+  # By ID on the top level: on the team's subvolume the ioctl's own transaction can hit
+  # the full quota (EDQUOT, clone run 43360525562). Else free the guest's file and retry.
+  sudo btrfs qgroup limit -e none "0/$qid" "$STATE" || {
+    bx "$q1" 'rm -f /home/dev/q; sync; fstrim / || true' 60 >/dev/null || true
+    sudo btrfs filesystem sync "$STATE"
+    sudo btrfs qgroup limit -e none "0/$qid" "$STATE"
+  }
   code=$(bdcode POST "/v1/vms/$q1/stop")
   echo "team at its limit: stop 507 kept the VM, retry after lifting the limit $code"
 fi
