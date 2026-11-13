@@ -288,7 +288,10 @@ func revokeLinksOf(st *State, gone func(keyID string) bool) {
 // exists in team, has not expired, and its user is still a member. A VM's own
 // token (vm_<id>) stands while the VM's token record does.
 func (s *server) keyAlive(keyID, team string, now time.Time) bool {
-	st := s.store.Snapshot()
+	return keyAliveIn(s.store.Snapshot(), keyID, team, now)
+}
+
+func keyAliveIn(st *State, keyID, team string, now time.Time) bool {
 	if vm, ok := strings.CutPrefix(keyID, "vm_"); ok {
 		t := st.VMTokens[vm]
 		return t != nil && t.TeamID == team

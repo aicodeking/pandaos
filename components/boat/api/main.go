@@ -253,6 +253,7 @@ func serve(args []string) int {
 		go s.serveAIProxy(ctx, *aiListen)
 	}
 	go s.syncJumpKeys(ctx)
+	go s.jumpExpiryLoop(ctx, time.Minute)
 	srv := &http.Server{Addr: *listen, Handler: s, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	go func() {
 		<-ctx.Done()
@@ -387,6 +388,8 @@ func (s *server) routes() {
 	s.route("DELETE /v1/telemetry", "admin", s.deleteTelemetry)
 
 	s.route("POST /v1/vms/{id}/ssh", "exec", s.sshVM)
+	s.route("GET /v1/vms/{id}/ssh", "vms:read", s.listSSHGrants)
+	s.route("DELETE /v1/vms/{id}/ssh/{fingerprint}", "exec", s.revokeSSHGrant)
 	s.route("GET /v1/vms/{id}/desktop", "exec", s.desktopVM)
 
 	s.route("GET /v1/teams", "", s.listTeams)

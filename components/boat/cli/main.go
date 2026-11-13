@@ -37,7 +37,7 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat cmd start|ls|status|logs [-f]|signal [--signal S]|stop|history <vm> [id] [-- cmd]
   boat files ls|rm [-r]|mv [--overwrite]|search [--content] [--regex]|info|mkdir|chmod <vm> ...
   boat prompt <vm> "text" [--agent|--provider claude|codex|opencode|pi|prime|kimi|mistral] [--model M] [--async] [--new] [--resume CONV]
-  boat prompts ls|status|logs [-f] <vm> [id]    boat conversations <vm>
+  boat prompts ls|status|logs [-f] <vm> [id]    boat conversations|convos <vm>
   boat steer <vm> "text" [--prompt-id ID]       boat interrupt <vm> [--prompt-id ID]
   boat env ls | new NAME | show E | set E | default E | build E | rm E   [--image I] [--size S] [--setup TEXT|--setup-file F] [--var K=V] [--secrets A,B]
   boat rename <vm> NAME                boat api-key create NAME [--preset read-only|full-sandbox|ci|admin | --actions a,b] | list | usage ID | rotate ID | revoke ID
@@ -49,7 +49,8 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat webhook create URL [--name N] [--event ready|error|archived|...] | list | rotate ID | remove ID   (boat.dev events)
   boat start|resume <vm> [--type S] [--fail-fast]
   boat resize <vm> [SIZE] [--disk GIB] [--discard-memory]
-  boat desktop <vm> [--no-open]
+  boat desktop|browser <vm> [--no-open]
+  boat ssh-keys ls <vm> | ssh-keys rm <vm> FINGERPRINT   keys granted by boat ssh (rm: own grants; admins: any)
   boat ports ls|add|rm|url <vm> [port] [--auth private|public] [--public] [--ttl 1h]
   boat host <vm> <port> [--public|--private]   expose a port and print its URL
   boat snapshots <vm> [ls | create [--name N] | rm <id> | download <id> [-o F] | share <id> [--team T] [--ttl 24h] | shares <id> | unshare <id> <share>]
@@ -60,7 +61,8 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat keys [ls | create [--name N] [--scopes a,b] [--team T] | rm ID | rotate ID [--overlap 24h] | usage ID]
   boat teams [ls | create NAME [--owner U] | show ID | rm ID | add-member TEAM NAME [--role R] | rm-member TEAM USER]
   boat status <vm> | events <vm> [--limit N] | recover <vm> | share <vm> | unshare <vm> (not supported here)
-  boat dashboard [--no-open]           boat deletion status <operation id>
+  boat dashboard [--no-open]           boat deletion status <operation id>     boat feedback   where to file issues
+  boat help [verb] | boat <verb> --help   (no login needed)
   boat upgrade|self-update [--version vX.Y.Z]   replace this binary with a release build (checksum-verified)
   boat completions bash|zsh|fish|powershell     print a shell completion script
   boat webhooks [ls | create URL [--events a,b] | show ID | update ID [--url U] [--events a,b] | rm ID | deliveries ID | test ID | rotate ID [--overlap 24h]]
@@ -69,7 +71,7 @@ A <vm> can be an id, a unique name, current (last created or forked in this shel
 Inside a VM: host <port> [--public] | host list | host url <port> | host hide <port>.
 Global: --json (JSON lines on stdout; new ends with {"event":"ready",...}; an error is {"error":{...}} on stderr and
   a last {"event":"error","code","status","message"} line on stdout), --api-url URL (this run's API; login --url saves one).
-Env: BOAT_URL (or BOAT_API_URL), BOAT_API_KEY, BOAT_CONFIG. boat.dev cloud-only verbs (org, billing, repos, ci, credentials, retention, onboard) are not supported here.`
+Env: BOAT_URL (or BOAT_API_URL), BOAT_API_KEY, BOAT_CONFIG. boat.dev cloud-only verbs (org, billing, repos, ci, credentials, retention, data-retention, wallet, onboard) are not supported here.`
 
 type app struct {
 	out, errw io.Writer
@@ -144,7 +146,15 @@ func (a *app) run(args []string) int {
 		rest = append(rest, x)
 	}
 	if len(rest) == 0 || rest[0] == "help" || rest[0] == "-h" || rest[0] == "--help" {
-		fmt.Fprintln(a.out, usage)
+		if len(rest) > 1 {
+			fmt.Fprintln(a.out, verbUsage(rest[1]))
+		} else {
+			fmt.Fprintln(a.out, usage)
+		}
+		return 0
+	}
+	if wantsHelp(rest[1:]) { // before login: help needs no credentials
+		fmt.Fprintln(a.out, verbUsage(rest[0]))
 		return 0
 	}
 	err := a.dispatch(rest[0], rest[1:])
@@ -154,9 +164,14 @@ func (a *app) run(args []string) int {
 		return 0
 	case errors.As(err, &ee):
 		return ee.code
-	case errors.Is(err, errUsage):
+	case errors.Is(err, errUsage) && !a.json:
 		fmt.Fprintln(a.errw, usage)
 		return 2
+	}
+	code := 1
+	if errors.Is(err, errUsage) {
+		code = 2
+		err = errors.New(strings.TrimSuffix(err.Error(), ": usage"))
 	}
 	if a.json {
 		e := map[string]any{"message": err.Error()}
@@ -172,7 +187,7 @@ func (a *app) run(args []string) int {
 	} else {
 		fmt.Fprintln(a.errw, "boat:", err)
 	}
-	return 1
+	return code
 }
 
 func (a *app) dispatch(cmd string, args []string) error {
@@ -189,6 +204,8 @@ func (a *app) dispatch(cmd string, args []string) error {
 		return a.logout(args)
 	case "completions":
 		return a.completions(args)
+	case "feedback":
+		return a.emit(obj{"url": "https://github.com/aicodeking/pandaos/issues", "message": feedbackText}, func() { fmt.Fprintln(a.out, feedbackText) })
 	}
 	if slices.Contains(notSelfHosted, cmd) {
 		return fmt.Errorf("boat %s is a boat.dev cloud feature; it is not supported on self-hosted boat", cmd)

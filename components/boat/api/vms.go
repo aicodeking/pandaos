@@ -1167,7 +1167,7 @@ func (s *server) sshVM(w http.ResponseWriter, r *http.Request, p *principal) {
 			writeUpstream(w, r, err)
 			return
 		}
-		if err := s.grantJump(r, p.Team.ID, r.PathValue("id"), pub); err != nil {
+		if err := s.grantJump(r, p, r.PathValue("id"), pub); err != nil {
 			if errors.Is(err, errLimit) {
 				s.storeErr(w, r, err)
 				return
@@ -1194,10 +1194,7 @@ func (s *server) sshVM(w http.ResponseWriter, r *http.Request, p *principal) {
 
 // authorizeKey appends pub to the VM user's authorized_keys if absent.
 func (s *server) authorizeKey(r *http.Request, id, pub string) error {
-	path := "/home/" + s.cfg.SSHUser + "/.ssh/authorized_keys"
-	if s.cfg.SSHUser == "root" {
-		path = "/root/.ssh/authorized_keys"
-	}
+	path := s.authorizedKeysPath()
 	resp, err := s.boatd.do(r.Context(), "GET", vmPath(id, "files")+"?path="+url.QueryEscape(path), nil, "")
 	if err != nil {
 		return err

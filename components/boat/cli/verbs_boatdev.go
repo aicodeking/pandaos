@@ -23,7 +23,7 @@ func init() {
 
 // notSelfHosted: boat.dev verbs for its hosted account features (orgs,
 // billing, repos, CI, credential profiles, retention, onboarding).
-var notSelfHosted = []string{"org", "orgs", "billing", "repos", "repo", "ci", "credentials", "retention", "onboard", "signup"}
+var notSelfHosted = []string{"org", "orgs", "billing", "repos", "repo", "ci", "credentials", "retention", "data-retention", "wallet", "onboard", "signup"}
 
 func compatVMPath(id string, rest ...string) string {
 	p := "/api/v1/sandboxes/" + url.PathEscape(id)

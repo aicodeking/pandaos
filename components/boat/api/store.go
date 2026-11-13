@@ -119,7 +119,7 @@ type State struct {
 	Secrets    map[string]*Secret    `json:"secrets"` // key: team_id + "/" + name
 	Webhooks   map[string]*Webhook   `json:"webhooks"`
 	Deliveries map[string][]Delivery `json:"deliveries"` // by webhook id, newest last
-	SSHGrants  map[string]*SSHGrant  `json:"ssh_grants"` // key: team_id + "|" + "type base64"
+	SSHGrants  map[string]*SSHGrant  `json:"ssh_grants"` // key: grantKey(team, "type base64", minting key)
 	// VMSecrets: secret names selected at create (absent = all team secrets).
 	VMSecrets map[string][]string `json:"vm_secrets"`
 	// Commands: detached command history per VM (newest last, capped).
@@ -287,6 +287,10 @@ type SSHGrant struct {
 	TeamID    string   `json:"team_id"`
 	PublicKey string   `json:"public_key"` // "type base64", comment stripped
 	VMs       []string `json:"vms"`
+	// KeyID/UserID minted the grant; empty = from before grants were owned.
+	KeyID   string    `json:"key_id,omitempty"`
+	UserID  string    `json:"user_id,omitempty"`
+	Created time.Time `json:"created,omitzero"`
 }
 
 func secretKey(team, name string) string { return team + "/" + name }

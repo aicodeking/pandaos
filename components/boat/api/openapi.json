@@ -3055,6 +3055,50 @@
       "$ref": "#/components/responses/Error"
      }
     }
+   },
+   "get": {
+    "summary": "List the ssh keys granted on the VM, with the API key and user that minted each grant",
+    "x-boat-scope": "vms:read",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "keys": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/SSHGrant"
+           }
+          }
+         },
+         "required": [
+          "keys"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
    }
   },
   "/v1/vms/{id}/desktop": {
@@ -11573,6 +11617,62 @@
      }
     }
    }
+  },
+  "/v1/vms/{id}/ssh/{fingerprint}": {
+   "delete": {
+    "summary": "Revoke an ssh key on the VM: drops it from the jump host and the VM's authorized_keys. Members revoke their own grants; team admins revoke any, including unowned ones.",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "fingerprint",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "SHA256:<base64> fingerprint (URL-escaped), or the bare base64"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "fingerprint": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "ok",
+          "fingerprint"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
   }
  },
  "components": {
@@ -19296,6 +19396,44 @@
        }
       }
      }
+    ]
+   },
+   "SSHGrant": {
+    "type": "object",
+    "properties": {
+     "fingerprint": {
+      "type": "string"
+     },
+     "public_key": {
+      "type": "string"
+     },
+     "key_id": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "user_id": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "unowned": {
+      "type": "boolean",
+      "description": "minted before grants recorded their key; team admins can revoke it"
+     },
+     "created": {
+      "type": "string",
+      "format": "date-time"
+     }
+    },
+    "required": [
+     "fingerprint",
+     "public_key",
+     "key_id",
+     "user_id",
+     "unowned"
     ]
    }
   },

@@ -587,6 +587,7 @@ func (s *server) removeMember(w http.ResponseWriter, r *http.Request, p *princip
 		writeErr(w, r, 409, "conflict", err.Error())
 		return
 	}
+	s.syncJumpKeys(r.Context()) // drops the member's ssh grants
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -778,6 +779,7 @@ func (s *server) deleteKey(w http.ResponseWriter, r *http.Request, p *principal)
 		s.storeErr(w, r, err)
 		return
 	}
+	s.syncJumpKeys(r.Context()) // drops the key's ssh grants
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
