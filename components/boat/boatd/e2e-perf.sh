@@ -15,7 +15,15 @@
 # boat-e2e runs on main 42710565475-43209685030 (2026-11-09..12); a gate already
 # tighter than that stays where it is. They catch regressions, not runner noise: rand
 # IOPS move by a factor of 5 between runs. Worst green value -> gate:
-PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-18}    # 5.91-9.73 s (3.8 GiB to write) -> 18 (1.85x)
+# 2026-11-22: ubuntu-latest moved from ubuntu-24.04 (Nov 9-13: host fio 329-549 MB/s,
+# iocost wbps ~5827 MB/s) to ubuntu-26.04 (/dev/mapper/cow-root: host fio 234-408 MB/s,
+# iocost wbps 285-414 MB/s). Five consecutive boat-e2e runs (run/commit):
+# 45011006649/a7a99ec, 45015710636/f140a88, 45020717901/2a0d8f2,
+# 45027253966/c308799, 45033234516/8cfef76: snapshot 12.03/23.20/12.14/20.37/11.91 s
+# (3.8 GiB to write). The 23.20 s run's host fio was 234 MB/s, iocost wbps 285 MB/s;
+# the 12.14/20.37/11.91 s runs' host fio was 408/243/387 MB/s. Gate: 23.20 x 1.3 -> 30.
+# perf_sw_vs_host >= 0.5 independently gates host-relative throughput.
+PERF_SNAPSHOT_MAX=${E2E_PERF_SNAPSHOT_MAX:-30}
 PERF_FROM_MAX=${E2E_PERF_FROM_MAX:-5}             # 0.75-2.48 s -> 5; red runs saw 3.18 (43151531250) and 4.07: the restore reads the mem file behind the dump's 3.8 GiB writeback
 # r12 (gate kept): main 0.99/1.11/1.29/7.02/1.24 s (7.02 in 43401898986), with the dump cap 1.65/0.71/1.69/5.24/0.74: a tail on both.
 # Fork right after that snapshot. 3 s failed unchanged code (3.12, 3.20 s), so 97c5515 set 5.
@@ -40,7 +48,12 @@ PERF_CREATE_DUMP_MAX=${E2E_PERF_CREATE_DUMP_MAX:-9}
 # the ceiling's fio flushed). r12-after-1..5: 2.33/1.46/2.29/2.44/1.72 s; e2e-limits' default_create
 # (same size, same runners) 1.41-2.42 s in all 10 r12 runs. Gate: 2.44 x 1.5 -> 4.
 PERF_COLD_CREATE_MAX=${E2E_PERF_COLD_CREATE_MAX:-4}
-PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-13}    # 4.93-9.44 s; 10 x 4 vCPU on 4 host CPUs -> 13 (1.4x)
+# Ten concurrent warm creates, standaloneSSH=true: set_identity intentionally waits for
+# synchronous systemctl restart ssh.service and crash-safe fsynced host-key regeneration
+# instead of async --no-block. Managed production passes defer_ssh_restart=true: 108-267 ms.
+# Same five ubuntu-26.04 runs above: 13.89/12.43/13.86/9.56/15.62 s.
+# Gate: 15.62 x 1.4 -> 22, keeping the original 1.4x headroom.
+PERF_WARM_TEN_MAX=${E2E_PERF_WARM_TEN_MAX:-22}
 PERF_RSS_MAX=${E2E_PERF_RSS_MAX:-700}             # idle default VM: 527-530 MiB -> 700
 PERF_WARM_RSS_MAX=${E2E_PERF_WARM_RSS_MAX:-450}   # idle warm VM: 259-280 MiB -> 450
 PERF_FREED_RSS_MAX=${E2E_PERF_FREED_RSS_MAX:-1000} # 3 GiB used, freed, 20 s later: 529-536 MiB -> 1000
