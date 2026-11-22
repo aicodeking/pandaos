@@ -48,6 +48,8 @@ type fakeHost struct {
 
 func init() { quotaCtl = func(string) error { return nil } }
 
+func init() { defaultMemAvail = func() int { return 1 << 20 } }
+
 func newFakeHost() *fakeHost { return &fakeHost{next: 1000, vms: map[int]*fakeFC{}} }
 
 func (h *fakeHost) run(stdin, name string, args ...string) error {

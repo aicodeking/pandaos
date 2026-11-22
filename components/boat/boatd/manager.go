@@ -130,6 +130,8 @@ func saveVMState(dir string, v VM) error {
 	return writeJSONNoSync(path, v, 0o600)
 }
 
+var defaultMemAvail = func() int { return meminfoMiB("MemAvailable") }
+
 func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 	for _, d := range []string{"vms", "snapshots", "images"} {
 		if err := os.MkdirAll(filepath.Join(cfg.StateDir, d), 0o711); err != nil {
@@ -145,7 +147,7 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 		now:   func() time.Time { return time.Now().UTC() },
 		vms:   map[string]VM{}, snaps: map[string]Snapshot{}, locks: map[string]*sync.Mutex{}, lockRefs: map[string]int{},
 		dones: map[string]<-chan struct{}{}, active: map[string]time.Time{}, statfs: statfs,
-		memAvail: func() int { return meminfoMiB("MemAvailable") }, warming: map[string]bool{}, warmSettle: 3 * time.Second,
+		memAvail: defaultMemAvail, warming: map[string]bool{}, warmSettle: 3 * time.Second,
 		exportArgv: tarZstdArgv, unpackArgv: []string{"zstd", "-dcq"}, dirty: map[string]bool{},
 		saveState: saveVMState, reservedSnaps: map[string]int{}, reservedBytes: map[string]int64{},
 		publishedReady: map[string]string{}, publishedQuarantined: map[string]string{}, publishedSSHPaused: map[string]string{},

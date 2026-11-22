@@ -173,13 +173,35 @@ boat '{"op":"set_env","vars":{"BOAT_TEST":"a b"}}' >/dev/null || fail "set_env"
 [[ $("${SSH[@]}" "dev@$GUEST_IP" 'bash -lc "printf %s \"\$BOAT_TEST\""') == "a b" ]] || fail "set_env in login shell"
 vexec 30 root sh -c 'test "$(readlink /etc/boat/env)" = /run/boat/env &&
   test "$(stat -c %a:%U /run/boat/env)" = 600:dev' || fail "volatile env mode/owner"
-# Restarting this dependency can stop the agent: use the independent SSH channel.
-"${SSH[@]}" "dev@$GUEST_IP" 'sudo systemctl restart boat-managed-env.service' || fail "volatile env restart"
-for _ in $(seq 60); do boat '{"op":"health"}' >/dev/null 2>&1 && break; sleep 1; done
-if ! boat '{"op":"health"}' > "$W/health.json" || ! grep -q '"ok": true' "$W/health.json"; then
-  fail "health after env restart"
-fi
+before=$(vexec 30 root systemctl show -p ActiveEnterTimestampMonotonic --value boat-managed-env.service) || fail "env restart timestamp"
+[[ -n $before && $before != 0 ]] || fail "empty env restart timestamp"
+# Restarting this dependency stops both the agent and SSH. Schedule it after
+# this exec returns, then require a new activation timestamp before continuing.
+vexec 30 root systemd-run --no-block --on-active=2s --unit=boat-test-env-restart \
+  systemctl restart boat-managed-env.service || fail "schedule volatile env restart"
+restart_deadline=$((SECONDS + 60))
+after=
+while (( SECONDS < restart_deadline )); do
+  # Bound transport waits too: the agent may disappear during either request.
+  remaining=$((restart_deadline - SECONDS))
+  if timeout "${remaining}s" python3 "$W/boat.py" "$W/vsock.sock" '{"op":"health"}' >"$W/health.json" 2>/dev/null &&
+      grep -q '"ok": true' "$W/health.json"; then
+    remaining=$((restart_deadline - SECONDS))
+    (( remaining > 0 )) || break
+    if after=$(timeout "${remaining}s" python3 "$W/boat.py" "$W/vsock.sock" \
+        '{"op":"exec","user":"root","timeout_s":3,"argv":["sh","-c","systemctl is-active --quiet boat-managed-env.service && systemctl show -p ActiveEnterTimestampMonotonic --value boat-managed-env.service"]}' 2>/dev/null) &&
+        [[ -n $after && $after != 0 && $after != "$before" ]]; then
+      break
+    fi
+    after=
+  fi
+  sleep 1
+done
+[[ -n $after && $after != 0 && $after != "$before" ]] || fail "volatile env restart did not complete within 60s"
+vexec 30 root sh -c 'test "$(readlink /etc/boat/env)" = /run/boat/env &&
+  test "$(stat -c %a:%U /run/boat/env)" = 600:dev' || fail "volatile env mode/owner after restart"
 vexec 30 dev test -r /etc/boat/env || fail "volatile env unreadable after restart"
+[[ $(vexec 30 dev sh -c 'printf %s "$BOAT_TEST"') == "a b" ]] || fail "set_env lost after restart"
 pass "set_env (exec + login shell)"
 
 # ---- 7. reseed + set_identity (as after a fork: same IP here, new name/mac/ids)

@@ -188,7 +188,7 @@ sudo mkdir -p /sys/fs/cgroup/boat-edge
 cat >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":"$WORK/dl/jailer","cgroupParent":"boat-edge",
- "reflink":"always","aiProxyPort":8744,"hostHttpsPort":443,"bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
+ "reflink":"always","aiProxyPort":8744,"hostHttpsPort":443,"hostHttpsAddrs":["10.200.0.1"],"bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
  "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},"defaultTeam":{"maxVMs":8}}
 JSON
 sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \

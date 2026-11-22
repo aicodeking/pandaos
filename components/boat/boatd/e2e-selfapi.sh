@@ -38,7 +38,7 @@ restart_boatd "$WORK/boatd-noapi.json"
 code=$(bx "$sa" ". /etc/boat/env; $sa_get || true")
 [ "$code" = 000 ] || fail "guest reached the host's tcp/443 without hostHttpsPort (HTTP $code)"
 
-jq '.hostHttpsPort = 443' "$WORK/boatd.json" >"$WORK/boatd-api.json"
+jq --arg ip "$host_ip" '.hostHttpsPort = 443 | .hostHttpsAddrs = [$ip]' "$WORK/boatd.json" >"$WORK/boatd-api.json"
 restart_boatd "$WORK/boatd-api.json"
 code=$(bx "$sa" ". /etc/boat/env; $sa_get || true")
 [ "$code" = 200 ] || fail "guest -> $SA_URL with its self token: HTTP $code"
