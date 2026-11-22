@@ -45,8 +45,20 @@ STOP_MAX=${E2E_STOP_MAX:-6}
 STOP_CLI_MAX=${E2E_STOP_CLI_MAX:-10}
 RESUME_MAX=${E2E_RESUME_MAX:-5}
 
-bd() { curl -fsS --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json' ${3:+-d "$3"}; }
-bdcode() { curl -s -o "$WORK/tmp/bd.out" -w '%{http_code}' --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json' ${3:+-d "$3"}; }
+bd() {
+  if [ -n "${3:-}" ]; then
+    printf '%s' "$3" | curl -fsS --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json' --data-binary @-
+  else
+    curl -fsS --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json'
+  fi
+}
+bdcode() {
+  if [ -n "${3:-}" ]; then
+    printf '%s' "$3" | curl -s -o "$WORK/tmp/bd.out" -w '%{http_code}' --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json' --data-binary @-
+  else
+    curl -s -o "$WORK/tmp/bd.out" -w '%{http_code}' --unix-socket "$SOCK" -X "$1" "http://boatd$2" -H 'content-type: application/json'
+  fi
+}
 # bx ID CMD [TIMEOUT_S] -> stdout of `bash -c CMD` as root in the VM; non-zero unless it exits 0
 bx() {
   local out

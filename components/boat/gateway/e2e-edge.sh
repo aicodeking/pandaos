@@ -183,37 +183,6 @@ for v in slim full; do
   sudo cp --sparse=always "$GUEST/rootfs-$v.ext4" "$STATE/images/$v/rootfs.ext4"
 done
 
-log "boatd (root, jailer)"
-sudo mkdir -p /sys/fs/cgroup/boat-edge
-cat >"$WORK/boatd.json" <<JSON
-{"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
- "firecracker":"$WORK/dl/firecracker","jailer":"$WORK/dl/jailer","cgroupParent":"boat-edge",
- "reflink":"always","aiProxyPort":8744,"hostHttpsPort":443,"hostHttpsAddrs":["10.200.0.1"],"bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
- "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},"defaultTeam":{"maxVMs":8}}
-JSON
-sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
-  "$WORK/boatd.pid" "$WORK/bin/boatd" "$WORK/boatd.json" "$WORK/boatd.log" &
-for _ in $(seq 600); do [ -S "$SOCK" ] && break; sleep 0.1; done
-[ -S "$SOCK" ] || fail "boatd did not start in 60s"
-
-log "boat-api + boat-gateway"
-head -c 32 /dev/urandom >"$KEYF" && chmod 600 "$KEYF"
-KEY=$(boat-api admin init -data "$WORK/api" -user edge -team edge | jq -r .token)
-[[ $KEY == boat_* ]] || fail "admin init: $KEY"
-api_args=(-data "$WORK/api" -listen 127.0.0.1:8740 -boatd "$SOCK" -rate 0 -images "slim,full" -ssh-user dev
-  -desktop-url "https://desktop.$D" -desktop-key-file "$KEYF"
-  -ssh-jump "jump@localhost:2222" -ssh-policy-helper-file "$HERE/guest/ssh-authorize.py" -vm-api-url "https://api.$D")
-help=$(boat-api serve -h 2>&1 || true)
-if [[ $help == *-vm-domain* ]]; then api_args+=(-vm-domain "$VMD"); fi
-if [[ $help == *-ai-proxy-listen* ]]; then api_args+=(-ai-proxy-listen 10.200.0.1:8744); fi
-boat-api serve "${api_args[@]}" >"$WORK/api.log" 2>&1 &
-PIDS+=($!)
-boat-gateway -listen 127.0.0.1:8742 -ask-listen 127.0.0.1:8743 -domain "$D" -vm-domain "$VMD" \
-  -desktop-domain "desktop.$D" -routes "$WORK/run/routes.json" -desktop-key "$KEYF" -api "$API" \
-  -legacy-hmac-until "$(( $(date +%s) + 86400 ))" >"$WORK/gateway.log" 2>&1 &
-PIDS+=($!)
-for _ in $(seq 100); do curl -fs "$API/healthz" >/dev/null && break; sleep 0.1; done
-
 log "caddy (tls internal) on :443"
 cat >"$WORK/Caddyfile" <<EOF
 {
@@ -260,14 +229,8 @@ for _ in $(seq 100); do sudo test -s "$CA" && break; sleep 0.2; done
 sudo test -s "$CA" || fail "caddy made no local CA"
 sudo cp "$CA" "$WORK/ca.pem" && sudo chown "$(id -u)" "$WORK/ca.pem"
 CA=$WORK/ca.pem
-# https_code URL [curl args...] -> HTTP status over real TLS (verified against Caddy's CA)
-hc() { local u=$1; shift; curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443" -o /dev/null -w '%{http_code}' "$@" "$u"; }
-for _ in $(seq 50); do [ "$(hc "https://api.$D/healthz" || true)" = 200 ] && break; sleep 0.2; done
-[ "$(hc "https://api.$D/healthz")" = 200 ] || fail "api over TLS"
-[ "$(hc "https://api.$D/internal/x")" = 404 ] || fail "/internal/* reachable"
-[ "$(hc "https://api.$D/internal")" = 404 ] || fail "/internal reachable"
-[ "$(hc "https://api.$D/internal/ssh/authorize" -X POST)" = 404 ] || fail "SSH authority reachable publicly"
-# Bootstrap only the disposable copied images, before any VM starts. Managed
+# Bootstrap the disposable copied images before boatd can copy them for NOCOW.
+# Managed
 # authorization must use verified HTTPS even under this fixture's private CA.
 log "guest test CA and control-plane DNS"
 for image in slim full; do
@@ -281,9 +244,53 @@ install -D -m 0644 "$ca" "$mount_dir/usr/local/share/ca-certificates/boat-edge.c
 # Python's default trust store reads this bundle; no insecure TLS override.
 test -s "$mount_dir/etc/ssl/certs/ca-certificates.crt"
 cat "$ca" >>"$mount_dir/etc/ssl/certs/ca-certificates.crt"
+# ssh-authorize.py uses OpenSSL capath lookup, which requires a subject hash.
+install -m 0644 "$ca" "$mount_dir/etc/ssl/certs/boat-edge.pem"
+ln -sf boat-edge.pem "$mount_dir/etc/ssl/certs/$(openssl x509 -hash -noout -in "$ca").0"
 printf '\n10.200.0.1 %s\n' "$api_host" >>"$mount_dir/etc/hosts"
 SEED_CA
- done
+done
+# Flush the unmounted image edits before boatd starts its NOCOW conversion.
+sudo sync
+
+log "boatd (root, jailer)"
+sudo mkdir -p /sys/fs/cgroup/boat-edge
+cat >"$WORK/boatd.json" <<JSON
+{"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
+ "firecracker":"$WORK/dl/firecracker","jailer":"$WORK/dl/jailer","cgroupParent":"boat-edge",
+ "reflink":"always","aiProxyPort":8744,"hostHttpsPort":443,"hostHttpsAddrs":["10.200.0.1"],"bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
+ "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},"defaultTeam":{"maxVMs":8}}
+JSON
+sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
+  "$WORK/boatd.pid" "$WORK/bin/boatd" "$WORK/boatd.json" "$WORK/boatd.log" &
+for _ in $(seq 600); do [ -S "$SOCK" ] && break; sleep 0.1; done
+[ -S "$SOCK" ] || fail "boatd did not start in 60s"
+
+log "boat-api + boat-gateway"
+head -c 32 /dev/urandom >"$KEYF" && chmod 600 "$KEYF"
+KEY=$(boat-api admin init -data "$WORK/api" -user edge -team edge | jq -r .token)
+[[ $KEY == boat_* ]] || fail "admin init: $KEY"
+api_args=(-data "$WORK/api" -listen 127.0.0.1:8740 -boatd "$SOCK" -rate 0 -images "slim,full" -ssh-user dev
+  -desktop-url "https://desktop.$D" -desktop-key-file "$KEYF"
+  -ssh-jump "jump@localhost:2222" -ssh-policy-helper-file "$HERE/guest/ssh-authorize.py" -vm-api-url "https://api.$D")
+help=$(boat-api serve -h 2>&1 || true)
+if [[ $help == *-vm-domain* ]]; then api_args+=(-vm-domain "$VMD"); fi
+if [[ $help == *-ai-proxy-listen* ]]; then api_args+=(-ai-proxy-listen 10.200.0.1:8744); fi
+boat-api serve "${api_args[@]}" >"$WORK/api.log" 2>&1 &
+PIDS+=($!)
+boat-gateway -listen 127.0.0.1:8742 -ask-listen 127.0.0.1:8743 -domain "$D" -vm-domain "$VMD" \
+  -desktop-domain "desktop.$D" -routes "$WORK/run/routes.json" -desktop-key "$KEYF" -api "$API" \
+  -legacy-hmac-until "$(( $(date +%s) + 86400 ))" >"$WORK/gateway.log" 2>&1 &
+PIDS+=($!)
+for _ in $(seq 100); do curl -fs "$API/healthz" >/dev/null && break; sleep 0.1; done
+
+# https_code URL [curl args...] -> HTTP status over real TLS (verified against Caddy's CA)
+hc() { local u=$1; shift; curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443" -o /dev/null -w '%{http_code}' "$@" "$u"; }
+for _ in $(seq 50); do [ "$(hc "https://api.$D/healthz" || true)" = 200 ] && break; sleep 0.2; done
+[ "$(hc "https://api.$D/healthz")" = 200 ] || fail "api over TLS"
+[ "$(hc "https://api.$D/internal/x")" = 404 ] || fail "/internal/* reachable"
+[ "$(hc "https://api.$D/internal")" = 404 ] || fail "/internal reachable"
+[ "$(hc "https://api.$D/internal/ssh/authorize" -X POST)" = 404 ] || fail "SSH authority reachable publicly"
 # boat.dev's SDKs use https://api.<domain>/api/v1: the API must answer, not the dashboard.
 me=$(curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443" -H "Authorization: Bearer $KEY" "https://api.$D/api/v1/me")
 jq -e '.ok == true' <<<"$me" >/dev/null || fail "/api/v1 through Caddy: $me"
