@@ -119,6 +119,14 @@ cleanup() {
   sudo pkill -9 -x firecracker
   sleep 0.5
   for t in $(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -E '^bt[0-9]+$'); do sudo ip link del "$t"; done
+  if [ -f "$WORK/dnsmasq.pid" ]; then
+    local dns_pid
+    dns_pid=$(cat "$WORK/dnsmasq.pid")
+    sudo kill "$dns_pid" 2>/dev/null
+    for _ in $(seq 50); do sudo kill -0 "$dns_pid" 2>/dev/null || break; sleep 0.1; done
+    sudo kill -0 "$dns_pid" 2>/dev/null && sudo kill -9 "$dns_pid" 2>/dev/null
+    sudo rm -f "$WORK/dnsmasq.pid"
+  fi
   sudo ip link del boatbr0 2>/dev/null
   sudo nft delete table inet boat 2>/dev/null
   sudo nft delete table bridge boat 2>/dev/null
@@ -126,7 +134,7 @@ cleanup() {
   sudo iptables -D FORWARD -o boatbr0 -j ACCEPT 2>/dev/null
   mountpoint -q "$STATE" && sudo umount -l "$STATE"
   sudo rmdir /sys/fs/cgroup/boat-edge 2>/dev/null
-  for f in boatd api gateway caddy jump-reaper sshd/log; do
+  for f in boatd api gateway caddy dnsmasq jump-reaper sshd/log; do
     [ -f "$WORK/$f.log" ] && { echo "--- $f.log (tail)"; sudo tail -n 40 "$WORK/$f.log"; }
   done
   [ -f "$WORK/sshd/log" ] && { echo "--- sshd log (tail)"; sudo tail -n 40 "$WORK/sshd/log"; }
@@ -136,9 +144,9 @@ trap cleanup EXIT
 sudo mkdir -p "$WORK" && sudo chown "$(id -u):$(id -g)" "$WORK"
 mkdir -p "$WORK/bin" "$WORK/dl" "$WORK/run" "$WORK/api" "$WORK/tmp" "$WORK/ssh" "$WORK/sshd" "$WORK/caddy"
 
-log "tools (caddy, sshd, jq, nft, btrfs)"
+log "tools (caddy, sshd, dnsmasq, jq, nft, btrfs)"
 missing=()
-for c in python3:python3 jq:jq nft:nftables mkfs.btrfs:btrfs-progs curl:curl ssh:openssh-client caddy:caddy /usr/sbin/sshd:openssh-server; do
+for c in python3:python3 jq:jq nft:nftables mkfs.btrfs:btrfs-progs curl:curl ssh:openssh-client caddy:caddy /usr/sbin/sshd:openssh-server /usr/sbin/dnsmasq:dnsmasq-base; do
   command -v "${c%%:*}" >/dev/null || missing+=("${c#*:}")
 done
 if [ ${#missing[@]} -gt 0 ]; then
@@ -257,13 +265,79 @@ sudo mkdir -p /sys/fs/cgroup/boat-edge
 cat >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":"$WORK/dl/jailer","cgroupParent":"boat-edge",
- "reflink":"always","aiProxyPort":8744,"hostHttpsPort":443,"hostHttpsAddrs":["10.200.0.1"],"bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
+ "dns":["10.200.0.1"],"reflink":"always","aiProxyPort":8744,"hostHttpsPort":443,"hostHttpsAddrs":["10.200.0.1"],"bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
  "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},"defaultTeam":{"maxVMs":8}}
 JSON
 sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
   "$WORK/boatd.pid" "$WORK/bin/boatd" "$WORK/boatd.json" "$WORK/boatd.log" &
 for _ in $(seq 600); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] || fail "boatd did not start in 60s"
+
+log "local DNS for api.$D on 10.200.0.1:53"
+sudo bash -c 'echo $$ >"$1"; exec /usr/sbin/dnsmasq --no-daemon --pid-file= --bind-interfaces --listen-address=10.200.0.1 --port=53 --no-resolv --no-hosts --server=1.1.1.1 --server=9.9.9.9 --host-record="api.$2,10.200.0.1" >"$3" 2>&1' _ \
+  "$WORK/dnsmasq.pid" "$D" "$WORK/dnsmasq.log" &
+# Query the bridge directly; the host resolver cannot resolve this private name.
+python3 - "api.$D" <<'DNS_READY_PY' || fail "local DNS did not resolve api.$D to 10.200.0.1 within 10s (see dnsmasq.log)"
+import secrets, socket, struct, sys, time
+
+
+def skip_name(data, offset):
+    while True:
+        length = data[offset]
+        offset += 1
+        if length & 0xc0 == 0xc0:
+            if offset >= len(data):
+                raise ValueError("truncated DNS pointer")
+            return offset + 1
+        if length & 0xc0 or length > 63:
+            raise ValueError("invalid DNS name")
+        if not length:
+            return offset
+        offset += length
+
+
+def query_a(name, server=("10.200.0.1", 53), timeout=0.5):
+    ident = secrets.randbits(16)
+    question = b"".join(bytes([len(label)]) + label.encode("ascii") for label in name.split(".")) + b"\0" + struct.pack("!HH", 1, 1)
+    packet = struct.pack("!6H", ident, 0x0100, 1, 0, 0, 0) + question
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        sock.connect(server)
+        sock.send(packet)
+        data = sock.recv(4096)
+    reply_id, flags, questions, answers, _, _ = struct.unpack_from("!6H", data)
+    if reply_id != ident or flags & 0x8000 == 0 or flags & 0x020f or questions != 1:
+        return False
+    if data[12:12 + len(question)] != question:
+        return False
+    offset = 12 + len(question)
+    for _ in range(answers):
+        offset = skip_name(data, offset)
+        kind, cls, _, size = struct.unpack_from("!HHIH", data, offset)
+        offset += 10
+        if offset + size > len(data):
+            raise ValueError("truncated DNS answer")
+        if kind == 1 and cls == 1 and size == 4 and data[offset:offset + size] == socket.inet_aton("10.200.0.1"):
+            return True
+        offset += size
+    return False
+
+
+def main():
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            if query_a(sys.argv[1], timeout=min(0.5, deadline - time.monotonic())):
+                return
+        except (OSError, ValueError, IndexError, struct.error):
+            pass
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+DNS_READY_PY
 
 log "boat-api + boat-gateway"
 head -c 32 /dev/urandom >"$KEYF" && chmod 600 "$KEYF"
@@ -372,8 +446,6 @@ print(hmac.new(k, sys.argv[2].encode(), hashlib.sha256).hexdigest())' "$KEYF" "$
 
 log "VM A (slim): http on 8080 (private) and 8081 (public)"
 boat new --name edge-a --json >/dev/null
-# set_identity replaces /etc/hosts, so seed control-plane DNS after creation.
-run edge-a "grep -qw 'api.$D' /etc/hosts || printf '10.200.0.1 %s\n' 'api.$D' | sudo tee -a /etc/hosts >/dev/null"
 id_a=$(field edge-a id) ip_a=$(field edge-a ip)
 run edge-a 'mkdir -p /tmp/www && echo edge-ok >/tmp/www/index.html &&
   for p in 8080 8081; do setsid nohup python3 -m http.server $p -d /tmp/www >/dev/null 2>&1 </dev/null & done; sleep 1'
@@ -417,8 +489,6 @@ fi
 
 log "VM D (full): desktop on its own origin"
 boat new --name edge-d --image full --json >/dev/null
-# set_identity replaces /etc/hosts, so seed control-plane DNS after creation.
-run edge-d "grep -qw 'api.$D' /etc/hosts || printf '10.200.0.1 %s\n' 'api.$D' | sudo tee -a /etc/hosts >/dev/null"
 id_d=$(field edge-d id)
 link=$(boat desktop edge-d --json | jq -r .url)
 [[ $link == "https://desktop.$D/$id_d?exp="* ]] || fail "desktop link: $link"
