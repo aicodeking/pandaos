@@ -157,8 +157,9 @@ let
             # daemon-reload) in a nested VM that also runs a spinning L3 guest. Run
             # 41470010397: attempt 1 took 205 s (16 s to /etc, 100 s from /etc to the
             # unit restarts); attempt 2 needed 74 s just to reach /etc and passed the
-            # old 300 s limit inside that same /etc-to-restart step.
-            machine.succeed("/run/current-system/specialisation/next/bin/switch-to-configuration test >&2", timeout=900)
+            # old 300 s limit inside that same /etc-to-restart step. Run
+            # 45011006649 reached sysinit-reactivation.target at 900 s.
+            machine.succeed("/run/current-system/specialisation/next/bin/switch-to-configuration test >&2", timeout=1800)
             assert machine.succeed("systemctl show -P MainPID boatd.service").strip() == boatd_before, "the switch restarted boatd"
             assert fc_pids() == pids, "the switch touched the VM's process"
             machine.wait_for_unit("boat-api.service")

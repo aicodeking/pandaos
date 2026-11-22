@@ -458,8 +458,18 @@ log "limits e2e: a really full disk (small btrfs)"
 SMALL=/var/lib/boat-e2e-small
 # Split data/metadata chunks: mixed block groups went read-only when full (run
 # 41376747187). metadata_ratio=1 keeps metadata allocated ahead, so data is what fills.
-truncate -s 7G "$WORK/small.img" && mkfs.btrfs -q -f -m single "$WORK/small.img"
+truncate -s 8G "$WORK/small.img" && mkfs.btrfs -q -f -m single "$WORK/small.img"
 sudo mkdir -p "$SMALL" && sudo mount -o loop,metadata_ratio=1 "$WORK/small.img" "$SMALL"
+# Pin more than 8 MiB of inline metadata so the chunk cleaner cannot shrink
+# metadata to the initial 8 MiB chunk while hostfill consumes data space.
+sudo python3 -c '
+import pathlib, sys
+pin = pathlib.Path(sys.argv[1]) / ".meta-pin"
+pin.mkdir()
+for i in range(12000):
+    (pin / str(i)).write_bytes(b"x" * 1024)
+' "$SMALL"
+sudo btrfs filesystem sync "$SMALL"
 loop_dev=$(findmnt -no SOURCE "$SMALL" | sed 's/\[.*//')
 sudo losetup --direct-io=on "$loop_dev" 2>/dev/null || true
 if [ -n "$loop_dev" ]; then
@@ -519,7 +529,10 @@ for _ in $(seq 60); do
   [ "$(df -B1M --output=avail "$SMALL" | tail -1 | tr -d ' ')" -gt 2048 ] && { ok=1; break; }
   sleep 1
 done
-[ -n "$ok" ] || fail "space not reclaimed after the delete"
+if [ -z "$ok" ]; then
+  sudo btrfs filesystem usage -m "$SMALL" || true
+  fail "space not reclaimed after the delete"
+fi
 again=$(newvm '{"name":"again","team":"lim"}')
 [ "$(vmf "$again" agent_ready)" = true ] || fail "no recovery after ENOSPC: $(bd GET "/v1/vms/$again")"
 bd DELETE "/v1/vms/$again" >/dev/null

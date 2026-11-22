@@ -494,7 +494,20 @@ for _ in $(seq 150); do [ "$(field edge-a state)" = running ] && break; sleep 0.
 [ "$(run edge-a 'cat /proc/sys/kernel/random/boot_id')" = "$boot_a" ] || fail "edge-a cold-booted instead of resuming"
 rt_new_exp=$(($(date +%s) + 300))
 rt_new="$rt_new_exp.$(hmac_hex "route.8080-$id_a.$rt_new_exp")"
-[ "$(curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443" -H "X-Boat-Route-Token: $rt_new" "$priv")" = edge-ok ] || fail "guest server or route lost across the upgrade"
+# The API SSE watcher may still be reconnecting before it lifts SSH quarantine.
+upgrade_body=
+upgrade_status=
+upgrade_deadline=$((SECONDS + 30))
+for _ in $(seq 60); do
+  [ "$SECONDS" -lt "$upgrade_deadline" ] || break
+  upgrade_body=$(curl -sS --max-time 5 --cacert "$CA" --connect-to "::127.0.0.1:443" -H "X-Boat-Route-Token: $rt_new" "$priv") && upgrade_status=0 || upgrade_status=$?
+  [ "$upgrade_status" = 0 ] && [ "$upgrade_body" = edge-ok ] && break
+  sleep 0.5
+done
+if [ "$upgrade_status" != 0 ] || [ "$upgrade_body" != edge-ok ]; then
+  echo "last route curl status: $upgrade_status; body: $upgrade_body" >&2
+  fail "guest server or route lost across the upgrade"
+fi
 
 if [ -x "$HERE/sdk/e2e-live.sh" ] || [ -x "$HERE/api/e2e-auth.sh" ]; then
   export BOAT_URL=$API BOAT_API_KEY=$KEY BOAT_API_DATA=$WORK/api BOAT_VM_DOMAIN=$VMD E2E_TMP=$WORK/tmp

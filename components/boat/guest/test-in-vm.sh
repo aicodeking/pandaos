@@ -178,8 +178,8 @@ before=$(vexec 30 root systemctl show -p ActiveEnterTimestampMonotonic --value b
 # Restarting this dependency stops both the agent and SSH. Schedule it after
 # this exec returns. Keep the scheduled service independent of sysinit so it
 # survives the restart and restores multi-user services before we reconnect.
-vexec 30 root systemd-run --no-block --on-active=2s --unit=boat-test-env-restart \
-  --property=DefaultDependencies=no sh -c 'systemctl restart boat-managed-env.service && systemctl start multi-user.target' || fail "schedule volatile env restart"
+vexec 30 root systemd-run --no-block --unit=boat-test-env-restart \
+  --property=DefaultDependencies=no sh -c 'sleep 2 && systemctl restart boat-managed-env.service && systemctl start multi-user.target' || fail "schedule volatile env restart"
 restart_deadline=$((SECONDS + 60))
 after=
 while (( SECONDS < restart_deadline )); do
