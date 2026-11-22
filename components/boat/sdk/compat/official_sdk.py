@@ -195,8 +195,9 @@ def verify_ssh_key_check(
         )
         deny_res = run_fn(sid, deny_cmd)
         check_fn(
-            getattr(deny_res, "exit_code", None) == 0
-            and (getattr(deny_res, "stdout", "") or "").strip() == "",
+            getattr(deny_res, "exit_code", None) == 1
+            and (getattr(deny_res, "stdout", "") or "").strip() == ""
+            and (getattr(deny_res, "stderr", "") or "").strip() == "",
             "ungranted ssh key is rejected by live guest authority",
         )
 
@@ -725,9 +726,10 @@ def _self_test() -> None:
             self.ssh_endpoint = ssh_endpoint
 
     class _CmdRes:
-        def __init__(self, exit_code: int, stdout: str):
+        def __init__(self, exit_code: int, stdout: str, stderr: str = ""):
             self.exit_code = exit_code
             self.stdout = stdout
+            self.stderr = stderr
 
     class _FakeApi:
         def __init__(self, endpoint: Optional[str] = None):
@@ -763,7 +765,7 @@ def _self_test() -> None:
         assert user == "dev"
         if (sid, kt, kb) in fake_real.authorized:
             return _CmdRes(0, f"{kt} {kb}\n")
-        return _CmdRes(0, "")
+        return _CmdRes(1, "")
 
     def fake_ssh(argv, **kw):
         ssh_calls.append(argv)

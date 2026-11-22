@@ -117,7 +117,7 @@ class OfficialSdkSshTest(unittest.TestCase):
             user, kt, kb = parts[idx + 1], parts[idx + 2], parts[idx + 3]
             if (sid, user, kt, kb) in granted:
                 return _CmdOut(0, f"{kt} {kb}\n")
-            return _CmdOut(0, "")
+            return _CmdOut(1, "")
 
         def fake_ssh_runner(argv, **kwargs):
             ssh_invocations.append(argv)
@@ -140,6 +140,47 @@ class OfficialSdkSshTest(unittest.TestCase):
             self.assertIn("ProxyCommand=", joined)
             self.assertIn("jump@localhost", joined)
             self.assertIn("dev@10.200.0.9", joined)
+
+    def test_verify_ssh_key_real_mode_rejects_unclean_ungranted_denials(self):
+        class FakeApi:
+            def ssh_key(self, sid, req):
+                return _SshKeyResp(machine_ip="10.200.0.9")
+
+        label = "ungranted ssh key is rejected by live guest authority"
+        for exit_code, stdout, stderr in (
+            (0, "key", ""),
+            (0, "", ""),
+            (1, "", "sudo: a password is required"),
+            (1, "key", ""),
+        ):
+            with self.subTest(exit_code=exit_code, stdout=stdout, stderr=stderr):
+                calls = []
+                checks = []
+
+                def fake_guest_run(sid, cmd):
+                    calls.append(cmd)
+                    kt, kb = shlex.split(cmd)[-2:]
+                    key_line = f"{kt} {kb}\n"
+                    if len(calls) == 1:
+                        return _CmdOut(0, key_line)
+                    return _CmdOut(exit_code, key_line if stdout else "", stderr)
+
+                def check(ok, what):
+                    checks.append((ok, what))
+                    self.assertTrue(ok, what)
+
+                with self.assertRaisesRegex(AssertionError, label):
+                    official_sdk.verify_ssh_key_check(
+                        FakeApi(),
+                        "bx_unclean_denial",
+                        real=True,
+                        ssh_key_request_cls=_SshKeyReq,
+                        run_fn=fake_guest_run,
+                        check_fn=check,
+                    )
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(checks[-1], (False, label))
+                self.assertTrue(all(ok for ok, _ in checks[:-1]))
 
     def test_verify_ssh_key_real_mode_fails_when_live_authority_denies(self):
         class BrokenAuthorityApi:
