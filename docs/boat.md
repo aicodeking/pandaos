@@ -103,8 +103,9 @@ Before you hand out API keys:
    ```sh
    panda-install --profile server --disk /dev/nvme0n1 --data-disk /dev/nvme1n1 \
      --domain boat.example.com --acme-email ops@example.com \
-     [--ipv6-prefix 2a01:4f8:xxx:yyy:b0a7::/80] --ssh-key "ssh-ed25519 ..."
+     --ssh-key "ssh-ed25519 ..."
    ```
+   Optionally add `--ipv6-prefix` with your routed VM IPv6 prefix, e.g. `--ipv6-prefix 2001:db8:1:2:b0a7::/80`.
    `--data-disk` erases the second disk and formats it as btrfs (`PANDADATA`) for `/var/lib/boat`. It is pinned by UUID as a required mount in `/etc/pandaos/disk.nix` and recorded in `/etc/pandaos/data-disk`. If that disk is ever missing, boatd and boat-api refuse to start rather than write VM data to the system disk. Without `--data-disk`, `/var/lib/boat` is a btrfs subvolume on the system disk. VM disks are reflink copies either way, so fork and snapshot are near-free. To mirror later: `btrfs device add` + `btrfs balance start -dconvert=raid1 -mconvert=raid1`.
    Use the `iso-server` ISO: the other ISOs do not carry the server system.
    Confirm the exact disk paths with `lsblk` before running the installer.

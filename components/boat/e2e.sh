@@ -583,6 +583,9 @@ ip_b=$(jq -r .ip <<<"$child")
 [ "$(run e2e-b hostname)" = e2e-b ] && [ "$(run e2e-a hostname)" = e2e-a ] || fail "fork hostname"
 run e2e-b 'ip -4 -o addr show eth0' | grep -q " $ip_b/" || fail "fork not re-IPed"
 [ "$(run e2e-b 'cat /etc/machine-id')" != "$(run e2e-a 'cat /etc/machine-id')" ] || fail "fork kept machine-id"
+# Managed SSH grants belong to a VM identity and must not survive a fork.
+ssh_ok "$ip_b" && fail "fork inherited parent SSH access"
+boat ssh e2e-b --json >/dev/null
 for _ in $(seq 100); do ssh_ok "$ip_b" && break; sleep 0.2; done
 hk_a=$(ssh-keyscan -T 5 -t ed25519 "$ip_a" 2>/dev/null | awk '{print $3}')
 hk_b=$(ssh-keyscan -T 5 -t ed25519 "$ip_b" 2>/dev/null | awk '{print $3}')

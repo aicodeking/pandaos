@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -563,5 +564,80 @@ func TestSSHAuthorityDecisionsSharePublicationFence(t *testing.T) {
 				t.Fatalf("decision ignored atomic publication invalidation: %d", c)
 			}
 		})
+	}
+}
+
+// Release omits false copy flags, as boatd's omitempty fields do in production.
+func TestSSHAuthorityForkReleaseReplacesPreparedVM(t *testing.T) {
+	e := setup(t)
+	e.enableSSH()
+	parent := e.createVM()
+	var installs atomic.Int32
+	var prepared, released atomic.Bool
+	e.srv.boatd.hc.Transport = r20SSHTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/ssh-policy") && r.URL.Path != vmPath(parent, "ssh-policy") {
+			installs.Add(1)
+		}
+		resp, err := http.DefaultTransport.RoundTrip(r)
+		if err != nil || r.Method != "POST" || (!strings.HasSuffix(r.URL.Path, "/fork/prepare") && !strings.HasSuffix(r.URL.Path, "/release")) {
+			return resp, err
+		}
+		defer resp.Body.Close()
+		var vm VM
+		if err := json.NewDecoder(resp.Body).Decode(&vm); err != nil {
+			return nil, err
+		}
+		if strings.HasSuffix(r.URL.Path, "/fork/prepare") {
+			prepared.Store(vm["pending_copy"] == true)
+			vm["copy_ready"] = true
+		} else {
+			released.Store(vm["pending_copy"] == nil)
+			delete(vm, "copy_ready")
+		}
+		// Ensure provisioning uses the supplied VM rather than falling back to a
+		// fresh GET (which would hide the stale-map bug in the lightweight fake).
+		vm["ssh_boot_epoch"] = "fake-boot-" + str(vm, "id")
+		b, err := json.Marshal(vm)
+		if err != nil {
+			return nil, err
+		}
+		resp.Body = io.NopCloser(strings.NewReader(string(b)))
+		resp.ContentLength = int64(len(b))
+		return resp, nil
+	})
+	code, out := e.do(e.owner, "POST", vmPath(parent, "fork"), map[string]any{"name": "released-child"})
+	if code != 201 {
+		t.Fatalf("fork=%d %v", code, out)
+	}
+	if !prepared.Load() || !released.Load() {
+		t.Fatal("fixture must prepare pending_copy=true and omit it on release")
+	}
+	if installs.Load() != 1 {
+		t.Errorf("fork installed child SSH policy %d times, want 1", installs.Load())
+	}
+	for _, field := range []string{"pending_copy", "copy_ready"} {
+		if _, ok := out[field]; ok {
+			t.Errorf("fork response retained prepared %s: %v", field, out)
+		}
+	}
+	child := str(out, "id")
+	e.boatd.mu.Lock()
+	installed := len(e.boatd.files[child+":/etc/boat/ssh-auth.json"]) != 0
+	e.boatd.mu.Unlock()
+	if !installed {
+		t.Fatal("fork returned without provisioning child SSH authority")
+	}
+}
+
+func TestSSHAuthoritySnapshotReleaseReplacesPreparedVM(t *testing.T) {
+	e := setup(t)
+	e.enableSSH()
+	id := e.createVM()
+	snap, err := e.srv.captureSnapshot(context.Background(), id, e.teamID(), "released-snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := snap["pending_copy"]; ok {
+		t.Fatalf("snapshot response retained prepared pending_copy: %v", snap)
 	}
 }

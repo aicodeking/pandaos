@@ -7,8 +7,9 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-# shellcheck disable=SC1090
-source <(sed '$d' "$here/panda-install.sh")
+sed '$d' "$here/panda-install.sh" >"$tmp/installer.sh"
+# shellcheck source=/dev/null
+source "$tmp/installer.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 k1="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl one@test"
@@ -17,8 +18,32 @@ k2="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEFkAfL5eeZvyBnKgqh9v1Dm8fJmlwFQ53z5mGXM
 reset() {
   disk="" profile=server hostname=h user=panda password_hash="" timezone=UTC relay=""
   domain=boat.example.test acme_email="" ipv6_prefix="" data_disk="" extra_config=""
-  ssh_keys=() yes=1 build=0 sudo_nopasswd=0 ssh_key_set=0 allow_insecure_relay=0
+  ssh_keys=() yes=1 build=0 sudo_nopasswd=0 ssh_key_set=0 relay_set=0 allow_insecure_relay=0
 }
+
+# Exercise gather without disks, root, or a host-specific zoneinfo directory.
+# Keep the flag and credential validation real.
+(
+  # shellcheck disable=SC2329 # called by gather in the sourced installer
+  check_disk() { :; }
+  # shellcheck disable=SC2329 # called by gather in the sourced installer
+  check_timezone() { :; }
+  reset
+  PANDA_SYSTEMS="$tmp/systems"
+  mkdir -p "$PANDA_SYSTEMS/headless"
+  profile=headless
+  domain=""
+  disk=$tmp
+  parse_args --ssh-key "$k1" --sudo-nopasswd
+  if (gather) >"$tmp/nopasswd-error" 2>&1; then
+    fail "--sudo-nopasswd accepted without --build"
+  fi
+  grep -qF -- '--sudo-nopasswd requires --build (the prebuilt offline system requires a password for sudo)' \
+    "$tmp/nopasswd-error" || { cat "$tmp/nopasswd-error" >&2; fail "missing --build error"; }
+  parse_args --build
+  gather
+  [[ $password_hash == '!' ]] || fail "key-only build password not locked"
+)
 
 # Two keys, no ACME e-mail, --sudo-nopasswd.
 reset
@@ -35,6 +60,8 @@ grep -q 'extra.nix' "$tmp/local.nix" || fail "extra.nix not imported"
 reset
 parse_args --acme-email ops@example.test
 password_hash='$y$x'
+# Bash 3.2 treats an empty array as unset under nounset; retain the empty-key test.
+if ((BASH_VERSINFO[0] < 4)); then set +u; fi
 write_local_nix "$tmp"
 grep -q wheelNeedsPassword "$tmp/local.nix" && fail "nopasswd sudo without the flag"
 grep -q 'acmeEmail = "ops@example.test"' "$tmp/local.nix" || fail "acmeEmail missing"

@@ -12,7 +12,7 @@ Ask the user these questions first. Wait for their answers before choosing an in
 
 | Ask | Record |
 |---|---|
-| Which profile? | `headless` for a console-only agent box, `desktop` for a GUI and computer use, or `server` for a self-hosted `boat` microVM host. |
+| Which profile? | `headless` for a console-only agent box, `desktop` for a GUI and computer use, `server` for a self-hosted `boat` microVM host, or `connect-only` for an already-installed workstation. For `connect-only`, go straight to [Track C](#track-c--other-pandacode-instances-teammates-and-sdks). |
 | Which machine and access method? | Local x86_64 PC and USB stick, a dedicated server with a virtual ISO console, or a dedicated server with SSH and a rescue system for kexec. Ask about backups, the intended OS and optional data disks, and a login SSH public key if remote access is needed. |
 | Which domain and DNS provider for `server`? | Base domain, public IPv4/IPv6 addresses, DNS zone access, tenant port and desktop domains, and ACME contact email. |
 | Who will run VMs on `server`? | `services.boat.untrustedTenants = false` for your own trusted VMs, or `true` for multi-tenant isolation settings. Serving untrusted tenants also requires the [operator checklist](docs/boat.md#operator-checklist) and an external penetration test. |

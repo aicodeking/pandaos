@@ -61,8 +61,8 @@ $UEFI_NOTE
   --user NAME             login user, in group wheel (default: panda)
   --password-hash HASH    crypt(3) hash, e.g. from: mkpasswd -m yescrypt
   --ssh-key KEY           optional ssh public key for the user (one line; repeat for more)
-  --sudo-nopasswd         sudo without a password (key-only boxes); then --password-hash
-                          is optional and, if omitted, the password is locked
+  --sudo-nopasswd         sudo without a password; requires --build. --password-hash
+                          is optional; if omitted, requires --ssh-key and locks the password
   --timezone TZ           e.g. Europe/Berlin (default: UTC)
   --relay URL             enable the optional panda-agentd with this relay (https)
   --allow-insecure-relay  accept an http:// relay URL
@@ -303,6 +303,9 @@ release_stale_mnt() {
 # Values given as flags are checked as-is; interactive answers are checked
 # right after each prompt and asked again until valid. Password comes last.
 gather() {
+  if ((sudo_nopasswd && !build)); then
+    die "--sudo-nopasswd requires --build (the prebuilt offline system requires a password for sudo)"
+  fi
   if ((yes)); then
     [[ -n $disk ]] || die "--disk is required with --yes"
     [[ -n $password_hash ]] || ((sudo_nopasswd)) || die "--password-hash is required with --yes (or pass --sudo-nopasswd)"

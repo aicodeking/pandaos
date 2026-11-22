@@ -39,7 +39,7 @@ panda-install --disk /dev/vda --profile headless --hostname X --user panda \
 | `--profile NAME` | no | the ISO's own: `headless` ISO → `headless`, desktop ISO → `desktop` | `headless`, or `desktop` (desktop ISO only) |
 | `--hostname NAME` | no | `pandaos` | `a-z`, `0-9`, `-`; max 63 chars |
 | `--user NAME` | no | `panda` | Login user, in `wheel`, `networkmanager`, `panda-mem` |
-| `--password-hash H` | yes, unless `--sudo-nopasswd` | | crypt(3) hash, e.g. `mkpasswd -m yescrypt` (charset `[A-Za-z0-9./$=]`) |
+| `--password-hash H` | yes, unless `--sudo-nopasswd --build` | | crypt(3) hash, e.g. `mkpasswd -m yescrypt` (charset `[A-Za-z0-9./$=]`) |
 | `--ssh-key K` | no | none | One public key line (`ssh-ed25519 AAAA... me@host`); repeat the flag for more keys |
 | `--timezone TZ` | no | `UTC` | Must exist under `/etc/zoneinfo` |
 | `--relay URL` | no | none | PandaConnect relay for panda-agentd: `https://host[:port][/path]` |
@@ -49,7 +49,7 @@ panda-install --disk /dev/vda --profile headless --hostname X --user panda \
 | `--ipv6-prefix P` | no | none | Routed IPv6 prefix for VMs → `services.boat.ipv6Prefix` |
 | `--data-disk DEV` | no | none | Second whole disk for `/var/lib/boat`, **erased**, btrfs `PANDADATA`; pinned by UUID in `disk.nix` (required mount) and marked in `/etc/pandaos/data-disk` |
 | `--extra-config FILE` | no | none | A NixOS module, copied to `/etc/pandaos/extra.nix` and imported by `local.nix` (static networking, update mode, ...) |
-| `--sudo-nopasswd` | no | off | Key-only box: `security.sudo.wheelNeedsPassword = false` in `local.nix`. `--password-hash` is then optional; without it the account password is locked (needs `--ssh-key`) |
+| `--sudo-nopasswd` | no | off | Requires `--build`: sets `security.sudo.wheelNeedsPassword = false` in `local.nix` for the first boot. `--password-hash` is then optional; without it the account password is locked and `--ssh-key` is required. The prebuilt offline system requires a password for sudo |
 | `--build` | no | off | Build `/etc/pandaos#pandaos` now instead of copying the prebuilt system. **Needs network.** `local.nix` and `extra.nix` then apply from the first boot (required when the box has no DHCP, e.g. a hosted server with static addresses) |
 | `--yes` | | | No prompts and no typed disk confirmation |
 

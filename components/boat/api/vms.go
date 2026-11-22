@@ -2685,7 +2685,9 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 		if freshBoot {
 			release["fresh_boot"] = true
 		}
-		if err := s.boatd.call(r.Context(), "POST", vmPath(childID, "release"), release, &child); err != nil {
+		// Decode into a fresh map: omitted omitempty fields must not survive prepare.
+		var released VM
+		if err := s.boatd.call(r.Context(), "POST", vmPath(childID, "release"), release, &released); err != nil {
 			if freshBoot {
 				s.failClosedFork(w, r, childID, childPrev, nil, fmt.Sprintf("the child could not be released: %v", err), releaseChild)
 				return
@@ -2696,6 +2698,7 @@ func (s *server) forkVM(w http.ResponseWriter, r *http.Request, p *principal) {
 			writeUpstream(w, r, err)
 			return
 		}
+		child = released
 		// Like create: a release whose set_env failed leaves the child running with
 		// agent_ready=false and an error; persist it so reads keep reporting it.
 		ready, hasReady := child["agent_ready"].(bool)
@@ -3486,10 +3489,12 @@ func (s *server) captureSnapshot(ctx context.Context, id, team, name string) (VM
 		s.forgetSnapshotSource(sid)
 		return nil, fmt.Errorf("%w: %v", errCopyCredentials, err)
 	}
-	if err := s.boatd.call(ctx, "POST", path+"/"+url.PathEscape(sid)+"/release", nil, &snap); err != nil {
+	// Release is a complete response, not a patch of the prepared snapshot.
+	var released VM
+	if err := s.boatd.call(ctx, "POST", path+"/"+url.PathEscape(sid)+"/release", nil, &released); err != nil {
 		return nil, err
 	}
-	return snap, nil
+	return released, nil
 }
 
 // prepareAndRecordSnapshot is captureSnapshot's part under the VM's shared start

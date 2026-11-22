@@ -172,9 +172,14 @@ boat '{"op":"set_env","vars":{"BOAT_TEST":"a b"}}' >/dev/null || fail "set_env"
 [[ $(vexec 30 dev sh -c 'printf %s "$BOAT_TEST"') == "a b" ]] || fail "set_env in exec"
 [[ $("${SSH[@]}" "dev@$GUEST_IP" 'bash -lc "printf %s \"\$BOAT_TEST\""') == "a b" ]] || fail "set_env in login shell"
 vexec 30 root sh -c 'test "$(readlink /etc/boat/env)" = /run/boat/env &&
-  test "$(stat -c %a:%U /run/boat/env)" = 600:dev &&
-  systemctl restart boat-managed-env.service &&
-  test -r /etc/boat/env' || fail "volatile env mode/owner/restart"
+  test "$(stat -c %a:%U /run/boat/env)" = 600:dev' || fail "volatile env mode/owner"
+# Restarting this dependency can stop the agent: use the independent SSH channel.
+"${SSH[@]}" "dev@$GUEST_IP" 'sudo systemctl restart boat-managed-env.service' || fail "volatile env restart"
+for _ in $(seq 60); do boat '{"op":"health"}' >/dev/null 2>&1 && break; sleep 1; done
+if ! boat '{"op":"health"}' > "$W/health.json" || ! grep -q '"ok": true' "$W/health.json"; then
+  fail "health after env restart"
+fi
+vexec 30 dev test -r /etc/boat/env || fail "volatile env unreadable after restart"
 pass "set_env (exec + login shell)"
 
 # ---- 7. reseed + set_identity (as after a fork: same IP here, new name/mac/ids)

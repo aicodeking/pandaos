@@ -650,6 +650,13 @@ func newTestManager(t *testing.T, mod func(*Config)) (*Manager, *fakeHost) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Keep unit tests independent of the real host's available memory.
+	m.memAvail = func() int {
+		if cfg.HostMemMiB <= 0 {
+			return 1 << 20
+		}
+		return cfg.HostMemMiB
+	}
 	t.Cleanup(m.closeWatches)
 	return m, h
 }

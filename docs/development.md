@@ -62,7 +62,7 @@ by hand (`fake-relay -listen :8787`) and point a local `panda-agentd -relay http
 
 | Workflow | When | What |
 |---|---|---|
-| `ci.yml` | every push and PR | fails without `flake.lock`; `nix flake check` with KVM, `go vet`/`go test` for both components, `bench/test_collect.py`; on `main` also builds both ISOs and reports their size |
+| `ci.yml` + reusable `unit-checks.yml` and `nix-checks.yml` | every push and PR | fails without `flake.lock`; `nix flake check` with KVM; `go vet`/`go test -race` for all 10 Go components; boat SDKs and guest agent unit tests; `boatbench` unit tests and results/docs drift checks; `cubench` unit tests and dry run; script self-tests; pushes to `main` also build the `headless` and `desktop` ISOs and report their size |
 | `lock.yml` | by hand | runs `nix flake lock` (or `nix flake update`) and uploads `flake.lock` as the `flake-lock` artifact, for contributors without Nix |
 | `nightly.yml` | daily, or by hand | runs each check separately and uploads metrics as an artifact |
 | `release.yml` | tag `v*` or manual dry run | runs `nix-checks` and `unit-checks`, builds all three ISOs (`headless`, `desktop`, `server`) with `--no-update-lock-file`, plus boat CLI binaries and guest images, and writes checksum manifests; tag runs attest build provenance, publish the GitHub Release, and advance `release` fast-forward only; manual runs keep artifacts without publishing |

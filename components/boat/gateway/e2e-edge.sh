@@ -97,12 +97,20 @@ warn() { echo "::warning::edge: $*"; }
 FAILED=()
 soft() { local name=$1; shift; "$@" || { echo "edge: $name FAILED (continuing, the run will fail)" >&2; FAILED+=("$name"); }; }
 
+JUMP_STATE=$WORK/run/jump
 PIDS=()
 cleanup() {
   set +e
   for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done
   [ -f "$WORK/caddy.pid" ] && sudo kill "$(cat "$WORK/caddy.pid")" 2>/dev/null
   [ -f "$WORK/sshd/pid" ] && sudo kill "$(cat "$WORK/sshd/pid")" 2>/dev/null
+  if [ -f "$WORK/jump-reaper.pid" ]; then
+    sudo kill "$(cat "$WORK/jump-reaper.pid")" 2>/dev/null
+    for _ in $(seq 50); do sudo kill -0 "$(cat "$WORK/jump-reaper.pid")" 2>/dev/null || break; sleep 0.2; done
+    sudo kill -9 "$(cat "$WORK/jump-reaper.pid")" 2>/dev/null
+    sudo rm -f "$WORK/jump-reaper.pid"
+  fi
+  sudo rm -rf -- "$JUMP_STATE"
   sudo pkill -9 -x firecracker
   if [ -f "$WORK/boatd.pid" ]; then
     sudo kill "$(cat "$WORK/boatd.pid")" 2>/dev/null
@@ -118,7 +126,7 @@ cleanup() {
   sudo iptables -D FORWARD -o boatbr0 -j ACCEPT 2>/dev/null
   mountpoint -q "$STATE" && sudo umount -l "$STATE"
   sudo rmdir /sys/fs/cgroup/boat-edge 2>/dev/null
-  for f in boatd api gateway caddy sshd/log; do
+  for f in boatd api gateway caddy jump-reaper sshd/log; do
     [ -f "$WORK/$f.log" ] && { echo "--- $f.log (tail)"; sudo tail -n 40 "$WORK/$f.log"; }
   done
   [ -f "$WORK/sshd/log" ] && { echo "--- sshd log (tail)"; sudo tail -n 40 "$WORK/sshd/log"; }
@@ -285,8 +293,22 @@ id jump >/dev/null 2>&1 || sudo useradd -r -M -s /usr/sbin/nologin jump
 id boat-ssh >/dev/null 2>&1 || sudo useradd -r -M -s /usr/sbin/nologin boat-ssh
 sudo usermod -p '*' jump # not locked ('!'), still no password
 sudo install -d -m 0755 /etc/boat-edge
-{ echo '#!/bin/bash'; cat "$HERE/gateway/jump-keys.sh"; } | sudo tee /etc/boat-edge/jump-keys >/dev/null
+{
+  echo '#!/bin/bash'
+  printf 'export PATH=%q:/usr/bin:/bin\n' "$WORK/bin"
+  printf 'export BOAT_JUMP_STATE_DIR=%q\n' "$JUMP_STATE"
+  cat "$HERE/gateway/jump-keys.sh"
+} | sudo tee /etc/boat-edge/jump-keys >/dev/null
 sudo chmod 0755 /etc/boat-edge/jump-keys
+# Match the module's root-owned, boat-ssh-writable state and live reaper.
+# A private fixture directory avoids interfering with a host's /run/boat-jump.
+sudo install -d -o root -g boat-ssh -m 0770 "$JUMP_STATE"
+sudo bash -c 'echo $$ >"$1"; exec "$2" jump-reaper -api "$3" -dir "$4" -routes "$5" -interval 3s -max-stale 2m >"$6" 2>&1' _ \
+  "$WORK/jump-reaper.pid" "$WORK/bin/boat-gateway" "$API/internal/ssh/authorize" \
+  "$JUMP_STATE" "$WORK/run/routes.json" "$WORK/jump-reaper.log" &
+PIDS+=($!)
+for _ in $(seq 100); do sudo test -s "$JUMP_STATE/reaper.alive" && break; sleep 0.2; done
+sudo test -s "$JUMP_STATE/reaper.alive" || fail "jump-reaper heartbeat missing"
 ssh-keygen -q -t ed25519 -N "" -f "$WORK/sshd/host_ed25519" <<<y >/dev/null 2>&1 || true
 sudo chown root:root "$WORK/sshd/host_ed25519"
 cat >"$WORK/sshd/config" <<EOF
