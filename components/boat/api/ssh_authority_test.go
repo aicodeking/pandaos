@@ -53,15 +53,20 @@ func TestSSHAuthorityInternalRejectsForwarded(t *testing.T) {
 // The fake installs the same wire policy without executing guest software.
 func (e *env) enableSSH() {
 	e.t.Helper()
-	if e.srv.cfg.SSHPolicyHelperFile != "" {
+	enableSSHConfig(e.t, &e.srv.cfg)
+}
+
+func enableSSHConfig(t *testing.T, cfg *Config) {
+	t.Helper()
+	if cfg.SSHPolicyHelperFile != "" {
 		return
 	}
-	p := filepath.Join(e.t.TempDir(), "ssh-helper")
+	p := filepath.Join(t.TempDir(), "ssh-helper")
 	if err := os.WriteFile(p, []byte("mock-policy-helper"), 0600); err != nil {
-		e.t.Fatal(err)
+		t.Fatal(err)
 	}
-	e.srv.cfg.SSHPolicyHelperFile = p
-	e.srv.cfg.VMAPIURL = "https://boat.example"
+	cfg.SSHPolicyHelperFile = p
+	cfg.VMAPIURL = "https://boat.example"
 }
 
 func (e *env) lookupSSH(vm, pub string) (int, map[string]any) {

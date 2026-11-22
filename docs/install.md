@@ -193,9 +193,22 @@ the box is unreachable, and only the provider's rescue system gets it back.**
    and root's `authorized_keys`, and does not touch the disks. The installer boots into RAM
    (tmpfs): files such as `extra.nix` on the old OS root are not carried into the live installer:
    ```sh
-   curl -fLO https://github.com/nix-community/nixos-images/releases/latest/download/nixos-kexec-installer-noninteractive-x86_64-linux.tar.gz
-   tar -xzf nixos-kexec-installer-noninteractive-x86_64-linux.tar.gz -C /root && /root/kexec/run
+   set -eu
+   KEXEC_TAG=nixos-25.05
+   KEXEC_ARCHIVE=nixos-kexec-installer-noninteractive-x86_64-linux.tar.gz
+   KEXEC_SHA256=8c08e3459f28ad2d7cf931ea6075415ef92f5b59ba5d15a10ac60b093f4c1c52
+   cd "$(mktemp -d)"
+   curl -fL -o "$KEXEC_ARCHIVE" "https://github.com/nix-community/nixos-images/releases/download/$KEXEC_TAG/$KEXEC_ARCHIVE"
+   printf '%s  %s\n' "$KEXEC_SHA256" "$KEXEC_ARCHIVE" | sha256sum -c -
+   tar -xzf "$KEXEC_ARCHIVE" -C /root
+   /root/kexec/run
    ```
+   Run these commands as root. The SHA-256 above is the archive digest recorded in the
+   [nixos-25.05 release metadata](https://api.github.com/repos/nix-community/nixos-images/releases/tags/nixos-25.05).
+   Check the [upstream releases](https://github.com/nix-community/nixos-images/releases) when
+   choosing another version, and update both the tag and its expected digest together. Do not
+   extract or run the archive if verification fails.
+
    ssh back in as root after about a minute. Check `ls /sys/firmware/efi/efivars` (needed in step 5).
    After reconnecting, upload `extra.nix` from the workstation with
    `scp extra.nix root@<ip>:/root/extra.nix`, or write `/root/extra.nix` in the live installer.

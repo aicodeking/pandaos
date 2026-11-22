@@ -155,8 +155,9 @@ pkgs.testers.runNixOSTest {
         machine.fail("runuser -u boat-gateway -- test -r /var/lib/boat/secrets/boat-desktop-key.cred")
     exp = int(time.time()) + 600
 
-    def mac(payload):
-        return hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()
+    def mac(purpose, payload):
+        pk = hmac.new(key, f"boat-hmac-v2/{purpose}".encode(), hashlib.sha256).digest()
+        return hmac.new(pk, payload.encode(), hashlib.sha256).hexdigest()
 
     with subtest("caddy + gateway over TLS: private/public routes, per-VM desktop origins"):
         machine.wait_for_unit("caddy.service")
@@ -168,12 +169,14 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed(code + f"https://api.{D}/internal/desktop-auth") == "404"
         machine.wait_until_succeeds(code + f"https://8000-vm2.vm.{D}/boatd.json | grep -x 200", timeout=60)
         assert machine.succeed(code + f"https://8000-vm1.vm.{D}/boatd.json") == "401"
-        rt = f"{exp}.{mac(f'route.8000-vm1.{exp}')}"
+        rt = f"{exp}.{mac('port-route', f'route.8000-vm1.{exp}')}"
         assert machine.succeed(code + f"-H 'X-Boat-Route-Token: {rt}' https://8000-vm1.vm.{D}/boatd.json") == "200"
-        bad = f"{exp}.{mac(f'route.8000-vm2.{exp}')}"
+        legacy = f"{exp}.{hmac.new(key, f'route.8000-vm1.{exp}'.encode(), hashlib.sha256).hexdigest()}"
+        assert machine.succeed(code + f"-H 'X-Boat-Route-Token: {legacy}' https://8000-vm1.vm.{D}/boatd.json") == "401"
+        bad = f"{exp}.{mac('port-route', f'route.8000-vm2.{exp}')}"
         assert machine.succeed(code + f"-H 'X-Boat-Route-Token: {bad}' https://8000-vm1.vm.{D}/boatd.json") == "401"
 
-        q = f"exp={exp}&sig={mac(f'vm1.{exp}')}"
+        q = f"exp={exp}&sig={mac('desktop-link', f'vm1.{exp}')}"
         loc = machine.succeed(f"curl -sk -o /dev/null -w '%{{redirect_url}}' {resolve} 'https://desktop.{D}/vm1?{q}'")
         assert loc == f"https://vm1.desktop.{D}/?{q}", loc
         hdrs = machine.succeed(f"curl -sk -D - -o /dev/null {resolve} 'https://vm1.desktop.{D}/?{q}'")
@@ -214,6 +217,8 @@ pkgs.testers.runNixOSTest {
         assert "boat-dashboard-marker" not in body and "404" in body, body
 
     with subtest("ssh jump: -W to permitopen only, no shell, 2222 is jump-only"):
+        machine.wait_for_unit("boat-jump-reaper.service")
+        machine.wait_until_succeeds("test -e /run/boat-jump/reaper.alive")
         machine.wait_for_open_port(2222)
         machine.succeed("ssh-keygen -q -t ed25519 -N ''' -f /root/k")
         pub = machine.succeed("cat /root/k.pub").strip()
@@ -222,7 +227,8 @@ pkgs.testers.runNixOSTest {
         line = f'restrict,port-forwarding,permitopen="10.200.0.2:22" {key_type} {key_blob}'
         body = json.dumps({"authorized_keys": [line]})
         machine.succeed(f"printf %s {shlex.quote(body)} >/etc/boat/jump-response.json")
-        out = machine.succeed(f"runuser -u boat-ssh -- /etc/boat/jump-keys http://127.0.0.1:8740/internal/ssh/authorize {key_type} {key_blob} jump")
+        machine.fail(f"runuser -u boat-ssh -- /etc/boat/jump-keys http://127.0.0.1:8740/internal/ssh/authorize {key_type} {key_blob} jump")
+        out = machine.succeed(f"runuser -u boat-ssh -- env BOAT_JUMP_ALLOW_UNTRACKED=1 /etc/boat/jump-keys http://127.0.0.1:8740/internal/ssh/authorize {key_type} {key_blob} jump")
         assert out == line + "\n", out
         # An old static file must never restore access during an authority outage.
         machine.succeed(f"printf %s {shlex.quote(line)} >/var/lib/boat/ssh/jump_authorized_keys")

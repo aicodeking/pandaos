@@ -104,12 +104,25 @@ Only `main` and release tags push. Pull requests, other branches and forks only 
 
 ## Releasing
 
-There is no release yet. Installed boxes update from the `release` branch, which only exists after
-the first release.
+Installed boxes update from the `release` branch, which advances only after a tagged release
+passes its checks and publishes its assets.
 
-1. Move the Unreleased entries in `CHANGELOG.md` under the new version.
-2. Tag a commit on `main` and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
-3. `release.yml` builds and checks everything, publishes `pandaos-<tag>-headless-x86_64-linux.iso`,
-   `pandaos-<tag>-desktop-x86_64-linux.iso` and `SHA256SUMS` with provenance, and only then moves
-   `release` to the tag (`git push origin <sha>:refs/heads/release --force`). It refuses tags that are
-   not on `main`. If `release` is a protected branch, allow GitHub Actions to force-push to it.
+1. Move the Unreleased entries in `CHANGELOG.md` under the new version, then commit that change
+   to `main` and push it.
+2. Create an annotated tag on that commit on `main` and push the tag:
+   ```sh
+   git tag -a v0.2.0 -m "PandaOS v0.2.0" && git push origin v0.2.0
+   ```
+3. [release.yml](../.github/workflows/release.yml) gates publishing on `nix-checks`, `unit-checks`
+   (Go race tests, boat SDK/guest tests, script self-tests, bench-drift and cubench), all three ISO
+   builds, and the boat CLI and guest asset builds. It publishes these assets with build provenance
+   attestations for the ISOs, CLI binaries and guest images:
+   - `pandaos-<tag>-{headless,desktop,server}-x86_64-linux.iso` and `SHA256SUMS`.
+   - `boat_<os>_<arch>` (with `.exe` on Windows) and `boat_SHA256SUMS`.
+   - `boat-guest-vmlinux`, `boat-guest-rootfs-{slim,full}.ext4.zst` and `boat_guest_SHA256SUMS`.
+4. The workflow refuses tags that are not on `main`. After publishing, it advances `release` to
+   the tagged commit **fast-forward only**: it refuses to rewind or diverge from an existing
+   `origin/release`. If `release` is protected, allow GitHub Actions to fast-forward push to it.
+
+A manual `workflow_dispatch` run performs the same checks and builds but keeps assets as run
+artifacts; it does not attest, publish or move `release`.

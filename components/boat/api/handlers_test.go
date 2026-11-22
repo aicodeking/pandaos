@@ -29,6 +29,11 @@ type env struct {
 
 func setup(t *testing.T) *env {
 	t.Helper()
+	return setupWithConfig(t, nil)
+}
+
+func setupWithConfig(t *testing.T, fn func(*Config)) *env {
+	t.Helper()
 	dir := t.TempDir()
 	store, err := OpenStore(dir)
 	if err != nil {
@@ -47,6 +52,9 @@ func setup(t *testing.T) *env {
 	audit := &bytes.Buffer{}
 	cfg := Config{Images: []string{"ubuntu-24.04"}, DesktopURL: "https://boat.example/desktop",
 		DesktopKey: []byte("desktop-key"), DesktopTTL: time.Minute, AllowPrivateHook: true}
+	if fn != nil {
+		fn(&cfg)
+	}
 	s := newServer(store, kr, newBoatd(bsrv.URL), cfg, newLimiter(0, 0), &auditLog{w: audit})
 	s.hooks.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	api := httptest.NewServer(recorder(s))
