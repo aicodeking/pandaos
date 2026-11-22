@@ -690,11 +690,21 @@ class InstallerBoundaryTests(unittest.TestCase):
             sshd_bin.write_bytes(b'')
             sshd_bin.chmod(0o755)
 
+            host_keys = tuple(sshd_cfg.parent / ('ssh_host_' + typ + '_key')
+                              for typ in ('ed25519', 'ecdsa'))
+            host_keys[0].write_bytes(b'')
+            host_keys[0].with_suffix('.pub').write_bytes(b'stale')
             commands = []
             writes = []
 
             def fake_run(*argv, check=True):
                 commands.append(argv)
+                if argv[0] == '/usr/bin/ssh-keygen':
+                    key = Path(argv[-1])
+                    self.assertFalse(key.exists())
+                    self.assertFalse(key.with_suffix('.pub').exists())
+                    key.write_bytes(b'private stub')
+                    key.with_suffix('.pub').write_bytes(b'public stub')
                 if 'show' in argv:
                     return subprocess.CompletedProcess(
                         argv, 0,
@@ -732,6 +742,7 @@ class InstallerBoundaryTests(unittest.TestCase):
                  mock.patch.object(helper, 'HELPER_PATH', helper_path), \
                  mock.patch.object(helper, 'SSHD_RUN_DIR', run_dir), \
                  mock.patch.object(helper, 'SSHD_BIN', sshd_bin), \
+                 mock.patch.object(helper, 'HOST_KEYS', host_keys), \
                  mock.patch.object(helper.os, 'geteuid', return_value=0), \
                  mock.patch.object(helper.os, 'fstat', side_effect=root_fstat), \
                  mock.patch.object(Path, 'lstat', root_lstat), \
@@ -744,6 +755,14 @@ class InstallerBoundaryTests(unittest.TestCase):
                 helper.install(CONFIG)
 
                 self.assertEqual(writes, [cfg_path])
+                self.assertEqual(len([c for c in commands if c[0] == '/usr/bin/ssh-keygen']), 2)
+                reset = ('/usr/bin/systemctl', 'reset-failed', 'ssh.service')
+                start = ('/usr/bin/systemctl', 'start', 'ssh.service')
+                self.assertLess(commands.index(reset), commands.index(start))
+                for key in host_keys:
+                    self.assertEqual(key.read_bytes(), b'private stub')
+                    self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
+                    self.assertEqual(stat.S_IMODE(key.with_suffix('.pub').stat().st_mode), 0o644)
                 self.assertTrue(run_dir.is_dir())
                 self.assertEqual(stat.S_IMODE(real_lstat(run_dir).st_mode), 0o755)
                 self.assertNotIn(('/usr/bin/systemctl', 'daemon-reload'), commands)
@@ -795,7 +814,7 @@ class InstallerBoundaryTests(unittest.TestCase):
 
     def test_sshd_unchanged_requires_files_current_and_sshd_newer(self):
         from types import SimpleNamespace
-        fake_stat = SimpleNamespace(st_mode=stat.S_IFREG | 0o555, st_uid=0, st_gid=0, st_mtime=1000.0)
+        fake_stat = SimpleNamespace(st_mode=stat.S_IFREG | 0o555, st_uid=0, st_gid=0, st_mtime=1000.0, st_size=1)
         show = subprocess.CompletedProcess((), 0, '123\n', '')
         def check(files_ok=True, started=2000.0, service_ok=True, pid_out=show):
             service = mock.Mock() if service_ok else mock.Mock(side_effect=ValueError('inactive'))
@@ -808,6 +827,9 @@ class InstallerBoundaryTests(unittest.TestCase):
                  mock.patch.object(helper, 'process_start_time', return_value=started):
                 return helper.sshd_unchanged(CONFIG)
         self.assertTrue(check())
+        fake_stat.st_size = 0
+        self.assertFalse(check())
+        fake_stat.st_size = 1
         self.assertFalse(check(files_ok=False))
         self.assertFalse(check(started=500.0))      # sshd predates config: restart
         self.assertFalse(check(service_ok=False))
@@ -1366,6 +1388,45 @@ class InstallerBoundaryTests(unittest.TestCase):
                         helper.rotate_token(new_config)
                 finally:
                     fstat_override.clear()
+
+
+class HostKeyRepairTests(unittest.TestCase):
+    def test_repairs_symlink_without_touching_target_and_fsyncs_pair_and_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / 'target'
+            target.write_bytes(b'leave intact')
+            key = root / 'ssh_host_ed25519_key'
+            key.symlink_to(target)
+            public = Path(str(key) + '.pub')
+            public.symlink_to(target)
+            synced = []
+            real_fsync = os.fsync
+
+            def fsync(fd):
+                info = os.fstat(fd)
+                synced.append((info.st_dev, info.st_ino))
+                real_fsync(fd)
+
+            def keygen(*args, **kwargs):
+                self.assertEqual(args, ('/usr/bin/ssh-keygen', '-q', '-t',
+                                       'ed25519', '-N', '', '-f', str(key)))
+                self.assertFalse(key.is_symlink())
+                self.assertFalse(public.is_symlink())
+                key.write_bytes(b'private stub')
+                public.write_bytes(b'public stub')
+
+            with mock.patch.object(helper, 'HOST_KEYS', (key,)), \
+                 mock.patch.object(helper, 'protected_parent') as parent, \
+                 mock.patch.object(helper, 'run', side_effect=keygen) as command, \
+                 mock.patch.object(helper.os, 'fsync', side_effect=fsync):
+                helper.ensure_host_keys()
+                helper.ensure_host_keys()  # Nonempty stubs stay compatible and need no repair.
+            parent.assert_has_calls([mock.call(key), mock.call(key)])
+            command.assert_called_once()
+            self.assertEqual(target.read_bytes(), b'leave intact')
+            self.assertEqual(synced, [(p.stat().st_dev, p.stat().st_ino)
+                                      for p in (key, public, root)])
 
 
 class LiveSshdLoginTests(unittest.TestCase):

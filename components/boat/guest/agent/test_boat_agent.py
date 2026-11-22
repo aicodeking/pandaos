@@ -359,6 +359,44 @@ class AgentTest(unittest.TestCase):
         with open(os.path.join(d, "sshd_config")) as f:
             self.assertEqual(f.read(), "old")
 
+    def test_host_key_replacements_are_fsynced_before_publish(self):
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for typ in agent.HOST_KEY_TYPES:
+                (root / ("ssh_host_%s_key" % typ)).write_text("old")
+            synced = set()
+            real_sync, real_replace = os.fsync, os.replace
+
+            def sync(fd):
+                info = os.fstat(fd)
+                synced.add((info.st_dev, info.st_ino))
+                real_sync(fd)
+
+            def replace(src, dst):
+                info = os.stat(src)
+                self.assertIn((info.st_dev, info.st_ino), synced)
+                self.assertEqual(stat.S_IMODE(info.st_mode),
+                                 0o644 if str(dst).endswith(".pub") else 0o600)
+                real_replace(src, dst)
+
+            with mock.patch.object(agent.os, "fsync", side_effect=sync), \
+                 mock.patch.object(agent.os, "replace", side_effect=replace) as replaced:
+                agent.regenerate_host_keys(tmp)
+            self.assertEqual(replaced.call_count, 4)
+            info = root.stat()
+            self.assertIn((info.st_dev, info.st_ino), synced)
+
+    def test_host_key_generation_failure_preserves_existing_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "ssh_host_ed25519_key"
+            key.write_text("old")
+            with mock.patch.object(agent, "run", side_effect=RuntimeError("keygen failed")):
+                with self.assertRaises(RuntimeError):
+                    agent.regenerate_host_keys(tmp)
+            self.assertEqual(key.read_text(), "old")
+            self.assertEqual(list(Path(tmp).iterdir()), [key])
+
     def test_regenerate_secrets_never_uses_async_no_block_restart(self):
         from unittest import mock
         machine_id = os.path.join(self.tmp, "machine-id")

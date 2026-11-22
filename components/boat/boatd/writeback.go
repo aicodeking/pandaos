@@ -228,14 +228,15 @@ func (m *Manager) capDump(id string, on bool) {
 	if on {
 		limit = dumpWbpsWhileBooting
 	}
-	if val, _ := m.cfg.ioMax(limit); val != "" {
+	lines, _ := m.cfg.ioMaxLines(limit)
+	for i, val := range lines {
 		// Keep the same write semantics as writeCgroup, but expose even ENOENT:
 		// a vanished cgroup must not look like a successfully applied cap.
 		path := filepath.Join(cgroupRoot, m.cfg.CgroupParent, id, "io.max")
-		writeErr := os.WriteFile(path, []byte(val), 0)
+		writeErr := writeIOMaxFile(path, []byte(val), 0)
 		actual, readErr := readDumpIOMax(path)
 		log.Printf("%s: dump-cap dev=%s requested=%q actual=%q write_error=%v read_error=%v capped=%t booting=%d dumps=%d generation=%d",
-			id, m.cfg.stateDisk, val, actual, writeErr, readErr, on, m.dio.booting, len(m.dio.dumping), m.dio.dumping[id])
+			id, m.cfg.ioDisks()[i], val, actual, writeErr, readErr, on, m.dio.booting, len(m.dio.dumping), m.dio.dumping[id])
 	}
 }
 

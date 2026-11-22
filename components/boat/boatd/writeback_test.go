@@ -449,3 +449,79 @@ func TestBootPacingSkipsWritebackKicksAndDefersSync(t *testing.T) {
 		t.Fatal("expected writeback kick once no VM is booting")
 	}
 }
+
+func TestMultiDiskIOMaxAndDumpCap(t *testing.T) {
+	oldRoot, oldWrite := cgroupRoot, writeIOMaxFile
+	defer func() { cgroupRoot, writeIOMaxFile = oldRoot, oldWrite }()
+	cgroupRoot = t.TempDir()
+	logs := captureDumpLogs(t)
+	c := Config{cgroupLimits: true, stateDisks: []string{"259:0", "259:4"}, CgroupParent: "p", IOMaxMBps: 100, IOMaxIOPS: 1000, UntrustedTenants: true}
+	var writes []string
+	// Regular files cannot emulate cgroup's per-device update semantics; record each write.
+	writeIOMaxFile = func(path string, data []byte, mode os.FileMode) error {
+		if path != filepath.Join(cgroupRoot, "p", "vm", "io.max") {
+			t.Fatalf("path=%s", path)
+		}
+		writes = append(writes, string(data))
+		return nil
+	}
+	lines, limited := c.ioMaxLines(0)
+	if !limited || len(lines) != 2 {
+		t.Fatalf("lines=%v limited=%v", lines, limited)
+	}
+	for i, disk := range c.ioDisks() {
+		want := disk + " rbps=104857600 wbps=104857600 riops=1000 wiops=1000"
+		if lines[i] != want {
+			t.Fatalf("line=%q want %q", lines[i], want)
+		}
+	}
+	if err := (realProcs{cfg: c}).setIOMax("vm"); err != nil {
+		t.Fatal(err)
+	}
+	if len(writes) != 2 || writes[0] != lines[0] || writes[1] != lines[1] {
+		t.Fatalf("writes=%v", writes)
+	}
+	m := &Manager{cfg: c}
+	m.capDump("vm", true)
+	m.capDump("vm", false)
+	if len(writes) != 6 {
+		t.Fatalf("writes=%v", writes)
+	}
+	for i, disk := range c.ioDisks() {
+		want := disk + " rbps=104857600 wbps=67108864 riops=1000 wiops=1000"
+		if writes[2+i] != want || writes[4+i] != lines[i] {
+			t.Fatalf("writes=%v", writes)
+		}
+		if !strings.Contains(logs(), "vm: dump-cap dev="+disk) {
+			t.Fatalf("missing disk log: %s", logs())
+		}
+	}
+}
+
+func TestMultiDiskIOMaxWriteFailure(t *testing.T) {
+	oldWrite := writeIOMaxFile
+	defer func() { writeIOMaxFile = oldWrite }()
+	logs := captureDumpLogs(t)
+	sentinel := errors.New("second disk rejected")
+	var writes []string
+	writeIOMaxFile = func(_ string, data []byte, _ os.FileMode) error {
+		writes = append(writes, string(data))
+		if strings.HasPrefix(string(data), "259:4 ") {
+			return sentinel
+		}
+		return nil
+	}
+	c := Config{cgroupLimits: true, stateDisks: []string{"259:0", "259:4"}, CgroupParent: "p", IOMaxIOPS: 1000, UntrustedTenants: true}
+	if err := (realProcs{cfg: c}).setIOMax("vm"); !errors.Is(err, sentinel) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(writes) != 2 {
+		t.Fatalf("writes=%v", writes)
+	}
+	// Dump caps remain best effort but must report the failing device.
+	m := &Manager{cfg: c}
+	m.capDump("vm", true)
+	if len(writes) != 4 || !strings.Contains(logs(), "write_error=second disk rejected") {
+		t.Fatalf("writes=%v logs=%s", writes, logs())
+	}
+}

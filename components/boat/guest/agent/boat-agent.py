@@ -617,12 +617,29 @@ def write_atomic(path, text, mode):
 
 def regenerate_host_keys(ssh_dir):
     """Replace every host key. No RSA: its keygen costs a random 0.1-1 s on each fork."""
-    for name in os.listdir(ssh_dir):
-        if name.startswith("ssh_host_"):
-            os.unlink(os.path.join(ssh_dir, name))
-    for key_type in HOST_KEY_TYPES:
-        run(["ssh-keygen", "-q", "-t", key_type, "-N", "",
-             "-f", os.path.join(ssh_dir, "ssh_host_%s_key" % key_type)])
+    # Stage every pair before publishing anything, preserving old keys on keygen failure.
+    with tempfile.TemporaryDirectory(prefix=".boat-host-keys-", dir=ssh_dir) as staging:
+        names = []
+        for key_type in HOST_KEY_TYPES:
+            name = "ssh_host_%s_key" % key_type
+            run(["ssh-keygen", "-q", "-t", key_type, "-N", "",
+                 "-f", os.path.join(staging, name)])
+            for suffix, mode in (("", 0o600), (".pub", 0o644)):
+                staged = os.path.join(staging, name + suffix)
+                with open(staged, "rb") as stream:
+                    os.fchmod(stream.fileno(), mode)
+                    os.fsync(stream.fileno())
+                names.append(name + suffix)
+        for name in names:
+            os.replace(os.path.join(staging, name), os.path.join(ssh_dir, name))
+        for name in os.listdir(ssh_dir):
+            if name.startswith("ssh_host_") and name not in names:
+                os.unlink(os.path.join(ssh_dir, name))
+    directory = os.open(ssh_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 SSH_AUTH_CONFIGS = ("/etc/boat/ssh-auth.json", "/etc/boat/ssh-authorize.json")

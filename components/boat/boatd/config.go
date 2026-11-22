@@ -157,6 +157,7 @@ type Config struct {
 	IndexQuarantineS int `json:"indexQuarantineS"` // a deleted VM's IP/MAC/uid is not reused for this long (if another is free); 0 = off
 
 	cgroupLimits bool                  // set at startup when the cgroup controllers could be delegated
+	stateDisks   []string              // all resolved stateDir disks, for io.max
 	stateDisk    string                // "major:minor" of stateDir's disk, for io.max
 	routesGID    int                   // routesGroup's gid, set at startup
 	Teams        map[string]TeamPolicy `json:"teams"`
@@ -590,4 +591,15 @@ func isPublicControlIPv4(addr netip.Addr) bool {
 		}
 	}
 	return true
+}
+
+// ioDisks also supports callers configuring the legacy single-disk field.
+func (c Config) ioDisks() []string {
+	if len(c.stateDisks) > 0 {
+		return c.stateDisks
+	}
+	if c.stateDisk != "" {
+		return []string{c.stateDisk}
+	}
+	return nil
 }

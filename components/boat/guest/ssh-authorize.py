@@ -536,6 +536,38 @@ def stop_old_sshd():
         time.sleep(0.02)
 
 
+def ensure_host_keys():
+    """Repair keys lost to an unclean shutdown without following stale symlinks."""
+    for key in HOST_KEYS:
+        protected_parent(key)
+        try:
+            info = key.lstat()
+            if stat.S_ISREG(info.st_mode) and info.st_size > 0:
+                continue
+        except FileNotFoundError:
+            pass
+        key.unlink(missing_ok=True)
+        public = Path(str(key) + '.pub')
+        public.unlink(missing_ok=True)
+        key_type = key.name.removeprefix('ssh_host_').removesuffix('_key')
+        run('/usr/bin/ssh-keygen', '-q', '-t', key_type, '-N', '', '-f', str(key))
+        for path, mode in ((key, 0o600), (public, 0o644)):
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+                    raise ValueError('invalid generated host key')
+                os.fchmod(fd, mode)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        directory = os.open(key.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
 def install(config):
     global _UNCHANGED_STATE
     _UNCHANGED_STATE = None
@@ -571,7 +603,9 @@ def install(config):
         atomic_file(DROPIN_PATH, dropin_bytes, 0o644)
         run('/usr/bin/systemctl', 'daemon-reload')
     ensure_sshd_run_dir()
+    ensure_host_keys()
     verify_files_and_config(config)
+    run('/usr/bin/systemctl', 'reset-failed', 'ssh.service', check=False)
     run('/usr/bin/systemctl', 'start', 'ssh.service')
     verify_service()
 
@@ -648,7 +682,10 @@ def _sshd_exe_matches(pid):
 def _policy_newest_mtime():
     mtimes = [SSHD_CONFIG.lstat().st_mtime, DROPIN_PATH.lstat().st_mtime]
     for key in HOST_KEYS:
-        mtimes.append(key.lstat().st_mtime)
+        info = key.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+            raise ValueError('missing or invalid host key')
+        mtimes.append(info.st_mtime)
     return max(mtimes)
 
 

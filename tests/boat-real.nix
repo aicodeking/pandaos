@@ -241,6 +241,10 @@ let
           return server.succeed("pgrep -x firecracker || true").split()
 
 
+      def vms_by_name() -> dict:
+          return {v["name"]: v for v in (json.loads(line) for line in server.succeed("boat list --json").splitlines())}
+
+
       def vm(name) -> dict:
           for line in server.succeed("boat list --json").splitlines():
               v = json.loads(line)
@@ -250,7 +254,14 @@ let
 
 
       def run(name, cmd, timeout=300):
-          return server.succeed(f"boat exec {name} -- bash -c {shlex.quote(cmd)}", timeout=timeout).strip()
+          for attempt in range(5):
+              status, output = server.execute(f"boat exec {name} -- bash -c {shlex.quote(cmd)}", timeout=timeout)
+              if status == 0:
+                  return output.strip()
+              rate_limited = "HTTP 429" in output or "rate limit exceeded" in output
+              if not rate_limited or attempt == 4:
+                  raise AssertionError(f"boat exec {name} failed (exit {status}): {output}")
+              time.sleep(1)
 
 
       def secs(f):
@@ -344,9 +355,13 @@ let
               # boatd snapshots the VMs on stop and resumes them on start.
               def all_running(_last) -> bool:
                   try:
-                      return all(vm(n)["state"] == "running" and vm(n)["agent_ready"] for n in names)
+                      vms = vms_by_name()
+                      if all(vms[n]["state"] == "running" and vms[n]["agent_ready"] for n in names):
+                          return True
                   except Exception:  # boat-api or boatd not answering yet
-                      return False
+                      pass
+                  time.sleep(0.5)
+                  return False
 
               retry(all_running, timeout_seconds=600)
               for n in names:

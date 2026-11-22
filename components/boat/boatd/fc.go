@@ -276,7 +276,7 @@ func (p realProcs) setIOMax(id string) error {
 	if p.cfg.cgroupLimits && p.cfg.CgroupParent != "" && id != "" {
 		cg = filepath.Join(cgroupRoot, p.cfg.CgroupParent, id)
 	}
-	val, limited := p.cfg.ioMax(0)
+	lines, limited := p.cfg.ioMaxLines(0)
 	if !limited {
 		if p.cfg.UntrustedTenants {
 			return fmt.Errorf("%s: io.max: untrustedTenants requires cgroup io.max limits (cgroup=%q disk=%q)", id, cg, p.cfg.stateDisk)
@@ -286,8 +286,11 @@ func (p realProcs) setIOMax(id string) error {
 	if cg == "" {
 		return fmt.Errorf("%s: io.max: missing VM cgroup", id)
 	}
-	if err := os.WriteFile(filepath.Join(cg, "io.max"), []byte(val), 0); err != nil {
-		return fmt.Errorf("%s: io.max: %w", id, err)
+	// Cgroup v2 updates one device rule per write; do not concatenate the lines.
+	for _, val := range lines {
+		if err := writeIOMaxFile(filepath.Join(cg, "io.max"), []byte(val), 0); err != nil {
+			return fmt.Errorf("%s: io.max: %w", id, err)
+		}
 	}
 	return nil
 }
@@ -295,9 +298,21 @@ func (p realProcs) setIOMax(id string) error {
 // ioMax is a VM's io.max line on stateDir's disk: ioMaxMBps / ioMaxIOPS, with writes capped
 // at capWbps too if that is lower (0: no cap). limited: some value is not "max". "" without
 // cgroup limits or a known disk.
-func (c Config) ioMax(capWbps int64) (line string, limited bool) {
-	if !c.cgroupLimits || c.stateDisk == "" {
-		return "", false
+func (c Config) ioMax(capWbps int64) (string, bool) {
+	lines, limited := c.ioMaxLines(capWbps)
+	if len(lines) == 1 {
+		return lines[0], limited
+	}
+	return "", false
+}
+
+// writeIOMaxFile is replaceable in tests to model per-device cgroup updates.
+var writeIOMaxFile = os.WriteFile
+
+// ioMaxLines emits a separate cgroup rule for every underlying disk.
+func (c Config) ioMaxLines(capWbps int64) (lines []string, limited bool) {
+	if !c.cgroupLimits || len(c.ioDisks()) == 0 {
+		return nil, false
 	}
 	rb, wb := int64(c.IOMaxMBps)<<20, int64(c.IOMaxMBps)<<20
 	if capWbps > 0 && (wb == 0 || capWbps < wb) {
@@ -311,7 +326,10 @@ func (c Config) ioMax(capWbps int64) (line string, limited bool) {
 		return strconv.FormatInt(n, 10)
 	}
 	iops := int64(c.IOMaxIOPS)
-	return fmt.Sprintf("%s rbps=%s wbps=%s riops=%s wiops=%s", c.stateDisk, v(rb), v(wb), v(iops), v(iops)), limited
+	for _, disk := range c.ioDisks() {
+		lines = append(lines, fmt.Sprintf("%s rbps=%s wbps=%s riops=%s wiops=%s", disk, v(rb), v(wb), v(iops), v(iops)))
+	}
+	return lines, limited
 }
 
 // jailerArgs: per-VM uid/gid, chroot, netns, new pid ns and a cgroup with

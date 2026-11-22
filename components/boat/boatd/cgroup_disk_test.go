@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -162,6 +163,42 @@ func TestResolveBlockDiskTopologies(t *testing.T) {
 			return id, nil
 		}
 		return "", errors.New("not found")
+	}
+
+	// A direct-I/O loop on cow-root must reach both physical NVMe disks.
+	loopCow := filepath.Join(devs, "virtual", "block", "loop4")
+	mustWrite(filepath.Join(loopCow, "dev"), "7:4")
+	mustWrite(filepath.Join(loopCow, "loop", "backing_file"), "/cow-root")
+	mustWrite(filepath.Join(loopCow, "loop", "dio"), "1")
+	mustSymlink(loopCow, filepath.Join(sysBlock, "7:4"))
+	statMap["/cow-root"] = "253:2"
+	broken := filepath.Join(devs, "virtual", "block", "dm-3")
+	mustWrite(filepath.Join(broken, "dev"), "253:3")
+	mustMkdir(filepath.Join(broken, "dm"))
+	mustSymlink(nvme0, filepath.Join(broken, "slaves", "good"))
+	mustWrite(filepath.Join(broken, "slaves", "bad", "dev"), "999:0")
+	mustSymlink(broken, filepath.Join(sysBlock, "253:3"))
+
+	md := filepath.Join(devs, "virtual", "block", "md0")
+	mustWrite(filepath.Join(md, "dev"), "9:0")
+	mustMkdir(filepath.Join(md, "md"))
+	mustSymlink(nvme1, filepath.Join(md, "slaves", "a"))
+	mustSymlink(dm1, filepath.Join(md, "slaves", "b"))
+	mustSymlink(nvme0, filepath.Join(md, "slaves", "c"))
+	mustSymlink(md, filepath.Join(sysBlock, "9:0"))
+	for _, tc := range []struct {
+		id   string
+		want []string
+	}{
+		{"253:2", []string{"259:0", "259:4"}},
+		{"9:0", []string{"259:0", "259:4"}},
+		{"7:4", []string{"259:0", "259:4"}},
+		{"253:1", []string{"259:0"}},
+		{"253:3", nil}, {"253:9", nil}, {"7:8", nil}, {"999:0", nil}, {"7:1", nil},
+	} {
+		if got := resolveBlockDisks(sysBlock, tc.id, statFn); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("resolveBlockDisks(%s) = %v, want %v", tc.id, got, tc.want)
+		}
 	}
 
 	cases := []struct {
@@ -377,5 +414,32 @@ exit 0
 				t.Fatalf("spawned firecracker pid %d survived io.max failure under untrustedTenants", pid)
 			}
 		})
+	}
+}
+
+func TestSetupCgroupsMultiDisks(t *testing.T) {
+	oldRoot, oldFn := cgroupRoot, stateDisksFn
+	defer func() { cgroupRoot, stateDisksFn = oldRoot, oldFn }()
+	for _, model := range []string{"", "rbps=3000000000 rrandiops=400000"} {
+		for _, disks := range [][]string{{"259:0", "259:4"}, nil} {
+			cgroupRoot = t.TempDir()
+			stateDisksFn = func(string) []string { return disks }
+			c := defaultConfig()
+			c.Jailer, c.CgroupParent, c.UntrustedTenants = "/usr/bin/jailer", "boat", true
+			c.IOCost, c.IOCostModel = true, model
+			err := setupCgroups(&c)
+			if (err != nil) != (len(disks) == 0) {
+				t.Fatalf("disks=%v model=%q: %v", disks, model, err)
+			}
+			if err == nil && !reflect.DeepEqual(c.ioDisks(), disks) {
+				t.Fatalf("disks=%v", c.ioDisks())
+			}
+			if err == nil && model != "" {
+				b, err := os.ReadFile(filepath.Join(cgroupRoot, "io.cost.model"))
+				if err != nil || !strings.HasPrefix(string(b), "259:4 ctrl=user model=linear ") {
+					t.Fatalf("last disk model=%q: %v", b, err)
+				}
+			}
+		}
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -176,10 +177,11 @@ func serve(cfgPath string) error {
 	return nil
 }
 
-// cgroupRoot and stateDiskFn are variables for the tests.
+// Cgroup paths and disk resolvers are replaceable in tests.
 var (
-	cgroupRoot  = "/sys/fs/cgroup"
-	stateDiskFn = stateDisk
+	cgroupRoot   = "/sys/fs/cgroup"
+	stateDiskFn  = stateDisk
+	stateDisksFn = stateDisks
 )
 
 // setupCgroups enables memory/pids/cpu/io for the per-VM children of cgroupParent (or
@@ -209,18 +211,33 @@ func setupCgroups(c *Config) error {
 	if err := setParentMemCeiling(c); err != nil {
 		return fmt.Errorf("cgroups: %w", err)
 	}
-	c.stateDisk = stateDiskFn(c.StateDir)
-	if c.UntrustedTenants && c.stateDisk == "" {
+	// Preserve legacy single-disk test overrides, including an unresolved disk.
+	if reflect.ValueOf(stateDisksFn).Pointer() == reflect.ValueOf(stateDisks).Pointer() &&
+		reflect.ValueOf(stateDiskFn).Pointer() != reflect.ValueOf(stateDisk).Pointer() {
+		c.stateDisks = nil
+		if disk := stateDiskFn(c.StateDir); disk != "" {
+			c.stateDisks = []string{disk}
+		}
+	} else {
+		c.stateDisks = stateDisksFn(c.StateDir)
+	}
+	c.stateDisk = ""
+	if len(c.stateDisks) == 1 {
+		c.stateDisk = c.stateDisks[0]
+	}
+	if c.UntrustedTenants && len(c.ioDisks()) == 0 {
 		return errors.New("cgroups: untrustedTenants requires a resolvable block device for stateDir")
 	}
 	if c.IOCost && c.IOCostModel == "" {
 		log.Printf("cgroups: ioCost: no ioCostModel, iocost left off (the kernel's default model throttles a fast disk); run `%s`", measureCmd)
 	} else if c.IOCost {
-		if err := enableIOCost(cgroupRoot, c.stateDisk, c.IOCostModel, c.IOCostQoS); err != nil {
-			if c.UntrustedTenants && c.IOCostModel != "" {
-				return fmt.Errorf("cgroups: ioCost: %w", err)
+		for _, disk := range c.ioDisks() {
+			if err := enableIOCost(cgroupRoot, disk, c.IOCostModel, c.IOCostQoS); err != nil {
+				if c.UntrustedTenants && c.IOCostModel != "" {
+					return fmt.Errorf("cgroups: ioCost: %w", err)
+				}
+				log.Printf("cgroups: ioCost: %v (VMs share the disk first come, first served; io.max still applies)", err)
 			}
-			log.Printf("cgroups: ioCost: %v (VMs share the disk first come, first served; io.max still applies)", err)
 		}
 	}
 	return nil
@@ -331,104 +348,98 @@ func mountSource(mountinfoPath, dir string) string {
 	return source
 }
 
-// resolveBlockDisk resolves a block device ("major:minor") under sysBlockRoot
-// (typically "/sys/dev/block") up to depth 8 through partitions, loop backing
-// files (via statFn returning the backing file's block device "major:minor"),
-// and single-disk device-mapper/LVM slaves to the physical whole disk's "major:minor".
+// resolveBlockDisk preserves the single-disk interface for callers requiring one device.
 func resolveBlockDisk(sysBlockRoot, devID string, statFn func(string) (string, error)) string {
-	return resolveBlockDiskDepth(sysBlockRoot, devID, statFn, 0)
-}
-
-func resolveBlockDiskDepth(sysBlockRoot, devID string, statFn func(string) (string, error), depth int) string {
-	for depth < 8 {
-		id := strings.TrimSpace(devID)
-		if id == "" {
-			return ""
-		}
-		sys := filepath.Join(sysBlockRoot, id)
-		real, err := filepath.EvalSymlinks(sys)
-		if err != nil {
-			if _, serr := os.Stat(sys); serr != nil {
-				return ""
-			}
-			real = sys
-		}
-		if _, err := os.Stat(filepath.Join(real, "partition")); err == nil { // io.max takes whole disks only
-			p, err := os.ReadFile(filepath.Join(filepath.Dir(real), "dev"))
-			if err != nil {
-				p, err = os.ReadFile(filepath.Join(sys, "..", "dev"))
-			}
-			if err != nil || strings.TrimSpace(string(p)) == "" {
-				return ""
-			}
-			devID = strings.TrimSpace(string(p))
-			depth++
-			continue
-		}
-		if b, err := os.ReadFile(filepath.Join(real, "loop", "backing_file")); err == nil {
-			backing := strings.TrimRight(string(b), "\r\n")
-			if backing == "" {
-				return ""
-			}
-			// Buffered loop mounts (dio == 0) execute writes on root-cgroup loopX kthreads,
-			// bypassing physical-disk io.max; throttle the loop device itself unless dio == 1.
-			dio, derr := os.ReadFile(filepath.Join(real, "loop", "dio"))
-			if derr != nil || strings.TrimSpace(string(dio)) != "1" {
-				return id
-			}
-			if statFn == nil {
-				return ""
-			}
-			nextID, err := statFn(backing)
-			if err != nil || strings.TrimSpace(nextID) == "" {
-				return ""
-			}
-			devID = strings.TrimSpace(nextID)
-			depth++
-			continue
-		}
-		if entries, err := os.ReadDir(filepath.Join(real, "slaves")); err == nil && len(entries) > 0 {
-			if len(entries) == 1 {
-				sb, err := os.ReadFile(filepath.Join(real, "slaves", entries[0].Name(), "dev"))
-				if err != nil || strings.TrimSpace(string(sb)) == "" {
-					return ""
-				}
-				devID = strings.TrimSpace(string(sb))
-				depth++
-				continue
-			}
-			whole := ""
-			for _, e := range entries {
-				sb, err := os.ReadFile(filepath.Join(real, "slaves", e.Name(), "dev"))
-				if err != nil {
-					return ""
-				}
-				resolved := resolveBlockDiskDepth(sysBlockRoot, strings.TrimSpace(string(sb)), statFn, depth+1)
-				if resolved == "" || (whole != "" && resolved != whole) {
-					return ""
-				}
-				whole = resolved
-			}
-			return whole
-		}
-		if _, err := os.Stat(filepath.Join(real, "device")); err == nil {
-			return id
-		}
-		if _, err := os.Stat(filepath.Join(real, "loop")); err == nil {
-			return "" // unattached loop device without backing_file
-		}
-		if _, err := os.Stat(filepath.Join(real, "dm")); err == nil {
-			return "" // virtual dm device without slaves
-		}
-		return id
+	disks := resolveBlockDisks(sysBlockRoot, devID, statFn)
+	if len(disks) == 1 {
+		return disks[0]
 	}
 	return ""
+}
+
+// resolveBlockDisks follows every backing device. An incomplete topology fails closed.
+func resolveBlockDisks(sysBlockRoot, devID string, statFn func(string) (string, error)) []string {
+	return resolveBlockDisksDepth(sysBlockRoot, devID, statFn, 0)
+}
+
+func resolveBlockDisksDepth(sysBlockRoot, devID string, statFn func(string) (string, error), depth int) []string {
+	id := strings.TrimSpace(devID)
+	if depth >= 8 || id == "" {
+		return nil
+	}
+	real, err := filepath.EvalSymlinks(filepath.Join(sysBlockRoot, id))
+	if err != nil {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(real, "partition")); err == nil {
+		parent, err := os.ReadFile(filepath.Join(filepath.Dir(real), "dev"))
+		if err != nil {
+			return nil
+		}
+		return resolveBlockDisksDepth(sysBlockRoot, string(parent), statFn, depth+1)
+	}
+	if _, err := os.Stat(filepath.Join(real, "loop")); err == nil {
+		b, err := os.ReadFile(filepath.Join(real, "loop", "backing_file"))
+		backing := strings.TrimRight(string(b), "\r\n")
+		if err != nil || backing == "" {
+			return nil
+		}
+		// Buffered loop writes run on root-cgroup kthreads; throttle the loop itself.
+		dio, err := os.ReadFile(filepath.Join(real, "loop", "dio"))
+		if err != nil || strings.TrimSpace(string(dio)) != "1" {
+			return []string{id}
+		}
+		if statFn == nil {
+			return nil
+		}
+		next, err := statFn(backing)
+		if err != nil {
+			return nil
+		}
+		return resolveBlockDisksDepth(sysBlockRoot, next, statFn, depth+1)
+	}
+	entries, err := os.ReadDir(filepath.Join(real, "slaves"))
+	if err == nil && len(entries) > 0 {
+		var disks []string
+		for _, entry := range entries {
+			b, err := os.ReadFile(filepath.Join(real, "slaves", entry.Name(), "dev"))
+			if err != nil {
+				return nil
+			}
+			resolved := resolveBlockDisksDepth(sysBlockRoot, string(b), statFn, depth+1)
+			if len(resolved) == 0 {
+				return nil
+			}
+			disks = append(disks, resolved...)
+		}
+		slices.Sort(disks)
+		return slices.Compact(disks)
+	}
+	// A failed slaves read must never turn a virtual device into a physical disk.
+	if err != nil && !os.IsNotExist(err) {
+		return nil
+	}
+	for _, kind := range []string{"dm", "md"} {
+		if _, err := os.Stat(filepath.Join(real, kind)); err == nil {
+			return nil
+		}
+	}
+	return []string{id}
 }
 
 // stateDisk returns "major:minor" of the whole disk under dir, as io.max wants
 // it ("" if unknown): btrfs's st_dev is anonymous, so go through the mount source,
 // then unwrap partitions, loop backing files, and single-disk dm/LVM slaves.
 func stateDisk(dir string) string {
+	disks := stateDisks(dir)
+	if len(disks) == 1 {
+		return disks[0]
+	}
+	return ""
+}
+
+// stateDisks resolves all whole disks beneath the state directory's mount.
+func stateDisks(dir string) []string {
 	const (
 		mountinfoPath = "/proc/self/mountinfo"
 		sysBlockRoot  = "/sys/dev/block"
@@ -436,10 +447,10 @@ func stateDisk(dir string) string {
 	source := mountSource(mountinfoPath, dir)
 	var st syscall.Stat_t
 	if source == "" || syscall.Stat(source, &st) != nil {
-		return ""
+		return nil
 	}
 	id := linuxDevID(uint64(st.Rdev))
-	return resolveBlockDisk(sysBlockRoot, id, func(backing string) (string, error) {
+	return resolveBlockDisks(sysBlockRoot, id, func(backing string) (string, error) {
 		var bst syscall.Stat_t
 		if err := syscall.Stat(backing, &bst); err != nil {
 			return "", err
