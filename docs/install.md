@@ -242,7 +242,8 @@ the box is unreachable, and only the provider's rescue system gets it back.**
    ```sh
    mount -o subvol=@ /dev/nvme0n1p2 /mnt   # also mount @nix on /mnt/nix to read the system's etc
    efibootmgr -c -d /dev/nvme0n1 -p 1 -L PandaOS -l '\EFI\systemd\systemd-bootx64.efi'
-   efibootmgr -o <PXE>,<PandaOS>,...      # delete entries of the old OS with efibootmgr -b N -B
+   efibootmgr -o 0001,0002      # replace with PXE,PandaOS boot numbers from efibootmgr -v
+   # delete entries of the old OS with efibootmgr -b N -B
    ```
 6. Reboot. Verify the new ssh host key using the provider's console or another trusted channel
    before replacing the `known_hosts` entry, then `ssh panda@<ip>`.

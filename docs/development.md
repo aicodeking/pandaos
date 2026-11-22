@@ -51,8 +51,8 @@ Budgets are in `tests/budgets.json`; how metrics are measured is in [benchmarks.
 ## Go components
 
 ```sh
-cd components/agentd && go vet ./... && go test ./...
-cd components/mem && go vet ./... && go test ./...
+(cd components/agentd && go vet ./... && go test -race ./...)
+(cd components/mem && go vet ./... && go test -race ./...)
 ```
 
 `components/agentd/cmd/fake-relay` is a small relay used by the round-trip tests. You can also run it
@@ -65,7 +65,7 @@ by hand (`fake-relay -listen :8787`) and point a local `panda-agentd -relay http
 | `ci.yml` | every push and PR | fails without `flake.lock`; `nix flake check` with KVM, `go vet`/`go test` for both components, `bench/test_collect.py`; on `main` also builds both ISOs and reports their size |
 | `lock.yml` | by hand | runs `nix flake lock` (or `nix flake update`) and uploads `flake.lock` as the `flake-lock` artifact, for contributors without Nix |
 | `nightly.yml` | daily, or by hand | runs each check separately and uploads metrics as an artifact |
-| `release.yml` | tag `v*` | `nix flake check`, builds both ISOs (all with `--no-update-lock-file`), writes `SHA256SUMS`, attests build provenance, publishes a GitHub release, then force-moves the `release` branch to the tag |
+| `release.yml` | tag `v*` or manual dry run | runs `nix-checks` and `unit-checks`, builds all three ISOs (`headless`, `desktop`, `server`) with `--no-update-lock-file`, plus boat CLI binaries and guest images, and writes checksum manifests; tag runs attest build provenance, publish the GitHub Release, and advance `release` fast-forward only; manual runs keep artifacts without publishing |
 
 KVM on GitHub runners is enabled with a udev rule that makes `/dev/kvm` usable by everyone; Nix is
 installed with `cachix/install-nix-action` with the `kvm` and `nixos-test` system features, and

@@ -62,6 +62,16 @@ can also check the build provenance with `gh attestation verify "$iso" --repo AI
 If the tagged assets are unavailable (for example, while release assets are still publishing),
 use the source-build steps in the [install guide](docs/install.md#1-get-the-iso). Explicitly choose
 and check out the same tag or verified commit for the ISO, guest images, and CLI source builds.
+After `nix build .#iso-headless`, `nix build .#iso-desktop`, or `nix build .#iso-server`,
+select the revision-stamped source-built ISO before continuing to the flash step below
+(the server build uses `headless` in its source filename):
+
+```sh
+iso=$(find -L result/iso -name '*.iso' | head -n 1)
+test -n "$iso"
+```
+
+Proceed only if `test -n "$iso"` succeeds.
 
 1. On a Linux workstation, complete the disk gate for the USB stick, unmount its partitions, then
    flash the ISO. Substitute the confirmed path for the example `/dev/sdX`.
@@ -168,6 +178,13 @@ Certificate Transparency exposure are described in the [TLS setup](docs/boat.md#
     --ssh-key 'ssh-ed25519 AAAA... operator@workstation'
   ```
 
+  For dedicated servers without DHCP (static IPv4/IPv6), prepare `extra.nix` with the
+  static network configuration matching the uplink MAC, as in
+  [Hosted server over SSH (kexec)](docs/install.md#hosted-server-over-ssh-kexec).
+  Make that file available in the live installer and add
+  `--build --extra-config /path/to/extra.nix` to `panda-install` so static networking
+  applies from the first boot and the server remains reachable.
+
   For a trusted host, add `--untrusted-tenants false`. For a multi-tenant host, add
   `--untrusted-tenants true`, `--vm-domain`, and `--desktop-domain` with the chosen domains, and
   configure DNS-01 in `/etc/pandaos/local.nix` before the rebuild. If using the on-demand fallback
@@ -218,6 +235,18 @@ After verification, run `sudo boat-admin images import boat-guest-vmlinux "$root
 [guest-image guide](docs/boat.md#guest-images) has the declarative settings, source build,
 and CI artifact options. If release assets are unavailable, explicitly check out the same
 chosen tag or verified commit used for the ISO and CLI before building guest images from source.
+From the repository root, `components/boat/guest/build.sh all` writes
+`components/boat/guest/out/vmlinux` and
+`components/boat/guest/out/rootfs-{slim,full}.ext4.zst`; the `boat-guest-*` names are
+created by CI release packaging. If Docker ran off-server, transfer the kernel and chosen
+rootfs to the server first, preserving these relative paths (or adjust the import paths).
+On the server, import the source-built files:
+
+```sh
+sudo boat-admin images import components/boat/guest/out/vmlinux components/boat/guest/out/rootfs-full.ext4.zst
+```
+
+Use `rootfs-slim.ext4.zst` instead for headless guests.
 
 ### B4. Create the first owner key and test one VM
 
@@ -233,8 +262,12 @@ chosen tag or verified commit used for the ISO and CLI before building guest ima
    `boat_SHA256SUMS`, and compare its SHA-256 using `Get-FileHash`.
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/AICodeKing/pandaos/v0.2.0/components/boat/cli/install.sh |
-     BOAT_VERSION=v0.2.0 sh
+   tmp=$(mktemp) &&
+     curl -fsSL -o "$tmp" https://raw.githubusercontent.com/AICodeKing/pandaos/v0.2.0/components/boat/cli/install.sh &&
+     BOAT_VERSION=v0.2.0 sh "$tmp"
+   status=$?
+   rm -f "$tmp"
+   [ "$status" -eq 0 ]
    ```
 
    If the release binaries are unavailable, [build the CLI from source](components/boat/cli/README.md),

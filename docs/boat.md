@@ -165,8 +165,17 @@ when `services.boat.images` is empty.
   and use `gh run download <run-id> -R AICodeKing/pandaos -n boat-assets` when the dry run completes.
   It builds the same guest filenames, keeps them for seven days and includes `boat_guest_SHA256SUMS`.
   Verify the images with that manifest before installing.
-- **Build:** on any x86_64 host with Docker, `components/boat/guest/build.sh all` writes `out/vmlinux` and `out/rootfs-{slim,full}.ext4.zst`.
-- **Then install:** `sudo boat-admin images import boat-guest-vmlinux boat-guest-rootfs-full.ext4.zst` (a `.zst` is decompressed; a plain `.ext4` is copied with a reflink when it can be). It checks the rootfs is a clean ext4 image before replacing anything, installs both files 0644 as `ubuntu-24.04` (the default id while nothing is declared) and needs no restart: VMs created after it use the new files, running ones keep theirs. `--id NAME` installs another image; declare it with `services.boat.localImages = [ "NAME" ];` so boat-api offers it (boat-admin prints that line). `sudo boat-admin images list` shows what is installed and whether it is declared. `boat-images.service` logs the import command while the default image is missing. Or put the files on any HTTPS server you control and set `services.boat.images` to those URLs with the hashes from `boat_guest_SHA256SUMS`. `boat-images.service` fetches only `https://` URLs and checks every hash.
+- **Build:** from the repository root on any x86_64 host with Docker,
+  `components/boat/guest/build.sh all` writes `components/boat/guest/out/vmlinux` and
+  `components/boat/guest/out/rootfs-{slim,full}.ext4.zst`. CI release packaging creates the
+  `boat-guest-*` names. If Docker ran off-server, transfer the kernel and chosen rootfs
+  to the server first, preserving these relative paths (or adjust the import paths).
+  On the server, import the source-built files (use `rootfs-slim.ext4.zst` for headless guests):
+
+  ```sh
+  sudo boat-admin images import components/boat/guest/out/vmlinux components/boat/guest/out/rootfs-full.ext4.zst
+  ```
+- **Install release or CI files:** `sudo boat-admin images import boat-guest-vmlinux boat-guest-rootfs-full.ext4.zst` (a `.zst` is decompressed; a plain `.ext4` is copied with a reflink when it can be). It checks the rootfs is a clean ext4 image before replacing anything, installs both files 0644 as `ubuntu-24.04` (the default id while nothing is declared) and needs no restart: VMs created after it use the new files, running ones keep theirs. `--id NAME` installs another image; declare it with `services.boat.localImages = [ "NAME" ];` so boat-api offers it (boat-admin prints that line). `sudo boat-admin images list` shows what is installed and whether it is declared. `boat-images.service` logs the import command while the default image is missing. Or put the files on any HTTPS server you control and set `services.boat.images` to those URLs with the hashes from `boat_guest_SHA256SUMS`. `boat-images.service` fetches only `https://` URLs and checks every hash.
 
 Use `full` for the desktop; on `slim`, `POST …/desktop` answers 422 `not_supported`.
 
@@ -226,7 +235,7 @@ Internet --443--> Caddy --api.D-----------------------> boat-api :8740 (/interna
 - **Live routes.** boat-gateway (Go stdlib, websockets included) re-reads `/run/boat/routes.json` whenever its mtime or size changes, so new VMs and ports never reload Caddy.
 - **SSH:** OpenSSH ProxyJump.
   ```sh
-  boat ssh <vmid>                                    # ProxyCommand ssh -W via the jump host
+  boat ssh my-vm                                    # ProxyCommand ssh -W via the jump host
   ssh -J jump@ssh.boat.example.com:2222 dev@10.200.x.y
   ```
   Port 2222 admits only the system user `jump`. It has no password, shell, tty, agent, X11 or socket forwarding (`ForceCommand false`). `/etc/boat/jump-keys`, run as the dedicated unprivileged `boat-ssh` user, asks boat-api's loopback-only `POST /internal/ssh/authorize` about the offered key. It emits only validated `restrict,port-forwarding,permitopen="<literal IPv4>:22"` lines for currently committed live grants and ready VM identities. The guest also checks managed keys online through `POST /v1/vms/{id}/ssh/authorize`, using a separate root-protected lookup credential. No static jump file, routes-file liveness check, cached allow, or offline fallback authorizes managed SSH. An unavailable API, unready policy, malformed response, or lookup timeout denies new managed authentication.
