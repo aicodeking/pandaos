@@ -129,7 +129,14 @@ let
             machine.succeed(f"boat login --url http://127.0.0.1:8740 --key {token} >&2")
 
         with subtest("the module's settings hold for a real Firecracker under the jailer"):
-            vm = json.loads(machine.succeed("boat new --name real --json", timeout=600))
+            # At L3 nesting the agent may not answer within bootTimeoutS = 60.
+            # boat new enables self_api env delivery by default; this host-only
+            # test opts out of all env pushes so creation needs no guest agent.
+            vm = json.loads(machine.succeed(
+                f"curl -fsS -H 'Authorization: Bearer {token}' -H 'Content-Type: application/json' "
+                "-d '{\"name\":\"real\",\"no_env\":true,\"self_api\":false}' http://127.0.0.1:8740/v1/vms",
+                timeout=600,
+            ))
             # The guest's serial console and Firecracker's own log, for when it does not come up.
             print(machine.execute("tail -n 60 /var/lib/boat/vms/*/firecracker.log")[1])
             assert vm["state"] == "running", vm

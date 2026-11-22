@@ -15,7 +15,9 @@ import (
 // the next boatd finish the delete, never resume or list the VM. It lives in
 // StateDir/tombstones/<id>, outside the team's quota'd subvolume (vms/<id> is a
 // symlink into it): a team at its quota, or a host with no free blocks in the
-// team's subvolume, can still delete. The older marker, a file named "deleting"
+// team's subvolume, can still delete. If the host itself is full, deleteVM
+// reclaims payloads and retries; persistent ENOSPC permits deletion without a
+// durable marker so deletion can always reclaim space. The older marker, "deleting",
 // inside the VM dir, is still honored and migrated.
 //
 // A delete whose directory removal fails keeps its tombstone and leaves the VM in the
@@ -68,6 +70,10 @@ func (m *Manager) writeTombstone(id string, v VM) error {
 			return err
 		}
 	}
+	writeFile := m.tombstoneWriteFile
+	if writeFile == nil {
+		writeFile = os.WriteFile
+	}
 	path := m.tombstonePath(id)
 	body := []byte("deleting\n")
 	if v.ID == id {
@@ -75,7 +81,7 @@ func (m *Manager) writeTombstone(id string, v VM) error {
 			body = b
 		}
 	}
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+	if err := writeFile(path, body, 0o600); err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
@@ -83,7 +89,7 @@ func (m *Manager) writeTombstone(id string, v VM) error {
 		if err := m.ensureTombstoneDir(); err != nil {
 			return err
 		}
-		if err := os.WriteFile(path, body, 0o600); err != nil {
+		if err := writeFile(path, body, 0o600); err != nil {
 			return err
 		}
 	}

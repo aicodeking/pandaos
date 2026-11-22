@@ -190,7 +190,7 @@ while (( SECONDS < restart_deadline )); do
     remaining=$((restart_deadline - SECONDS))
     (( remaining > 0 )) || break
     if after=$(timeout "${remaining}s" python3 "$W/boat.py" "$W/vsock.sock" \
-        '{"op":"exec","user":"root","timeout_s":3,"argv":["sh","-c","systemctl is-active --quiet boat-managed-env.service && systemctl show -p ActiveEnterTimestampMonotonic --value boat-managed-env.service"]}' 2>/dev/null) &&
+        '{"op":"exec","user":"root","timeout_s":3,"argv":["sh","-c","systemctl is-active --quiet boat-managed-env.service && ! systemctl show -p ActiveState --value boat-test-env-restart.service | grep -Eq \"^(active|activating)$\" && systemctl is-active --quiet ssh.service && systemctl show -p ActiveEnterTimestampMonotonic --value boat-managed-env.service"]}' 2>/dev/null) &&
         [[ -n $after && $after != 0 && $after != "$before" ]]; then
       break
     fi
@@ -225,8 +225,21 @@ keys_after=$(hostkeys)
 [[ -z $(comm -12 <(echo "$keys_before") <(echo "$keys_after")) ]] || fail "a host key was not regenerated"
 vexec 30 root grep -q 8.8.8.8 /etc/resolv.conf || fail "dns"
 rm -f "$W/known"
-for _ in $(seq 30); do "${SSH[@]}" "dev@$GUEST_IP" true 2>/dev/null && break; sleep 0.5; done  # sshd restarts after the reply
-"${SSH[@]}" "dev@$GUEST_IP" true || fail "ssh after set_identity"
+# sshd restarts after the reply; keep the successful connection as the check.
+ssh_ok=0
+for _ in $(seq 30); do
+  if vexec 5 root systemctl is-active --quiet ssh.service 2>/dev/null &&
+      "${SSH[@]}" "dev@$GUEST_IP" true 2>/dev/null; then
+    ssh_ok=1
+    break
+  fi
+  sleep 0.5
+done
+if (( ! ssh_ok )); then
+  vexec 30 root systemctl status ssh.service --no-pager || true
+  vexec 30 root journalctl -u ssh.service -n 30 --no-pager || true
+  fail "ssh after set_identity"
+fi
 pass "reseed gates set_identity; hostname, machine-id, all host keys, dns, network"
 boat '{"op":"sync"}' >/dev/null || fail "sync"
 pass "sync"

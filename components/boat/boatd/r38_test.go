@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -303,5 +305,129 @@ func TestR38RestartKeepsAFailedDeleteAsErrorVM(t *testing.T) {
 	}
 	if _, err := m2.get(v.ID); err == nil || m2.tombstoned(v.ID) {
 		t.Fatal("VM or tombstone survived the finished delete")
+	}
+}
+
+// Only ENOSPC may cross the tombstone durability barrier. Faults are wrapped as
+// real filesystem errors so the recovery must use errors.Is rather than ==.
+func TestR38DeleteTombstoneErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		first, retry error
+	}{
+		{"permission", syscall.EACCES, nil},
+		{"io", syscall.EIO, nil},
+		{"readonly", syscall.EROFS, nil},
+		{"invalid_directory", syscall.ENOTDIR, nil},
+		{"space_recovered", syscall.ENOSPC, nil},
+		{"space_persistently_full", syscall.ENOSPC, syscall.ENOSPC},
+		{"retry_io", syscall.ENOSPC, syscall.EIO},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, h := newTestManager(t, nil)
+			ctx := context.Background()
+			v, err := m.Create(ctx, CreateReq{Name: "full"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap, err := m.CreateSnapshot(ctx, v.ID, "saved")
+			if err != nil {
+				t.Fatal(err)
+			}
+			eventually(t, "snapshot synced", func() bool {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				return !m.snaps[snap.ID].Unsynced
+			})
+			payloads := []string{vmstate, memFile, diskFile, kernFile}
+			for _, f := range payloads {
+				path := filepath.Join(m.root(v.ID), f)
+				if !exists(path) {
+					if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			attempts, syncs := 0, 0
+			m.syncFSFn = func(path string) error {
+				syncs++
+				if path != m.cfg.StateDir {
+					t.Fatalf("sync filesystem: %s", path)
+				}
+				if h.Alive(v.PID, v.ID) {
+					t.Fatal("runtime still alive at sync")
+				}
+				got, err := m.get(v.ID)
+				if err != nil || got.State != Stopped || got.PID != 0 {
+					t.Fatalf("teardown state: %+v %v", got, err)
+				}
+				if !exists(filepath.Join(m.vmDir(v.ID), "vm.json")) {
+					t.Fatal("vm.json removed before retry")
+				}
+				for _, f := range payloads {
+					if exists(filepath.Join(m.root(v.ID), f)) {
+						t.Fatalf("payload %s survived before sync", f)
+					}
+				}
+				if len(m.Snapshots(v.ID)) != 0 || exists(m.snapDir(snap.ID)) {
+					t.Fatal("snapshot survived before sync")
+				}
+				return nil
+			}
+			m.tombstoneWriteFile = func(path string, body []byte, mode os.FileMode) error {
+				attempts++
+				fault := tc.first
+				if attempts == 2 {
+					if syncs != 1 {
+						t.Fatal("retry happened before filesystem sync")
+					}
+					fault = tc.retry
+				}
+				if attempts > 2 {
+					t.Fatal("more than one retry")
+				}
+				if fault != nil {
+					return &os.PathError{Op: "open", Path: path, Err: fault}
+				}
+				return os.WriteFile(path, body, mode)
+			}
+			deleted, err := m.Delete(ctx, v.ID)
+			if tc.first != syscall.ENOSPC {
+				if !errors.Is(err, tc.first) {
+					t.Fatalf("error = %v", err)
+				}
+				got, getErr := m.get(v.ID)
+				if getErr != nil || got.State != Running || !h.Alive(v.PID, v.ID) {
+					t.Fatalf("non-ENOSPC tore down VM: %+v %v", got, getErr)
+				}
+				for _, f := range payloads {
+					if !exists(filepath.Join(m.root(v.ID), f)) {
+						t.Fatalf("non-ENOSPC removed %s", f)
+					}
+				}
+				if attempts != 1 || syncs != 0 || len(m.Snapshots(v.ID)) != 1 {
+					t.Fatal("non-ENOSPC started recovery")
+				}
+				return
+			}
+			if attempts != 2 || syncs != 1 {
+				t.Fatalf("attempts=%d syncs=%d", attempts, syncs)
+			}
+			if tc.retry != nil && tc.retry != syscall.ENOSPC {
+				if !errors.Is(err, tc.retry) || !exists(filepath.Join(m.vmDir(v.ID), "vm.json")) {
+					t.Fatalf("retry must fail closed: %v", err)
+				}
+				return
+			}
+			if err != nil || deleted.State != "deleted" {
+				t.Fatalf("delete: %+v %v", deleted, err)
+			}
+			if exists(m.vmDir(v.ID)) || m.tombstoned(v.ID) {
+				t.Fatal("VM dir or tombstone survived")
+			}
+			if _, err := m.get(v.ID); err == nil {
+				t.Fatal("VM not forgotten")
+			}
+		})
 	}
 }

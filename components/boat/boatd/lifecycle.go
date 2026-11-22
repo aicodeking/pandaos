@@ -913,9 +913,11 @@ func (m *Manager) deleteVM(ctx context.Context, id string, syncNet bool) (VM, er
 	if err != nil {
 		return v, err
 	}
-	// The tombstone is durable before any teardown: a crash from here on makes the
-	// next boatd finish this delete instead of resuming (or resurrecting) the VM.
-	if err := m.writeTombstone(id, v); err != nil {
+	// Normally the tombstone is durable before teardown, so a crash makes the
+	// next boatd finish the delete. ENOSPC alone permits teardown first: deleting
+	// must still reclaim space when the host cannot allocate even a marker.
+	err = m.writeTombstone(id, v)
+	if err != nil && !errors.Is(err, syscall.ENOSPC) {
 		return v, fmt.Errorf("delete: tombstone: %w", err)
 	}
 	m.killWait(id, v.PID)
@@ -929,6 +931,29 @@ func (m *Manager) deleteVM(ctx context.Context, id string, syncNet bool) (VM, er
 	m.updateInMemory(id, "deleted", func(x *VM) { x.State, x.PID = Stopped, 0 }) // closes the billing interval without a redundant vm.json fsync
 	for _, s := range m.Snapshots(id) {
 		m.DeleteSnapshot(id, s.ID)
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		// Keep vm.json until the retry: it is still the recovery record while
+		// there is no durable tombstone. Unlink payloads before syncfs so btrfs
+		// commits delayed refs and releases their extents before the retry.
+		for _, f := range []string{vmstate, memFile, diskFile, kernFile} {
+			if uerr := os.Remove(filepath.Join(m.root(id), f)); uerr != nil && !os.IsNotExist(uerr) {
+				log.Printf("%s: delete: reclaiming %s before tombstone retry: %v", id, f, uerr)
+			}
+		}
+		flush := m.syncFSFn
+		if flush == nil {
+			flush = syncFS
+		}
+		if ferr := flush(m.cfg.StateDir); ferr != nil {
+			log.Printf("%s: delete: syncing filesystem before tombstone retry: %v", id, ferr)
+		}
+		if err = m.writeTombstone(id, v); err != nil {
+			if !errors.Is(err, syscall.ENOSPC) {
+				return v, fmt.Errorf("delete: tombstone retry: %w", err)
+			}
+			log.Printf("WARNING: %s: delete: tombstone still has no space after reclaim; proceeding without a durable marker: %v", id, err)
+		}
 	}
 	if err := m.removeVMState(id); err != nil {
 		return m.deleteFailed(id, v, err)

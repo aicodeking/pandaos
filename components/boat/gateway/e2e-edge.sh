@@ -232,11 +232,11 @@ CA=$WORK/ca.pem
 # Bootstrap the disposable copied images before boatd can copy them for NOCOW.
 # Managed
 # authorization must use verified HTTPS even under this fixture's private CA.
-log "guest test CA and control-plane DNS"
+log "guest test CA"
 for image in slim full; do
-  sudo bash -s -- "$STATE/images/$image/rootfs.ext4" "$WORK/guest-ca-mount" "$CA" "api.$D" <<'SEED_CA'
+  sudo bash -s -- "$STATE/images/$image/rootfs.ext4" "$WORK/guest-ca-mount" "$CA" <<'SEED_CA'
 set -euo pipefail
-image=$1 mount_dir=$2 ca=$3 api_host=$4
+image=$1 mount_dir=$2 ca=$3
 mkdir -p "$mount_dir"
 mount -o loop "$image" "$mount_dir"
 trap 'umount "$mount_dir"' EXIT
@@ -247,7 +247,6 @@ cat "$ca" >>"$mount_dir/etc/ssl/certs/ca-certificates.crt"
 # ssh-authorize.py uses OpenSSL capath lookup, which requires a subject hash.
 install -m 0644 "$ca" "$mount_dir/etc/ssl/certs/boat-edge.pem"
 ln -sf boat-edge.pem "$mount_dir/etc/ssl/certs/$(openssl x509 -hash -noout -in "$ca").0"
-printf '\n10.200.0.1 %s\n' "$api_host" >>"$mount_dir/etc/hosts"
 SEED_CA
 done
 # Flush the unmounted image edits before boatd starts its NOCOW conversion.
@@ -373,6 +372,8 @@ print(hmac.new(k, sys.argv[2].encode(), hashlib.sha256).hexdigest())' "$KEYF" "$
 
 log "VM A (slim): http on 8080 (private) and 8081 (public)"
 boat new --name edge-a --json >/dev/null
+# set_identity replaces /etc/hosts, so seed control-plane DNS after creation.
+run edge-a "grep -qw 'api.$D' /etc/hosts || printf '10.200.0.1 %s\n' 'api.$D' | sudo tee -a /etc/hosts >/dev/null"
 id_a=$(field edge-a id) ip_a=$(field edge-a ip)
 run edge-a 'mkdir -p /tmp/www && echo edge-ok >/tmp/www/index.html &&
   for p in 8080 8081; do setsid nohup python3 -m http.server $p -d /tmp/www >/dev/null 2>&1 </dev/null & done; sleep 1'
@@ -416,6 +417,8 @@ fi
 
 log "VM D (full): desktop on its own origin"
 boat new --name edge-d --image full --json >/dev/null
+# set_identity replaces /etc/hosts, so seed control-plane DNS after creation.
+run edge-d "grep -qw 'api.$D' /etc/hosts || printf '10.200.0.1 %s\n' 'api.$D' | sudo tee -a /etc/hosts >/dev/null"
 id_d=$(field edge-d id)
 link=$(boat desktop edge-d --json | jq -r .url)
 [[ $link == "https://desktop.$D/$id_d?exp="* ]] || fail "desktop link: $link"
@@ -461,7 +464,10 @@ lookup=$(sudo -u boat-ssh env BOAT_JUMP_ALLOW_UNTRACKED=1 /etc/boat-edge/jump-ke
 sshj() { ssh -F "$WORK/ssh_config" -J jump@localhost:2222 "$@"; }
 out=""
 for _ in $(seq 30); do out=$(sshj "dev@$ip_a" hostname 2>&1) && break; sleep 1; done
-[ "$out" = edge-a ] || fail "ssh -J: $out"
+if [ "$out" != edge-a ]; then
+  run edge-a "getent hosts api.$D || true; sudo journalctl -u ssh -n 20 --no-pager || true" || true
+  fail "ssh -J: $out"
+fi
 # The CLI's own ProxyCommand path. e2e.sh ran on this runner first, and VM IPs
 # are reused: drop its known_hosts entry for this address.
 ssh-keygen -q -R "$ip_a" >/dev/null 2>&1 || true

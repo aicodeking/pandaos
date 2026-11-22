@@ -72,7 +72,9 @@ type Manager struct {
 	deleteRetryDelay   time.Duration
 	tombstoneDirMu     sync.Mutex
 	tombstoneDirSynced atomic.Bool
-	syncDirFn          func(string) error // test hook; nil = syncDir
+	tombstoneWriteFile func(string, []byte, os.FileMode) error // test hook; nil = os.WriteFile
+	syncFSFn           func(string) error                      // test hook; nil = syncFS
+	syncDirFn          func(string) error                      // test hook; nil = syncDir
 	teamVolMu          sync.Mutex
 	dumpSlots          chan struct{}                          // host-wide semaphore bounding concurrent memory dumps
 	memMaxRetries      map[string]bool                        // VMs with a background memory.max restore loop (under mu)
