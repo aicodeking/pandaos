@@ -21,50 +21,74 @@ import (
 )
 
 type Config struct {
-	SSHUser          string
-	SSHJump          string // optional user@host:port bastion returned to clients
-	DesktopURL       string // base URL of the desktop gateway; empty disables /desktop
-	DesktopKey       []byte
-	DesktopTTL       time.Duration
-	Images           []string
-	AllowPrivateHook bool // permit webhook targets on loopback/private nets (dev/tests)
-	MaxFileBytes     int64
-	JumpKeysFile     string            // authorized_keys for the ssh jump user; empty disables
-	MaxKeysPerTeam   int               // 0 = unlimited
-	MaxHooksPerTeam  int               // 0 = unlimited
-	AIProxyURL       string            // what VMs use to reach the AI proxy; empty = no proxy
-	AIUpstreams      map[string]string // provider base URL overrides (tests)
-	PublicURL        string            // public base URL of this API, for signed snapshot links
-	MaxImportBytes   int64
-	VMDomain         string // port routes are <port>-<vmid>.<VMDomain> (scheme optional, default https)
-	VMAPIURL         string // this API as VMs reach it (BOAT_URL in the guest); empty = PublicURL
-	PortURLTTL       time.Duration
-	BodyTimeout      time.Duration       // request body read deadline on non-stream routes (0 = default)
-	HookDeny         []netip.Prefix      // more webhook targets to refuse (the VM pool's prefixes)
-	ProviderModels   map[string][]string // agent -> models listed by GET /api/v1/provider-models
+	SSHPolicyUsers      []string // explicitly allowed installed/verified OS login names
+	SSHPolicyHelperFile string   // guest policy helper artifact, never tenant supplied
+	SSHUser             string
+	SSHJump             string // optional user@host:port bastion returned to clients
+	DesktopURL          string // base URL of the desktop gateway; empty disables /desktop
+	DesktopKey          []byte
+	DesktopTTL          time.Duration
+	Images              []string
+	AllowPrivateHook    bool // permit webhook targets on loopback/private nets (dev/tests)
+	MaxFileBytes        int64
+	JumpKeysFile        string            // legacy jump file to clear; never populated
+	MaxKeysPerTeam      int               // 0 = unlimited
+	MaxHooksPerTeam     int               // 0 = unlimited
+	AIProxyURL          string            // what VMs use to reach the AI proxy; empty = no proxy
+	AIUpstreams         map[string]string // provider base URL overrides (tests)
+	PublicURL           string            // public base URL of this API, for signed snapshot links
+	MaxImportBytes      int64
+	VMDomain            string // port routes are <port>-<vmid>.<VMDomain> (scheme optional, default https)
+	VMAPIURL            string // this API as VMs reach it (BOAT_URL in the guest); empty = PublicURL
+	PortURLTTL          time.Duration
+	BodyTimeout         time.Duration       // request body read deadline on non-stream routes (0 = default)
+	UploadIdleTimeout   time.Duration       // per-read progress deadline on uploads/imports (0 = default 30s)
+	UploadMaxDuration   time.Duration       // total duration cap on uploads/imports (0 = default 2h)
+	HookDeny            []netip.Prefix      // more webhook targets to refuse (the VM pool's prefixes)
+	ProviderModels      map[string][]string // agent -> models listed by GET /api/v1/provider-models
 }
 
 type server struct {
-	store      *Store
-	keys       *Keyring
-	boatd      *boatdClient
-	limiter    *limiter  // per key
-	teamLim    *limiter  // per team (all keys of a team share it)
-	aiLim      *limiter  // AI proxy requests per VM
-	streams    *inflight // long responses per team
-	teamAll    *inflight // every authenticated request per team (bounds buffered bodies)
-	uploads    *inflight // uploads and imports per team
-	aiInflight *inflight // AI proxy requests per VM
-	aiMeter    *aiMeter
-	aiClient   *http.Client
-	otel       *otelExporter // nil = no instance export
-	ctx        context.Context
-	keyUse     sync.Map // key id -> *keyUsage
-	audit      *auditLog
-	hooks      *dispatcher
-	cfg        Config
-	mux        *http.ServeMux
-	jumpMu     sync.Mutex
+	store              *Store
+	keys               *Keyring
+	boatd              *boatdClient
+	limiter            *limiter  // per key
+	teamLim            *limiter  // per team (all keys of a team share it)
+	aiLim              *limiter  // AI proxy requests per VM
+	streams            *inflight // long responses per team
+	teamAll            *inflight // every authenticated request per team (bounds buffered bodies)
+	uploads            *inflight // uploads and imports per team
+	aiInflight         *inflight // AI proxy requests per VM
+	teamOTel           *inflight // per-team OTLP export goroutines
+	aiMeter            *aiMeter
+	aiClient           *http.Client
+	otel               *otelExporter // nil = no instance export
+	ctx                context.Context
+	keyUse             sync.Map // key id -> *keyUsage
+	audit              *auditLog
+	hooks              *dispatcher
+	cfg                Config
+	mux                *http.ServeMux
+	sshCleanupMu       sync.Mutex
+	sshCleanupRunning  bool
+	sshCleanupDirty    bool
+	sshCleanupScope    jumpReattestScope
+	sshDeferredVMs     map[string]bool // non-running VMs deferred from periodic expiry retry until they start/delete
+	sshCleanupTimer    *time.Timer
+	sshCleanupDebounce time.Duration // 0 = defaultJumpSyncDebounce
+	vmCreates          vmLifecycleGate
+	reconcileMu        sync.Mutex
+	reconcileActive    map[string]bool
+	reconcileDirty     map[string]string // vmID -> latest team ("" if unknown)
+	attestedMu         sync.Mutex
+	attestedEpoch      map[string]string
+	inFlightPolicy     map[string]int
+	pendingEpochs      map[string]map[string]bool // boot epochs with a policy push in flight
+	helperMu           sync.Mutex
+	helperPath         string
+	helperModNano      int64
+	helperSize         int64
+	helperBytes        []byte
 	// routeTable lists every registered "METHOD /path" (OpenAPI drift test).
 	routeTable []string
 	// routeScopes maps every authenticated pattern to its scope ("" = any key);
@@ -77,6 +101,8 @@ type server struct {
 	stops       stopOps                                           // boat.dev stop operations (compat_stops.go)
 	// drawCompatID draws a bx_ id candidate (tests force collisions); nil = random.
 	drawCompatID func() string
+	// streamRecheck overrides streamRecheckEvery (tests); 0 = default.
+	streamRecheck time.Duration
 }
 
 // ---- scopes and roles ----
@@ -97,15 +123,29 @@ func validRole(r string) bool { return r == "owner" || r == "admin" || r == "mem
 
 type principal struct {
 	Key    *APIKey
+	KeyGen int64
 	User   *User
 	Team   *Team
 	Role   string
 	Scopes []string // key scopes ∩ role scopes
+	// Identity of the secret actually authenticated, including overlap secrets.
+	// Keep no raw bearer secret; compatibility calls forward this principal.
+	credentialSalt, credentialHash string
 	// Operator is the instance operator (set by admin init); only operators
 	// create or delete teams. Still limited by the key's admin scope.
 	Operator bool
 	// VMID: a VM's own token (selftoken.go); it reaches only that VM's routes.
 	VMID string
+}
+
+func keyGenValid(k *APIKey, gen int64, now time.Time) bool {
+	if k == nil {
+		return false
+	}
+	if gen == k.Gen {
+		return true
+	}
+	return gen == k.Gen-1 && k.PrevHash != "" && k.PrevUntil != nil && !k.PrevUntil.IsZero() && now.Before(*k.PrevUntil)
 }
 
 func (p *principal) has(scope string) bool { return slices.Contains(p.Scopes, scope) }
@@ -130,6 +170,9 @@ func (s *server) authenticate(header string) *principal {
 	if !ok {
 		return nil
 	}
+	if strings.HasPrefix(strings.TrimSpace(tok), sshLookupPrefix) {
+		return nil
+	}
 	if strings.HasPrefix(tok, selfTokenPrefix) {
 		return s.authenticateSelf(strings.TrimSpace(tok))
 	}
@@ -138,17 +181,23 @@ func (s *server) authenticate(header string) *principal {
 		return nil
 	}
 	st := s.store.Snapshot()
+	now := time.Now()
 	k := st.Keys[id]
-	if k == nil || (k.Expires != nil && !time.Now().Before(*k.Expires)) {
+	if k == nil || (k.Expires != nil && !now.Before(*k.Expires)) {
 		return nil
 	}
+	salt, hash, keyGen := k.Salt, k.Hash, k.Gen
 	got := s.keys.HashSecret(k.Salt, secret)
 	if subtle.ConstantTimeCompare([]byte(got), []byte(k.Hash)) != 1 {
 		// Rotation overlap: the previous secret works until PrevUntil.
-		if k.PrevUntil == nil || !time.Now().Before(*k.PrevUntil) ||
+		if k.PrevHash == "" || k.PrevUntil == nil || k.PrevUntil.IsZero() || !now.Before(*k.PrevUntil) ||
 			subtle.ConstantTimeCompare([]byte(s.keys.HashSecret(k.PrevSalt, secret)), []byte(k.PrevHash)) != 1 {
 			return nil
 		}
+		salt, hash, keyGen = k.PrevSalt, k.PrevHash, k.Gen-1
+	}
+	if !keyGenValid(k, keyGen, now) {
+		return nil
 	}
 	u, t := st.Users[k.UserID], st.Teams[k.TeamID]
 	if u == nil || t == nil {
@@ -158,7 +207,94 @@ func (s *server) authenticate(header string) *principal {
 	if role == "" {
 		return nil
 	}
-	return &principal{Key: k, User: u, Team: t, Role: role, Scopes: effectiveScopes(k.Scopes, role), Operator: u.Operator}
+	return &principal{Key: k, KeyGen: keyGen, User: u, Team: t, Role: role, Scopes: effectiveScopes(k.Scopes, role), Operator: u.Operator, credentialSalt: salt, credentialHash: hash}
+}
+
+// currentKeyPrincipal resolves the authenticated credential against the state
+// being committed. It must run inside the same transaction as the key mint.
+func currentKeyPrincipal(st *State, p *principal, now time.Time) *principal {
+	if p == nil || p.VMID != "" || p.Key == nil || p.User == nil || p.Team == nil || p.credentialHash == "" {
+		return nil
+	}
+	k := st.Keys[p.Key.ID]
+	if k == nil || k.UserID != p.User.ID || k.TeamID != p.Team.ID ||
+		(k.Expires != nil && !now.Before(*k.Expires)) ||
+		(p.Key.Expires != nil && !now.Before(*p.Key.Expires)) {
+		return nil
+	}
+	matches := func(salt, hash string) bool {
+		return salt != "" && hash != "" && salt == p.credentialSalt && subtle.ConstantTimeCompare([]byte(hash), []byte(p.credentialHash)) == 1
+	}
+	var curGen int64
+	switch {
+	case matches(k.Salt, k.Hash):
+		curGen = k.Gen
+	case k.PrevHash != "" && k.PrevUntil != nil && !k.PrevUntil.IsZero() && now.Before(*k.PrevUntil) && matches(k.PrevSalt, k.PrevHash):
+		curGen = k.Gen - 1
+	default:
+		return nil
+	}
+	if curGen != p.KeyGen || !keyGenValid(k, curGen, now) {
+		return nil
+	}
+	u, team := st.Users[k.UserID], st.Teams[k.TeamID]
+	if u == nil || team == nil || team.role(u.ID) == "" {
+		return nil
+	}
+	role := team.role(u.ID)
+	scopes := slices.Clone(effectiveScopes(k.Scopes, role))
+	scopes = slices.DeleteFunc(scopes, func(sc string) bool { return !p.has(sc) })
+	return &principal{Key: k, KeyGen: curGen, User: u, Team: team, Role: role, Scopes: scopes, credentialSalt: p.credentialSalt, credentialHash: p.credentialHash, Operator: p.Operator && u.Operator}
+}
+
+// principalAliveIn revalidates either an API-key principal or a VM self-token
+// principal against st at now, returning (resolved, 0, "", "") on success or
+// (nil, httpStatus, code, message) when revoked or missing scope.
+func principalAliveIn(st *State, p *principal, scope string, now time.Time) (*principal, int, string, string) {
+	if p == nil || p.Key == nil || p.Team == nil {
+		return nil, 401, "unauthorized", "invalid or expired api key"
+	}
+	if p.VMID != "" {
+		if !keyAliveIn(st, p.Key.ID, p.Team.ID, "", now) {
+			return nil, 401, "unauthorized", "invalid or expired api key"
+		}
+		if scope != "" && (!p.has(scope) || !keyAliveIn(st, p.Key.ID, p.Team.ID, scope, now)) {
+			return nil, 403, "forbidden", "key requires scope " + scope
+		}
+		return p, 0, "", ""
+	}
+	cur := currentKeyPrincipal(st, p, now)
+	if cur == nil {
+		return nil, 401, "unauthorized", "invalid or expired api key"
+	}
+	if scope != "" && (!cur.has(scope) || !p.has(scope)) {
+		return nil, 403, "forbidden", "key requires scope " + scope
+	}
+	return cur, 0, "", ""
+}
+
+type authError struct {
+	status    int
+	code, msg string
+}
+
+func (e *authError) Error() string { return e.msg }
+
+func requirePrincipalIn(st *State, p *principal, scope string, now time.Time) (*principal, error) {
+	cur, status, code, msg := principalAliveIn(st, p, scope, now)
+	if cur == nil {
+		return nil, &authError{status: status, code: code, msg: msg}
+	}
+	return cur, nil
+}
+
+func (s *server) revalidatePrincipal(w http.ResponseWriter, r *http.Request, p *principal, scope string) *principal {
+	cur, status, code, msg := principalAliveIn(s.store.Snapshot(), p, scope, time.Now())
+	if cur == nil {
+		writeErr(w, r, status, code, msg)
+		return nil
+	}
+	return cur
 }
 
 // ---- rate limiting: token bucket per key ----
@@ -196,6 +332,21 @@ func (l *limiter) allow(key string) (bool, time.Duration) {
 	}
 	b := l.buckets[key]
 	if b == nil {
+		if len(l.buckets) >= maxRateBuckets {
+			l.sweep(now)
+			if len(l.buckets) >= maxRateBuckets {
+				var oldestKey string
+				var oldestTime time.Time
+				for k, cur := range l.buckets {
+					if oldestKey == "" || cur.last.Before(oldestTime) {
+						oldestKey, oldestTime = k, cur.last
+					}
+				}
+				if oldestKey != "" {
+					delete(l.buckets, oldestKey)
+				}
+			}
+		}
 		b = &bucket{tokens: l.burst, last: now}
 		l.buckets[key] = b
 	}
@@ -307,11 +458,12 @@ type ctxKey struct{}
 type reqInfo struct {
 	id       string
 	p        *principal
-	audit    bool   // audit even though it is a GET (sensitive read)
-	pattern  string // the matched route, for traces and the OpenAPI drift test
-	vmOK     bool   // ownVM passed, so a later boatd 404 is about something else
-	vm       VM     // what ownVM fetched, reused within the request
-	compatID string // the bx_ id an /api/v1 path named (compatResolve)
+	audit    bool     // audit even though it is a GET (sensitive read)
+	pattern  string   // the matched route, for traces and the OpenAPI drift test
+	vmOK     bool     // ownVM passed, so a later boatd 404 is about something else
+	vm       VM       // what ownVM fetched, reused within the request
+	compatID string   // the bx_ id an /api/v1 path named (compatResolve)
+	idemVMs  []string // native VM ids created by an idempotent compat call
 }
 
 // baseCtx outlives requests (env builds).
@@ -410,6 +562,9 @@ func auditPath(r *http.Request) string {
 	if strings.HasPrefix(r.URL.Path, fileDownloadPath) {
 		return fileDownloadPath + "REDACTED"
 	}
+	if strings.HasPrefix(r.URL.Path, fileUploadPath) {
+		return fileUploadPath + "REDACTED"
+	}
 	return r.URL.Path
 }
 
@@ -419,34 +574,52 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request, p *principal)
 // auditedReads are GETs that disclose data or grant access, so they are
 // audited like writes.
 var auditedReads = map[string]bool{
-	"GET /v1/vms/{id}/files":                    true,
-	"GET /v1/vms/{id}/desktop":                  true,
-	"GET /v1/vms/{id}/ports/{port}/url":         true,
-	"GET /v1/secrets":                           true,
-	"GET /v1/keys":                              true,
-	"GET /v1/webhooks/{id}/deliveries":          true,
-	"GET /v1/vms/{id}/files/list":               true,
-	"GET /v1/vms/{id}/files/search":             true,
-	"GET /v1/vms/{id}/files/info":               true,
-	"GET /v1/vms/{id}/commands/{cid}/logs":      true,
-	"GET /v1/vms/{id}/prompts/{pid}/logs":       true,
-	"GET /v1/vms/{id}/snapshots/{sid}/download": true,
-	"GET /v1/vms/{id}/snapshots/{sid}/shares":   true,
-	"GET /v1/ai/credentials":                    true,
-	"GET /v1/telemetry":                         true,
+	"GET /v1/vms/{id}/files":                                          true,
+	"GET /v1/vms/{id}/desktop":                                        true,
+	"GET /v1/vms/{id}/ports/{port}/url":                               true,
+	"GET /v1/secrets":                                                 true,
+	"GET /v1/keys":                                                    true,
+	"GET /v1/webhooks/{id}/deliveries":                                true,
+	"GET /v1/vms/{id}/files/list":                                     true,
+	"GET /v1/vms/{id}/files/search":                                   true,
+	"GET /v1/vms/{id}/files/info":                                     true,
+	"GET /v1/vms/{id}/commands/{cid}/logs":                            true,
+	"GET /v1/vms/{id}/prompts/{pid}/logs":                             true,
+	"GET /v1/vms/{id}/snapshots/{sid}/download":                       true,
+	"GET /v1/vms/{id}/snapshots/{sid}/shares":                         true,
+	"GET /v1/ai/credentials":                                          true,
+	"GET /v1/telemetry":                                               true,
+	"GET /api/v1/snapshots/{sid}/download":                            true,
+	"GET /api/v1/sandboxes/{id}/desktop":                              true,
+	"GET /api/v1/sandboxes/{id}/files":                                true,
+	"GET /api/v1/sandboxes/{id}/files/list":                           true,
+	"GET /api/v1/sandboxes/{id}/artifacts":                            true,
+	"GET /api/v1/sandboxes/{id}/commands/{cid}/logs":                  true,
+	"GET /api/v1/sandboxes/{id}/command-history/{cid}/logs":           true,
+	"GET /api/v1/sandboxes/{id}/commands/{pid}/stream":                true,
+	"GET /api/v1/sandboxes/{id}/events":                               true,
+	"GET /api/v1/api-keys":                                            true,
+	"GET /api/v1/secrets":                                             true,
+	"GET /api/v1/credential-profiles":                                 true,
+	"GET /api/v1/credential-profiles/{profile}/accounts/{credential}": true,
+	"GET /api/v1/telemetry":                                           true,
 }
 
 // streamRoutes hold a connection for as long as the guest or client keeps it open.
 var streamRoutes = map[string]bool{
-	"POST /v1/vms/{id}/exec":                    true,
-	"POST /api/v1/sandboxes/{id}/commands":      true,
-	"GET /api/v1/sandboxes/{id}/files":          true,
-	"POST /v1/vms/{id}/prompt":                  true,
-	"GET /v1/events":                            true,
-	"GET /v1/vms/{id}/commands/{cid}/logs":      true,
-	"GET /v1/vms/{id}/prompts/{pid}/logs":       true,
-	"GET /v1/vms/{id}/files":                    true,
-	"GET /v1/vms/{id}/snapshots/{sid}/download": true,
+	"POST /v1/vms/{id}/exec":                                true,
+	"POST /api/v1/sandboxes/{id}/commands":                  true,
+	"GET /api/v1/sandboxes/{id}/files":                      true,
+	"GET /api/v1/sandboxes/{id}/commands/{pid}/stream":      true,
+	"GET /api/v1/sandboxes/{id}/commands/{cid}/logs":        true,
+	"GET /api/v1/sandboxes/{id}/command-history/{cid}/logs": true,
+	"GET /api/v1/sandboxes/{id}/artifacts":                  true,
+	"POST /v1/vms/{id}/prompt":                              true,
+	"GET /v1/events":                                        true,
+	"GET /v1/vms/{id}/commands/{cid}/logs":                  true,
+	"GET /v1/vms/{id}/prompts/{pid}/logs":                   true,
+	"GET /v1/vms/{id}/files":                                true,
+	"GET /v1/vms/{id}/snapshots/{sid}/download":             true,
 }
 
 var uploadRoutes = map[string]bool{
@@ -531,6 +704,9 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 			writeErr(w, r, http.StatusForbidden, "forbidden", "key lacks scope "+scope)
 			return
 		}
+		if s.refuseSelfNoEnv(w, r, p, pattern) {
+			return
+		}
 		releaseAll, ok := s.acquireOr429(w, r, s.teamAll, p.Team.ID)
 		if !ok {
 			return
@@ -543,6 +719,20 @@ func (s *server) route(pattern, scope string, h handlerFunc) {
 		defer release()
 		if !s.guardBody(w, r, p, pattern) {
 			return
+		}
+		// Only after guardBody's ownership check: a non-owner must not be able to
+		// flip another VM's "policy in flight" flag (it relaxes the guest SSH
+		// lookup's attested-epoch proof).
+		if pattern == "POST /v1/vms/{id}/ssh" {
+			if id := r.PathValue("id"); id != "" {
+				s.enterPolicy(id)
+				defer s.leavePolicy(id)
+			}
+		}
+		if isStreamRequest(pattern, r) {
+			var stop func()
+			r, stop = s.watchStream(r, p, scope)
+			defer stop()
 		}
 		h(w, r, p)
 	})
@@ -564,29 +754,49 @@ func writeErr(w http.ResponseWriter, r *http.Request, status int, code, msg stri
 func writeUpstream(w http.ResponseWriter, r *http.Request, err error) {
 	var be *boatdError
 	if errors.As(err, &be) {
+		msg := be.message()
+		if strings.HasPrefix(msg, guestPrefix) {
+			// The VM's own agent refused: strip the internal prefix and keep the
+			// guest's message. Real boatd maps structured guest codes to 4xx.
+			clean := strings.TrimPrefix(msg, guestPrefix)
+			switch {
+			case be.Status == http.StatusUnprocessableEntity || be.code() == "unsupported" || be.code() == "not_supported":
+				writeErr(w, r, http.StatusUnprocessableEntity, "not_supported", clean)
+			case be.Status == http.StatusBadRequest:
+				writeErr(w, r, http.StatusBadRequest, "bad_request", clean)
+			case be.Status == http.StatusForbidden:
+				writeErr(w, r, http.StatusForbidden, "permission_denied", clean)
+			case be.Status == http.StatusNotFound:
+				writeErr(w, r, http.StatusNotFound, "not_found", clean)
+			case be.Status == http.StatusConflict:
+				writeErr(w, r, http.StatusConflict, "conflict", clean)
+			case be.Status/100 == 4:
+				writeErr(w, r, be.Status, "bad_request", clean)
+			default:
+				st, code := guestStatus(msg)
+				writeErr(w, r, st, code, clean)
+			}
+			return
+		}
 		switch {
 		case be.Status == http.StatusNotFound && info(r).vmOK:
 			writeErr(w, r, 404, "not_found", "not found")
 		case be.Status == http.StatusNotFound:
 			writeErr(w, r, 404, "not_found", "vm not found")
 		case be.Status == http.StatusTooManyRequests:
-			writeErr(w, r, 429, "quota_exceeded", be.message())
+			writeErr(w, r, 429, "quota_exceeded", msg)
 		case be.Status == http.StatusConflict:
-			writeErr(w, r, 409, "conflict", be.message())
+			writeErr(w, r, 409, "conflict", msg)
 		case be.Status == http.StatusServiceUnavailable && (be.code() == "no_ready_machine" || be.code() == "host_capacity"):
 			// The host is full (or, with fail_fast, still starting): the caller may retry later.
 			w.Header().Set("Retry-After", "10")
-			writeErr(w, r, 503, be.code(), be.message())
+			writeErr(w, r, 503, be.code(), msg)
 		case be.Status == http.StatusGatewayTimeout && be.code() == "resize_timeout":
 			// The disk is grown on the host, the guest's resize2fs did not finish: the
 			// same disk_gib again retries it (PROTOCOL.md resize).
-			writeErr(w, r, 504, "resize_timeout", be.message())
+			writeErr(w, r, 504, "resize_timeout", msg)
 		case be.Status/100 == 4:
-			writeErr(w, r, be.Status, "bad_request", be.message())
-		case strings.HasPrefix(be.message(), guestPrefix):
-			// The VM's own agent refused: its message is the caller's to see.
-			st, code := guestStatus(be.message())
-			writeErr(w, r, st, code, strings.TrimPrefix(be.message(), guestPrefix))
+			writeErr(w, r, be.Status, "bad_request", msg)
 		default:
 			log.Printf("%s: %v", info(r).id, err)
 			writeErr(w, r, http.StatusBadGateway, "upstream_error", "vm manager error")
@@ -606,9 +816,23 @@ func guestStatus(msg string) (int, string) {
 	switch {
 	case strings.Contains(m, "not installed in this image"):
 		return http.StatusUnprocessableEntity, "not_supported"
-	case strings.Contains(m, "session exists"):
+	case strings.Contains(m, "session exists"),
+		strings.Contains(m, "command is not running"),
+		strings.Contains(m, "already exists"),
+		strings.Contains(m, " exists; set overwrite"),
+		strings.Contains(m, "file exists"),
+		strings.Contains(m, "directory not empty"),
+		strings.Contains(m, "non-empty directory"),
+		strings.Contains(m, "is a directory; delete it first"):
 		return http.StatusConflict, "conflict"
-	case strings.Contains(m, " must be ") || strings.Contains(m, ": bad ") || strings.Contains(m, "unknown op"):
+	case strings.Contains(m, " must be "),
+		strings.Contains(m, ": bad "),
+		strings.Contains(m, "unknown op"),
+		strings.Contains(m, "refusing to delete"),
+		strings.Contains(m, "not a directory"),
+		strings.Contains(m, "is a directory"),
+		strings.Contains(m, "must not be negative"),
+		strings.Contains(m, "no such user"):
 		return http.StatusBadRequest, "bad_request"
 	}
 	return http.StatusBadGateway, "guest_error"

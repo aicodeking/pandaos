@@ -11,6 +11,7 @@ import hmac
 import ipaddress
 import json
 import os
+import pwd
 import re
 import secrets
 import select
@@ -20,6 +21,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -28,7 +30,7 @@ from urllib.parse import urlsplit
 # -I leaves the script's directory off sys.path; it is root-owned (/usr/local/lib/boat).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import boat_ops  # noqa: E402
-from boat_ops import OpError, b64d, user_info  # noqa: E402
+from boat_ops import OpError, b64d, oserror_code, resolve_cwd, spawn_error_info, user_info  # noqa: E402
 
 VERSION = "1"
 VSOCK_PORT = 1024
@@ -38,7 +40,9 @@ DRAIN_GRACE_S = 1.0          # keep reading after exit (children holding pipes)
 DEFAULT_TIMEOUT_S = 600
 
 BOAT_DIR = os.environ.get("BOAT_DIR", "/etc/boat")
-ENV_FILE = os.path.join(BOAT_DIR, "env")
+# /etc/boat/env is a compatibility symlink. Replace the canonical tmpfs file so
+# an atomic write cannot replace that link with a persistent credential file.
+ENV_FILE = "/run/boat/env"
 IDENTITY_FILE = os.path.join(BOAT_DIR, "identity.json")
 EXEC_USER = os.environ.get("BOAT_EXEC_USER", "dev")
 IFACE = os.environ.get("BOAT_IFACE", "eth0")
@@ -79,12 +83,70 @@ def touch(delta_running=0):
         _activity["running"] += delta_running
 
 
-def ssh_sessions_active():
+UTMP_PATHS = ("/run/utmp", "/var/run/utmp")
+DEV_ROOT = "/dev"
+UTMP_RECORD_SIZE = 384
+UTMP_USER_PROCESS = 7
+
+
+def _safe_tty_path(dev_root, line):
+    if not line or line.startswith("/") or "\\" in line or "\x00" in line:
+        return None
+    parts = line.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return None
+    root = os.path.realpath(dev_root)
+    candidate = os.path.normpath(os.path.join(root, *parts))
     try:
-        out = subprocess.run(["who"], capture_output=True, text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return bool(out.strip())
+        if os.path.commonpath([root, candidate]) != root or candidate == root:
+            return None
+        real = os.path.realpath(candidate)
+        if os.path.commonpath([root, real]) != root or real == root:
+            return None
+    except ValueError:
+        return None
+    return real
+
+
+def utmp_idle_s(utmp_paths=None, dev_root=None, now=None):
+    """Least idle seconds across active USER_PROCESS TTYs in Linux utmp, or None."""
+    data = None
+    for path in (utmp_paths if utmp_paths is not None else UTMP_PATHS):
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            break
+        except OSError:
+            continue
+    if not data:
+        return None
+    root = dev_root if dev_root is not None else DEV_ROOT
+    now_ts = time.time() if now is None else now
+    best = None
+    limit = len(data) - (len(data) % UTMP_RECORD_SIZE)
+    for off in range(0, limit, UTMP_RECORD_SIZE):
+        ut_type = struct.unpack_from("<h", data, off)[0]
+        if ut_type != UTMP_USER_PROCESS:
+            continue
+        raw_line = data[off + 8:off + 40].split(b"\x00", 1)[0]
+        try:
+            line = raw_line.decode("ascii").strip()
+        except UnicodeDecodeError:
+            continue
+        tty_path = _safe_tty_path(root, line)
+        if tty_path is None:
+            continue
+        try:
+            st = os.stat(tty_path)
+        except OSError:
+            continue
+        tty_idle = max(0.0, now_ts - st.st_mtime)
+        best = tty_idle if best is None else min(best, tty_idle)
+    return best
+
+
+def ssh_sessions_active():
+    return utmp_idle_s() is not None
 
 
 def desktop_idle_s():
@@ -104,10 +166,15 @@ def idle_seconds():
         if _activity["running"]:
             return 0.0
         idle = time.monotonic() - _activity["last"]
-    if ssh_sessions_active() or boat_ops.running_count():
+    if boat_ops.running_count():
         return 0.0
+    u = utmp_idle_s()
+    if u is not None:
+        idle = min(idle, u)
     d = desktop_idle_s()
-    return round(min(idle, d) if d is not None else idle, 1)
+    if d is not None:
+        idle = min(idle, d)
+    return round(idle, 1)
 
 
 # ---------------------------------------------------------------- helpers
@@ -116,8 +183,11 @@ def b64e(b):
     return base64.b64encode(b).decode()
 
 
-def run(argv, check=True):
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+def run(argv, check=True, input=None):
+    kw = {"capture_output": True, "text": True, "timeout": 60}
+    if input is not None:
+        kw["input"] = input
+    r = subprocess.run(argv, **kw)
     if check and r.returncode != 0:
         raise OpError("%s failed: %s" % (" ".join(argv), (r.stderr or r.stdout).strip()))
     return r
@@ -141,7 +211,23 @@ def read_env_file(path=None, *, required=False):
 
 # ---------------------------------------------------------------- exec
 
+def trusted_root_exec(req, pw):
+    if "trusted_root_exec" not in req:
+        return False
+    if (req["trusted_root_exec"] is not True or req.get("user") != "root" or
+            os.geteuid() != 0 or pw is None or pw.pw_uid != 0 or pw.pw_gid != 0):
+        raise OpError("trusted_root_exec requires explicit root and literal true", code="invalid_argument")
+    if (not isinstance(req.get("env", {}), dict) or req.get("env", {}) or
+            req.get("tty", False) is not False or req.get("cwd") is not None):
+        raise OpError("trusted_root_exec forbids env, tty and cwd overrides", code="invalid_argument")
+    return True
+
+
 def exec_env(req, pw):
+    if trusted_root_exec(req, pw):
+        # Construct this before Popen: -I cannot protect the dynamic loader.
+        return {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root",
+                "USER": "root", "LOGNAME": "root", "LANG": "C", "SHELL": "/bin/sh"}
     env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
            "LANG": "C.UTF-8", "TERM": "xterm-256color" if req.get("tty") else "dumb"}
     if pw:
@@ -153,10 +239,10 @@ def exec_env(req, pw):
     env.update(read_env_file())
     extra = req.get("env") or {}
     if not isinstance(extra, dict):
-        raise OpError("env must be an object")
+        raise OpError("env must be an object", code="invalid_argument")
     for k, v in extra.items():
         if not ENV_KEY.match(str(k)):
-            raise OpError("bad env key: %r" % k)
+            raise OpError("bad env key: %r" % k, code="invalid_argument")
         env[k] = str(v)
     return env
 
@@ -165,19 +251,28 @@ def run_spec(req):
     """Who, where and with what a request's argv runs: exec and cmd_start share this."""
     argv = req.get("argv")
     if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
-        raise OpError("argv must be a non-empty list of strings")
+        raise OpError("argv must be a non-empty list of strings", code="invalid_argument")
     pw = user_info(req.get("user", EXEC_USER))
-    sp = {"argv": argv, "env": exec_env(req, pw), "cwd": req.get("cwd") or (pw.pw_dir if pw else None)}
+    if trusted_root_exec(req, pw):
+        return {"argv": argv, "env": exec_env(req, pw), "cwd": "/root",
+                "user": 0, "group": 0, "extra_groups": []}
+    raw_cwd = req.get("cwd")
+    if raw_cwd is None or raw_cwd == "":
+        cwd = pw.pw_dir if pw else None
+    else:
+        home = pw.pw_dir if pw else (os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir)
+        cwd = resolve_cwd(raw_cwd, home)
+    sp = {"argv": argv, "env": exec_env(req, pw), "cwd": cwd}
     if pw:
         sp.update(user=pw.pw_uid, group=pw.pw_gid,
                   extra_groups=os.getgrouplist(pw.pw_name, pw.pw_gid))
     return sp
 
 
-def spawn(req):
-    sp = run_spec(req)
-    argv = sp.pop("argv")
-    kw = dict(sp, start_new_session=True, close_fds=True)
+def _spawn_spec(req, sp):
+    argv = sp["argv"]
+    kw = {k: v for k, v in sp.items() if k != "argv"}
+    kw.update(start_new_session=True, close_fds=True)
     if req.get("tty"):
         import pty
         master, slave = pty.openpty()
@@ -189,6 +284,10 @@ def spawn(req):
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, **kw)
     return proc, {proc.stdout.fileno(): "stdout", proc.stderr.fileno(): "stderr"}, proc.stdin
+
+
+def spawn(req):
+    return _spawn_spec(req, run_spec(req))
 
 
 def feed_stdin(sink, data):
@@ -287,7 +386,7 @@ class Session:
 
 def check_session_id(sid):
     if not isinstance(sid, str) or not SESSION_ID.match(sid):
-        raise OpError("bad session id")
+        raise OpError("bad session id", code="invalid_argument")
 
 
 def new_session(sid, send):
@@ -296,7 +395,7 @@ def new_session(sid, send):
         for k in [k for k, v in SESSIONS.items() if v.done_at is not None and now - v.done_at > SESSION_LINGER_S]:
             del SESSIONS[k]
         if sid in SESSIONS:
-            raise OpError("session exists: %s" % sid)
+            raise OpError("session exists: %s" % sid, code="already_exists")
         s = SESSIONS[sid] = Session(send)
     return s
 
@@ -310,7 +409,7 @@ def op_exec_attach(req, send):
     sid, seen = req.get("session"), req.get("seen", 0)
     check_session_id(sid)
     if not isinstance(seen, int) or isinstance(seen, bool) or seen < 0:
-        raise OpError("seen must be a non-negative integer")
+        raise OpError("seen must be a non-negative integer", code="invalid_argument")
     with _sessions_lock:
         s = SESSIONS.get(sid)
     if s is None and seen == 0 and isinstance(req.get("exec"), dict):
@@ -326,15 +425,17 @@ def op_exec_attach(req, send):
     elif s is not None:
         send({"attached": sid})
     if s is None:
-        raise OpError("no such exec session")
+        raise OpError("no such exec session", code="not_found")
     s.attach(seen, send)
 
 
 def spawn_checked(req):
+    sp = run_spec(req)
     try:
-        return spawn(req)
-    except (OSError, ValueError) as e:
-        raise OpError("spawn: %s" % e)
+        return _spawn_spec(req, sp)
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        msg, code = spawn_error_info(e, sp.get("argv"), sp.get("cwd"))
+        raise OpError("spawn: %s" % msg, code=code)
 
 
 def op_exec(req, send):
@@ -351,7 +452,10 @@ def op_exec(req, send):
         try:
             spawned = spawn_checked(req)
         except OpError as e:
-            sess.emit({"error": str(e)})
+            err_obj = {"error": str(e)}
+            if e.code:
+                err_obj["code"] = e.code
+            sess.emit(err_obj)
             return
         exec_child(req, sess.emit, *spawned, timeout)
     finally:
@@ -430,7 +534,7 @@ def pump(proc, fds, send, deadline):
 def validate_identity(req):
     host = req.get("hostname")
     if not isinstance(host, str) or not HOSTNAME.match(host):
-        raise OpError("bad hostname")
+        raise OpError("bad hostname", code="invalid_argument")
     try:
         ipaddress.IPv4Interface(req["ipv4_cidr"])
         ipaddress.IPv4Address(req["gw"])
@@ -443,16 +547,35 @@ def validate_identity(req):
         if req.get("ipv6_gw"):
             ipaddress.IPv6Address(req["ipv6_gw"])
     except (KeyError, ValueError) as e:
-        raise OpError("bad address: %s" % e)
+        raise OpError("bad address: %s" % e, code="invalid_argument")
     if req.get("mac") and not MAC.match(req["mac"]):
-        raise OpError("bad mac")
+        raise OpError("bad mac", code="invalid_argument")
+    for flag in ("defer_ssh_restart", "skip_ssh_restart"):
+        if flag in req and req[flag] is not None and type(req[flag]) is not bool:
+            raise OpError("%s must be a boolean" % flag, code="invalid_argument")
     ident = {k: req.get(k) for k in ("hostname", "ipv4_cidr", "gw", "mac", "ipv6_cidr", "ipv6_gw")}
     ident["dns"] = list(dns)
     return ident
 
 
-def apply_network(ident):
-    dev = IFACE
+def _build_ip_batch(ident, dev):
+    lines = []
+    if ident.get("mac"):
+        lines.append("link set %s down" % dev)
+        lines.append("link set %s address %s" % (dev, ident["mac"]))
+    lines.append("link set %s up" % dev)
+    lines.append("addr flush dev %s to 0.0.0.0/0" % dev)
+    lines.append("addr add %s dev %s" % (ident["ipv4_cidr"], dev))
+    lines.append("route replace default via %s dev %s" % (ident["gw"], dev))
+    if ident.get("ipv6_cidr"):
+        lines.append("addr flush dev %s to ::/0 scope global" % dev)
+        lines.append("addr add %s dev %s" % (ident["ipv6_cidr"], dev))
+        if ident.get("ipv6_gw"):
+            lines.append("route replace ::/0 via %s dev %s" % (ident["ipv6_gw"], dev))
+    return "\n".join(lines) + "\n"
+
+
+def _apply_network_sequential(ident, dev):
     if ident.get("mac"):
         run(["ip", "link", "set", dev, "down"])
         run(["ip", "link", "set", dev, "address", ident["mac"]])
@@ -465,6 +588,13 @@ def apply_network(ident):
         run(["ip", "-6", "addr", "add", ident["ipv6_cidr"], "dev", dev])
         if ident.get("ipv6_gw"):
             run(["ip", "-6", "route", "replace", "default", "via", ident["ipv6_gw"], "dev", dev])
+
+
+def apply_network(ident):
+    dev = IFACE
+    batch = _build_ip_batch(ident, dev)
+    if run(["ip", "-force", "-batch", "-"], check=False, input=batch).returncode != 0:
+        _apply_network_sequential(ident, dev)
     if ident["dns"]:
         write_atomic("/etc/resolv.conf",
                      "".join("nameserver %s\n" % d for d in ident["dns"]), 0o644)
@@ -495,12 +625,34 @@ def regenerate_host_keys(ssh_dir):
              "-f", os.path.join(ssh_dir, "ssh_host_%s_key" % key_type)])
 
 
-def regenerate_secrets():
+SSH_AUTH_CONFIGS = ("/etc/boat/ssh-auth.json", "/etc/boat/ssh-authorize.json")
+SSHD_CONFIG_FILE = "/etc/ssh/sshd_config"
+
+
+def has_managed_ssh_policy():
+    if any(os.path.exists(p) for p in SSH_AUTH_CONFIGS):
+        return True
+    try:
+        with open(SSHD_CONFIG_FILE, "rb") as f:
+            return f.read(64).startswith(b"# Managed online authority")
+    except OSError:
+        return False
+
+
+def regenerate_secrets(defer_ssh_restart=False):
     write_atomic("/etc/machine-id", uuid.uuid4().hex + "\n", 0o444)
     regenerate_host_keys("/etc/ssh")
-    # Keys are on disk now. Don't hold the reply for sshd's start; clients retry.
-    # restart (not reload) also revives a failed sshd.
-    run(["systemctl", "--no-block", "restart", "ssh.service"], check=False)
+    if defer_ssh_restart is True:
+        return
+    # Never queue an async `--no-block` restart: boatd runs boat-ssh-authorize
+    # install immediately after set_identity replies, and an overlapping async
+    # restart job can kill sshd mid-verification. Restart synchronously when
+    # ssh.service is already active, or revive a failed standalone unit when
+    # online SSH authority does not manage sshd.
+    if run(["systemctl", "is-active", "--quiet", "ssh.service"], check=False).returncode == 0:
+        run(["systemctl", "restart", "ssh.service"], check=False)
+    elif not has_managed_ssh_policy() and run(["systemctl", "is-failed", "--quiet", "ssh.service"], check=False).returncode == 0:
+        run(["systemctl", "restart", "ssh.service"], check=False)
 
 
 def rnd_ioctl(data):
@@ -516,7 +668,7 @@ def rnd_ioctl(data):
 def op_reseed(req, send):
     data = b64d(req.get("entropy_b64"))
     if not ENTROPY_MIN <= len(data) <= ENTROPY_MAX:
-        raise OpError("entropy must be %d..%d bytes" % (ENTROPY_MIN, ENTROPY_MAX))
+        raise OpError("entropy must be %d..%d bytes" % (ENTROPY_MIN, ENTROPY_MAX), code="invalid_argument")
     try:
         rnd_ioctl(data)
     except OSError as e:
@@ -531,11 +683,11 @@ def take_reseed(req):
     with _reseed_lock:
         if not _reseed["armed"]:
             raise OpError("reseed required before set_identity (no fresh entropy since "
-                          "the last restore/set_identity)")
+                          "the last restore/set_identity)", code="conflict")
         gen = req.get("generation")
         if gen is not None and gen != _reseed["generation"]:
             raise OpError("reseed generation %r != set_identity generation %r"
-                          % (_reseed["generation"], gen))
+                          % (_reseed["generation"], gen), code="invalid_argument")
         _reseed.update(armed=False, generation=None)
 
 
@@ -553,7 +705,7 @@ def op_sync(req, send):
 def op_set_clock(req, send):
     ns = req.get("unix_ns")
     if type(ns) is not int or ns <= 0:
-        raise OpError("unix_ns must be a positive integer")
+        raise OpError("unix_ns must be a positive integer", code="invalid_argument")
     try:
         time.clock_settime_ns(time.CLOCK_REALTIME, ns)
     except OSError as e:
@@ -563,11 +715,15 @@ def op_set_clock(req, send):
 
 def op_set_identity(req, send):
     ident = validate_identity(req)
+    defer_ssh = req.get("defer_ssh_restart") is True or req.get("skip_ssh_restart") is True
     take_reseed(req)
     t0 = time.monotonic()
     apply_network(ident)
     t1 = time.monotonic()
-    regenerate_secrets()
+    if defer_ssh:
+        regenerate_secrets(defer_ssh_restart=True)
+    else:
+        regenerate_secrets()
     t2 = time.monotonic()
     os.makedirs(os.path.dirname(IDENTITY_FILE), exist_ok=True)
     write_atomic(IDENTITY_FILE, json.dumps(ident), 0o600)
@@ -592,20 +748,30 @@ def op_get_env(req, send):
 def op_set_env(req, send):
     env = req.get("vars")
     if not isinstance(env, dict):
-        raise OpError("vars must be an object")
+        raise OpError("vars must be an object", code="invalid_argument")
     lines = []
     for k, v in sorted(env.items()):
         if not ENV_KEY.match(str(k)):
-            raise OpError("bad env key: %r" % k)
+            raise OpError("bad env key: %r" % k, code="invalid_argument")
         lines.append("export %s=%s\n" % (k, shlex.quote(str(v))))
-    os.makedirs(os.path.dirname(ENV_FILE), exist_ok=True)
-    write_atomic(ENV_FILE, "".join(lines), 0o600)
+    pw = None
     try:  # login shells of the VM user must be able to source it
         pw = user_info(EXEC_USER)
-        if pw:
-            os.chown(ENV_FILE, pw.pw_uid, pw.pw_gid)
     except OpError:
         pass
+    # The early boot helper creates the protected tmpfs parent. mkstemp keeps
+    # partial writes private and distinct even for concurrent set_env requests.
+    fd, tmp = tempfile.mkstemp(prefix=".env-", dir=os.path.dirname(ENV_FILE))
+    try:
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o600)
+            if pw:
+                os.fchown(f.fileno(), pw.pw_uid, pw.pw_gid)
+            f.write("".join(lines))
+        os.replace(tmp, ENV_FILE)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     send({"ok": True, "count": len(lines)})
 
 
@@ -766,10 +932,10 @@ def op_desktop(req, send):
     action = req.get("action")
     if action == "start":
         if not os.path.exists("/etc/systemd/system/" + DESKTOP_UNIT):
-            raise OpError("desktop is not installed in this image (slim variant)")
+            raise OpError("desktop is not installed in this image (slim variant)", code="unsupported")
         token = req.get("token") or secrets.token_urlsafe(32)
         if not re.match(r"^[A-Za-z0-9_-]{16,128}$", token):
-            raise OpError("token must be 16-128 url-safe chars")
+            raise OpError("token must be 16-128 url-safe chars", code="invalid_argument")
         run(["systemctl", "start", DESKTOP_UNIT])
         if not wait_port(DESKTOP_BACKEND, DESKTOP_START_TIMEOUT_S):
             raise OpError("desktop did not come up on %s:%d: %s"
@@ -788,13 +954,13 @@ def op_desktop(req, send):
         send({"ok": True, "running": up and _desktop["token"] is not None,
               "port": DESKTOP_PORT if up else None})
     else:
-        raise OpError("action must be start|stop|status")
+        raise OpError("action must be start|stop|status", code="invalid_argument")
 
 
 # ---------------------------------------------------------------- server
 
 def op_health(req, send):
-    send({"ok": True, "uptime": round(time.monotonic() - STARTED, 1),
+    send({"ok": True, "trusted_root_exec": True, "uptime": round(time.monotonic() - STARTED, 1),
           "idle_s": idle_seconds(), "version": VERSION})
 
 
@@ -844,24 +1010,34 @@ def handle_conn(conn):
             if not line:
                 return
             if len(line) > MAX_LINE:
-                send({"error": "request too large"})
+                send({"error": "request too large", "code": "invalid_argument"})
                 return
             if not line.strip():
                 continue
             try:
                 req = json.loads(line)
                 if not isinstance(req, dict):
-                    raise OpError("request must be an object")
+                    raise OpError("request must be an object", code="invalid_argument")
                 fn = OPS.get(req.get("op"))
                 if fn is None:
-                    raise OpError("unknown op: %r" % req.get("op"))
+                    raise OpError("unknown op: %r" % req.get("op"), code="invalid_argument")
                 fn(req, send)
             except (OpError, ValueError, TypeError) as e:
-                send({"error": str(e)})
+                err_obj = {"error": str(e)}
+                code = getattr(e, "code", None)
+                if code is None and isinstance(e, (ValueError, TypeError)):
+                    code = "invalid_argument"
+                if code:
+                    err_obj["code"] = code
+                send(err_obj)
             except OSError as e:
                 if isinstance(e, (BrokenPipeError, ConnectionResetError)):
                     return
-                send({"error": "%s: %s" % (type(e).__name__, e)})
+                err_obj = {"error": "%s: %s" % (type(e).__name__, e)}
+                code = oserror_code(e)
+                if code:
+                    err_obj["code"] = code
+                send(err_obj)
 
 
 def log(msg):

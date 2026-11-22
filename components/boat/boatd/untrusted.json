@@ -1,5 +1,6 @@
 {
   "untrustedTenants": true,
+  "standaloneSSH": false,
   "btrfsQgroups": true,
   "storageOvercommit": 1,
   "memOvercommit": 1,

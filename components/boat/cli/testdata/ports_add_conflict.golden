@@ -3,6 +3,6 @@ exit 2
 --- stdout
 --- stderr
 boat: --public conflicts with --auth private
-  boat ports ls|add|rm|url <vm> [port] [--auth private|public] [--public] [--ttl 1h]
+  boat ports ls|add|rm|url|revoke <vm> [port] [--auth private|public] [--public] [--ttl 1h]
 --- requests
 GET /v1/vms/vm1 

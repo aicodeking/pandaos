@@ -26,7 +26,7 @@ func TestDetachedCommands(t *testing.T) {
 	e := setup(t)
 	id := e.createVM()
 	base := "/v1/vms/" + id + "/commands"
-	for _, bad := range []map[string]any{{}, {"cmd": []string{""}}, {"cmd": []string{"x"}, "cwd": "rel"}, {"cmd": []string{"x"}, "env": map[string]string{"a b": "c"}}} {
+	for _, bad := range []map[string]any{{}, {"cmd": []string{""}}, {"cmd": []string{"x"}, "cwd": "bad\x00cwd"}, {"cmd": []string{"x"}, "cwd": "bad\ncwd"}, {"cmd": []string{"x"}, "env": map[string]string{"a b": "c"}}} {
 		if st, _ := e.do(e.owner, "POST", base, bad); st != 400 {
 			t.Errorf("bad start %v: %d", bad, st)
 		}
@@ -300,24 +300,24 @@ func TestEnvironments(t *testing.T) {
 			t.Errorf("bad env %v: %d", bad, st)
 		}
 	}
-	st, env := e.do(e.owner, "POST", "/v1/environments", map[string]any{"name": "base", "size": "large",
+	st, env := e.do(e.owner, "POST", "/v1/environments", map[string]any{"name": "app", "size": "large",
 		"setup_script": "npm ci", "env": map[string]string{"FOO": "bar"}, "secrets": []string{"A"}})
 	if st != 201 || env["version"] != float64(1) {
 		t.Fatalf("create: %d %v", st, env)
 	}
 	eid := env["id"].(string)
-	if st, _ := e.do(e.owner, "POST", "/v1/environments", map[string]any{"name": "base"}); st != 409 {
+	if st, _ := e.do(e.owner, "POST", "/v1/environments", map[string]any{"name": "app"}); st != 409 {
 		t.Errorf("duplicate: %d", st)
 	}
-	if st, _ := e.do(e.owner, "POST", "/v1/vms", map[string]any{"environment": "typo"}); st != 400 {
+	if st, _ := e.do(e.owner, "POST", "/v1/vms", map[string]any{"environment": "typo"}); st != 404 {
 		t.Errorf("unknown env must fail before create: %d", st)
 	}
-	if st, _ := e.do(e.owner, "POST", "/v1/vms", map[string]any{"environment": "base", "no_env": true}); st != 400 {
+	if st, _ := e.do(e.owner, "POST", "/v1/vms", map[string]any{"environment": "app", "no_env": true}); st != 400 {
 		t.Errorf("environment + no_env: %d", st)
 	}
 
-	st, vm := e.do(e.owner, "POST", "/v1/vms", map[string]any{"environment": "base"})
-	if st != 201 || vm["environment"] != "base" || vm["size"] != "large" || vm["setup_cmd_id"] == nil {
+	st, vm := e.do(e.owner, "POST", "/v1/vms", map[string]any{"environment": "app"})
+	if st != 201 || vm["environment"] != "app" || vm["size"] != "large" || vm["setup_cmd_id"] == nil {
 		t.Fatalf("vm from env: %d %v", st, vm)
 	}
 	id := vm["id"].(string)
@@ -352,7 +352,7 @@ func TestEnvironments(t *testing.T) {
 		t.Errorf("builder must stay stopped, got %v", builderState)
 	}
 	cmds := len(e.boatd.cmds)
-	st, fast := e.do(e.owner, "POST", "/v1/vms", map[string]any{"environment": "base"})
+	st, fast := e.do(e.owner, "POST", "/v1/vms", map[string]any{"environment": "app"})
 	if st != 201 || fast["from_build"] != true || fast["setup_cmd_id"] != nil || fast["from_snapshot"] != b.SnapshotID || len(e.boatd.cmds) != cmds {
 		t.Errorf("fast start: %d %v", st, fast)
 	}
@@ -363,7 +363,7 @@ func TestEnvironments(t *testing.T) {
 		t.Fatalf("update: %d %v", st, up)
 	}
 	st, stale := e.do(e.owner, "POST", "/v1/vms", map[string]any{}) // default env now
-	if st != 201 || stale["from_build"] != false || stale["setup_cmd_id"] == nil || stale["environment"] != "base" {
+	if st != 201 || stale["from_build"] != false || stale["setup_cmd_id"] == nil || stale["environment"] != "app" {
 		t.Errorf("stale build / default env: %d %v", st, stale)
 	}
 	if st, plain := e.do(e.owner, "POST", "/v1/vms", map[string]any{"no_env": true}); st != 201 || plain["environment"] != nil {
@@ -378,7 +378,7 @@ func TestEnvironments(t *testing.T) {
 	if fb.State != "failed" || !strings.Contains(fb.Error, "exited 3") || fb.SnapshotID != b.SnapshotID {
 		t.Errorf("failed build: %+v", fb)
 	}
-	if st, g := e.do(e.owner, "GET", "/v1/environments/base", nil); st != 200 || g["id"] != eid { // by name too
+	if st, g := e.do(e.owner, "GET", "/v1/environments/app", nil); st != 200 || g["id"] != eid { // by name too
 		t.Errorf("get by name: %d %v", st, g)
 	}
 	if _, l := e.do(e.owner, "GET", "/v1/environments", nil); len(list(l, "environments")) != 1 {
@@ -388,7 +388,7 @@ func TestEnvironments(t *testing.T) {
 	if st, _ := e.do(other, "GET", "/v1/environments/"+eid, nil); st != 404 {
 		t.Errorf("cross-team env: %d", st)
 	}
-	if st, _ := e.do(other, "POST", "/v1/vms", map[string]any{"environment": "base"}); st != 400 {
+	if st, _ := e.do(other, "POST", "/v1/vms", map[string]any{"environment": "app"}); st != 404 {
 		t.Errorf("cross-team env by name: %d", st)
 	}
 	if st, _ := e.do(e.owner, "DELETE", "/v1/environments/"+eid, nil); st != 200 {

@@ -63,6 +63,7 @@ func (s *server) compatRoutes() {
 	s.route("POST /api/v1/environments", "admin", s.compatCreateEnv)
 	s.route("PUT /api/v1/environments/{id}", "admin", s.compatUpdateEnv)
 	s.route("DELETE /api/v1/environments/{id}", "admin", s.compatDeleteEnv)
+	s.route("POST /api/v1/environments/{id}/upgrade", "admin", s.compatUpgradeEnv)
 	// host, desktop, ssh key (compat_host.go)
 	s.route("POST /api/v1/sandboxes/{id}/host", "vms:write", s.compatHost)
 	s.route("POST /api/v1/sandboxes/{id}/desktop", "exec", s.compatDesktop)

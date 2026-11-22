@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,7 +40,22 @@ func homeDir(getenv func(string) string) string {
 // apiOrigin accepts boat.dev's API base (https://host/api/v1) for this CLI,
 // which talks to the native /v1 next to it.
 func apiOrigin(u string) string {
-	return strings.TrimSuffix(strings.TrimRight(u, "/"), "/api/v1")
+	u = strings.TrimRight(strings.TrimSpace(u), "/")
+	for _, suf := range []string{"/api/v1", "/v1"} {
+		if t, ok := strings.CutSuffix(u, suf); ok {
+			return strings.TrimRight(t, "/")
+		}
+	}
+	return u
+}
+
+// loadCfg is loadConfig plus the global --api-url, which always wins.
+func (a *app) loadCfg() (Config, error) {
+	cfg, err := loadConfig(a.getenv)
+	if a.apiURL != "" {
+		cfg.URL = apiOrigin(a.apiURL)
+	}
+	return cfg, err
 }
 
 // loadConfig reads the config file; BOAT_URL (or boat.dev's BOAT_API_URL) and
@@ -58,6 +74,7 @@ func loadConfig(getenv func(string) string) (Config, error) {
 	if v := getenv("BOAT_URL"); v != "" {
 		c.URL = v
 	}
+	c.URL = apiOrigin(c.URL)
 	if v := getenv("BOAT_API_URL"); v != "" { // boat.dev's name (env of --api-url)
 		c.URL = apiOrigin(v)
 	}
@@ -90,10 +107,32 @@ type client struct {
 
 // apiError is the server's {"error":{code,message,request_id}} envelope.
 type apiError struct {
-	Status    int    `json:"status"`
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	RequestID string `json:"request_id,omitempty"`
+	Status         int    `json:"status"`
+	Code           string `json:"code"`
+	Message        string `json:"message"`
+	RequestID      string `json:"request_id,omitempty"`
+	RequestIDCamel string `json:"requestId,omitempty"`
+	// VM is the error body's top-level "vm" object (e.g. the stopped child of
+	// a failed no_env fork), when the server sent one.
+	VM map[string]any `json:"-"`
+	// VMs is the top-level "vms" array (a failed batch create names every VM
+	// that exists, stopped or still running).
+	VMs []map[string]any `json:"-"`
+}
+
+// UnmarshalJSON accepts request_id and the compat envelope's requestId.
+func (e *apiError) UnmarshalJSON(b []byte) error {
+	type plain apiError
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	if p.RequestID == "" {
+		p.RequestID = p.RequestIDCamel
+	}
+	p.RequestIDCamel = ""
+	*e = apiError(p)
+	return nil
 }
 
 func (e *apiError) Error() string {
@@ -104,7 +143,18 @@ func (e *apiError) Error() string {
 }
 
 func (c *client) request(method, path string, body io.Reader, ctype string) (*http.Response, error) {
-	req, err := http.NewRequest(method, strings.TrimRight(c.base, "/")+path, body)
+	return c.requestCtx(context.Background(), method, path, body, ctype)
+}
+
+func (c *client) requestCtx(ctx context.Context, method, path string, body io.Reader, ctype string) (*http.Response, error) {
+	return c.requestCtxHeaders(ctx, method, path, body, ctype, nil)
+}
+
+func (c *client) requestCtxHeaders(ctx context.Context, method, path string, body io.Reader, ctype string, headers map[string]string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.base, "/")+path, body)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +162,9 @@ func (c *client) request(method, path string, body io.Reader, ctype string) (*ht
 	req.Header.Set("User-Agent", "boat-cli/"+version)
 	if ctype != "" {
 		req.Header.Set("Content-Type", ctype)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -121,9 +174,47 @@ func (c *client) request(method, path string, body io.Reader, ctype string) (*ht
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 		e := &apiError{Status: resp.StatusCode, Message: http.StatusText(resp.StatusCode)}
-		var env struct{ Error *apiError }
-		if json.Unmarshal(b, &env) == nil && env.Error != nil {
-			e.Code, e.Message, e.RequestID = env.Error.Code, env.Error.Message, env.Error.RequestID
+		// error is either an object or a bare string; decode it on its own so a
+		// string never aborts reading the top-level request id.
+		var env struct {
+			Error      json.RawMessage `json:"error"`
+			RequestID  string          `json:"requestId"`
+			RequestID2 string          `json:"request_id"`
+			VM         json.RawMessage `json:"vm"`
+			VMs        json.RawMessage `json:"vms"`
+		}
+		if json.Unmarshal(b, &env) == nil && len(env.Error) > 0 {
+			var obj apiError
+			var msg string
+			if json.Unmarshal(env.Error, &obj) == nil {
+				e.Code, e.RequestID = obj.Code, obj.RequestID
+				if obj.Message != "" {
+					e.Message = obj.Message
+				}
+			} else if json.Unmarshal(env.Error, &msg) == nil && msg != "" {
+				e.Message = msg
+			}
+		}
+		if len(env.VM) > 0 {
+			var vm map[string]any
+			if json.Unmarshal(env.VM, &vm) == nil {
+				e.VM = vm
+			}
+		}
+		if len(env.VMs) > 0 {
+			var vms []map[string]any
+			if json.Unmarshal(env.VMs, &vms) == nil {
+				e.VMs = vms
+			}
+		}
+		if e.RequestID == "" {
+			e.RequestID = env.RequestID
+		}
+		if e.RequestID == "" {
+			e.RequestID = env.RequestID2
+		}
+		if e.RequestID == "" {
+			e.RequestID = resp.Header.Get("X-Request-Id")
 		}
 		return nil, e
 	}
@@ -131,6 +222,10 @@ func (c *client) request(method, path string, body io.Reader, ctype string) (*ht
 }
 
 func (c *client) call(method, path string, in, out any) error {
+	return c.callH(method, path, in, out, nil)
+}
+
+func (c *client) callH(method, path string, in, out any, headers map[string]string) error {
 	var body io.Reader
 	ctype := ""
 	if in != nil {
@@ -140,7 +235,7 @@ func (c *client) call(method, path string, in, out any) error {
 		}
 		body, ctype = bytes.NewReader(b), "application/json"
 	}
-	resp, err := c.request(method, path, body, ctype)
+	resp, err := c.requestCtxHeaders(context.Background(), method, path, body, ctype, headers)
 	if err != nil {
 		return err
 	}

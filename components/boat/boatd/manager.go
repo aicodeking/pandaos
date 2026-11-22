@@ -22,38 +22,83 @@ import (
 // apiErr carries an HTTP status to the API layer.
 
 type Manager struct {
-	cfg   Config
-	run   runner
-	procs procs
-	ev    *broker
-	usage *ledger
-	now   func() time.Time
+	incarnation string // unpredictable process identity; never restored from disk
+	cfg         Config
+	run         runner
+	procs       procs
+	ev          *broker
+	usage       *ledger
+	now         func() time.Time
 
-	mu     sync.Mutex
-	vms    map[string]VM
-	snaps  map[string]Snapshot
-	locks  map[string]*sync.Mutex
-	dones  map[string]<-chan struct{}
-	active map[string]time.Time // last exec/file/desktop seen by boatd
-	freed  map[int]time.Time    // quarantined VM indexes -> end of quarantine (quarantine.go)
-	resets resetHub             // vsock resets, for exec streams to reattach (execstream.go)
-	netMu  sync.Mutex
+	mu                   sync.Mutex
+	vms                  map[string]VM
+	snaps                map[string]Snapshot
+	locks                map[string]*sync.Mutex
+	lockRefs             map[string]int // holders+waiters per id; entry pruned at zero (guarded by mu)
+	dones                map[string]<-chan struct{}
+	active               map[string]time.Time // last exec/file/desktop seen by boatd
+	freed                map[int]time.Time    // quarantined VM indexes -> end of quarantine (quarantine.go)
+	resets               resetHub             // vsock resets, for exec streams to reattach (execstream.go)
+	netMu                sync.Mutex
+	publishedReady       map[string]string // vmID -> SSHBootEpoch already open in nftables (under netMu)
+	publishedQuarantined map[string]string // vmID -> SSHBootEpoch already fenced in nftables (under netMu)
+	publishedSSHPaused   map[string]string // vmID -> SSHBootEpoch fenced in @ssh_pause_* sets (under netMu)
+	dynQuarantined       map[string]VM     // vmID -> VM fenced via incremental @quarantine_* set elements (under netMu)
+	dynSSHPaused         map[string]VM     // vmID -> VM fenced via incremental @ssh_pause_* set elements (under netMu)
+	lastNftRuleset       string            // last ruleset applied via nft -f - (under netMu); empty = invalidated
+	lastRoutes           *routeFile        // last routes.json written (under netMu)
+	lastRoutesPath       string
+	// syncNet group-commit coalescing (lock order: syncNetMu is a leaf lock, never held across syncNetOnce).
+	syncNetMu   sync.Mutex
+	syncNetRun  *syncNetBatch
+	syncNetWait *syncNetBatch
 	// snapDirMu: syncSaved rewrites snap.json behind CreateSnapshot; a delete of
 	// the snapshot meanwhile must not race it (RemoveAll fails with ENOTEMPTY when
 	// the temp file appears mid-removal). Taken before m.mu, never inside it.
 	snapDirMu sync.Mutex
 
-	imagesReady   chan struct{}  // closed when images are NOCOW: a clone of one that is not stays CoW
+	imagesReady   chan struct{} // closed when images are NOCOW: a clone of one that is not stays CoW
+	watchStop     chan struct{} // closed when tests/shutdown detach background process watchers
+	watchOnce     sync.Once
 	reservedSnaps map[string]int // by team: storage being written, see reservation
 	reservedBytes map[string]int64
 	reaping       map[string]bool // VMs a reap goroutine is on
+	allocating    map[string]VM   // VMs whose slot is reserved but whose dir is still being made (outside mu)
 	reapSlots     chan struct{}   // stops running at once: each writes a memory dump
 	reapWG        sync.WaitGroup
-	teamVolMu     sync.Mutex
+	// Deletes whose dir could not be removed: ids with a background retry running
+	// (under mu), and its first delay (0 = deleteRetryMin; tests shorten it).
+	deleteRetries      map[string]bool
+	deleteRetryDelay   time.Duration
+	tombstoneDirMu     sync.Mutex
+	tombstoneDirSynced atomic.Bool
+	syncDirFn          func(string) error // test hook; nil = syncDir
+	teamVolMu          sync.Mutex
+	dumpSlots          chan struct{}                          // host-wide semaphore bounding concurrent memory dumps
+	memMaxRetries      map[string]bool                        // VMs with a background memory.max restore loop (under mu)
+	snapSyncs          map[string]*snapSyncCall               // in-flight syncSnapshot calls per VM (under mu)
+	fsyncSnapFile      func(path string) (os.FileInfo, error) // test hook for syncSnapshot; nil = fsyncFileInfo
+
+	storageCache storageCache // storage() walk results (snapshot.go)
+	usageCache   usageCache   // assembled Usage() reports (lifecycle.go)
+	// Generations, under mu. storageGen moves when what storage() sums changes (a VM or
+	// snapshot created or deleted, a VM's size or team changed); stateGen when a VM
+	// changes state (running intervals feed the usage report).
+	storageGen  uint64
+	stateGen    uint64
+	persist     map[string]*vmPersist                            // per-VM vm.json write ordering (store.go)
+	saveRelease func(path string, v any, mode os.FileMode) error // fsynced write of an authorization; nil = writeJSONAtomic. A test hook
+	removeFile  func(path string) error                          // removes a discarded memory file; nil = os.Remove. A test hook
+	freezeGate  func(parentID string)                            // runs just before a fork freezes its parent, under the parent lock. A test hook
 
 	dio dumpIO // dumps capped while VMs boot (writeback.go)
 
-	ctFlushErrs atomic.Int64 // conntrack flushes that failed: stale flows may survive
+	ctFlushErrs atomic.Int64      // conntrack flushes that failed: stale flows may survive
+	ctState     map[string]uint8  // per-IP conntrack clean/dirty state (under mu)
+	ctDirtyGen  map[string]uint64 // per-IP dirty generation to avoid flush-vs-boot race (under mu)
+	portProbe   func(int) bool    // test hook for freePortLocked TCP bind probe; nil = tcpPortAvailable
+	exportMu    sync.Mutex        // guards exportReg and stateDir/exports.json
+	exportReg   map[string]exportRecord
 
 	statfs func(path string) (free, total uint64, err error)
 
@@ -65,11 +110,13 @@ type Manager struct {
 	hostMem    int      // MiB available to VMs before overcommit (RAM - reserve)
 	hostCPU    int
 
-	memAvail   func() int      // MemAvailable in MiB; 0 = unknown
-	warming    map[string]bool // template builds in flight
-	warmSettle time.Duration   // wait for free page reporting before saving a template
-	ballooned  bool            // only memoryPressure (one ticker goroutine) uses these two
-	balloonPct int
+	memAvail      func() int      // MemAvailable in MiB; 0 = unknown
+	warming       map[string]bool // template builds in flight
+	warmSettle    time.Duration   // wait for free page reporting before saving a template
+	ballooned     bool            // only memoryPressure (one ticker goroutine) uses these two
+	balloonPct    int
+	balloonOnce   sync.Once
+	balloonClient *http.Client
 }
 
 // saveVMState fsyncs only a stop or an error, the states a host crash must not forget.
@@ -89,15 +136,25 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 			return nil, err
 		}
 	}
-	m := &Manager{cfg: cfg, run: run, procs: p, ev: newBroker(),
+	incarnation, err := sshNonce()
+	if err != nil {
+		return nil, err
+	}
+	m := &Manager{incarnation: incarnation, cfg: cfg, run: run, procs: p, ev: newBroker(),
 		usage: &ledger{path: filepath.Join(cfg.StateDir, "usage.jsonl")},
 		now:   func() time.Time { return time.Now().UTC() },
-		vms:   map[string]VM{}, snaps: map[string]Snapshot{}, locks: map[string]*sync.Mutex{},
+		vms:   map[string]VM{}, snaps: map[string]Snapshot{}, locks: map[string]*sync.Mutex{}, lockRefs: map[string]int{},
 		dones: map[string]<-chan struct{}{}, active: map[string]time.Time{}, statfs: statfs,
 		memAvail: func() int { return meminfoMiB("MemAvailable") }, warming: map[string]bool{}, warmSettle: 3 * time.Second,
 		exportArgv: tarZstdArgv, unpackArgv: []string{"zstd", "-dcq"}, dirty: map[string]bool{},
 		saveState: saveVMState, reservedSnaps: map[string]int{}, reservedBytes: map[string]int64{},
-		reaping: map[string]bool{}, reapSlots: make(chan struct{}, reapParallel), imagesReady: make(chan struct{})}
+		publishedReady: map[string]string{}, publishedQuarantined: map[string]string{}, publishedSSHPaused: map[string]string{},
+		dynQuarantined: map[string]VM{}, dynSSHPaused: map[string]VM{},
+		reaping: map[string]bool{}, allocating: map[string]VM{}, reapSlots: make(chan struct{}, reapParallel),
+		dumpSlots: make(chan struct{}, maxConcurrentDumps), memMaxRetries: map[string]bool{},
+		snapSyncs: map[string]*snapSyncCall{},
+		ctState:   map[string]uint8{}, ctDirtyGen: map[string]uint64{},
+		imagesReady: make(chan struct{}), watchStop: make(chan struct{})}
 	m.hostMem, m.hostCPU = cfg.HostMemMiB, cfg.HostCPUs
 	if m.hostMem == 0 {
 		m.hostMem = hostMemMiB()
@@ -118,8 +175,15 @@ func newManager(cfg Config, run runner, p procs) (*Manager, error) {
 			m.convertImages()
 		}
 	}()
+	if err := m.ensureTombstoneDir(); err != nil {
+		return nil, err
+	}
 	cfg.enableKSM()
-	return m, m.reconcile()
+	rerr := m.reconcile()
+	if rerr == nil {
+		m.retryLeftoverTombstones()
+	}
+	return m, rerr
 }
 
 func (m *Manager) vmDir(id string) string   { return filepath.Join(m.cfg.StateDir, "vms", id) }
@@ -145,7 +209,9 @@ func (m *Manager) ids(v VM) (int, int) {
 	return m.cfg.FCUID, m.cfg.FCGID
 }
 
-// lock serialises lifecycle ops on one VM.
+// lock serialises lifecycle ops on one VM. Entries are refcounted and
+// dropped when the last holder/waiter releases, so the map does not grow
+// with VM churn.
 func (m *Manager) lock(id string) func() {
 	m.mu.Lock()
 	l, ok := m.locks[id]
@@ -153,22 +219,34 @@ func (m *Manager) lock(id string) func() {
 		l = &sync.Mutex{}
 		m.locks[id] = l
 	}
+	if m.lockRefs == nil {
+		m.lockRefs = map[string]int{}
+	}
+	m.lockRefs[id]++
 	m.mu.Unlock()
 	l.Lock()
-	return l.Unlock
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.Unlock()
+			m.mu.Lock()
+			if m.lockRefs[id]--; m.lockRefs[id] <= 0 {
+				delete(m.lockRefs, id)
+				if m.locks[id] == l {
+					delete(m.locks, id)
+				}
+			}
+			m.mu.Unlock()
+		})
+	}
 }
 
 func (m *Manager) lockBusy(id string) bool {
 	m.mu.Lock()
 	l := m.locks[id]
 	m.mu.Unlock()
-	if l == nil || l.TryLock() {
-		if l != nil {
-			l.Unlock()
-		}
-		return false
-	}
-	return true
+	// An entry exists only while someone holds or waits for the lock.
+	return l != nil
 }
 
 func (m *Manager) get(id string) (VM, error) {
@@ -194,9 +272,95 @@ func (m *Manager) list(team string) []VM {
 	return out
 }
 
+type vmSSHSummary struct {
+	ID              string `json:"id"`
+	Team            string `json:"team"`
+	State           State  `json:"state"`
+	IP              string `json:"ip"`
+	AgentReady      bool   `json:"agent_ready"`
+	PendingCopy     bool   `json:"pending_copy,omitempty"`
+	SSHBootEpoch    string `json:"ssh_boot_epoch"`
+	SSHPolicyReady  bool   `json:"ssh_policy_ready"`
+	SSHPolicyDigest string `json:"ssh_policy_digest,omitempty"`
+	createdAt       time.Time
+}
+
+func (v VM) sshSummary() vmSSHSummary {
+	return vmSSHSummary{
+		ID:              v.ID,
+		Team:            v.Team,
+		State:           v.State,
+		IP:              v.IP,
+		AgentReady:      v.AgentReady,
+		PendingCopy:     v.PendingCopy,
+		SSHBootEpoch:    v.SSHBootEpoch,
+		SSHPolicyReady:  v.SSHPolicyReady,
+		SSHPolicyDigest: v.SSHPolicyDigest,
+		createdAt:       v.CreatedAt,
+	}
+}
+
+func (m *Manager) getSSHSummary(id string, includePending bool) (vmSSHSummary, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.vms[id]
+	if !ok || (!includePending && v.PendingCopy) {
+		return vmSSHSummary{}, errNotFound
+	}
+	return v.sshSummary(), nil
+}
+
+func (m *Manager) listSSHSummary(team string, includePending bool) []vmSSHSummary {
+	m.mu.Lock()
+	out := make([]vmSSHSummary, 0, len(m.vms))
+	for _, v := range m.vms {
+		if !includePending && v.PendingCopy {
+			continue
+		}
+		if team != "" && v.Team != team {
+			continue
+		}
+		out = append(out, v.sshSummary())
+	}
+	m.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].createdAt.Before(out[j].createdAt) })
+	return out
+}
+
 // update copies the VM, applies fn, persists, swaps it in, and publishes a
 // state event. Leaving Running closes a billing interval.
+//
+// A commit that must be durable (a stop or an error: saveVMState fsyncs it) does not
+// fsync under m.mu: the new state is swapped in, and the vm.json write runs after the
+// lock is released, ordered per VM by sequence number (vmPersist). update returns
+// only once the file is durable, so a caller replies to its client after the same
+// barrier as before; Get, List and the other VMs' updates meanwhile are not held up.
+// The state event and the closed billing interval are published at the swap, ahead
+// of the fsync; a host crash in between shows the previous state on disk, which
+// reconcile treats as it always has (a dead VM's state comes from its files).
 func (m *Manager) update(id, reason string, fn func(*VM)) (VM, error) {
+	m.mu.Lock()
+	old, ok := m.vms[id]
+	if !ok {
+		m.mu.Unlock()
+		return VM{}, errNotFound
+	}
+	nv := old.clone()
+	fn(&nv)
+	if old.PendingCopy || nv.PendingCopy {
+		m.mu.Unlock()
+		return m.updatePending(id, reason, fn)
+	}
+	nv, finish := m.commitDeferLocked(old, nv, reason)
+	m.mu.Unlock()
+	return nv, finish()
+}
+
+// updateInMemory applies fn and publishes the transition (in-memory state,
+// closed billing interval, state event, cache generations) without writing or
+// fsyncing vm.json. Used by deleteVM after a durable tombstone is already on
+// disk and immediately before removeVMState deletes the VM directory.
+func (m *Manager) updateInMemory(id, reason string, fn func(*VM)) (VM, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	old, ok := m.vms[id]
@@ -205,20 +369,202 @@ func (m *Manager) update(id, reason string, fn func(*VM)) (VM, error) {
 	}
 	nv := old.clone()
 	fn(&nv)
-	return nv, m.commitLocked(old, nv, reason)
+	nv = m.stampLocked(old, nv)
+	if p := m.persist[id]; p != nil {
+		p.seq++
+	}
+	delete(m.dirty, id)
+	m.applyLocked(old, nv, reason)
+	return nv, nil
 }
 
-func (m *Manager) commitLocked(old, nv VM, reason string) error {
+// updatePending commits a transition of a copy awaiting authorization (or its
+// release) with its fsynced vm.json written outside m.mu. The order is the strict one
+// commitLocked keeps for these transitions: the new state is made durable first and
+// swapped in (published, visible to Get/List/start) only after, so a copy is never
+// authorized in memory ahead of the disk, and a failed write leaves the old state
+// with no disk-full fallback. m.mu is not held through the fsync: Get, List and the
+// other VMs proceed meanwhile.
+//
+// The write is numbered under m.mu like any commit (and counted in-flight, so the
+// deferred commits of this VM queue behind it instead of fsyncing under the lock). A
+// commit of the same VM that overtakes it makes this one stale: the transition is
+// recomputed from the newer state and written again, so the disk never ends on a
+// state derived from an old one.
+func (m *Manager) updatePending(id, reason string, fn func(*VM)) (VM, error) {
+	// One such transition of a VM at a time: two of them would keep invalidating each
+	// other's sequence number. Only the rare plain commit can still overtake one.
+	m.mu.Lock()
+	pre := &m.persistLocked(id).pre
+	m.mu.Unlock()
+	pre.Lock()
+	defer pre.Unlock()
+	for {
+		m.mu.Lock()
+		old, ok := m.vms[id]
+		if !ok {
+			m.mu.Unlock()
+			return VM{}, errNotFound
+		}
+		nv := old.clone()
+		fn(&nv)
+		if !old.PendingCopy && !nv.PendingCopy { // authorized meanwhile: nothing strict left
+			nv, finish := m.commitDeferLocked(old, nv, reason)
+			m.mu.Unlock()
+			return nv, finish()
+		}
+		nv = m.stampLocked(old, nv)
+		p := m.persistLocked(id)
+		p.seq++
+		seq := p.seq
+		p.inflight++
+		save := m.saveState
+		release, saveRelease := old.PendingCopy && !nv.PendingCopy, m.saveRelease
+		if saveRelease == nil {
+			saveRelease = writeJSONAtomic
+		}
+		m.mu.Unlock()
+
+		werr := p.write(seq, true, id, m.vmDir(id), func() error {
+			if release {
+				return saveRelease(filepath.Join(m.vmDir(id), "vm.json"), nv, 0o600)
+			}
+			return save(m.vmDir(id), nv)
+		})
+
+		m.mu.Lock()
+		p.inflight--
+		switch {
+		case werr != nil:
+			m.mu.Unlock()
+			return VM{}, werr
+		case p.seq != seq:
+			m.mu.Unlock() // overtaken: rebase on the newer state
+			continue
+		}
+		if _, ok := m.vms[id]; !ok {
+			m.mu.Unlock()
+			return VM{}, errNotFound
+		}
+		delete(m.dirty, id)
+		m.applyLocked(old, nv, reason)
+		m.mu.Unlock()
+		return nv, nil
+	}
+}
+
+// commitDeferLocked commits nv (replacing old) for a caller that holds m.mu and can
+// finish outside it: the state is swapped in and published under the lock, and the
+// returned finish waits for the vm.json write, which runs outside m.mu (the caller
+// must call it after Unlock, exactly once). It returns the stamped VM.
+//
+// Authorization transitions (PendingCopy) and a non-durable state with no write in
+// flight keep the strict inline path of commitLocked: nothing to fsync, nothing to
+// wait behind. Anything else (a stop or error that fsyncs, or any write queued behind
+// a deferred one of the same VM, whose vmPersist.mu may be held through an fsync)
+// writes after the lock is released, so one VM's slow fsync never stalls the others.
+func (m *Manager) commitDeferLocked(old, nv VM, reason string) (VM, func() error) {
+	p := m.persistLocked(nv.ID)
+	if old.PendingCopy || nv.PendingCopy || (!needsSync(nv) && p.inflight == 0) {
+		err := m.commitLocked(old, nv, reason)
+		if err == nil {
+			nv = m.vms[nv.ID].clone()
+		}
+		return nv, func() error { return err }
+	}
+	id := nv.ID
+	nv = m.stampLocked(old, nv)
+	p.seq++
+	seq := p.seq
+	p.inflight++
+	save := m.saveState
+	durable := needsSync(nv)
+	m.applyLocked(old, nv, reason)
+	return nv, func() error {
+		werr := p.write(seq, durable, id, m.vmDir(id), func() error { return save(m.vmDir(id), nv) })
+		m.mu.Lock()
+		p.inflight--
+		err := m.settleWriteLocked(p, seq, id, werr)
+		m.mu.Unlock()
+		return err
+	}
+}
+
+// needsSync: the states saveVMState fsyncs.
+func needsSync(v VM) bool { return v.State == Stopped || v.State == Error || v.PendingCopy }
+
+// persistLocked returns id's write-ordering record. Caller holds m.mu.
+func (m *Manager) persistLocked(id string) *vmPersist {
+	p := m.persist[id]
+	if p == nil {
+		if m.persist == nil {
+			m.persist = map[string]*vmPersist{}
+		}
+		p = &vmPersist{}
+		m.persist[id] = p
+	}
+	return p
+}
+
+// settleWriteLocked books the outcome of a vm.json write done outside m.mu. A full
+// disk is absorbed (memory is right, flushDirty retries the file), any other failure
+// is returned and also retried by flushDirty: the state is already swapped in and
+// published, so rolling it back would lie to everyone who saw it.
+func (m *Manager) settleWriteLocked(p *vmPersist, seq uint64, id string, err error) error {
+	switch {
+	case err == nil:
+		if p.seq == seq {
+			delete(m.dirty, id) // a newer commit settles its own
+		}
+		return nil
+	case errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT):
+		log.Printf("%s: state not persisted, disk full", id)
+		m.dirty[id] = true
+		return nil
+	}
+	m.dirty[id] = true
+	return err
+}
+
+// stampLocked sets the clock, SSH gate and run timestamps for every commit.
+func (m *Manager) stampLocked(old, nv VM) VM {
+	if nv.State != Running {
+		nv.SSHPolicyReady = false
+	}
 	now := m.now()
 	nv.UpdatedAt = now
 	if nv.State == Running && old.State != Running {
 		nv.StartedAt = &now
+		nv.StoppedAt = nil
 	}
+	if nv.State == Stopped {
+		switch {
+		case old.State != Stopped:
+			nv.StoppedAt = &now
+		case old.StoppedAt != nil:
+			nv.StoppedAt = old.StoppedAt
+		default:
+			// Freeze the legacy fallback before a stopped edit changes updated_at.
+			t := old.UpdatedAt
+			nv.StoppedAt = &t
+		}
+	}
+	return nv
+}
+
+func (m *Manager) commitLocked(old, nv VM, reason string) error {
+	nv = m.stampLocked(old, nv)
+	p := m.persistLocked(nv.ID)
+	p.seq++
+	seq := p.seq
+	// Inline: this caller holds m.mu, so the write (ordered behind any deferred one
+	// of the same VM) happens under it, as it always did.
 	var err error
 	if old.PendingCopy && !nv.PendingCopy {
-		err = writeJSONAtomic(filepath.Join(m.vmDir(nv.ID), "vm.json"), nv, 0o600)
+		err = p.write(seq, true, nv.ID, m.vmDir(nv.ID), func() error { return writeJSONAtomic(filepath.Join(m.vmDir(nv.ID), "vm.json"), nv, 0o600) })
 	} else {
-		err = m.saveState(m.vmDir(nv.ID), nv)
+		save := m.saveState
+		err = p.write(seq, needsSync(nv), nv.ID, m.vmDir(nv.ID), func() error { return save(m.vmDir(nv.ID), nv) })
 	}
 	if err != nil && (old.PendingCopy || nv.PendingCopy) {
 		return err // authorization transitions must never use the disk-full fallback
@@ -233,7 +579,24 @@ func (m *Manager) commitLocked(old, nv VM, reason string) error {
 	} else {
 		delete(m.dirty, nv.ID)
 	}
+	m.applyLocked(old, nv, reason)
+	return nil
+}
+
+// applyLocked swaps nv in and publishes what the change means: generations for the
+// storage and usage caches, the closed billing interval, the state event.
+func (m *Manager) applyLocked(old, nv VM, reason string) {
+	now := nv.UpdatedAt
 	m.vms[nv.ID] = nv
+	if old.ID == "" {
+		m.storageCache.invalidate() // a new VM
+	}
+	if old.ID == "" || old.DiskGiB != nv.DiskGiB || old.MemMiB != nv.MemMiB || old.Team != nv.Team {
+		m.storageGen++
+	}
+	if old.ID == "" || old.State != nv.State || !sameTime(old.StartedAt, nv.StartedAt) || old.Size != nv.Size || old.Team != nv.Team {
+		m.stateGen++
+	}
 	if old.State == Running && nv.State != Running && old.StartedAt != nil {
 		if err := m.usage.append(usageRec{"vm", nv.ID, nv.Team, nv.Size, *old.StartedAt, now}); err != nil {
 			log.Printf("usage: %v", err)
@@ -242,25 +605,31 @@ func (m *Manager) commitLocked(old, nv VM, reason string) error {
 	if old.State != nv.State && !nv.PendingCopy {
 		m.ev.publish(Event{Type: "vm.state", VMID: nv.ID, Team: nv.Team, Size: nv.Size, State: nv.State, Prev: old.State, Reason: reason})
 	}
-	return nil
+}
+
+func sameTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
 }
 
 // quotaLocked: would adding s to team exceed its policy? exclude = VM being started.
 func (m *Manager) quotaLocked(team string, s Size, exclude string) error {
 	p := m.cfg.team(team)
 	n, cpu, mem := 1, s.VCPU, s.MemMiB
-	for _, v := range m.vms {
+	m.eachVMLocked(func(v VM) {
 		if v.Team == team && v.ID != exclude && v.State.active() {
 			n, cpu, mem = n+1, cpu+v.VCPU, mem+v.MemMiB
 		}
-	}
+	})
 	// Whole host, all teams. A VM's cgroup allows it its RAM plus the VMM's overhead.
 	var hostMem, hostCPU int
-	for _, v := range m.vms {
+	m.eachVMLocked(func(v VM) {
 		if v.ID != exclude && v.State.active() {
 			hostMem, hostCPU = hostMem+v.MemMiB+m.cfg.VMOverheadMiB, hostCPU+v.VCPU
 		}
-	}
+	})
 	if err := m.realMemCheck(s); err != nil {
 		return err
 	}
@@ -279,14 +648,89 @@ func (m *Manager) quotaLocked(team string, s Size, exclude string) error {
 	return nil
 }
 
-// alloc checks quota, assigns a network slot and persists v in state st.
-func (m *Manager) alloc(v VM, st State) (VM, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.allocLocked(v, st)
+// eachVMLocked visits every VM that holds resources: the published ones and those
+// still being allocated. Caller holds m.mu.
+func (m *Manager) eachVMLocked(fn func(VM)) {
+	for _, v := range m.vms {
+		fn(v)
+	}
+	for _, v := range m.allocating {
+		fn(v)
+	}
 }
 
-func (m *Manager) allocLocked(v VM, st State) (VM, error) {
+// alloc checks quota, assigns a network slot and persists v in state st. The slow
+// part (btrfs subvolume, conntrack) runs outside m.mu: under the lock only the slot
+// is reserved, in m.allocating, which quota and slot accounting count.
+func (m *Manager) alloc(v VM, st State) (VM, error) {
+	m.mu.Lock()
+	v, err := m.reserveVMLocked(v, st)
+	m.mu.Unlock()
+	if err != nil {
+		return VM{}, err
+	}
+	if err := m.makeVMDir(v); err != nil {
+		m.dropReservation(v.ID, "")
+		return VM{}, err
+	}
+	m.flushConntrack(v.IP, v.IPv6, v.PublicIP) // a previous owner's flows
+	if v.PendingCopy {
+		return m.publishPending(v)
+	}
+	m.mu.Lock()
+	delete(m.allocating, v.ID)
+	// The reservation leaves m.allocating in the same critical section that publishes
+	// the VM, so quota and slot accounting never see a gap.
+	if err := m.commitLocked(VM{}, v, "created"); err != nil {
+		m.allocating[v.ID] = v // keep the slot reserved until the dir is gone
+		m.mu.Unlock()
+		m.dropReservation(v.ID, v.ID)
+		return VM{}, err
+	}
+	m.mu.Unlock()
+	return v, nil
+}
+
+// publishPending publishes a new copy awaiting authorization. Its vm.json is fsynced
+// (saveVMState), and the fsync must not run under m.mu: the write happens first, with
+// the reservation still held in m.allocating (quota and slot accounting keep counting
+// it, nothing can see the VM), and only a durable VM is swapped in. A failed write
+// publishes nothing and rolls the reservation back, as the inline commit did.
+func (m *Manager) publishPending(v VM) (VM, error) {
+	m.mu.Lock()
+	sv := m.stampLocked(VM{}, v)
+	p := m.persistLocked(v.ID)
+	p.seq++
+	seq := p.seq
+	save := m.saveState
+	m.mu.Unlock()
+	err := p.write(seq, true, v.ID, m.vmDir(v.ID), func() error { return save(m.vmDir(v.ID), sv) })
+	if err != nil {
+		m.dropReservation(v.ID, v.ID) // the slot stays reserved until the dir is gone
+		return VM{}, err
+	}
+	m.mu.Lock()
+	delete(m.allocating, v.ID)
+	delete(m.dirty, v.ID)
+	m.applyLocked(VM{}, sv, "created")
+	m.mu.Unlock()
+	return v, nil
+}
+
+// dropReservation releases a reservation after a failed alloc, removing the VM dir
+// first (removeDir != "") so the slot is never reused while the dir still exists.
+func (m *Manager) dropReservation(id, removeDir string) {
+	if removeDir != "" {
+		m.removeVMDir(removeDir)
+	}
+	m.mu.Lock()
+	delete(m.allocating, id)
+	m.mu.Unlock()
+}
+
+// reserveVMLocked checks quota and picks the ID and network slot, recording v in
+// m.allocating. Caller holds m.mu.
+func (m *Manager) reserveVMLocked(v VM, st State) (VM, error) {
 	if err := m.quotaLocked(v.Team, Size{v.VCPU, v.MemMiB, v.DiskGiB}, ""); err != nil {
 		return VM{}, err
 	}
@@ -294,9 +738,7 @@ func (m *Manager) allocLocked(v VM, st State) (VM, error) {
 		return VM{}, err
 	}
 	used, pub := map[int]bool{}, map[string]bool{}
-	for _, o := range m.vms {
-		used[o.Index], pub[o.PublicIP] = true, true
-	}
+	m.eachVMLocked(func(o VM) { used[o.Index], pub[o.PublicIP] = true, true })
 	idx := m.pickIndexLocked(used)
 	if idx == 0 {
 		return VM{}, errCapacity("no free VM addresses")
@@ -313,14 +755,7 @@ func (m *Manager) allocLocked(v VM, st State) (VM, error) {
 		}
 	}
 	v.State, v.Ports, v.CreatedAt = st, []Port{}, m.now()
-	if err := m.makeVMDir(v); err != nil {
-		return VM{}, err
-	}
-	m.flushConntrack(v.IP, v.IPv6, v.PublicIP) // a previous owner's flows
-	if err := m.commitLocked(VM{}, v, "created"); err != nil {
-		m.removeVMDir(v.ID)
-		return VM{}, err
-	}
+	m.allocating[v.ID] = v
 	return v, nil
 }
 
@@ -449,21 +884,382 @@ func (m *Manager) removeStoreDir(link string) error {
 	return os.RemoveAll(link)
 }
 
-// syncNet reloads nftables and routes.json from the current VM set. An nft
-// error means the isolation rules are not in force: callers starting a VM must
-// fail rather than run it unfiltered.
+type syncNetBatch struct {
+	ready chan struct{} // closed when this batch may start executing
+	done  chan struct{} // closed when this batch finishes executing
+	err   error
+}
+
+// syncNet reloads nftables and routes.json from the current VM set. Concurrent
+// callers arriving while a reload is in flight coalesce into a single follow-up
+// pass (group-commit), guaranteeing every caller observes a reload that started
+// after its mutation while avoiding N sequential `nft -f -` reloads.
+// An nft error means the isolation rules are not in force: callers starting a VM
+// must fail rather than run it unfiltered. Already-published ready VMs remain live
+// in routes.json across reloads (zero host-wide blackout); newly-promoted VMs
+// are withheld from routes.json until nft -f - succeeds.
 func (m *Manager) syncNet() error {
+	m.syncNetMu.Lock()
+	if m.syncNetRun == nil {
+		b := &syncNetBatch{done: make(chan struct{})}
+		m.syncNetRun = b
+		m.syncNetMu.Unlock()
+		return m.runSyncNetBatch(b)
+	}
+	if m.syncNetWait != nil {
+		b := m.syncNetWait
+		m.syncNetMu.Unlock()
+		<-b.done
+		return b.err
+	}
+	b := &syncNetBatch{ready: make(chan struct{}), done: make(chan struct{})}
+	m.syncNetWait = b
+	m.syncNetMu.Unlock()
+	<-b.ready
+	return m.runSyncNetBatch(b)
+}
+
+func (m *Manager) runSyncNetBatch(b *syncNetBatch) (err error) {
+	defer func() {
+		m.syncNetMu.Lock()
+		b.err = err
+		close(b.done)
+		if m.syncNetWait != nil {
+			next := m.syncNetWait
+			m.syncNetRun = next
+			m.syncNetWait = nil
+			close(next.ready)
+		} else {
+			m.syncNetRun = nil
+		}
+		m.syncNetMu.Unlock()
+	}()
+	return m.syncNetOnce()
+}
+
+func (m *Manager) syncNetOnce() error {
 	m.netMu.Lock()
 	defer m.netMu.Unlock()
 	vms := m.list("")
-	err := m.run(ruleset(m.cfg, vms), "nft", "-f", "-")
-	if err != nil {
-		log.Printf("nft: %v", err)
+	rs := ruleset(m.cfg, vms)
+	routesPath := filepath.Join(m.cfg.RunDir, "routes.json")
+	if m.lastNftRuleset != rs || len(m.dynQuarantined) > 0 || len(m.dynSSHPaused) > 0 {
+		preVMs := m.preNftVMsLocked(vms)
+		preRF := buildRouteFile(m.cfg, preVMs)
+		if m.lastRoutesPath != routesPath || routePreSyncNeeded(m.lastRoutes, preRF) {
+			if err := writeRouteFile(m.cfg, preRF); err != nil {
+				m.lastRoutes = nil
+				m.lastNftRuleset = ""
+				clear(m.dynQuarantined)
+				clear(m.dynSSHPaused)
+				preRS := ruleset(m.cfg, preVMs)
+				ferr := m.run(preRS, "nft", "-f", "-")
+				if ferr != nil {
+					m.stopUnfencedGuests(preVMs)
+				} else {
+					m.recordNftLocked(preVMs)
+				}
+				return errors.Join(fmt.Errorf("routes: %w", err), ferr)
+			}
+			cp := preRF
+			m.lastRoutes = &cp
+			m.lastRoutesPath = routesPath
+		}
+		if err := m.run(rs, "nft", "-f", "-"); err != nil {
+			m.lastNftRuleset = ""
+			clear(m.dynQuarantined)
+			clear(m.dynSSHPaused)
+			m.stopUnfencedGuests(vms)
+			return fmt.Errorf("nft: %w", err)
+		}
+		m.lastNftRuleset = rs
+		clear(m.dynQuarantined)
+		clear(m.dynSSHPaused)
 	}
-	if rerr := writeRoutes(m.cfg, vms); rerr != nil {
-		log.Printf("routes: %v", rerr)
+	postRF := buildRouteFile(m.cfg, vms)
+	_, statErr := os.Stat(routesPath)
+	if statErr != nil || m.lastRoutes == nil || m.lastRoutesPath != routesPath || !sameRouteFile(*m.lastRoutes, postRF) {
+		if err := writeRouteFile(m.cfg, postRF); err != nil {
+			m.lastRoutes = nil
+			m.lastNftRuleset = ""
+			clear(m.dynQuarantined)
+			clear(m.dynSSHPaused)
+			preVMs := m.preNftVMsLocked(vms)
+			ferr := m.run(ruleset(m.cfg, preVMs), "nft", "-f", "-")
+			if ferr != nil {
+				m.stopUnfencedGuests(preVMs)
+			} else {
+				m.recordNftLocked(preVMs)
+			}
+			return errors.Join(fmt.Errorf("routes: %w", err), ferr)
+		}
+		cp := postRF
+		m.lastRoutes = &cp
+		m.lastRoutesPath = routesPath
 	}
-	return err
+	m.recordNftLocked(vms)
+	return nil
+}
+
+// syncQuarantine fences v via incremental `nft add element` on the dedicated
+// quarantine sets when the tables are already loaded, avoiding a full `nft -f -`
+// reload on every fork/snapshot pause. Falls back to full syncNet if the table is
+// not initialized or the incremental update fails (fail-closed preserved).
+func (m *Manager) syncQuarantine(v VM) error {
+	m.netMu.Lock()
+	if m.lastNftRuleset == "" || v.IP == "" || v.Tap == "" || v.SSHBootEpoch == "" || m.publishedSSHPaused[v.ID] != "" {
+		m.netMu.Unlock()
+		return m.syncNet()
+	}
+	routesPath := filepath.Join(m.cfg.RunDir, "routes.json")
+	if m.publishedQuarantined[v.ID] == v.SSHBootEpoch && m.publishedReady[v.ID] == "" {
+		vms := m.list("")
+		preRF := buildRouteFile(m.cfg, m.preNftVMsLocked(vms))
+		if m.lastRoutesPath != routesPath || routePreSyncNeeded(m.lastRoutes, preRF) {
+			if err := writeRouteFile(m.cfg, preRF); err != nil {
+				m.lastRoutes = nil
+				m.lastNftRuleset = ""
+				clear(m.dynQuarantined)
+				clear(m.dynSSHPaused)
+				m.netMu.Unlock()
+				return errors.Join(fmt.Errorf("routes: %w", err), m.syncNet())
+			}
+			cp := preRF
+			m.lastRoutes = &cp
+			m.lastRoutesPath = routesPath
+		}
+		m.netMu.Unlock()
+		return nil
+	}
+	if m.publishedReady[v.ID] != v.SSHBootEpoch {
+		m.netMu.Unlock()
+		return m.syncNet()
+	}
+	vms := m.list("")
+	preVMs := m.preNftVMsLocked(vms)
+	preRF := buildRouteFile(m.cfg, preVMs)
+	if m.lastRoutesPath != routesPath || routePreSyncNeeded(m.lastRoutes, preRF) {
+		if err := writeRouteFile(m.cfg, preRF); err != nil {
+			m.lastRoutes = nil
+			m.lastNftRuleset = ""
+			clear(m.dynQuarantined)
+			clear(m.dynSSHPaused)
+			m.netMu.Unlock()
+			return errors.Join(fmt.Errorf("routes: %w", err), m.syncNet())
+		}
+		cp := preRF
+		m.lastRoutes = &cp
+		m.lastRoutesPath = routesPath
+	}
+	if err := m.run("", "nft", quarantineNFTArgs("add", v)...); err != nil {
+		m.lastNftRuleset = ""
+		clear(m.dynQuarantined)
+		clear(m.dynSSHPaused)
+		m.netMu.Unlock()
+		return m.syncNet()
+	}
+	if m.dynQuarantined == nil {
+		m.dynQuarantined = map[string]VM{}
+	}
+	m.dynQuarantined[v.ID] = v
+	delete(m.publishedReady, v.ID)
+	m.publishedQuarantined[v.ID] = v.SSHBootEpoch
+	m.netMu.Unlock()
+	return nil
+}
+
+// syncSSHPause fences new inbound TCP/22 SYNs to an already-ready VM via
+// incremental `nft add element` on the @ssh_pause_* sets without removing v
+// from routes.json or disrupting existing HTTP/WebSocket/SSE sessions. Falls
+// back to full syncNet if the table is not loaded or incremental add fails.
+func (m *Manager) syncSSHPause(v VM) error {
+	m.netMu.Lock()
+	if m.lastNftRuleset == "" || v.IP == "" || v.Tap == "" || v.SSHBootEpoch == "" ||
+		m.publishedReady[v.ID] != v.SSHBootEpoch {
+		m.netMu.Unlock()
+		return m.syncNet()
+	}
+	if m.publishedSSHPaused[v.ID] == v.SSHBootEpoch {
+		m.netMu.Unlock()
+		return nil
+	}
+	if err := m.run("", "nft", sshPauseNFTArgs("add", v)...); err != nil {
+		m.lastNftRuleset = ""
+		clear(m.dynQuarantined)
+		clear(m.dynSSHPaused)
+		m.netMu.Unlock()
+		return m.syncNet()
+	}
+	if m.dynSSHPaused == nil {
+		m.dynSSHPaused = map[string]VM{}
+	}
+	if m.publishedSSHPaused == nil {
+		m.publishedSSHPaused = map[string]string{}
+	}
+	m.dynSSHPaused[v.ID] = v
+	m.publishedSSHPaused[v.ID] = v.SSHBootEpoch
+	m.netMu.Unlock()
+	return nil
+}
+
+// syncClearSSHPause releases v from the transient @ssh_pause_* sets via
+// incremental `nft delete element` after rotate-token succeeds, avoiding a full
+// `nft -f -` reload. Falls back to full syncNet on error or mismatched state.
+func (m *Manager) syncClearSSHPause(v VM) error {
+	m.netMu.Lock()
+	if m.publishedSSHPaused[v.ID] == "" {
+		m.netMu.Unlock()
+		return nil
+	}
+	dp, inDyn := m.dynSSHPaused[v.ID]
+	target := v
+	if inDyn {
+		target = dp
+	}
+	if m.lastNftRuleset == "" || !v.sshNetworkReady() ||
+		target.IP != v.IP || target.IPv6 != v.IPv6 || target.Tap != v.Tap ||
+		m.publishedSSHPaused[v.ID] != v.SSHBootEpoch || m.publishedReady[v.ID] != v.SSHBootEpoch {
+		m.netMu.Unlock()
+		return m.syncNet()
+	}
+	if err := m.run("", "nft", sshPauseNFTArgs("delete", target)...); err != nil {
+		m.lastNftRuleset = ""
+		clear(m.dynQuarantined)
+		clear(m.dynSSHPaused)
+		m.netMu.Unlock()
+		return m.syncNet()
+	}
+	delete(m.dynSSHPaused, v.ID)
+	delete(m.publishedSSHPaused, v.ID)
+	if !inDyn {
+		// v was loaded via static elements in lastNftRuleset during a mid-pause syncNet;
+		// clear cached ruleset string so a future syncNet cannot mistake kernel state.
+		m.lastNftRuleset = ""
+	}
+	m.netMu.Unlock()
+	return nil
+}
+
+// syncUnquarantine releases v from the dedicated quarantine sets via incremental
+// `nft delete element` after a pause/resume verification, updating routes.json only
+// after nft succeeds. Falls back to full syncNet if v was not dynamically
+// quarantined, the tables were reloaded, or the incremental update fails.
+func (m *Manager) syncUnquarantine(v VM) error {
+	m.netMu.Lock()
+	dq, ok := m.dynQuarantined[v.ID]
+	if !ok || m.lastNftRuleset == "" || !v.sshNetworkReady() ||
+		dq.IP != v.IP || dq.IPv6 != v.IPv6 || dq.Tap != v.Tap ||
+		m.publishedQuarantined[v.ID] != v.SSHBootEpoch {
+		m.netMu.Unlock()
+		return m.syncNet()
+	}
+	if err := m.run("", "nft", quarantineNFTArgs("delete", dq)...); err != nil {
+		m.lastNftRuleset = ""
+		clear(m.dynQuarantined)
+		m.netMu.Unlock()
+		return m.syncNet()
+	}
+	delete(m.dynQuarantined, v.ID)
+	delete(m.publishedQuarantined, v.ID)
+	m.publishedReady[v.ID] = v.SSHBootEpoch
+	vms := m.list("")
+	postRF := buildRouteFile(m.cfg, m.preNftVMsLocked(vms))
+	routesPath := filepath.Join(m.cfg.RunDir, "routes.json")
+	_, statErr := os.Stat(routesPath)
+	if statErr != nil || m.lastRoutes == nil || m.lastRoutesPath != routesPath || !sameRouteFile(*m.lastRoutes, postRF) {
+		if err := writeRouteFile(m.cfg, postRF); err != nil {
+			// Re-fence immediately in nftables before returning error; caller also clears SSHPolicyReady and syncs.
+			_ = m.run("", "nft", quarantineNFTArgs("add", dq)...)
+			m.lastRoutes = nil
+			m.lastNftRuleset = ""
+			clear(m.dynQuarantined)
+			delete(m.publishedReady, v.ID)
+			m.netMu.Unlock()
+			return fmt.Errorf("routes: %w", err)
+		}
+		cp := postRF
+		m.lastRoutes = &cp
+		m.lastRoutesPath = routesPath
+	}
+	m.netMu.Unlock()
+	return nil
+}
+
+// syncRoutes updates routes.json (e.g. recording newly Running quarantined VM IPs)
+// without reloading nftables when quarantine rules for those VMs are already active.
+// Only VMs already committed in publishedReady are emitted as live routes.
+func (m *Manager) syncRoutes() error {
+	m.netMu.Lock()
+	defer m.netMu.Unlock()
+	vms := m.list("")
+	preVMs := m.preNftVMsLocked(vms)
+	rf := buildRouteFile(m.cfg, preVMs)
+	routesPath := filepath.Join(m.cfg.RunDir, "routes.json")
+	if err := writeRouteFile(m.cfg, rf); err != nil {
+		m.lastRoutes = nil
+		return fmt.Errorf("routes: %w", err)
+	}
+	cp := rf
+	m.lastRoutes = &cp
+	m.lastRoutesPath = routesPath
+	return nil
+}
+
+func (m *Manager) preNftVMsLocked(vms []VM) []VM {
+	pre := make([]VM, len(vms))
+	copy(pre, vms)
+	for i := range pre {
+		if !pre[i].sshNetworkReady() || m.publishedReady[pre[i].ID] != pre[i].SSHBootEpoch {
+			pre[i].SSHPolicyReady = false
+		}
+	}
+	return pre
+}
+
+func (m *Manager) recordNftLocked(vms []VM) {
+	clear(m.publishedReady)
+	clear(m.publishedQuarantined)
+	clear(m.publishedSSHPaused)
+	for _, v := range vms {
+		if v.sshNetworkReady() {
+			m.publishedReady[v.ID] = v.SSHBootEpoch
+			if v.sshPauseFenced {
+				if m.publishedSSHPaused == nil {
+					m.publishedSSHPaused = map[string]string{}
+				}
+				m.publishedSSHPaused[v.ID] = v.SSHBootEpoch
+			}
+		} else if v.SSHBootEpoch != "" && v.State != Stopped && v.State != Error {
+			m.publishedQuarantined[v.ID] = v.SSHBootEpoch
+		}
+	}
+}
+
+func (m *Manager) isSSHPausedInNft(v VM) bool {
+	if v.SSHBootEpoch == "" {
+		return false
+	}
+	m.netMu.Lock()
+	defer m.netMu.Unlock()
+	return m.publishedSSHPaused[v.ID] == v.SSHBootEpoch
+}
+
+func (m *Manager) isQuarantinedInNft(v VM) bool {
+	if v.SSHBootEpoch == "" {
+		return false
+	}
+	m.netMu.Lock()
+	defer m.netMu.Unlock()
+	return m.publishedQuarantined[v.ID] == v.SSHBootEpoch && m.publishedReady[v.ID] == ""
+}
+
+func (m *Manager) isPublishedReadyInNft(v VM) bool {
+	if !v.sshNetworkReady() {
+		return false
+	}
+	m.netMu.Lock()
+	defer m.netMu.Unlock()
+	return m.publishedReady[v.ID] == v.SSHBootEpoch && m.lastRoutes != nil && m.lastRoutes.VMs[v.ID].IP == v.IP
 }
 
 func (m *Manager) touch(id string) {
@@ -497,14 +1293,53 @@ func (m *Manager) reconcile() error {
 	for _, s := range snaps {
 		m.snaps[s.ID] = s
 	}
-	vms, err := loadAll[VM](filepath.Join(m.cfg.StateDir, "vms"), "vm.json")
+	m.finishTombstones()
+	all, err := loadAll[VM](filepath.Join(m.cfg.StateDir, "vms"), "vm.json")
 	if err != nil {
 		return err
 	}
+	vms := all[:0:0]
+	for _, v := range all {
+		if m.tombstoned(v.ID) {
+			// Its delete started and could not be finished: never resume it. It stays
+			// as a terminal error VM (its disk still counts against its team) until
+			// the background retry removes the dir.
+			log.Printf("%s: delete was interrupted and could not be finished; keeping it as an error VM", v.ID)
+			v = doomedVM(v)
+		}
+		vms = append(vms, v)
+	}
+	// A dir whose removal failed half way may have lost its vm.json: the tombstone's
+	// copy of the record keeps the VM known (and counted) until the dir is gone.
+	known := map[string]bool{}
 	for _, v := range vms {
-		m.vms[v.ID] = v
+		known[v.ID] = true
+	}
+	for _, id := range m.tombstonedIDs() {
+		if rec, ok := m.readTombstone(id); ok && !known[id] && exists(m.vmDir(id)) {
+			vms = append(vms, doomedVM(rec))
+		}
+	}
+	for i := range vms {
+		v := &vms[i]
+		epoch, err := m.newSSHEpoch()
+		if err != nil {
+			return err
+		}
+		v.SSHBootEpoch, v.SSHPolicyReady, v.SSHPolicyDigest, v.sshConfig, v.sshHelperDigest, v.sshPauseFenced = epoch, false, "", nil, "", false
+		m.vms[v.ID] = *v
+		if v.State.active() || v.PID > 0 {
+			m.markConntrackDirty(v.IP, v.IPv6, v.PublicIP)
+		}
+	}
+	// A live adopted guest must be fenced before any agent work or publication.
+	if err := m.syncNet(); err != nil {
+		return err
 	}
 	for _, s := range snaps {
+		if _, ok := m.snaps[s.ID]; !ok {
+			continue // went with a VM whose interrupted delete was just finished
+		}
 		if s.Unsynced {
 			// Maybe a host crash before the fsync: keep the disk, drop the memory.
 			log.Printf("%s: snapshot memory was not synced; it restores cold", s.ID)
@@ -517,6 +1352,7 @@ func (m *Manager) reconcile() error {
 			m.snaps[s.ID] = s
 		}
 	}
+	promotedAdopted := false
 	for _, v := range vms {
 		if v.PendingCopy {
 			if v.PID > 0 && m.procs.Alive(v.PID, v.ID) {
@@ -554,6 +1390,12 @@ func (m *Manager) reconcile() error {
 		}
 		alive := v.PID > 0 && m.procs.Alive(v.PID, v.ID)
 		if alive && v.State == Running {
+			if m.cfg.standaloneReady(v) {
+				if _, err := m.update(v.ID, "", func(x *VM) { x.SSHPolicyReady = true }); err != nil {
+					return err
+				}
+				promotedAdopted = true
+			}
 			go func(v VM) { // a crash may have left them lifted; a new dump owns its limits
 				unlock := m.lock(v.ID)
 				defer unlock()
@@ -586,13 +1428,22 @@ func (m *Manager) reconcile() error {
 		// It was running and nobody stopped it: boatd or the host died. Its memory
 		// is gone; bring it back cold from its disk (see resumeAll).
 		nv.ResumeOnBoot = nv.ResumeOnBoot || (v.State == Running && !alive && nv.State == Stopped && m.cfg.ResumeCrashed)
+		billed := v
+		if v.StartedAt != nil && m.usage.hasVM(v.ID, *v.StartedAt) {
+			// The stop that ended this run closed its interval in the ledger, but its
+			// vm.json never became durable: do not bill the run a second time.
+			billed.StartedAt = nil
+		}
 		m.mu.Lock()
-		err := m.commitLocked(v, nv, "boatd restart")
+		err := m.commitLocked(billed, nv, "boatd restart")
 		m.mu.Unlock()
 		if err != nil {
 			return err
 		}
 		delVMNet(m.run, v)
+	}
+	if promotedAdopted {
+		return m.syncNet()
 	}
 	return nil
 }
@@ -625,12 +1476,37 @@ func (m *Manager) deadState(v VM) VM {
 
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 
+func (m *Manager) closeWatches() {
+	m.watchOnce.Do(func() { close(m.watchStop) })
+	m.flushUsage()
+}
+
+// flushUsage makes every ledger record written so far durable (shutdown, barriers).
+func (m *Manager) flushUsage() {
+	if m.usage == nil {
+		return
+	}
+	if err := m.usage.flush(); err != nil {
+		log.Printf("usage: flush: %v", err)
+	}
+}
+
 // watch marks a VM stopped when its firecracker exits on its own (guest
 // reboot/poweroff, crash). Exits caused by our own ops find PID changed.
 func (m *Manager) watch(id string, pid int, done <-chan struct{}) {
-	<-done
+	select {
+	case <-done:
+	case <-m.watchStop:
+		return
+	}
+	closeAgentConns(filepath.Join(m.root(id), vsockUDS)) // the VMM is gone: so are its vsock conns
 	unlock := m.lock(id)
 	defer unlock()
+	select {
+	case <-m.watchStop:
+		return
+	default:
+	}
 	v, err := m.get(id)
 	if err != nil || v.PID != pid || v.State != Running {
 		return
@@ -648,6 +1524,7 @@ func (m *Manager) watch(id string, pid int, done <-chan struct{}) {
 
 // killWait kills the VM's firecracker and waits for it to be gone.
 func (m *Manager) killWait(id string, pid int) {
+	closeAgentConns(filepath.Join(m.root(id), vsockUDS)) // the guest's vsock dies with the VMM
 	if pid <= 0 {
 		return
 	}
@@ -658,10 +1535,31 @@ func (m *Manager) killWait(id string, pid int) {
 	if done == nil {
 		return
 	}
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		log.Printf("%s: pid %d did not exit after SIGKILL", id, pid)
+	// done closes immediately with pidfd (Linux) or cmd.Wait; if Adopt fell back to
+	// polling (capped at 50ms), poll Alive with fast exponential backoff so killWait
+	// still detects VMM exit in ~1-2ms instead of waiting for Adopt's next tick.
+	deadline := time.Now().Add(10 * time.Second)
+	for i := 0; ; i++ {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		if !m.procs.Alive(pid, id) {
+			return
+		}
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			log.Printf("%s: pid %d did not exit after SIGKILL", id, pid)
+			return
+		}
+		timer := time.NewTimer(min(procExitStep(i), rem))
+		select {
+		case <-done:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 
@@ -674,16 +1572,43 @@ const (
 	logRotateEvery = time.Second
 )
 
-// flushDirty retries state writes that hit a full disk.
+// flushDirty retries state writes that hit a full disk. The writes run outside m.mu,
+// through the same per-VM ordering as every commit, so a retry never lands over a
+// newer state and never holds up the API behind an fsync.
 func (m *Manager) flushDirty() {
+	type job struct {
+		id  string
+		p   *vmPersist
+		seq uint64
+		v   VM
+	}
+	var jobs []job
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	save := m.saveState
 	for id := range m.dirty {
 		v, ok := m.vms[id]
-		if !ok || m.saveState(m.vmDir(id), v) == nil {
+		if !ok {
 			delete(m.dirty, id)
+			continue
+		}
+		p := m.persistLocked(id)
+		p.seq++
+		p.inflight++
+		jobs = append(jobs, job{id, p, p.seq, v})
+	}
+	m.mu.Unlock()
+	errs := make([]error, len(jobs))
+	for i, j := range jobs {
+		errs[i] = j.p.write(j.seq, needsSync(j.v), j.id, m.vmDir(j.id), func() error { return save(m.vmDir(j.id), j.v) })
+	}
+	m.mu.Lock()
+	for i, j := range jobs {
+		j.p.inflight--
+		if errs[i] == nil && j.p.seq == j.seq {
+			delete(m.dirty, j.id)
 		}
 	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) rotateLogs() {
@@ -720,24 +1645,48 @@ func rotateLog(path string) error {
 // shutdownReason: a stop that cannot wait for a retry (stop falls back to a cold shutdown).
 const shutdownReason = "boatd shutdown"
 
-// stopAll snapshots every running VM in parallel (service stop / host reboot).
+func (m *Manager) stopAllLimit() int {
+	if n := cap(m.dumpSlots); n > 0 {
+		return n
+	}
+	return maxConcurrentDumps
+}
+
+// stopAll snapshots every running VM with bounded concurrency (service stop / host reboot).
 func (m *Manager) stopAll(ctx context.Context, reason string) {
-	var wg sync.WaitGroup
+	var running []VM
 	for _, v := range m.list("") {
 		if v.State == Running {
+			running = append(running, v)
+		}
+	}
+	if len(running) > 0 {
+		limit := min(m.stopAllLimit(), len(running))
+		jobs := make(chan VM, len(running))
+		for _, v := range running {
+			jobs <- v
+		}
+		close(jobs)
+		var wg sync.WaitGroup
+		for range limit {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if _, err := m.Stop(ctx, v.ID, reason); err != nil {
-					log.Printf("%s: stop: %v", v.ID, err)
-					return
+				for v := range jobs {
+					stopped, err := m.stopOpts(ctx, v.ID, reason, false, false, true)
+					if err != nil {
+						log.Printf("%s: stop: %v", v.ID, err)
+					}
+					if stopped.State == Stopped && stopped.HasSnapshot {
+						m.syncSnapshot(v.ID) // we are exiting: ensure snapshot is durable before return
+					}
 				}
-				m.syncSnapshot(v.ID) // we are exiting: the background one would not finish
-				m.update(v.ID, "", func(x *VM) { x.ResumeOnBoot = true })
 			}()
 		}
+		wg.Wait()
 	}
-	wg.Wait()
+	m.waitSnapSyncs(ctx)
+	m.flushUsage() // the stops above closed billing intervals: durable before we exit
 }
 
 // resumeAll starts VMs that stopAll stopped (in the background).
@@ -761,31 +1710,58 @@ func (m *Manager) resumeAll(ctx context.Context) {
 
 const reapParallel = 8
 
-// reap stops VMs past their TTL or idle limit. Called every 30 s. It never waits: one
-// goroutine per VM, because any guest can hold its own up (a health probe that times
-// out, a start waiting for the guest with the VM's lock held), and that must not delay
-// anybody else's stop. A VM still being handled from the last tick is skipped.
+// reap stops VMs past their TTL or idle limit. Called every 30 s. It checks host-side
+// TTL and host-recorded last activity first so idle guests are not woken by a vsock
+// health RPC every tick, and acquires a reapSlots token before spawning a goroutine so
+// concurrency stays bounded at reapParallel. A VM already being handled or holding its
+// lifecycle lock is skipped until the next tick.
 func (m *Manager) reap(ctx context.Context) {
 	now := m.now()
 	for _, v := range m.list("") {
 		if v.State != Running {
 			continue
 		}
+		ttlDue := v.ExpiresAt != nil && now.After(*v.ExpiresAt)
+		limit := m.idleLimit(v)
+		idleDue := !ttlDue && limit > 0 && now.Sub(m.hostLastActive(v)) > limit
+		if !ttlDue && !idleDue {
+			continue
+		}
+		if m.lockBusy(v.ID) {
+			continue
+		}
 		m.mu.Lock()
 		busy := m.reaping[v.ID]
-		m.reaping[v.ID] = true
+		if !busy {
+			m.reaping[v.ID] = true
+		}
 		m.mu.Unlock()
 		if busy {
 			continue
 		}
+		if m.reapSlots != nil {
+			select {
+			case m.reapSlots <- struct{}{}:
+			case <-ctx.Done():
+				m.mu.Lock()
+				delete(m.reaping, v.ID)
+				m.mu.Unlock()
+				return
+			}
+		}
 		m.reapWG.Add(1)
-		go func() {
+		go func(v VM) {
 			defer m.reapWG.Done()
+			defer func() {
+				m.mu.Lock()
+				delete(m.reaping, v.ID)
+				m.mu.Unlock()
+				if m.reapSlots != nil {
+					<-m.reapSlots
+				}
+			}()
 			m.reapVM(ctx, v, now)
-			m.mu.Lock()
-			delete(m.reaping, v.ID)
-			m.mu.Unlock()
-		}()
+		}(v)
 	}
 }
 
@@ -793,16 +1769,13 @@ func (m *Manager) reapVM(ctx context.Context, v VM, now time.Time) {
 	reason := ""
 	if v.ExpiresAt != nil && now.After(*v.ExpiresAt) {
 		reason = "ttl"
-	} else if limit := m.idleLimit(v); limit > 0 && now.Sub(m.lastActive(ctx, v)) > limit {
-		reason = "idle"
+	} else if limit := m.idleLimit(v); limit > 0 {
+		last := m.hostLastActive(v)
+		if now.Sub(last) > limit && now.Sub(m.guestLastActive(ctx, v, last)) > limit {
+			reason = "idle"
+		}
 	}
-	if reason == "" || m.lockBusy(v.ID) { // busy: next tick, and no slot held meanwhile
-		return
-	}
-	select {
-	case m.reapSlots <- struct{}{}:
-		defer func() { <-m.reapSlots }()
-	case <-ctx.Done():
+	if reason == "" || m.lockBusy(v.ID) {
 		return
 	}
 	if reason == "ttl" { // a PATCH may have moved the deadline while this waited for a slot
@@ -823,9 +1796,9 @@ func (m *Manager) idleLimit(v VM) time.Duration {
 	return time.Duration(max(s, 0)) * time.Second
 }
 
-// lastActive = latest of boot, boatd-seen activity and the agent's idle_s
-// (exec, ssh sessions, desktop input inside the guest).
-func (m *Manager) lastActive(ctx context.Context, v VM) time.Time {
+// hostLastActive returns the latest activity timestamp known to the host (boot/start
+// or boatd exec/file/desktop calls) without contacting the guest agent.
+func (m *Manager) hostLastActive(v VM) time.Time {
 	last := v.CreatedAt
 	if v.StartedAt != nil {
 		last = *v.StartedAt
@@ -835,6 +1808,16 @@ func (m *Manager) lastActive(ctx context.Context, v VM) time.Time {
 		last = t
 	}
 	m.mu.Unlock()
+	return last
+}
+
+// lastActive = latest of boot, boatd-seen activity and the agent's idle_s
+// (exec, ssh sessions, desktop input inside the guest).
+func (m *Manager) lastActive(ctx context.Context, v VM) time.Time {
+	return m.guestLastActive(ctx, v, m.hostLastActive(v))
+}
+
+func (m *Manager) guestLastActive(ctx context.Context, v VM, last time.Time) time.Time {
 	c, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	r, err := agentCall(c, filepath.Join(m.root(v.ID), vsockUDS), map[string]string{"op": "health"})
@@ -847,4 +1830,36 @@ func (m *Manager) lastActive(ctx context.Context, v VM) time.Time {
 		}
 	}
 	return last
+}
+
+// If nft cannot install a quarantine, old established rules may still admit
+// traffic. Stop unverified processes rather than claiming a fence exists.
+// netMu is held; no VM lifecycle lock is acquired (watchers also call syncNet).
+func (m *Manager) stopUnfencedGuests(vms []VM) {
+	for _, v := range vms {
+		if v.sshNetworkReady() || v.PID <= 0 {
+			continue
+		}
+		current, err := m.get(v.ID)
+		if err != nil || current.PID != v.PID || current.SSHBootEpoch != v.SSHBootEpoch {
+			continue
+		}
+		m.killWait(v.ID, v.PID)
+		m.mu.Lock()
+		current, ok := m.vms[v.ID]
+		if ok && current.PID == v.PID && current.SSHBootEpoch == v.SSHBootEpoch {
+			nv := current.clone()
+			nv.State, nv.PID, nv.SSHPolicyReady = Error, 0, false
+			nv.Error = "network quarantine could not be installed"
+			// The Error state swaps in under the lock (the denial holds even if storage
+			// fails: flushDirty retries the file); its fsync runs after the unlock.
+			_, finish := m.commitDeferLocked(current, nv, "quarantine failed")
+			m.mu.Unlock()
+			if err := finish(); err != nil {
+				log.Printf("%s: quarantine failure state: %v", v.ID, err)
+			}
+			continue
+		}
+		m.mu.Unlock()
+	}
 }

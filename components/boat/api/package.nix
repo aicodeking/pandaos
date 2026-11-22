@@ -2,7 +2,10 @@
 buildGoModule {
   pname = "boat-api";
   version = "0.1.0";
-  src = ./.;
+  src = lib.fileset.toSource {
+    root = ./.;
+    fileset = lib.fileset.fileFilter (f: f.hasExt "go" || f.name == "go.mod" || f.name == "openapi.json") ./.;
+  };
   vendorHash = null;
   ldflags = [ "-s" "-w" ];
   # The module basename is `api`.

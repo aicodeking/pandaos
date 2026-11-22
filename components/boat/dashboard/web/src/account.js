@@ -1,6 +1,6 @@
 // Team-level screens: secrets, API keys, webhooks and delivery log, members, environments.
 
-import { fmtTime, parseKV, parseList } from "./format.js";
+import { fmtTime, parseKV, parseList, parseOptionalInt } from "./format.js";
 import { askDialog, badge, button, field, h, run, section, showValueDialog, table, toast } from "./ui.js";
 
 const SCOPES = ["vms:read", "vms:write", "exec", "admin"];
@@ -14,8 +14,9 @@ export function secretsScreen(ctx) {
     const secrets = await ctx.api.listSecrets();
     const name = h("input", { type: "text", required: true, pattern: SECRET_NAME, title: "UPPER_SNAKE environment variable name", autocomplete: "off", autocapitalize: "characters", spellcheck: "false" });
     const value = h("input", { type: "password", required: true, autocomplete: "new-password" });
+    const inject = h("input", { type: "checkbox", checked: true });
     const save = async () => {
-      const result = await ctx.api.putSecret(name.value, value.value);
+      const result = await ctx.api.putSecret(name.value, value.value, inject.checked);
       value.value = "";
       toast(result.rotated ? `Rotated ${name.value}. Running VMs keep the old value until restarted.` : `Saved ${name.value}`);
       await refresh();
@@ -33,6 +34,7 @@ export function secretsScreen(ctx) {
         "Team secrets",
         [
           { label: "Name", cell: (x) => h("code", {}, x.name) },
+          { label: "Auto-inject", cell: (x) => (x.inject ? "yes" : "only when picked") },
           { label: "Updated", cell: (x) => fmtTime(x.updated) },
           { label: "Actions", cell: (x) => button("Delete", (e) => run(() => remove(x), e.currentTarget), { ...danger, "aria-label": `Delete secret ${x.name}` }) },
         ],
@@ -45,6 +47,7 @@ export function secretsScreen(ctx) {
         h("h3", {}, "Add or rotate"),
         field("Name", name),
         field("Value", value, "Write-only: the API never returns a value, here or anywhere else."),
+        h("label", { class: "check" }, inject, "Inject into new VMs by default"),
         h("div", { class: "row" }, h("button", { type: "submit", class: "primary" }, "Save secret")),
       ),
     );
@@ -56,10 +59,48 @@ export function keysScreen(ctx) {
   const load = async (refresh) => {
     const keys = await ctx.api.listKeys();
     const name = h("input", { type: "text", required: true, autocomplete: "off" });
+    const expiresInS = h("input", { type: "number", min: "1", inputmode: "numeric", placeholder: "Optional" });
     const scopeBoxes = SCOPES.map((scope) => ({ scope, el: h("input", { type: "checkbox", checked: ctx.me.scopes?.includes(scope), disabled: !ctx.me.scopes?.includes(scope) }) }));
     const create = async () => {
-      const key = await ctx.api.createKey({ name: name.value.trim(), scopes: scopeBoxes.filter((b) => b.el.checked).map((b) => b.scope) });
-      await showValueDialog({ title: `Key ${key.name || key.id}`, message: "This token is shown once. Store it now.", label: "API key", value: key.token });
+      const exp = parseOptionalInt(expiresInS.value, "Expires in", { min: 1 });
+      const spec = {
+        name: name.value.trim(),
+        scopes: scopeBoxes.filter((b) => b.el.checked).map((b) => b.scope),
+        ...(exp !== undefined ? { expires_in_s: exp } : {}),
+      };
+      const key = await ctx.api.createKey(spec);
+      await showValueDialog({
+        title: `Key ${key.name || key.id}`,
+        message: key.expires
+          ? `This token is shown once. Store it now. Expires ${fmtTime(key.expires)}.`
+          : "This token is shown once. Store it now.",
+        label: "API key",
+        value: key.token,
+      });
+      await refresh();
+    };
+    const rotate = async (key) => {
+      const current = key.id === ctx.me.key_id;
+      const answer = await askDialog({
+        title: `Rotate key ${key.name || key.id}?`,
+        message: current
+          ? "Generates a new secret for the key you are signed in with. This tab switches to the new token after rotation."
+          : "Generates a new secret, keeping this key's ID and scopes. The old secret works during the overlap window.",
+        confirm: "Rotate key",
+        fields: [{ name: "overlap_s", label: "Overlap (seconds)", type: "number", min: "0", max: "2592000", placeholder: "86400", hint: "Blank = 24 hours (86400s). 0 revokes the old secret immediately." }],
+      });
+      if (!answer) return;
+      const overlapS = parseOptionalInt(answer.overlap_s, "Overlap", { min: 0, max: 2592000 });
+      const rotated = await ctx.api.rotateKey(key.id, overlapS);
+      if (current && rotated.token && ctx.setKey) ctx.setKey(rotated.token);
+      await showValueDialog({
+        title: `Rotated key ${key.name || key.id}`,
+        message: rotated.prev_until
+          ? `This new token is shown once. The previous secret works until ${fmtTime(rotated.prev_until)}.`
+          : "This new token is shown once. The previous secret is no longer valid.",
+        label: "API key",
+        value: rotated.token ?? "",
+      });
       await refresh();
     };
     const remove = async (key) => {
@@ -85,7 +126,16 @@ export function keysScreen(ctx) {
           { label: "ID", cell: (k) => h("code", {}, k.id) },
           { label: "Scopes", cell: (k) => (k.scopes?.length ? k.scopes.join(" ") : "all of the role's scopes") },
           { label: "Created", cell: (k) => fmtTime(k.created) },
-          { label: "Actions", cell: (k) => button("Revoke", (e) => run(() => remove(k), e.currentTarget), { ...danger, "aria-label": `Revoke key ${k.name || k.id}` }) },
+          { label: "Expires", cell: (k) => (k.expires ? fmtTime(k.expires) : "never") },
+          {
+            label: "Actions",
+            cell: (k) => h(
+              "div",
+              { class: "row" },
+              button("Rotate", (e) => run(() => rotate(k), e.currentTarget), { "aria-label": `Rotate key ${k.name || k.id}` }),
+              button("Revoke", (e) => run(() => remove(k), e.currentTarget), { ...danger, "aria-label": `Revoke key ${k.name || k.id}` }),
+            ),
+          },
         ],
         keys,
         "No keys.",
@@ -95,6 +145,7 @@ export function keysScreen(ctx) {
         { class: "form", onsubmit: (e) => { e.preventDefault(); run(create, submitOf(e)); } },
         h("h3", {}, "New key"),
         field("Name", name),
+        field("Expires in (seconds)", expiresInS, "Optional. Leave blank for a key that never expires."),
         h("fieldset", { class: "field" }, h("legend", {}, "Scopes"), scopeBoxes.map((b) => h("label", { class: "check" }, b.el, b.scope)), h("small", { class: "hint" }, "A key cannot have more scopes than the key that creates it.")),
         h("div", { class: "row" }, h("button", { type: "submit", class: "primary" }, "Create key")),
       ),
@@ -198,7 +249,7 @@ export function teamScreen(ctx) {
     const remove = async (member) => {
       const ok = await askDialog({
         title: `Remove ${member.user_id}?`,
-        message: "This revokes their API keys. ssh keys they registered stay in VMs, so re-key or delete those VMs to cut off access.",
+        message: "This immediately revokes their API keys and SSH access grants on this team.",
         confirm: "Remove member",
         danger: true,
       });
@@ -249,6 +300,51 @@ export function environmentsScreen(ctx) {
       toast(`Building ${x.name || x.id}`);
       await refresh();
     };
+    const edit = async (x) => {
+      const envText = Object.entries(x.env ?? {}).map(([k, v]) => `${k}=${v}`).join("\n");
+      const answer = await askDialog({
+        title: `Edit environment ${x.name || x.id}`,
+        message: "Saving creates a new environment version. Existing sandboxes stay pinned until upgraded.",
+        confirm: "Save version",
+        fields: [
+          { name: "name", label: "Name", value: x.name ?? "" },
+          { name: "image", label: "Image", value: x.image ?? "", placeholder: "Optional" },
+          { name: "size", label: "Size", value: x.size ?? "", placeholder: "Optional" },
+          { name: "setup_script", label: "Setup script", type: "textarea", rows: "4", value: x.setup_script ?? "" },
+          { name: "env", label: "Variables", type: "textarea", rows: "3", value: envText, hint: "One KEY=value per line." },
+          { name: "is_default", label: "Team default environment", type: "checkbox", checked: Boolean(x.is_default) },
+        ],
+      });
+      if (!answer) return;
+      const spec = {
+        name: answer.name.trim() || undefined,
+        image: answer.image.trim() || undefined,
+        size: answer.size.trim() || undefined,
+        setup_script: answer.setup_script || undefined,
+        env: parseKV(answer.env),
+        is_default: Boolean(answer.is_default),
+      };
+      const updated = await ctx.api.updateEnvironment(x.id, spec);
+      toast(`Updated ${updated.name || x.name || x.id}${updated.version ? ` to v${updated.version}` : ""}`);
+      await refresh();
+    };
+    const upgrade = async (x) => {
+      const answer = await askDialog({
+        title: `Upgrade sandboxes on ${x.name || x.id}?`,
+        message: "Re-pins sandboxes on this environment to its latest version. Running sandboxes receive additions and updates live; variable removals require stopping the sandbox first.",
+        confirm: "Upgrade",
+        fields: [{ name: "agentIds", label: "Specific VM IDs", hint: "Optional. Comma or space separated; leave blank to upgrade all sandboxes on this environment." }],
+      });
+      if (!answer) return;
+      const ids = parseList(answer.agentIds);
+      const res = await ctx.api.upgradeEnvironment(x.id, ids.length ? ids : undefined);
+      const failed = res.failed ? `, ${res.failed} failed` : "";
+      toast(
+        `Upgraded ${res.upgraded ?? 0} sandbox(es) to v${res.version ?? x.version ?? "?"} (${res.upgraded_live ?? 0} live, ${res.upgraded_stopped ?? 0} stopped${failed})`,
+        Boolean(res.failed),
+      );
+      await refresh();
+    };
     const remove = async (x) => {
       const ok = await askDialog({ title: `Delete environment ${x.name || x.id}?`, message: "This cannot be undone.", confirm: "Delete environment", danger: true });
       if (!ok) return;
@@ -261,17 +357,32 @@ export function environmentsScreen(ctx) {
       table(
         "Environments",
         [
-          { label: "Name", cell: (x) => [x.name || x.id, x.is_default ? h("span", { class: "tag" }, "default") : null] },
+          {
+            label: "Name",
+            cell: (x) => [
+              x.name || x.id,
+              x.version ? h("span", { class: "tag" }, `v${x.version}`) : null,
+              x.is_default ? h("span", { class: "tag" }, "default") : null,
+            ],
+          },
           { label: "Image", cell: (x) => x.image || "—" },
           { label: "Size", cell: (x) => x.size || "—" },
           { label: "Variables", cell: (x) => Object.keys(x.env ?? {}).join(" ") || "—" },
+          {
+            label: "Build",
+            cell: (x) => (x.build?.state
+              ? [badge(x.build.state), x.build.error ? h("div", { class: "error" }, x.build.error) : null]
+              : "—"),
+          },
           {
             label: "Actions",
             cell: (x) => h(
               "div",
               { class: "row" },
-              button("Build", (e) => run(() => build(x), e.currentTarget)),
-              button("Delete", (e) => run(() => remove(x), e.currentTarget), danger),
+              button("Edit", (e) => run(() => edit(x), e.currentTarget), { "aria-label": `Edit environment ${x.name || x.id}` }),
+              button("Build", (e) => run(() => build(x), e.currentTarget), { "aria-label": `Build environment ${x.name || x.id}` }),
+              button("Upgrade", (e) => run(() => upgrade(x), e.currentTarget), { "aria-label": `Upgrade environment ${x.name || x.id}` }),
+              button("Delete", (e) => run(() => remove(x), e.currentTarget), { ...danger, "aria-label": `Delete environment ${x.name || x.id}` }),
             ),
           },
         ],

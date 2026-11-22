@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -240,6 +241,11 @@ func (p realProcs) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 	if p.cfg.Jailer == "" {
+		if p.cfg.UntrustedTenants {
+			p.Kill(cmd.Process.Pid)
+			<-exited
+			return 0, nil, errors.New("untrustedTenants: refuses to start VM without jailer cgroup")
+		}
 		done := make(chan struct{})
 		go func() { <-exited; close(done) }()
 		setOOMScore(cmd.Process.Pid)
@@ -251,20 +257,39 @@ func (p realProcs) Start(v VM, root string, uid, gid int) (int, <-chan struct{},
 	if err != nil {
 		return 0, nil, err
 	}
-	p.setIOMax(v.ID)
+	if err := p.setIOMax(v.ID); err != nil {
+		if p.cfg.UntrustedTenants {
+			p.Kill(pid)
+			return 0, nil, err
+		}
+		log.Printf("%v", err)
+	}
 	return pid, p.Adopt(pid, v.ID), nil
 }
 
 // setIOMax writes the VM cgroup's io.max. It is not a --cgroup flag because the
-// jailer rejects values that contain "=".
-func (p realProcs) setIOMax(id string) {
+// jailer rejects values that contain "=". Under untrustedTenants, missing cgroup
+// or stateDisk configuration or a failed io.max write returns an error so Start
+// kills the spawned VMM instead of running it unthrottled.
+func (p realProcs) setIOMax(id string) error {
+	cg := ""
+	if p.cfg.cgroupLimits && p.cfg.CgroupParent != "" && id != "" {
+		cg = filepath.Join(cgroupRoot, p.cfg.CgroupParent, id)
+	}
 	val, limited := p.cfg.ioMax(0)
 	if !limited {
-		return
+		if p.cfg.UntrustedTenants {
+			return fmt.Errorf("%s: io.max: untrustedTenants requires cgroup io.max limits (cgroup=%q disk=%q)", id, cg, p.cfg.stateDisk)
+		}
+		return nil
 	}
-	if err := os.WriteFile(filepath.Join(cgroupRoot, p.cfg.CgroupParent, id, "io.max"), []byte(val), 0); err != nil {
-		log.Printf("%s: io.max: %v", id, err)
+	if cg == "" {
+		return fmt.Errorf("%s: io.max: missing VM cgroup", id)
 	}
+	if err := os.WriteFile(filepath.Join(cg, "io.max"), []byte(val), 0); err != nil {
+		return fmt.Errorf("%s: io.max: %w", id, err)
+	}
+	return nil
 }
 
 // ioMax is a VM's io.max line on stateDir's disk: ioMaxMBps / ioMaxIOPS, with writes capped
@@ -314,21 +339,66 @@ func jailerArgs(c Config, v VM, uid, gid int, vmDir string) []string {
 	return append(args, "--", "--api-sock", "/"+apiSock)
 }
 
+// pollBackoff doubles a polling interval from start up to max.
+type pollBackoff struct {
+	cur, max time.Duration
+}
+
+func newPollBackoff(start, max time.Duration) *pollBackoff {
+	return &pollBackoff{cur: start, max: max}
+}
+
+func (b *pollBackoff) next() time.Duration {
+	d := b.cur
+	if b.cur < b.max {
+		b.cur *= 2
+		if b.cur > b.max {
+			b.cur = b.max
+		}
+	}
+	return d
+}
+
+// procExitBackoff steps fast polling for process exit detection (~1-2ms latency,
+// capped at 50ms) when pidfd is unavailable.
+var procExitBackoff = []time.Duration{
+	1 * time.Millisecond,
+	2 * time.Millisecond,
+	5 * time.Millisecond,
+	10 * time.Millisecond,
+	25 * time.Millisecond,
+	50 * time.Millisecond,
+}
+
+func procExitStep(i int) time.Duration {
+	if i >= len(procExitBackoff) {
+		return procExitBackoff[len(procExitBackoff)-1]
+	}
+	return procExitBackoff[i]
+}
+
 func waitPidFile(path string, exited <-chan error) (int, error) {
 	deadline := time.Now().Add(10 * time.Second)
+	bo := newPollBackoff(time.Millisecond, 10*time.Millisecond)
 	for time.Now().Before(deadline) {
 		if b, err := os.ReadFile(path); err == nil {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
 				return pid, nil
 			}
 		}
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			break
+		}
+		timer := time.NewTimer(min(bo.next(), rem))
 		select {
 		case err := <-exited:
+			timer.Stop()
 			if err != nil {
 				return 0, fmt.Errorf("jailer: %w (see firecracker.log)", err)
 			}
 			exited = nil // exited cleanly; the pid file is (about to be) there
-		case <-time.After(10 * time.Millisecond):
+		case <-timer.C:
 		}
 	}
 	return 0, fmt.Errorf("jailer wrote no pid file %s", path)
@@ -346,12 +416,20 @@ func setOOMScore(pid int) {
 
 func (p realProcs) Adopt(pid int, id string) <-chan struct{} {
 	setOOMScore(pid) // also re-applied to VMs a restarted boatd takes over
+	alive := func() bool { return p.Alive(pid, id) }
+	if done, ok := adoptPidfd(pid, alive); ok {
+		return done
+	}
+	return adoptPoll(alive)
+}
+
+func adoptPoll(alive func() bool) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
-		for p.Alive(pid, id) {
-			time.Sleep(100 * time.Millisecond)
+		defer close(done)
+		for i := 0; alive(); i++ {
+			time.Sleep(procExitStep(i))
 		}
-		close(done)
 	}()
 	return done
 }
@@ -392,15 +470,22 @@ func (realProcs) Kill(pid int) { syscall.Kill(pid, syscall.SIGKILL) }
 // waitSock waits until the API socket accepts, or the process dies.
 func waitSock(path string, done <-chan struct{}, d time.Duration) error {
 	deadline := time.Now().Add(d)
+	bo := newPollBackoff(time.Millisecond, 20*time.Millisecond)
 	for time.Now().Before(deadline) {
 		if c, err := dialJail(context.Background(), path); err == nil {
 			c.Close()
 			return nil
 		}
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			break
+		}
+		timer := time.NewTimer(min(bo.next(), rem))
 		select {
 		case <-done:
+			timer.Stop()
 			return fmt.Errorf("firecracker exited during startup (see firecracker.log)")
-		case <-time.After(20 * time.Millisecond):
+		case <-timer.C:
 		}
 	}
 	return fmt.Errorf("firecracker API socket %s not ready after %s", path, d)

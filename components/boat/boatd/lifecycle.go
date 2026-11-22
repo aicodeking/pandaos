@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -29,6 +32,10 @@ type CreateReq struct {
 	Snapshot  string            `json:"snapshot"`  // create from a saved snapshot instead of an image
 	FailFast  bool              `json:"fail_fast"` // refuse (no_ready_machine) instead of waiting
 	Count     int               `json:"count"`     // > 1: CreateBatch, all or none
+	// FreshBoot (with Snapshot): restore only the snapshot's disk and cold boot; the
+	// snapshot's memory is never loaded nor copied. The API sets it when the new VM's
+	// secret selection is narrower than the source's.
+	FreshBoot bool `json:"fresh_boot"`
 }
 
 func validEnv(env map[string]string) error {
@@ -154,7 +161,15 @@ func (m *Manager) prepareCreate(ctx context.Context, r CreateReq, warm string) (
 			return createPlan{}, errf(404, "snapshot not found")
 		}
 		base.Image, base.Size, base.VCPU, base.MemMiB, base.DiskGiB = sn.Image, sn.Size, sn.VCPU, sn.MemMiB, sn.DiskGiB
-		base.FromSnapshot, src, restore = sn.ID, m.snapDir(sn.ID), sn.HasMem
+		base.FromSnapshot, src, restore = sn.ID, m.snapDir(sn.ID), sn.HasMem && !r.FreshBoot
+		if sn.NoEnv || sn.Labels["boat.no_env"] == "1" {
+			if base.Labels == nil {
+				base.Labels = map[string]string{}
+			} else {
+				base.Labels = maps.Clone(base.Labels)
+			}
+			base.Labels["boat.no_env"] = "1"
+		}
 	} else if warm != "" {
 		src, restore = warm, true
 	} else if !exists(filepath.Join(src, diskFile)) || !exists(filepath.Join(src, kernFile)) {
@@ -168,15 +183,19 @@ func (m *Manager) prepareCreate(ctx context.Context, r CreateReq, warm string) (
 
 // finishCreate materializes and boots v, allocated from p.
 func (m *Manager) finishCreate(ctx context.Context, v VM, p createPlan, allocT time.Duration) (VM, error) {
+	return m.finishCreateSync(ctx, v, p, allocT, true)
+}
+
+func (m *Manager) finishCreateSync(ctx context.Context, v VM, p createPlan, allocT time.Duration, syncNet bool) (VM, error) {
 	t1 := time.Now()
 	unlock := m.lock(v.ID)
 	defer unlock()
 	steps, err := m.materialize(v, p.src, p.restore, p.sameTeam)
 	if err != nil {
-		return m.fail(v.ID, err)
+		return m.failSync(v.ID, err, syncNet)
 	}
 	log.Printf("%s: create alloc=%dms materialize=%dms (%s)", v.ID, allocT.Milliseconds(), time.Since(t1).Milliseconds(), steps)
-	return m.bootNew(ctx, v, p.restore, p.env)
+	return m.bootNewSync(ctx, v, p.restore, p.env, syncNet)
 }
 
 // materialize reflink-copies disk, kernel (+ vmstate/mem) from src into the
@@ -245,18 +264,26 @@ func (m *Manager) chownRoot(v VM) error {
 
 // bootNew starts a freshly materialized VM and gives the guest its identity.
 func (m *Manager) bootNew(ctx context.Context, v VM, restore bool, env map[string]string) (VM, error) {
+	return m.bootNewSync(ctx, v, restore, env, true)
+}
+
+func (m *Manager) bootNewSync(ctx context.Context, v VM, restore bool, env map[string]string, syncNet bool) (VM, error) {
 	defer m.bootIO()()
 	t0 := time.Now()
-	if err := m.syncNet(); err != nil { // anti-spoof rules are in force before its first frame
-		return m.fail(v.ID, err)
-	}
-	v, err := m.boot(ctx, v, restore)
+	v, err := m.bootWithSync(ctx, v, restore, syncNet)
 	if err != nil {
-		return m.fail(v.ID, err)
+		return m.failSync(v.ID, err, syncNet)
 	}
 	t1 := time.Now()
-	if err := m.syncNet(); err != nil { // routes: it is running now
-		return m.fail(v.ID, err)
+	if syncNet {
+		if v.SSHPolicyReady {
+			err = m.syncNet()
+		} else {
+			err = m.syncRoutes()
+		}
+		if err != nil {
+			return m.failSync(v.ID, err, true)
+		}
 	}
 	log.Printf("%s: boot=%dms net=%dms", v.ID, t1.Sub(t0).Milliseconds(), time.Since(t1).Milliseconds())
 	return m.initGuest(ctx, v, env, true, restore)
@@ -265,13 +292,19 @@ func (m *Manager) bootNew(ctx context.Context, v VM, restore bool, env map[strin
 const guestInitFactor = 2 // whole guest init, in units of bootTimeoutS
 
 func (m *Manager) fail(id string, err error) (VM, error) {
+	return m.failSync(id, err, true)
+}
+
+func (m *Manager) failSync(id string, err error, syncNet bool) (VM, error) {
 	log.Printf("%s: %v", id, err)
 	v, _ := m.get(id)
 	m.killWait(id, v.PID)
 	delVMNet(m.run, v)
-	m.update(id, "failed", func(v *VM) { v.State, v.Error, v.PID = Error, err.Error(), 0 })
-	m.syncNet()
-	return VM{}, err
+	_, uerr := m.update(id, "failed", func(v *VM) { v.State, v.Error, v.PID = Error, err.Error(), 0 })
+	if !syncNet {
+		return VM{}, errors.Join(err, uerr)
+	}
+	return VM{}, errors.Join(err, uerr, m.syncNet())
 }
 
 func (m *Manager) bootArgs(v VM) string {
@@ -287,13 +320,31 @@ func (m *Manager) bootArgs(v VM) string {
 
 // boot launches firecracker and either cold-boots or restores root/{vmstate,mem}.
 func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
+	return m.bootWithSync(ctx, v, restore, true)
+}
+
+func (m *Manager) bootWithSync(ctx context.Context, v VM, restore, syncBefore bool) (VM, error) {
+	var err error
+	if syncBefore {
+		v, err = m.resetSSHBoot(v.ID)
+		if err != nil {
+			return v, err
+		}
+		if err := m.syncNet(); err != nil { // anti-spoof and quarantine rules are in force before its first frame
+			return v, err
+		}
+	}
+
 	uid, gid := m.ids(v)
+	m.markConntrackDirty(v.IP, v.IPv6, v.PublicIP)
 	if err := addVMNet(m.cfg, m.run, v, uid, gid); err != nil {
 		return v, err
 	}
 	root := m.root(v.ID)
 	os.Remove(filepath.Join(root, apiSock))
 	os.Remove(filepath.Join(root, vsockUDS))
+	// A new VMM: conns to the last one are stale.
+	closeAgentConns(filepath.Join(root, vsockUDS))
 	if !restore { // a cold boot has no memory base
 		os.Remove(filepath.Join(root, vmstate))
 		os.Remove(filepath.Join(root, memFile))
@@ -338,10 +389,10 @@ func (m *Manager) boot(ctx context.Context, v VM, restore bool) (VM, error) {
 	}
 	return m.update(v.ID, "", func(x *VM) {
 		x.State, x.HasSnapshot, x.Error, x.DiffOK = Running, false, "", m.cfg.DiffSnapshots
-		if x.TTLS > 0 {
-			t := m.now().Add(time.Duration(x.TTLS) * time.Second)
-			x.ExpiresAt = &t
+		if m.cfg.standaloneReady(*x) {
+			x.SSHPolicyReady = true
 		}
+		x.ExpiresAt = deadline(m.now(), x.TTLS)
 	})
 }
 
@@ -362,6 +413,9 @@ func (m *Manager) initGuest(ctx context.Context, v VM, env map[string]string, id
 	if err == nil && identity {
 		id := map[string]any{"op": "set_identity", "hostname": v.Name, "ipv4_cidr": v.IP + "/16",
 			"gw": m.cfg.gateway().String(), "mac": v.MAC, "dns": m.cfg.DNS}
+		if !m.cfg.standaloneReady(v) && v.Team != warmTeam {
+			id["defer_ssh_restart"] = true
+		}
 		if v.IPv6 != "" {
 			bits := netip.MustParsePrefix(m.cfg.IPv6Prefix).Bits() // on-link prefix; this VM owns one address
 			id["ipv6_cidr"], id["ipv6_gw"] = fmt.Sprintf("%s/%d", v.IPv6, bits), m.cfg.ipv6Gateway()
@@ -433,6 +487,10 @@ func (m *Manager) Stop(ctx context.Context, id, reason string) (VM, error) {
 // stop snapshots a running VM (its next start resumes it) or, with force, kills it
 // at once: no guest sync, no snapshot, so the next start cold-boots from its disk.
 func (m *Manager) stop(ctx context.Context, id, reason string, force bool) (VM, error) {
+	return m.stopOpts(ctx, id, reason, force, true, false)
+}
+
+func (m *Manager) stopOpts(ctx context.Context, id, reason string, force, bgSync, resumeOnBoot bool) (VM, error) {
 	unlock := m.lock(id)
 	defer unlock()
 	v, err := m.get(id)
@@ -442,8 +500,12 @@ func (m *Manager) stop(ctx context.Context, id, reason string, force bool) (VM, 
 	if v.State != Running {
 		return v, errf(http.StatusConflict, "vm is %s", v.State)
 	}
+	originalSSH := v.clone()
 	if v, err = m.update(id, reason, func(x *VM) { x.State = Stopping }); err != nil {
 		return v, err
+	}
+	if err := m.syncQuarantine(originalSSH); err != nil {
+		return m.fail(id, err)
 	}
 	root := m.root(id)
 	t0 := time.Now()
@@ -455,7 +517,7 @@ func (m *Manager) stop(ctx context.Context, id, reason string, force bool) (VM, 
 		}
 		dumped := false // tried and failed, as opposed to refused by the floor (which stops cold)
 		if err == nil {
-			v, err = m.takeSnapshot(ctx, v, true) // a stop's file is the next start's base: flushed now
+			v, err = m.takeSnapshot(ctx, v, false) // syncSnapshot flushes mem and vmstate behind the call
 			dumped = true
 		}
 		snap = err == nil
@@ -468,11 +530,14 @@ func (m *Manager) stop(ctx context.Context, id, reason string, force bool) (VM, 
 			rerr := newFC(filepath.Join(root, apiSock)).resume(ctx)
 			if rerr == nil {
 				v, rerr = m.update(id, "", func(x *VM) { x.State = Running })
+				if rerr == nil {
+					rerr = m.restoreSSHAfterPause(context.WithoutCancel(ctx), originalSSH)
+				}
 			}
 			if rerr != nil {
 				log.Printf("%s: resume after a failed stop: %v", id, rerr)
 			}
-			return v, errf(http.StatusInsufficientStorage, "stop: memory not saved, the VM is still running (free disk space and retry, or stop with force to discard its memory): %v", err)
+			return v, errors.Join(errf(http.StatusInsufficientStorage, "stop: memory not saved (free disk space and retry, or stop with force to discard its memory): %v", err), rerr)
 		}
 		if !snap {
 			// No snapshot and no retry (below the disk floor, huge pages, boatd exiting, a TTL):
@@ -494,11 +559,6 @@ func (m *Manager) stop(ctx context.Context, id, reason string, force bool) (VM, 
 	m.dumpDone(id) // its cgroup is gone with the VMM; no setMemLimits follows a stop
 	t2 := time.Now()
 	if snap {
-		// Now, not behind the call: the next merge would wait for this writeback, and it
-		// is a fork that gets charged (fork 1.3 -> 2.5 s).
-		if err := fsyncFile(filepath.Join(root, memFile)); err != nil {
-			log.Printf("%s: flush mem: %v", id, err)
-		}
 		snap = os.Rename(filepath.Join(root, snapState), filepath.Join(root, vmstate)) == nil
 	}
 	if !snap {
@@ -510,32 +570,78 @@ func (m *Manager) stop(ctx context.Context, id, reason string, force bool) (VM, 
 	delVMNet(m.run, v)
 	v, err = m.update(id, reason, func(x *VM) {
 		x.State, x.PID, x.HasSnapshot, x.SnapSynced, x.AgentReady, x.ExpiresAt = Stopped, 0, snap, false, false, nil
+		if resumeOnBoot {
+			x.ResumeOnBoot = true
+		}
 	})
 	t4 := time.Now()
-	m.syncNet()
+	err = errors.Join(err, m.syncNet())
 	log.Printf("%s: stop (%s) snapshot=%dms kill=%dms flush=%dms state=%dms net=%dms", id, map[bool]string{true: "force", false: reason}[force],
 		t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), t3.Sub(t2).Milliseconds(), t4.Sub(t3).Milliseconds(), time.Since(t4).Milliseconds())
-	if snap {
-		go m.syncSnapshot(id)
+	if snap && bgSync {
+		m.startSyncSnapshot(id)
 	}
 	return v, err
 }
 
+type StartReq struct {
+	Env      map[string]string `json:"env"`
+	FailFast bool              `json:"fail_fast"`
+	TTLS     *int              `json:"ttl_s"`
+	// FreshBoot discards the stop snapshot (vmstate + mem) of a stopped VM and cold
+	// boots from its disk, never restoring the old memory. The API sets it on a start
+	// that must not see a previous run's secrets in guest RAM (a no_env cold start).
+	FreshBoot bool `json:"fresh_boot"`
+}
+
+type ForkReq struct {
+	Name           string            `json:"name"`
+	Team           string            `json:"team"`
+	FailFast       bool              `json:"fail_fast"`
+	Labels         map[string]string `json:"labels"` // absent: only the parent's boat.* labels
+	TTLS           *int              `json:"ttl_s"`
+	ReprovisionSSH bool              `json:"reprovision_ssh"`
+}
+
 func (m *Manager) Start(ctx context.Context, id string, env map[string]string) (VM, error) {
+	return m.startVM(ctx, id, env, nil, false)
+}
+
+func (m *Manager) startVM(ctx context.Context, id string, env map[string]string, ttlS *int, freshBoot bool) (VM, error) {
 	if err := validEnv(env); err != nil {
 		return VM{}, err
 	}
+	if ttlS != nil && (*ttlS < 0 || *ttlS > maxPatchS) {
+		return VM{}, errf(400, "ttl_s must be 0 (no auto-stop) to %d", maxPatchS)
+	}
 	unlock := m.lock(id)
 	defer unlock()
+	if m.tombstoned(id) {
+		return VM{}, errf(http.StatusConflict, "vm is being deleted: its removal failed and is retried in the background")
+	}
 	m.mu.Lock()
 	old, ok := m.vms[id]
 	var err error
+	var finish func() error // the deferred vm.json write, run after m.mu is released
 	switch {
 	case !ok:
 		err = errNotFound
 	case old.PendingCopy:
 		err = errf(http.StatusConflict, "copy is awaiting authorization")
+	case freshBoot && old.State != Stopped && old.State != Error:
+		err = errf(http.StatusConflict, "fresh_boot needs a stopped vm (it is %s): stop it first", old.State)
 	case old.State == Running:
+		if ttlS != nil {
+			nv := old.clone()
+			nv.TTLS = *ttlS
+			nv.ExpiresAt = deadline(m.now(), nv.TTLS)
+			nv, finish := m.commitDeferLocked(old, nv, "")
+			m.mu.Unlock()
+			if err = finish(); err != nil {
+				return VM{}, err
+			}
+			return nv.clone(), nil
+		}
 		m.mu.Unlock()
 		return old.clone(), nil
 	case old.State != Stopped && old.State != Error:
@@ -544,16 +650,33 @@ func (m *Manager) Start(ctx context.Context, id string, env map[string]string) (
 		if err = m.quotaLocked(old.Team, Size{old.VCPU, old.MemMiB, old.DiskGiB}, id); err == nil {
 			nv := old.clone()
 			nv.State = Starting
-			err = m.commitLocked(old, nv, "")
+			if ttlS != nil {
+				nv.TTLS = *ttlS
+			}
+			if freshBoot {
+				nv.HasSnapshot, nv.SnapSynced = false, false
+			}
+			nv, finish = m.commitDeferLocked(old, nv, "")
 		}
 	}
 	m.mu.Unlock()
+	if finish != nil {
+		err = finish()
+	}
 	if err != nil {
 		return VM{}, err
 	}
 	v, _ := m.get(id)
 	root := m.root(id)
-	restore := exists(filepath.Join(root, vmstate)) && exists(filepath.Join(root, memFile))
+	if freshBoot {
+		// vmstate first: the pair is only a snapshot while both exist. A removal that
+		// fails (other than "already gone") fails the start: booting would restore the
+		// memory fresh_boot promises to discard.
+		if derr := m.removeMemory(root); derr != nil {
+			return m.fail(id, derr)
+		}
+	}
+	restore := !freshBoot && exists(filepath.Join(root, vmstate)) && exists(filepath.Join(root, memFile))
 	defer m.bootIO()()
 	v, err = m.boot(ctx, v, restore)
 	if err != nil && restore {
@@ -564,7 +687,11 @@ func (m *Manager) Start(ctx context.Context, id string, env map[string]string) (
 		v, err = m.boot(ctx, v, false)
 	}
 	if err == nil {
-		err = m.syncNet()
+		if v.SSHPolicyReady {
+			err = m.syncNet()
+		} else {
+			err = m.syncRoutes()
+		}
 	}
 	if err != nil {
 		return m.fail(id, err)
@@ -579,8 +706,15 @@ func (m *Manager) Fork(ctx context.Context, id, name, team string, labels map[st
 }
 
 func (m *Manager) fork(ctx context.Context, id, name, team string, labels map[string]string, pending bool) (VM, error) {
+	return m.forkOpts(ctx, id, name, team, labels, nil, pending, false)
+}
+
+func (m *Manager) forkOpts(ctx context.Context, id, name, team string, labels map[string]string, ttlS *int, pending, reprovisionSSH bool) (VM, error) {
 	if name != "" && !reName.MatchString(name) {
 		return VM{}, errf(400, "invalid name")
+	}
+	if ttlS != nil && (*ttlS < 0 || *ttlS > maxPatchS) {
+		return VM{}, errf(400, "ttl_s must be 0 (no auto-stop) to %d", maxPatchS)
 	}
 	if len(labels) > 64 {
 		return VM{}, errf(400, "too many labels")
@@ -593,37 +727,42 @@ func (m *Manager) fork(ctx context.Context, id, name, team string, labels map[st
 	if m.cfg.HugePages {
 		return VM{}, errHugePages
 	}
-	unlockP := m.lock(id)
-	p, err := m.get(id)
-	if err == nil && team != "" && p.Team != team {
-		err = errNotFound
-	}
-	if err == nil && (p.PendingCopy || (p.State != Running && p.State != Stopped)) {
-		err = errf(http.StatusConflict, "vm is %s", p.State)
-	}
+	// Phase 1 (no parent lock): size the child from the parent as it is now. The lock
+	// is not held across alloc, whose publishPending fsyncs, and not even taken to read
+	// the parent: a second fork of the same parent allocates while the first is in
+	// freeze. Phase 2 re-validates under the lock.
+	p, base, err := m.forkParent(id, team, name, labels, ttlS, pending)
 	if err != nil {
-		unlockP()
 		return VM{}, err
-	}
-	base := VM{PendingCopy: pending, Name: name, Team: p.Team, Image: p.Image, Size: p.Size, VCPU: p.VCPU, MemMiB: p.MemMiB,
-		DiskGiB: p.DiskGiB, Labels: p.Labels, TTLS: p.TTLS, IdleStopS: p.IdleStopS, ParentID: p.ID}
-	if labels != nil {
-		base.Labels = labels
 	}
 	t0 := time.Now()
-	err = m.checkFloor(uint64(p.MemMiB) << 20)
-	var c VM
-	if err == nil {
-		c, err = m.alloc(base, Forking)
-	}
-	if err != nil {
-		unlockP()
+	if err = m.checkFloor(uint64(p.MemMiB) << 20); err != nil {
 		return VM{}, err
 	}
+	c, err := m.alloc(base, Forking)
+	if err != nil {
+		return VM{}, err
+	}
+	// Phase 2 (parent lock, then child lock: the order every fork takes): the parent
+	// must be what the child was sized from, else the allocation is rolled back.
+	unlockP := m.lock(id)
+	p2, perr := m.get(id)
+	if perr != nil || !sameForkParent(p, p2) {
+		if perr == nil {
+			perr = errf(http.StatusConflict, "vm changed while it was being forked")
+		}
+		_, derr := m.deleteVM(context.WithoutCancel(ctx), c.ID, false)
+		unlockP()
+		return VM{}, errors.Join(perr, derr)
+	}
+	p = p2 // freeze the parent as it is now (its snapshot files may have changed)
 	unlockC := m.lock(c.ID)
 	defer unlockC()
+	if m.freezeGate != nil {
+		m.freezeGate(id)
+	}
 	t1 := time.Now()
-	withMem, err := m.freeze(ctx, p, m.root(c.ID))
+	withMem, err := m.freeze(ctx, p, m.root(c.ID), reprovisionSSH)
 	unlockP()
 	t2 := time.Now()
 	if err == nil {
@@ -635,7 +774,7 @@ func (m *Manager) fork(ctx context.Context, id, name, team string, labels map[st
 	if pending {
 		c, err = m.update(c.ID, "", func(x *VM) { x.CopyReady, x.HasSnapshot = true, withMem })
 		if err == nil && withMem {
-			go m.syncSnapshot(c.ID)
+			m.startSyncSnapshot(c.ID)
 		}
 		return c, err
 	}
@@ -646,8 +785,59 @@ func (m *Manager) fork(ctx context.Context, id, name, team string, labels map[st
 	return c, err
 }
 
+// defaultForkTTLS is the child's ttl_s when a fork request omits it.
+const defaultForkTTLS = 3600
+
+// forkParent reads the parent (without its lifecycle lock: a fork in freeze holds it)
+// and returns it with the child's template. fork re-validates under the lock.
+func (m *Manager) forkParent(id, team, name string, labels map[string]string, ttlS *int, pending bool) (VM, VM, error) {
+	p, err := m.get(id)
+	if err == nil && team != "" && p.Team != team {
+		err = errNotFound
+	}
+	if err == nil && (p.PendingCopy || (p.State != Running && p.State != Stopped)) {
+		err = errf(http.StatusConflict, "vm is %s", p.State)
+	}
+	if err != nil {
+		return VM{}, VM{}, err
+	}
+	base := VM{PendingCopy: pending, Name: name, Team: p.Team, Image: p.Image, Size: p.Size, VCPU: p.VCPU, MemMiB: p.MemMiB,
+		DiskGiB: p.DiskGiB, Labels: reservedLabels(p.Labels), TTLS: p.TTLS, IdleStopS: p.IdleStopS, ParentID: p.ID}
+	if labels != nil {
+		if len(labels) == 0 {
+			base.Labels = nil
+		} else {
+			base.Labels = make(map[string]string, len(labels))
+			for k, v := range labels {
+				base.Labels[k] = v
+			}
+		}
+	}
+	// An omitted ttl_s gives the child the default hour, not the parent's TTL (a parent
+	// with auto-stop off must not make a child that never stops); an explicit one,
+	// including 0 for no auto-stop, wins.
+	base.TTLS = defaultForkTTLS
+	if ttlS != nil {
+		base.TTLS = *ttlS
+	}
+	return p, base, nil
+}
+
+// sameForkParent: is b still the VM a fork sized its child from (same run state,
+// process and shape)?
+func sameForkParent(a, b VM) bool {
+	return a.State == b.State && a.PID == b.PID && !b.PendingCopy && a.Team == b.Team && a.Image == b.Image &&
+		a.Size == b.Size && a.VCPU == b.VCPU && a.MemMiB == b.MemMiB && a.DiskGiB == b.DiskGiB &&
+		a.TTLS == b.TTLS && a.IdleStopS == b.IdleStopS && maps.Equal(a.Labels, b.Labels)
+}
+
 // releaseCopy is internal: the API has durably revoked the captured credentials.
-func (m *Manager) releaseCopy(ctx context.Context, id string, env map[string]string) (VM, error) {
+//
+// freshBoot discards the child's copy of the parent's memory (vmstate + mem) and cold
+// boots it from the reflinked disk, so nothing the parent held in RAM (team secrets of
+// a run the child must not inherit) reaches the child. The discard happens before the
+// copy is authorized: a failed removal leaves it pending.
+func (m *Manager) releaseCopy(ctx context.Context, id string, env map[string]string, freshBoot bool) (VM, error) {
 	if err := validEnv(env); err != nil {
 		return VM{}, err
 	}
@@ -670,19 +860,63 @@ func (m *Manager) releaseCopy(ctx context.Context, id string, env map[string]str
 		return VM{}, err
 	}
 	restore := v.HasSnapshot
-	v, err = m.update(id, "", func(x *VM) { x.PendingCopy, x.CopyReady = false, false })
+	if freshBoot {
+		if err := m.discardMemory(v); err != nil {
+			return VM{}, err
+		}
+		restore = false
+	}
+	v, err = m.update(id, "", func(x *VM) {
+		x.PendingCopy, x.CopyReady = false, false
+		if freshBoot {
+			x.HasSnapshot, x.SnapSynced = false, false
+		}
+	})
 	if err != nil {
 		return VM{}, err
 	}
 	return m.bootNew(ctx, v, restore, env)
 }
 
+// discardMemory removes a VM's memory snapshot (vmstate first: the pair is only a
+// snapshot while both exist) and grows the disk, which a cold boot is allowed to.
+func (m *Manager) discardMemory(v VM) error {
+	if err := m.removeMemory(m.root(v.ID)); err != nil {
+		return err
+	}
+	return m.finishDisk(v)
+}
+
+// removeMemory deletes root's vmstate then mem (the pair is only a snapshot while both
+// exist). A file that is already gone is fine; any other failure is returned.
+func (m *Manager) removeMemory(root string) error {
+	rm := m.removeFile
+	if rm == nil {
+		rm = os.Remove
+	}
+	for _, f := range []string{vmstate, memFile} {
+		if err := rm(filepath.Join(root, f)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("discard %s: %w", f, err)
+		}
+	}
+	return nil
+}
+
 func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
+	return m.deleteVM(ctx, id, true)
+}
+
+func (m *Manager) deleteVM(ctx context.Context, id string, syncNet bool) (VM, error) {
 	unlock := m.lock(id)
 	defer unlock()
 	v, err := m.get(id)
 	if err != nil {
 		return v, err
+	}
+	// The tombstone is durable before any teardown: a crash from here on makes the
+	// next boatd finish this delete instead of resuming (or resurrecting) the VM.
+	if err := m.writeTombstone(id, v); err != nil {
+		return v, fmt.Errorf("delete: tombstone: %w", err)
 	}
 	m.killWait(id, v.PID)
 	delVMNet(m.run, v)
@@ -692,27 +926,21 @@ func (m *Manager) Delete(ctx context.Context, id string) (VM, error) {
 		m.rmVCPUCgroup(id)
 		os.Remove(filepath.Join(cgroupRoot, m.cfg.CgroupParent, id)) // the jailer's (empty) cgroup
 	}
-	m.update(id, "deleted", func(x *VM) { x.State, x.PID = Stopped, 0 }) // closes the billing interval
+	m.updateInMemory(id, "deleted", func(x *VM) { x.State, x.PID = Stopped, 0 }) // closes the billing interval without a redundant vm.json fsync
 	for _, s := range m.Snapshots(id) {
 		m.DeleteSnapshot(id, s.ID)
 	}
-	m.mu.Lock()
-	delete(m.dirty, id) // flushDirty must not write into the dir being removed
-	m.mu.Unlock()
-	if err := m.removeVMDir(id); err != nil {
-		return v, err
+	if err := m.removeVMState(id); err != nil {
+		return m.deleteFailed(id, v, err)
 	}
-	m.mu.Lock()
-	m.freeIndexLocked(v.Index)
-	delete(m.vms, id)
-	delete(m.dirty, id)
-	delete(m.dones, id)
-	delete(m.active, id)
-	m.mu.Unlock()
-	m.ev.publish(Event{Type: "vm.deleted", VMID: id, Team: v.Team, Size: v.Size})
-	m.syncNet()
+	m.clearTombstone(id)
+	m.forgetDeleted(v)
+	var nerr error
+	if syncNet {
+		nerr = m.syncNet()
+	}
 	v.State = "deleted"
-	return v, nil
+	return v, nerr
 }
 
 // AddPort exposes guest_port: always as a gateway hostname route, and with
@@ -752,9 +980,13 @@ func (m *Manager) AddPort(id string, guest int, public bool) (Port, error) {
 		} else {
 			nv.Ports = append(nv.Ports, p)
 		}
-		err = m.commitLocked(old, nv, "")
+		var finish func() error
+		nv, finish = m.commitDeferLocked(old, nv, "")
+		m.mu.Unlock()
+		err = finish() // outside m.mu: behind another write of this VM's vm.json, not every VM
+	} else {
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
 	if err != nil {
 		return Port{}, err
 	}
@@ -789,12 +1021,47 @@ func (m *Manager) freePortLocked() (int, error) {
 			used[p.HostPort] = true
 		}
 	}
+	for _, p := range m.cfg.ReservedPorts {
+		used[p] = true
+	}
+	if m.cfg.HostHTTPSPort > 0 {
+		used[m.cfg.HostHTTPSPort] = true
+	}
+	if m.cfg.AIProxyPort > 0 {
+		used[m.cfg.AIProxyPort] = true
+	}
+	probe := m.portProbe
+	if probe == nil {
+		probe = tcpPortAvailable
+	}
 	for h := m.cfg.PortMin; h <= m.cfg.PortMax; h++ {
-		if !used[h] {
+		if !used[h] && probe(h) {
 			return h, nil
 		}
 	}
 	return 0, errf(http.StatusServiceUnavailable, "no free host ports")
+}
+
+// tcpPortAvailable probes whether TCP port h can be bound locally without
+// colliding with an existing host service on wildcard or loopback addresses.
+func tcpPortAvailable(port int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
+	}
+	ln.Close()
+	ln4, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	ln4.Close()
+	ln6, err := net.Listen("tcp6", fmt.Sprintf("[::1]:%d", port))
+	if err == nil {
+		ln6.Close()
+	} else if errors.Is(err, syscall.EADDRINUSE) {
+		return false
+	}
+	return true
 }
 
 func (m *Manager) RemovePort(id string, guest int) error {
@@ -819,8 +1086,36 @@ func (m *Manager) RemovePort(id string, guest int) error {
 	return err
 }
 
+// usageCacheTTL bounds how stale a Usage() report may be (Until, the running VMs'
+// and snapshots' open intervals, the storage walk). Reports are also dropped the
+// moment the ledger gets a record or a VM or snapshot is created, deleted or changes
+// state, so a poller never sees a closed interval missing; the TTL only covers
+// time passing and file sizes growing.
+var usageCacheTTL = 5 * time.Second
+
+// usageSinceGranularity: `since` of a usage query is rounded down to it.
+const usageSinceGranularity = time.Minute
+
+// Usage returns the usage report from since. Identical calls within usageCacheTTL
+// (and no change in between) share one assembly: one ledger read, one report.
+//
+// since is rounded down to the minute (usageSinceGranularity), so a poller whose
+// window rolls forward by the second still hits one entry per minute; the report's
+// `since` is the rounded value.
 func (m *Manager) Usage(since time.Time) (usageReport, error) {
-	recs, err := m.usage.read(since)
+	return m.usageCache.get(m, since.Truncate(usageSinceGranularity))
+}
+
+// usageGens identifies everything a report is assembled from, apart from the clock.
+func (m *Manager) usageGens() usageGens {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return usageGens{m.storageGen, m.stateGen, m.usage.gen.Load(), len(m.vms), len(m.snaps)}
+}
+
+// buildUsage assembles the report: it re-reads and re-summarises the ledger.
+func (m *Manager) buildUsage(since time.Time) (usageReport, error) {
+	recs, aggs, err := m.usage.readAll(since)
 	if err != nil {
 		return usageReport{}, err
 	}
@@ -836,6 +1131,7 @@ func (m *Manager) Usage(since time.Time) (usageReport, error) {
 	}
 	m.mu.Unlock()
 	rep := summarize(recs, since, now)
+	applyAggs(&rep, aggs, since)
 	st, disk := m.storage()
 	rep.Disk, rep.Storage = &disk, []teamStorage{}
 	for _, t := range st {
@@ -843,4 +1139,19 @@ func (m *Manager) Usage(since time.Time) (usageReport, error) {
 	}
 	sort.Slice(rep.Storage, func(i, j int) bool { return rep.Storage[i].Team < rep.Storage[j].Team })
 	return rep, nil
+}
+
+// reservedLabels returns a new map of only the reserved labels (keys starting
+// with "boat."); nil when there are none. User labels never pass to a fork.
+func reservedLabels(in map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range in {
+		if strings.HasPrefix(k, "boat.") {
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[k] = v
+		}
+	}
+	return out
 }

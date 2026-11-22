@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +24,10 @@ import (
 	"time"
 )
 
+// runHeartbeatEvery is how often a live `boat run` renews the VM's auto-stop
+// deadline; a variable so tests can shorten it.
+var runHeartbeatEvery = 5 * time.Minute
+
 func init() {
 	commands["run"] = cmdRun
 	commands["push"] = cmdPush
@@ -31,6 +37,11 @@ const (
 	// runIdleStopS stops a job's VM if the CLI dies: a running exec counts as
 	// activity, so a live job is never stopped.
 	runIdleStopS = 15 * 60
+	// runTTLS is boat.dev's 15-minute wall-clock auto-stop for a job's VM. The
+	// live CLI pushes it forward every runHeartbeatEvery (PATCH ttl_s sets the
+	// time left from now), so a guest command that outlives a dead CLI cannot
+	// keep the VM up past it.
+	runTTLS = 15 * 60
 	// runNoLimitS stands for "no limit": the agent's default exec timeout is 600 s.
 	runNoLimitS = 30 * 24 * 60 * 60
 	maxBatch    = 16 // boatd's all-or-none batch (POST /v1/vms count)
@@ -73,15 +84,40 @@ func (a *app) newBatch(body obj, n int) error {
 		VMs []obj `json:"vms"`
 	}
 	if err := a.c.call("POST", "/v1/vms", body, &out); err != nil {
+		var ae *apiError
+		if errors.As(err, &ae) && ae.Code == "env_start_failed" {
+			return a.createStartFailure(err)
+		}
 		return fmt.Errorf("the batch was not created (all or none): %w", err)
 	}
-	if a.json {
-		for _, vm := range out.VMs {
-			a.emit(readyEvent(vm), nil)
+	failed := 0
+	for _, vm := range out.VMs {
+		ee := strings.TrimSpace(s(vm, "env_error"))
+		if ee != "" {
+			failed++
 		}
-		return nil
+		if a.json {
+			if ee != "" {
+				a.failEnv(vm, ee) // one error event with the id
+			} else {
+				a.emit(readyEvent(vm), nil)
+			}
+		}
 	}
-	return a.emitList(out.VMs, vmCols...)
+	if !a.json {
+		if err := a.emitList(markEnvFailed(out.VMs, false), vmCols...); err != nil {
+			return err
+		}
+		for _, vm := range out.VMs {
+			if ee := strings.TrimSpace(s(vm, "env_error")); ee != "" {
+				a.failEnv(vm, ee)
+			}
+		}
+	}
+	if failed > 0 {
+		return exitError{1}
+	}
+	return nil
 }
 
 // quiet runs a command and returns its stdout; output never reaches the user.
@@ -89,7 +125,15 @@ func (a *app) quiet(id string, argv []string) (string, error) {
 	var out, errb bytes.Buffer
 	q := *a
 	q.out, q.errw, q.json = &out, &errb, false
-	if err := q.stream(vmPath(id, "exec"), obj{"cmd": argv}); err != nil {
+	body := obj{"cmd": argv}
+	if dl, ok := a.context().Deadline(); ok {
+		rem := time.Until(dl)
+		if rem <= 0 {
+			return "", context.DeadlineExceeded
+		}
+		body["timeout_s"] = max(1, int(rem.Seconds()))
+	}
+	if err := q.stream(vmPath(id, "exec"), body); err != nil {
 		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(errb.String()))
 	}
 	return out.String(), nil
@@ -243,8 +287,9 @@ func (a *app) pushFiles(id, abs string, files []string, to string) (pushResult, 
 	tmp := "/tmp/.boat-push-" + hex.EncodeToString(rnd[:]) + ".tgz"
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(packPush(pw, abs, files)) }()
-	resp, err := a.c.request("PUT", vmPath(id, "files")+"?path="+url.QueryEscape(tmp), pr, "application/octet-stream")
+	resp, err := a.c.requestCtx(a.context(), "PUT", vmPath(id, "files")+"?path="+url.QueryEscape(tmp), pr, "application/octet-stream")
 	if err != nil {
+		pr.CloseWithError(err)
 		return pushResult{}, err
 	}
 	resp.Body.Close()
@@ -312,10 +357,10 @@ func cmdRun(a *app, args []string) error {
 	fl.IntVar(&o.timeoutS, "timeout", 0, "stop the command after this many seconds and exit 124")
 	fl.BoolVar(&o.keep, "keep", false, "keep the VM afterwards (it stops 15 minutes later)")
 	envv := labels{}
-	fl.Var(envv, "e", "KEY=VALUE (repeatable)")
-	fl.Var(envv, "env", "same as -e")
+	fl.Var(envVarFlag{envv}, "e", "KEY=VALUE (repeatable)")
+	fl.Var(envVarFlag{envv}, "env", "same as -e")
 	environment := fl.String("environment", "", "environment name")
-	noEnv := fl.Bool("no-env", false, "the VM gets none of the team's stored secrets")
+	noEnv := fl.Bool("no-env", false, "ignore the team's default environment and stored secrets")
 	pos, after, err := parse(fl, args)
 	if err != nil {
 		return err
@@ -332,7 +377,7 @@ func cmdRun(a *app, args []string) error {
 			return err
 		}
 	}
-	body := obj{"size": *size, "idle_stop_s": runIdleStopS}
+	body := obj{"size": *size, "idle_stop_s": runIdleStopS, "ttl_s": runTTLS}
 	if err := a.applyFrom(body, *from); err != nil {
 		return err
 	}
@@ -343,6 +388,7 @@ func cmdRun(a *app, args []string) error {
 		body["environment"] = *environment
 	}
 	if *noEnv {
+		body["no_env"] = true
 		body["secrets"] = []string{}
 	}
 	// Before the create: Ctrl-C during it still deletes the VM it made.
@@ -351,7 +397,7 @@ func cmdRun(a *app, args []string) error {
 	defer signal.Stop(sig)
 	var vm obj
 	if err := a.c.call("POST", "/v1/vms", body, &vm); err != nil {
-		return err
+		return a.createStartFailure(err)
 	}
 	return a.runJob(vm, o, sig)
 }
@@ -359,14 +405,35 @@ func cmdRun(a *app, args []string) error {
 func (a *app) runJob(vm obj, o runOpts, sig <-chan os.Signal) error {
 	id := s(vm, "id")
 	start := time.Now()
+	ctx := a.context()
+	var deadline time.Time
+	var cancel context.CancelFunc = func() {}
+	if o.timeoutS > 0 {
+		deadline = start.Add(time.Duration(o.timeoutS) * time.Second)
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+
 	done := make(chan error, 1)
-	go func() { done <- a.runSteps(vm, o) }()
+	go func() { done <- a.runSteps(ctx, vm, o, deadline) }()
+	hbCtx, stopBeat := context.WithCancel(context.Background())
+	beatDone := make(chan struct{})
+	go func() {
+		defer close(beatDone)
+		a.heartbeat(hbCtx, id)
+	}()
 	var err error
 	select {
 	case err = <-done:
 	case <-sig:
+		cancel()
 		err = exitError{130}
 	}
+	// The job is over: stop renewing, and wait so no PATCH lands after the DELETE.
+	stopBeat()
+	<-beatDone
 	code := 0
 	var ee exitError
 	switch {
@@ -404,21 +471,67 @@ func (a *app) runJob(vm obj, o runOpts, sig <-chan os.Signal) error {
 	return err
 }
 
+// heartbeat renews the VM's wall-clock auto-stop until ctx ends. Best effort:
+// a failed renewal is not fatal (the next tick retries, and the VM may be gone).
+func (a *app) heartbeat(ctx context.Context, id string) {
+	tick := time.NewTicker(runHeartbeatEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			a.renewTTL(ctx, id)
+		}
+	}
+}
+
+// renewTTL is one PATCH ttl_s; ctx aborts it so a hung call cannot hold up the job's exit.
+func (a *app) renewTTL(ctx context.Context, id string) {
+	b, _ := json.Marshal(obj{"ttl_s": runTTLS})
+	resp, err := a.c.requestCtx(ctx, "PATCH", vmPath(id), bytes.NewReader(b), "application/json")
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
+func (a *app) waitSetupCmd(ctx context.Context, id, cmdID string) error {
+	q := *a
+	q.ctx, q.out, q.json = ctx, a.errw, false
+	if err := q.followLogs(vmPath(id, "commands", cmdID, "logs")); err != nil {
+		return fmt.Errorf("environment setup failed: %w", err)
+	}
+	return nil
+}
+
 // runSteps waits for setup, pushes, and runs the command.
-func (a *app) runSteps(vm obj, o runOpts) error {
+func (a *app) runSteps(ctx context.Context, vm obj, o runOpts, deadline time.Time) error {
 	id := s(vm, "id")
-	if c := s(vm, "setup_cmd_id"); c != "" {
-		q := *a
-		q.out, q.json = a.errw, false
-		if err := q.followLogs(vmPath(id, "commands", c, "logs")); err != nil {
-			return fmt.Errorf("environment setup failed: %w", err)
+	q := *a
+	q.ctx = ctx
+	timed := !deadline.IsZero()
+	mapDeadline := func(err error) error {
+		if timed && errors.Is(err, context.DeadlineExceeded) {
+			return exitError{124}
+		}
+		return err
+	}
+	if ee := strings.TrimSpace(s(vm, "env_error")); ee != "" {
+		return fmt.Errorf("environment delivery failed: %s", ee)
+	}
+	if se := strings.TrimSpace(s(vm, "setup_error")); se != "" {
+		return fmt.Errorf("environment setup failed: %s", se)
+	}
+	if c := strings.TrimSpace(s(vm, "setup_cmd_id")); c != "" {
+		if err := a.waitSetupCmd(ctx, id, c); err != nil {
+			return mapDeadline(err)
 		}
 	}
 	cwd := o.cwd
 	if o.pushDir != "" {
-		r, err := a.push(id, o.pushDir, "")
+		r, err := q.push(id, o.pushDir, "")
 		if err != nil {
-			return err
+			return mapDeadline(err)
 		}
 		if cwd == "" {
 			cwd = r.Path
@@ -433,9 +546,14 @@ func (a *app) runSteps(vm obj, o runOpts) error {
 		cmd = append([]string{"bash", "-c", `cd -- "$HOME/$0" && exec "$@"`, cwd}, cmd...)
 	}
 	body["cmd"] = cmd
-	body["timeout_s"] = o.timeoutS
-	if o.timeoutS == 0 {
+	if timed {
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return exitError{124}
+		}
+		body["timeout_s"] = max(1, int(rem.Seconds()))
+	} else {
 		body["timeout_s"] = runNoLimitS
 	}
-	return a.stream(vmPath(id, "exec"), body)
+	return mapDeadline(q.stream(vmPath(id, "exec"), body))
 }

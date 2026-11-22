@@ -23,7 +23,7 @@ import (
 //	boat scp -r ./dir vm:dir         boat scp -r vm:dir ./here
 //
 // A relative remote path is from the VM user's home; /home/user/… (boat.dev's
-// home) means that home too. A remote path ending in / gets the source's name.
+// home) and ~/… mean that home too. A remote path ending in / gets the source's name.
 func cmdSCP(a *app, args []string) error {
 	fs := flag.NewFlagSet("scp", flag.ContinueOnError)
 	rec := fs.Bool("r", false, "copy directories recursively")
@@ -50,6 +50,7 @@ func cmdSCP(a *app, args []string) error {
 		if err != nil {
 			return err
 		}
+		dstPath = homeRel(dstPath)
 		if strings.HasSuffix(dstPath, "/") || dstPath == "" {
 			dstPath += filepath.Base(filepath.Clean(src))
 		}
@@ -57,7 +58,7 @@ func cmdSCP(a *app, args []string) error {
 			if !*rec {
 				return fmt.Errorf("%s is a directory (use -r): %w", src, errUsage)
 			}
-			return a.scpDirUp(id, src, dstVM, homeRel(dstPath))
+			return a.scpDirUp(id, src, dstVM, dstPath)
 		}
 		return a.scpFileUp(id, src, dstVM, dstPath)
 	}
@@ -81,10 +82,18 @@ func splitRemote(p string) (vm, path string, remote bool) {
 	return vm, path, true
 }
 
-// homeRel maps boat.dev's /home/user to the home-relative form ("" = home).
+// homeRel maps boat.dev's /home/user and a leading ~ / ~/ to the home-relative
+// form ("" = home).
 func homeRel(p string) string {
-	if p == "/home/user" || strings.HasPrefix(p, "/home/user/") {
-		return strings.TrimPrefix(strings.TrimPrefix(p, "/home/user"), "/")
+	switch {
+	case p == "/home/user":
+		return ""
+	case strings.HasPrefix(p, "/home/user/"):
+		return strings.TrimLeft(p[len("/home/user/"):], "/")
+	case p == "~":
+		return ""
+	case strings.HasPrefix(p, "~/"):
+		return strings.TrimLeft(p[2:], "/")
 	}
 	return p
 }

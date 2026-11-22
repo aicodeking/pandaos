@@ -141,10 +141,8 @@ func postVM(a *app, args []string, verb, done string) error {
 }
 
 func cmdRecover(a *app, args []string) error { return postVM(a, args, "recover", "recovering") }
-func cmdShare(a *app, args []string) error {
-	return postVM(a, args, "share", "shared with the team (every sandbox here already is):")
-}
-func cmdUnshare(a *app, args []string) error { return postVM(a, args, "unshare", "private:") }
+func cmdShare(a *app, args []string) error   { return postVM(a, args, "share", "shared") }
+func cmdUnshare(a *app, args []string) error { return postVM(a, args, "unshare", "unshared") }
 
 // cmdDashboard prints the web dashboard's URL (the API's origin) and opens it.
 func cmdDashboard(a *app, args []string) error {
@@ -158,6 +156,9 @@ func cmdDashboard(a *app, args []string) error {
 		return fmt.Errorf("the API URL %q is not a URL", a.cfg.URL)
 	}
 	d := (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/"}).String()
+	if err := validateOpenURL(d); err != nil {
+		return err
+	}
 	if a.json || *noOpen {
 		return a.emit(obj{"url": d}, func() { fmt.Fprintln(a.out, d) })
 	}

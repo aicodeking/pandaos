@@ -1,6 +1,7 @@
 [Unit]
 Description=boat guest agent (JSON lines on vsock port 1024)
-After=local-fs.target systemd-udevd.service
+After=local-fs.target systemd-udevd.service boat-managed-env.service
+Requires=boat-managed-env.service
 Wants=systemd-udevd.service
 
 [Service]

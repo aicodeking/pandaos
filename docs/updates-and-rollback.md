@@ -1,7 +1,7 @@
 # Updates and rollback
 
-> Daily auto-updates with a health check and automatic rollback, the release channel, `panda-update`,
-> boot assessment and hourly snapshots are all **new in Unreleased**. v0.1.0 does not update itself.
+> v0.2.0 introduces the release channel, daily auto-updates with a health check and automatic
+> rollback, `panda-update`, boot assessment and hourly snapshots.
 
 PandaOS is NixOS: every update builds a complete new system *generation* next to the old one. The old
 one stays on disk and in the boot menu until garbage collection removes it (weekly, for generations
@@ -9,12 +9,12 @@ older than 14 days).
 
 ## The release channel
 
-The local flake at `/etc/pandaos` tracks **`github:AICodeKing/pandaos/release`**, not `main`. The
-`release` branch only moves when a `v*` tag passes the release workflow (`nix flake check`, both ISO
-builds, and a published GitHub release), so boxes never update to an untested commit on `main`.
-
-**There is no release tag yet**, so the `release` branch does not exist yet and the daily update has
-nothing to fetch. Until the first release, boxes stay on the version they were installed with.
+The local flake at `/etc/pandaos` tracks **`github:AICodeKing/pandaos/release`**. The workflow
+moves the branch to a `v*` tag after the checks, all three ISO builds and the boat CLI and guest
+builds succeed and GitHub publishes the release. The
+[v0.2.0 GitHub Release](https://github.com/AICodeKing/pandaos/releases/tag/v0.2.0)
+is the download location for the installer ISOs and boat assets. Use the [install guide](install.md)
+for asset verification or a source build.
 
 The installer writes a **pinned `flake.lock`** into `/etc/pandaos`, locking the exact PandaOS and
 nixpkgs revisions the ISO was built from. So a rebuild right after install works offline, and
@@ -27,7 +27,8 @@ cat /etc/pandaos/VERSION
 
 ## Signed releases (required)
 
-The GitHub branch alone is not trusted. Before anything is built, `panda-update-verify` checks
+GitHub build attestations cover release assets. Channel updates verify the Git commit separately.
+Before anything is built, `panda-update-verify` checks
 that the new `release` commit is **SSH-signed by a key in `pandaos.updates.allowedSigners`**,
 descends from the release the box runs (no downgrade, no rewritten history), and is exactly the
 tree Nix fetched. If any check fails, it puts the old `flake.lock` back and the box keeps running
@@ -63,8 +64,9 @@ turns the check off, and with it the protection.
 
 `pandaos.updates.mode`: `automatic` (default: the daily timer verifies and switches), `staged`
 (the daily timer verifies and builds the next release, `panda-update status` shows it as
-`staged:`, and `sudo panda-update run` applies it) or `manual` (no timer). Boat servers with
-`services.boat.untrustedTenants` default to `staged`.
+`staged:`, and `sudo panda-update run` applies it) or `manual` (no timer). A manual
+`sudo panda-update run` still verifies the release signature by default. Boat servers with
+`services.boat.untrustedTenants` explicitly set to `true` default to `staged`.
 
 ## The daily update
 

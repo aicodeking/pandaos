@@ -102,6 +102,11 @@ func TestAPI(t *testing.T) {
 		t.Fatalf("relative path: %d", c)
 	}
 
+	// This general API fixture models a separately verified SSH policy. Dedicated
+	// SSH tests assert an unverified new VM never publishes routes.
+	if _, err := m.update(v.ID, "", func(x *VM) { x.SSHPolicyReady = true }); err != nil {
+		t.Fatal(err)
+	}
 	// ports: hostname route always, host port only when public; routes.json follows.
 	var p Port
 	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/ports", map[string]any{"port": 8080, "public": true}, &p); c != 201 || p.HostPort != 20000 || p.Hostname != "8080-"+v.ID {
@@ -125,6 +130,11 @@ func TestAPI(t *testing.T) {
 		t.Fatalf("ports after delete: %+v", v.Ports)
 	}
 
+	// End the synthetic route fixture before exercising snapshot lifecycle.
+	// A real ready VM carries verified runtime config, covered by SSH tests.
+	if _, err := m.update(v.ID, "", func(x *VM) { x.SSHPolicyReady = false }); err != nil {
+		t.Fatal(err)
+	}
 	// snapshots + fork + stop/start through the API.
 	var s Snapshot
 	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/snapshots", map[string]string{"name": "s1"}, &s); c != 201 || s.VMID != v.ID {
@@ -265,5 +275,237 @@ func TestPutFileShortBody(t *testing.T) {
 	}
 	if c := call(t, srv, "GET", "/v1/vms/"+v.ID+"/files?path=/tmp/ok", nil, &got); c != 200 || string(got) != "abc" {
 		t.Fatalf("full body: %d %q", c, got)
+	}
+}
+
+func TestVMsSSHSummaryEndpoints(t *testing.T) {
+	m, _ := newTestManager(t, nil)
+	srv := httptest.NewServer(m.routes())
+	defer srv.Close()
+
+	var v1, v2 VM
+	if c := call(t, srv, "POST", "/v1/vms", map[string]any{"name": "one", "team": "t1", "labels": map[string]string{"env": "prod"}}, &v1); c != 201 {
+		t.Fatalf("create v1: %d", c)
+	}
+	if _, err := m.AddPort(v1.ID, 8080, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.update(v1.ID, "", func(x *VM) {
+		x.SSHPolicyReady = true
+		x.SSHPolicyDigest = "digest-v1"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if c := call(t, srv, "POST", "/v1/vms", map[string]any{"name": "two", "team": "t2"}, &v2); c != 201 {
+		t.Fatalf("create v2: %d", c)
+	}
+	pending, err := m.alloc(VM{Name: "pending", Team: "t1", Size: "default", VCPU: 1, MemMiB: 512, DiskGiB: 1, PendingCopy: true}, Forking)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/v1/vms?view=ssh", "/v1/vms/ssh-summary"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s: status %d body %s", path, resp.StatusCode, raw)
+		}
+		if strings.Contains(string(raw), `"ports"`) || strings.Contains(string(raw), `"labels"`) {
+			t.Fatalf("%s leaked heavy VM fields: %s", path, raw)
+		}
+		var out struct {
+			VMs []map[string]any `json:"vms"`
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		if len(out.VMs) != 2 {
+			t.Fatalf("%s: expected 2 visible VMs (excluding pending_copy), got %d: %s", path, len(out.VMs), raw)
+		}
+		got1 := out.VMs[0]
+		if got1["id"] != v1.ID || got1["team"] != "t1" || got1["state"] != string(Running) ||
+			got1["ip"] != v1.IP || got1["agent_ready"] != true ||
+			got1["ssh_boot_epoch"] != v1.SSHBootEpoch ||
+			got1["ssh_policy_ready"] != true || got1["ssh_policy_digest"] != "digest-v1" {
+			t.Fatalf("%s: unexpected v1 summary: %+v", path, got1)
+		}
+	}
+
+	// Team filter + include_pending=true:
+	var filtered struct {
+		VMs []vmSSHSummary `json:"vms"`
+	}
+	if c := call(t, srv, "GET", "/v1/vms?view=ssh&team=t1&include_pending=true", nil, &filtered); c != 200 {
+		t.Fatalf("filtered view=ssh: %d", c)
+	}
+	if len(filtered.VMs) != 2 || filtered.VMs[0].ID != v1.ID || filtered.VMs[1].ID != pending.ID || !filtered.VMs[1].PendingCopy {
+		t.Fatalf("filtered include_pending view=ssh mismatch: %+v", filtered.VMs)
+	}
+
+	// Single-VM ?view=ssh avoids heavy VM fields while returning full SSH projection:
+	resp, err := http.Get(srv.URL + "/v1/vms/" + v1.ID + "?view=ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	singleRaw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("single view=ssh status=%d body=%s", resp.StatusCode, singleRaw)
+	}
+	if strings.Contains(string(singleRaw), `"ports"`) || strings.Contains(string(singleRaw), `"labels"`) || strings.Contains(string(singleRaw), `"env"`) {
+		t.Fatalf("single view=ssh leaked heavy VM fields: %s", singleRaw)
+	}
+	var single vmSSHSummary
+	if err := json.Unmarshal(singleRaw, &single); err != nil {
+		t.Fatal(err)
+	}
+	if single.ID != v1.ID || single.Team != "t1" || single.State != Running || single.IP != v1.IP ||
+		!single.AgentReady || single.PendingCopy || single.SSHBootEpoch != v1.SSHBootEpoch ||
+		!single.SSHPolicyReady || single.SSHPolicyDigest != "digest-v1" {
+		t.Fatalf("unexpected single view=ssh: %+v", single)
+	}
+	if c := call(t, srv, "GET", "/v1/vms/nonexistent?view=ssh", nil, &single); c != 404 {
+		t.Fatalf("missing VM view=ssh: %d", c)
+	}
+	if c := call(t, srv, "GET", "/v1/vms/"+pending.ID+"?view=ssh", nil, &single); c != 404 {
+		t.Fatalf("pending VM view=ssh without include_pending: %d", c)
+	}
+	if c := call(t, srv, "GET", "/v1/vms/"+pending.ID+"?view=ssh&include_pending=true", nil, &single); c != 200 || !single.PendingCopy || single.ID != pending.ID {
+		t.Fatalf("pending VM view=ssh with include_pending: %d %+v", c, single)
+	}
+}
+
+func TestDeleteSnapshotByIDNotFound(t *testing.T) {
+	m, _ := newTestManager(t, nil)
+	srv := httptest.NewServer(m.routes())
+	defer srv.Close()
+
+	// Missing snapshot ID must return 404 cleanly (no nil deref or 500).
+	var errResp map[string]any
+	if c := call(t, srv, "DELETE", "/v1/snapshots/snap-does-not-exist", nil, &errResp); c != 404 {
+		t.Fatalf("DELETE missing snapshot: status=%d body=%v, want 404", c, errResp)
+	}
+
+	// Existing snapshot ID deletes cleanly via DELETE /v1/snapshots/{sid}.
+	var v VM
+	if c := call(t, srv, "POST", "/v1/vms", map[string]any{"name": "sdel", "team": "t1"}, &v); c != 201 {
+		t.Fatalf("create: %d", c)
+	}
+	var s Snapshot
+	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/snapshots", map[string]string{"name": "snap1"}, &s); c != 201 {
+		t.Fatalf("snapshot: %d", c)
+	}
+	var okResp map[string]bool
+	if c := call(t, srv, "DELETE", "/v1/snapshots/"+s.ID, nil, &okResp); c != 200 || !okResp["ok"] {
+		t.Fatalf("DELETE existing snapshot: status=%d body=%v", c, okResp)
+	}
+	// Deleting the same snapshot a second time returns 404.
+	if c := call(t, srv, "DELETE", "/v1/snapshots/"+s.ID, nil, &errResp); c != 404 {
+		t.Fatalf("DELETE already-deleted snapshot: status=%d body=%v, want 404", c, errResp)
+	}
+}
+
+func TestGuestOpErrorHTTPStatusMapping(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      *agentErr
+		wantHTTP int
+		wantCode string
+	}{
+		{"command_not_running", &agentErr{msg: "command is not running: exited"}, 409, ""},
+		{"directory_not_empty", &agentErr{msg: "/work/dir is a non-empty directory; set recursive"}, 409, ""},
+		{"directory_not_empty_os", &agentErr{msg: "Directory not empty"}, 409, ""},
+		{"already_exists", &agentErr{msg: "/tmp/dst already exists"}, 409, ""},
+		{"exists_overwrite", &agentErr{msg: "/tmp/dst exists; set overwrite"}, 409, ""},
+		{"refusing_to_delete", &agentErr{msg: "refusing to delete /"}, 400, ""},
+		{"not_a_directory", &agentErr{msg: "open /etc/hosts: Not a directory"}, 400, ""},
+		{"is_a_directory", &agentErr{msg: "open /tmp: Is a directory"}, 400, ""},
+		{"not_found", &agentErr{msg: "No such command: c99"}, 404, ""},
+		{"structured_conflict_code", &agentErr{msg: "custom state mismatch", code: "command_not_running"}, 409, "command_not_running"},
+		{"structured_invalid_code", &agentErr{msg: "bad path arg", code: "invalid_path"}, 400, "invalid_path"},
+		{"structured_not_found_code", &agentErr{msg: "gone", code: "not_found"}, 404, "not_found"},
+		{"unexpected_guest_failure", &agentErr{msg: "start: supervisor did not report in 10 s"}, 502, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			writeErr(rec, tc.err)
+			if rec.Code != tc.wantHTTP {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.wantHTTP, rec.Body.String())
+			}
+			var body map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			if !strings.Contains(body["error"], tc.err.msg) {
+				t.Fatalf("error message not preserved: got %q want substring %q", body["error"], tc.err.msg)
+			}
+			if body["code"] != tc.wantCode {
+				t.Fatalf("code=%q want=%q", body["code"], tc.wantCode)
+			}
+		})
+	}
+
+	// End-to-end via POST /v1/vms/{id}/agent returning a structured {"error", "code"} from the guest socket.
+	m, _ := newTestManager(t, nil)
+	v, err := m.Create(t.Context(), CreateReq{Team: "t1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(m.root(v.ID), vsockUDS)
+	if err := os.Rename(sock, sock+".old"); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				r := bufio.NewReader(c)
+				if _, err := r.ReadString('\n'); err != nil {
+					return
+				}
+				fmt.Fprint(c, "OK 1024\n")
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					var req map[string]any
+					_ = json.Unmarshal([]byte(line), &req)
+					switch req["op"] {
+					case "cmd_signal":
+						fmt.Fprint(c, `{"error":"command is not running: exited","code":"command_not_running"}`+"\n")
+					case "file_delete":
+						fmt.Fprint(c, `{"error":"refusing to delete /","code":"refused"}`+"\n")
+					default:
+						fmt.Fprint(c, `{"error":"internal failure"}`+"\n")
+					}
+				}
+			}(c)
+		}
+	}()
+
+	srv := httptest.NewServer(m.routes())
+	defer srv.Close()
+	var out map[string]string
+	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/agent", map[string]any{"op": "cmd_signal", "cmd_id": "c1"}, &out); c != 409 || out["code"] != "command_not_running" {
+		t.Fatalf("cmd_signal: status=%d body=%v, want 409 command_not_running", c, out)
+	}
+	out = nil
+	if c := call(t, srv, "POST", "/v1/vms/"+v.ID+"/agent", map[string]any{"op": "file_delete", "path": "/"}, &out); c != 400 || out["code"] != "refused" {
+		t.Fatalf("file_delete: status=%d body=%v, want 400 refused", c, out)
 	}
 }

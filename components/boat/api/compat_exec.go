@@ -26,10 +26,16 @@ const (
 
 // compatPath maps boat.dev paths (relative to /home/user) onto the guest's home.
 func (s *server) compatPath(p string) string {
-	home := "/home/" + orDefault(s.cfg.SSHUser, "dev")
+	user := orDefault(s.cfg.SSHUser, "dev")
+	home := "/home/" + user
+	if user == "root" {
+		home = "/root"
+	}
 	switch {
-	case p == "":
+	case p == "" || p == "~":
 		return home
+	case strings.HasPrefix(p, "~/"):
+		return path.Join(home, strings.TrimPrefix(p, "~/"))
 	case p == "/home/user" || strings.HasPrefix(p, "/home/user/"):
 		return home + strings.TrimPrefix(p, "/home/user")
 	case strings.HasPrefix(p, "/"):
@@ -54,6 +60,29 @@ type execFrame struct {
 	Signal   string `json:"signal"`
 	TimedOut bool   `json:"timed_out"`
 	Error    string `json:"error"`
+	Code     string `json:"code"`
+}
+
+// refuseNotReady answers boat.dev's 409 sandbox_not_ready for a sandbox whose
+// environment never reached the guest (compat state "error"): it runs no
+// commands until a start/resume pushes the environment again. Native exec is
+// unchanged (it is the repair channel for a VM the caller owns); only the
+// compat routes that start a command refuse.
+func (s *server) refuseNotReady(w http.ResponseWriter, r *http.Request, vm VM) bool {
+	if s.envPushPending(str(vm, "id")) {
+		// A create/start is still pushing the environment (or restoring the VM), in
+		// whatever state the caller read: a command now could run without it (compat
+		// state provisioning).
+		writeErr(w, r, http.StatusConflict, "sandbox_not_ready",
+			"the sandbox is still provisioning: its environment is being applied; retry shortly")
+		return true
+	}
+	if s.envErrorOf(vm) == "" {
+		return false
+	}
+	writeErr(w, r, http.StatusConflict, "sandbox_not_ready",
+		"the sandbox is in state error: its environment was not applied; resume it to retry")
+	return true
 }
 
 func (s *server) compatExec(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -72,11 +101,16 @@ func (s *server) compatExec(w http.ResponseWriter, r *http.Request, p *principal
 	case timeout < 1 || timeout > compatMaxTimeout:
 		writeErr(w, r, 400, "invalid_timeout", "timeoutSeconds must be 1-600")
 		return
-	case c.Detached:
-		s.compatDetached(w, r, p, c)
+	case !validCwd(c.Cwd):
+		writeErr(w, r, 400, "invalid_request", "invalid cwd")
 		return
 	}
-	if _, ok := s.ownVM(w, r, p); !ok {
+	vm, ok := s.ownVM(w, r, p)
+	if !ok || s.refuseNotReady(w, r, vm) {
+		return
+	}
+	if c.Detached {
+		s.compatDetached(w, r, p, c)
 		return
 	}
 	cwd := s.compatPath(c.Cwd)
@@ -97,7 +131,7 @@ func (s *server) compatExec(w http.ResponseWriter, r *http.Request, p *principal
 		s.compatStreamExec(w, resp.Body, cid)
 		return
 	}
-	s.compatSyncExec(w, resp.Body, cid, cwd)
+	s.compatSyncExec(w, r, resp.Body, cid, cwd)
 }
 
 // readFrames calls f for each native frame until the stream ends.
@@ -114,7 +148,22 @@ func readFrames(body io.Reader, f func(execFrame)) error {
 	return sc.Err()
 }
 
-func (s *server) compatSyncExec(w http.ResponseWriter, body io.Reader, cid, cwd string) {
+func compatExecErrorStatus(guestCode string) (int, string) {
+	switch guestCode {
+	case "invalid_user", "spawn_failed", "not_found", "invalid_argument":
+		return http.StatusBadRequest, "bad_request"
+	case "unsupported", "not_supported":
+		return http.StatusUnprocessableEntity, "not_supported"
+	case "permission_denied":
+		return http.StatusForbidden, "permission_denied"
+	case "conflict", "already_exists", "is_a_directory", "not_empty", "not_running":
+		return http.StatusConflict, "conflict"
+	default:
+		return http.StatusBadGateway, "upstream_error"
+	}
+}
+
+func (s *server) compatSyncExec(w http.ResponseWriter, r *http.Request, body io.Reader, cid, cwd string) {
 	started := time.Now().UTC()
 	var out, errb bytes.Buffer
 	var outCut, errCut bool
@@ -136,21 +185,24 @@ func (s *server) compatSyncExec(w http.ResponseWriter, body io.Reader, cid, cwd 
 			last = fr
 		}
 	})
-	if err != nil && last.Exit == nil {
+	if err != nil && last.Exit == nil && last.Error == "" {
 		last.Error = "output stream broke off"
 	}
-	var exit any
-	success := false
-	if last.Exit != nil {
-		exit, success = *last.Exit, *last.Exit == 0 && !last.TimedOut
+	if last.Exit == nil {
+		msg := strings.TrimPrefix(last.Error, guestPrefix)
+		if msg == "" {
+			msg = "output stream ended without an exit status"
+		}
+		st, code := compatExecErrorStatus(last.Code)
+		writeErr(w, r, st, code, msg)
+		return
 	}
+	exit := *last.Exit
+	success := exit == 0 && !last.TimedOut
 	fields := map[string]any{"success": success, "exitCode": exit, "signal": nullIfEmpty(last.Signal), "oomKilled": false,
 		"stdout": strings.ToValidUTF8(out.String(), "�"), "stderr": strings.ToValidUTF8(errb.String(), "�"),
 		"stdoutTruncated": outCut, "stderrTruncated": errCut, "timedOut": last.TimedOut, "cwd": cwd,
 		"startedAt": started, "finishedAt": time.Now().UTC(), "commandId": cid}
-	if last.Error != "" {
-		fields["error"] = last.Error
-	}
 	writeCompat(w, 200, "command.finished", fields)
 }
 
@@ -209,7 +261,7 @@ func (s *server) compatStreamExec(w http.ResponseWriter, body io.Reader, cid str
 		case fr.Error != "":
 			flush()
 			ended = true
-			send(map[string]any{"type": "error", "error": "command_failed", "message": fr.Error, "retryable": false})
+			send(map[string]any{"type": "error", "error": "command_failed", "message": strings.TrimPrefix(fr.Error, guestPrefix), "retryable": false})
 		}
 	})
 	flush()
@@ -304,11 +356,12 @@ func (s *server) compatReadFile(w http.ResponseWriter, r *http.Request, p *princ
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		if resp.StatusCode == 404 {
+		be := &boatdError{Status: resp.StatusCode, Body: body}
+		if resp.StatusCode == 404 && !strings.HasPrefix(be.message(), guestPrefix) {
 			writeErr(w, r, 404, "not_found", "file not found")
 			return
 		}
-		writeUpstream(w, r, &boatdError{Status: resp.StatusCode, Body: body})
+		writeUpstream(w, r, be)
 		return
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, compatMaxFile+1))

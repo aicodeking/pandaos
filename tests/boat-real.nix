@@ -165,7 +165,7 @@ let
             assert "boat_reboot_pending 1" in prom and "boatd-or-firecracker" in prom, prom
 
         with subtest("rm leaves nothing behind"):
-            machine.succeed("boat rm real --json >&2", timeout=300)
+            machine.succeed("boat rm --yes real --json >&2", timeout=300)
             assert not fc_pids(), "firecracker left behind"
 
         emit({"test": "boat-real", "pass": True})
@@ -348,7 +348,7 @@ let
 
           with subtest("rm leaves nothing behind"):
               for n in ["c", "b", "a"]:
-                  server.succeed(f"boat rm {n} --json >&2", timeout=300)
+                  server.succeed(f"boat rm --yes {n} --json >&2", timeout=300)
               assert server.succeed("boat list --json").strip() == ""
               assert not fc_pids(), "firecracker left behind"
               server.succeed("test -z \"$(ls -A /var/lib/boat/vms)\"")

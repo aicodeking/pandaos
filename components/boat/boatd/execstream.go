@@ -53,7 +53,9 @@ type agentLine struct {
 	err error
 }
 
-// readLines feeds a's lines to the returned channel until an error or stop.
+// readLines feeds a's lines to the returned channel until an error, stop, or the
+// final line. It reads nothing past the final line, so once that line is handed
+// over the conn has no reader and may go back to the pool (finishStream).
 func readLines(a *agentConn, stop <-chan struct{}) <-chan agentLine {
 	out := make(chan agentLine, 16)
 	go func() {
@@ -64,7 +66,7 @@ func readLines(a *agentConn, stop <-chan struct{}) <-chan agentLine {
 			case <-stop:
 				return
 			}
-			if err != nil {
+			if err != nil || rep.final() {
 				return
 			}
 		}
@@ -135,6 +137,7 @@ func (m *Manager) relayExec(ctx context.Context, id, sock string, a *agentConn, 
 		stop := make(chan struct{})
 		lines := readLines(a, stop)
 		done, reattach := false, false
+		var last *reply // the final line, when it arrived intact
 		for !done && !reattach {
 			var l agentLine
 			if pending != nil {
@@ -154,10 +157,23 @@ func (m *Manager) relayExec(ctx context.Context, id, sock string, a *agentConn, 
 			}
 			seen++
 			final := l.rep.final()
+			if final {
+				last = &l.rep
+			}
 			done = emit(l.raw, final) != nil || final
 		}
 		close(stop)
-		a.Close()
+		if last != nil {
+			// A finished exec leaves its conn idle (the guest loops on readline and
+			// sends nothing after the final line), so it can serve the next request.
+			// finishStream still closes it when unfit: an error line, a spent ctx
+			// deadline, bytes left over, or a conn that was reattached (no pool
+			// identity). Any other end (read error, client gone, reset) closes it:
+			// the guest may still be writing to it.
+			a.finishStream(sock, *last)
+		} else {
+			a.Close()
+		}
 		if done {
 			return
 		}

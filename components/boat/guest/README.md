@@ -159,14 +159,20 @@ Node toolchain (code-server's bundled Node excepted). The codex binary is alread
 stripped. The build log prints the 40 largest directories for the next round.
 
 Choices:
-- **Harnesses:** `full` has all seven that boat.dev lists. `slim` has claude, codex
-  and opencode, and stays small. pi and Kimi Code install with `npm ci` from the
-  lockfiles in `rootfs-full/opt/boat-harness`, and Mistral Vibe with
-  `pip --require-hashes` from its lock there, so every dependency is pinned by checksum.
-  Prime Agent is its sha256-pinned release tarball; it may fetch uv and Python on
-  first use. `test-in-vm.sh` checks `--version` only, because CI has no model keys:
-  none of the four has run a real prompt here. `boat prompt` takes only claude, codex
-  and opencode until the API adds the others; `boat exec` runs them now.
+- **Harnesses:** `full` has all seven `boat.dev` prompt harnesses (`claude`, `codex`,
+  `opencode`, `pi`, `prime`, `kimi`, `mistral`, plus aliases `claude-code`,
+  `prime-agent`, `kimi-code`). `slim` has `claude`, `codex` and `opencode`, and stays
+  small. `pi` and Kimi Code install with `npm ci` from the lockfiles in
+  `rootfs-full/opt/boat-harness`, and Mistral Vibe (`vibe`) with `pip --require-hashes`
+  from its lock there, so every dependency is pinned by checksum. Prime Agent is its
+  sha256-pinned release tarball; it may fetch `uv` and Python on first use.
+  `test-in-vm.sh` checks `--version` only, because CI has no model keys: none of
+  `pi`, `prime`, `kimi` or `mistral` has run a real prompt here, though `boat prompt`
+  (sync `/v1/vms/{id}/prompt`, async `/v1/vms/{id}/prompts`, and
+  `/api/v1/sandboxes/{id}/prompt`) and `boat exec` accept all seven. Other coding-agent
+  CLIs (`gemini`, `droid`, `amp`, `goose`, `qwen`, `kilocode`, `factory`, `crush`,
+  `hermes`, `openclaw`, `cursor-agent`, `lux`) are not pre-installed in the image or
+  wired into `boat prompt` (install inside the VM and run via `boat exec`).
 - **Ghostty** has no official build for Ubuntu 24.04: Ubuntu packages it from
   26.04, and the snap needs snapd. The full image installs the community noble
   .deb that the Ghostty docs list (mkasberg/ghostty-ubuntu 1.3.1, sha256-pinned).
@@ -184,13 +190,80 @@ Choices:
 
 User `dev` (uid 1000): passwordless sudo, `docker` group, no password (`*`), ssh
 keys only (`PasswordAuthentication no`, `PermitRootLogin no`, `AllowUsers dev`).
-Keys go in with `put_file /home/dev/.ssh/authorized_keys`.
+Managed keys are authorized online for each new authentication by the root-owned
+`/usr/local/libexec/boat-ssh-authorize` Python stdlib helper, executed with `python3 -I`
+as dedicated nologin user `boat-ssh`. Only an explicitly enrolled tenant key file,
+`/home/dev/.ssh/authorized_keys.tenant`, provides independent tenant access. Enroll
+that file through an authenticated guest command with mode 0600 and owner dev;
+never write managed grants there. Tenant/root authority is independent of managed
+revocation. Legacy `authorized_keys` and `authorized_keys2` are ignored. The installer
+preserves their unknown bytes in root-only `/etc/boat/ssh-legacy-archive` and never
+promotes them to tenant keys. CA keys, authorized-principals commands, password,
+keyboard-interactive and hostbased authentication are disabled.
+
+The API provisions `/etc/boat/ssh-auth.json` (root:boat-ssh, 0640, protected root-owned
+parents) independently of tenant environment or `BOAT_API_KEY`. Its exact v1 fields
+are `version`, `url` (full HTTPS `/v1/vms/{vm_id}/ssh/authorize` endpoint), `token`
+(lookup-only bearer), `vm_id`, `team_id`, `generation`, `boot_epoch`, and `users`
+(explicit OS usernames). The helper accepts only installed dev/user accounts; the
+API may authorize a restrictive subset. Both aliases are verified in effective sshd
+policy when installed. No config, no verified HTTPS, malformed/partial/oversized
+response, non-200 status, or a deadline failure means empty stdout and denied managed
+authorization. Requests have a 500ms socket timeout and a hard two-second total
+budget including DNS, TLS and complete body buffering (64 KiB maximum). The helper
+uses OpenSSL's hashed `/etc/ssl/certs` directory (`capath`) first for `O(1)` issuer
+lookup and falls back once to `/etc/ssl/certs/ca-certificates.crt` (`cafile`) only if
+`/etc/ssl/certs` is absent or the handshake raises `SSLCertVerificationError` (such as
+an unhashed custom root appended directly to `ca-certificates.crt`), with direct HTTPS
+and without environment `SSL_CERT_*` variables, proxies, redirects, retries, caches,
+shell evaluation, or static-key fallback.
+
+The host installs exact helper bytes as root:root 0555, then runs
+`/usr/bin/python3 -I /usr/local/libexec/boat-ssh-authorize install` through existing
+root guest exec, with the config JSON on stdin. Before any policy file upload or
+root exec, boatd must require the health capability `trusted_root_exec:true` (literal
+boolean); older agents silently ignore unknown request fields and must stay
+quarantined. Install, verify and `rotate-token` exec requests carry explicit
+`user:"root"` and `trusted_root_exec:true`. This reserved host-only mode builds
+exactly fixed `PATH=/usr/sbin:/usr/bin:/sbin:/bin`, `HOME=/root`, `USER=root`,
+`LOGNAME=root`, `LANG=C`, `SHELL=/bin/sh` before spawning the
+executable, ignores inherited/tenant environment, clears supplementary groups,
+uses `/root` as cwd, and rejects request environment, tty or cwd overrides. Public
+API routes must never forward this selector or elevate the requested user. `verify`
+and `rotate-token` accept the same stdin. All three emit
+`{version:1,config_digest,boot_epoch,readiness:true}` only on successful
+checks; `config_digest` is SHA256 of ASCII JSON with sorted keys, compact separators,
+no newline, and array order preserved. All config strings are ASCII. The installer
+closes `ssh.socket`, stops old sshd and its preauth/session processes (pidfd-based
+signals avoid numeric-PID reuse; absent kernel/Python support fails closed), archives the
+old config, installs an authoritative sshd config without legacy Includes, checks
+`sshd -t` and `sshd -T -C` for every installed alias, and verifies the restarted
+service. Errors do not restore the previous static policy. Installation can end
+existing SSH sessions; the host must keep ingress quarantined until attestation. When
+only the lookup token/generation in `/etc/boat/ssh-auth.json` changes on an already
+provisioned VM, `rotate-token` verifies `boat-ssh`, `sshd_config`, the `ssh.service`
+drop-in, helper permissions and active `ssh.service` state (failing closed on any
+divergence) and atomically updates `/etc/boat/ssh-auth.json` (`0640` `root:boat-ssh`)
+without stopping `ssh.service`, killing active `sshd` sessions, or invoking `sshd -T`.
+
+For existing guests, use a maintenance window: close guest/direct/jump ingress,
+suspend access, install and independently verify every authority slice, and reopen
+only after host identity/digest/epoch fences pass. Rollback keeps access suspended;
+it must never restore legacy static authorization. This guest slice alone does not
+establish system readiness. No deployment or VM execution is implied by these
+source changes.
+
+Run local helper tests with `python3 -B test_ssh_authorize.py`. They include real
+TLS failure/slow-stream probes and local `sshd -t/-T` with temporary host keys when
+available. Full root/systemd install and actual login/legacy/tenant enforcement
+must also be exercised on Linux; the macOS parser harness does not establish them.
 
 `user` (full only): boat.dev's guest user is `user` in `/home/user`. In `full`,
 `user` is a second passwd entry for uid 1000 (`useradd -o`, group `dev`, same groups)
 whose home is `/home/user`, a symlink to `/home/dev`. Everything stays dev's: files,
 `whoami` and `id -un` (uid lookups find `dev` first), the agent's default exec user,
-and every `/home/dev` path. `ssh user@...` works with dev's keys
+and every `/home/dev` path. `ssh user@...` works with explicitly enrolled tenant keys (and managed
+keys only when `user` is listed in the trusted online config)
 (`rootfs-full/etc/ssh/sshd_config.d/boat-user.conf` adds `AllowUsers user`),
 `exec` with `"user": "user"` runs with `HOME=/home/user`, and both have sudo.
 
@@ -277,7 +350,7 @@ and the connection stays usable.
 | `exec_attach` | `session, seen, exec?` | `{attached, started?}`, then the session's lines from `seen` on (PROTOCOL.md) |
 | `put_file` | `path, data_b64, mode? ("0644"), offset?, last? (true), owner?` | `{ok, size, complete}` |
 | `get_file` | `path` | `{offset, data_b64}` (1 MiB each)... then `{eof, size, mode}` |
-| `set_identity` | `hostname, ipv4_cidr, gw, dns, mac?, ipv6_cidr?, ipv6_gw?` | `{ok, ms: {network, secrets}}` |
+| `set_identity` | `hostname, ipv4_cidr, gw, dns, mac?, ipv6_cidr?, ipv6_gw?, defer_ssh_restart?` | `{ok, ms: {network, secrets}}` |
 | `set_env` | `vars` | `{ok, count}` |
 | `desktop` | `action: start\|stop\|status, token?` | `{ok, port, token, path}` / `{ok}` / `{ok, running, port}` |
 | `shutdown` | | `{ok}`, then the VM reboots and Firecracker exits |
@@ -286,7 +359,7 @@ and the connection stays usable.
 | `cmd_start` | `argv, env?, cwd?, user? ("dev")` | `{ok, cmd_id}` |
 | `cmd_list` | | `{ok, cmds: [status...]}` |
 | `cmd_status` | `cmd_id` | `{ok, cmd_id, argv, state, running, pid, started, ended?, exit?, signal?}` |
-| `cmd_logs` | `cmd_id, offset? (0), limit? (1 MiB, max 4 MiB)` | `{ok, data_b64, offset, next_offset, size, truncated, running}` |
+| `cmd_logs` | `cmd_id, offset? (0), limit? (1 MiB, max 4 MiB)` | `{ok, data_b64, offset, next_offset, size, truncated, running, exit, signal}` (`exit` and `signal` are `null` while the command runs or when not applicable; a guest from before they were added omits them, so their presence is the capability signal, as in PROTOCOL.md) |
 | `cmd_signal` | `cmd_id, signal` ("TERM", "SIGTERM" or a number) | `{ok}` |
 | `file_list` | `path` | `{ok, entries: [{name, type, size, mode, mtime}], truncated}` |
 | `file_delete` | `path, recursive? (false)` | `{ok}` |
@@ -319,8 +392,11 @@ Additions to the PROTOCOL.md contract (all optional):
   regenerated. If both requests carry `generation` (boatd's restore counter), they
   must match. A request that fails validation does not use up the reseed; a
   failure after validation does, so the host reseeds again before a retry.
-- `set_identity` replies once the new keys are on disk; sshd restarts just after
-  (`--no-block`), so a client may need to retry its first connection for a moment.
+- `set_identity` restarts `ssh.service` synchronously when it is active (or failed in
+  standalone SSH mode) before replying so regenerated host keys take effect without
+  racing a subsequent `boat-ssh-authorize install`; passing `defer_ssh_restart: true`
+  skips that restart when the host is about to run `boat-ssh-authorize install` before
+  releasing network quarantine.
 - Host keys are ed25519 and ecdsa only. RSA keygen took a random 59-555 ms per key on
   an M-series Mac (the other two: ~25 ms), which showed up as `identity=349-1208ms`
   on forks in CI. With RSA gone and sshd no longer awaited, one CI run measured
@@ -340,20 +416,53 @@ Additions to the PROTOCOL.md contract (all optional):
   refuses `/` and top-level system directories. `file_move` treats `to` as the exact
   destination. `file_search` uses ripgrep (so `.gitignore` applies): a fixed string by
   default; `content: false` matches a case-insensitive substring of file names.
-- `set_env` writes `/etc/boat/env` (`export K='v'` lines), 0600, owned by `dev` so
+- `set_env` atomically replaces `/run/boat/env` (`export K='v'` lines), 0600, owned by `dev` so
   that dev's login shells (`/etc/profile.d/boat-env.sh`) and bash (`/etc/bash.bashrc`)
-  can source it.
+  can source it through the compatibility symlink `/etc/boat/env`. Exec, detached
+  commands, `get_env`, and existing self-API smoke scripts use the same values.
 - `idle_s` is 0 while an exec runs or anyone is logged in (`who`, i.e. utmp: ssh
   sessions), else the time since the last exec/put_file/desktop start, or since the
   last desktop input (`xprintidle` on `:1`) if that is more recent.
 
+### Managed environment across boots
+
+New slim/full images keep the managed environment on the guest's per-boot `/run`
+tmpfs. A cold boot starts without that file; the host must push the current
+environment before releasing access. Restarting the agent or preparation service
+within a boot preserves a freshly pushed environment. Persistent `identity.json`,
+VM identity restoration and reseed/adoption operations retain their existing behavior.
+
+The root-owned helper `/usr/local/lib/boat/prepare-managed-env` runs as
+`/usr/bin/python3 -I /usr/local/lib/boat/prepare-managed-env`. It discards the old
+`/etc/boat/env` regular file and `env.boat-tmp` without reading or executing them,
+installs the compatibility link, verifies `/run` is tmpfs, and prepares root-owned
+0755 `/run/boat`. `boat-managed-env.service` is required before `sysinit.target`
+and by `boat-agent.service`, so preparation failure blocks normal service startup.
+The Docker build calls the same helper with `--image-setup` to discard a legacy
+managed file and install the link without requiring a mounted runtime tmpfs.
+
+For an existing supported guest, install the updated agent, helper and both units
+as root during an access-suspended maintenance window, enable
+`boat-managed-env.service`, reload systemd and run the helper before restarting the
+agent or allowing any environment consumer. Verify the symlink, tmpfs and empty
+runtime environment before pushing fresh values. Enabling the unit alone does not
+retroactively order already-running services. This is a guest installation
+interface; no automatic host migration is supplied here.
+
+This guarantee requires the updated guest code and enabled early unit. Preexisting
+snapshots/images without them remain legacy. Memory snapshots can retain tmpfs and
+process environments; tenant copies, command data/logs and prior disk blocks or
+snapshots are not erased by unlinking the old file. This change removes the managed
+file from future persistent writes; it does not sanitize historical storage.
+
 ## Tests
 
-- `cd agent && python3 -m unittest -v test_boat_agent`: 55 tests over a socketpair
+- `cd agent && python3 -B -m unittest -v test_boat_agent`: 78 tests including socketpair protocol checks
   (exec streaming/exit/stdin/env/cwd/tty/3 MB output/timeout + group kill,
   set_env, chunked put/get, validation, reseed gating set_identity, sync, the
   desktop token check and proxy, and `desktop-check.sh` end to end through the
-  real token proxy to a fake KasmVNC).
+  real token proxy to a fake KasmVNC), plus managed-env migration, tmpfs validation,
+  atomic publication and failed-write cleanup.
 - `./desktop-check.sh LINK [SECONDS]`: follows the link's redirects and meta
   refreshes with curl and a cookie jar (`$CURL_OPTS` is added; `--resolve`, `--connect-to`, `--cacert`
   and `-k` also apply to the websocket, as does `$SSL_CA`). It then opens
@@ -377,4 +486,5 @@ Additions to the PROTOCOL.md contract (all optional):
   exec and ssh), idle_s, the desktop (403 without the token, 302 + cookie, page
   served, 6081 not reachable from the host, `desktop-check.sh` fps with glxgears,
   the Ghostty llvmpipe check, code-server on 127.0.0.1:8080; slim: refused), and
-  shutdown.
+  shutdown and a second cold boot of the same disk: managed and legacy environment
+  files absent, identity preserved, login environment empty, and fresh `set_env` usable.

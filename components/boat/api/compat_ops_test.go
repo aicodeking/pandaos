@@ -58,7 +58,10 @@ func TestCompatSandboxIDs(t *testing.T) {
 	if len(list) != 1 || list[0].(map[string]any)["id"] != id {
 		t.Errorf("list: %v", list)
 	}
-	// Persisted: a fresh store from the same directory knows it.
+	// Persisted: a fresh store from the same directory knows it once flushed.
+	if err := e.srv.store.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	st2, err := OpenStore(e.dir)
 	if err != nil {
 		t.Fatal(err)
@@ -138,8 +141,8 @@ func TestCompatMeLimitsUsage(t *testing.T) {
 	if u := e.ok("GET", "/api/v1/me", nil, 200)["user"].(map[string]any); u["id"] == "" {
 		t.Errorf("me: %v", u)
 	}
-	if u := e.ok("GET", "/api/v1/sandboxes/"+id+"/usage", nil, 200); u["sandboxId"] != id || u["sandboxType"] != "small" {
-		t.Errorf("usage: %v", u)
+	if status, out, _ := e.compat(e.owner, "GET", "/api/v1/sandboxes/"+id+"/usage", nil, nil); status != 501 || errCode(out) != "not_supported" {
+		t.Errorf("usage: %d %v", status, out)
 	}
 }
 
@@ -407,8 +410,13 @@ func TestCompatKeysAndEnvironments(t *testing.T) {
 	if got := e.ok("GET", "/api/v1/environments", nil, 200)["environments"].([]any); len(got) != 1 {
 		t.Errorf("list envs: %v", got)
 	}
+	// Compatibility deletes retain at least one environment.
+	e.ok("POST", "/api/v1/environments", map[string]any{"name": "spare"}, 200)
 	if st, out, _ := e.compat(e.owner, "DELETE", "/api/v1/environments/"+id, nil, nil); st != 200 || out["success"] != true {
 		t.Errorf("delete env: %d %v", st, out)
+	}
+	if st, out := e.do(e.owner, "DELETE", "/v1/environments/spare", nil); st != 200 {
+		t.Fatalf("remove native spare: %d %v", st, out)
 	}
 	other := otherTeamKey(e)
 	e.ok("POST", "/api/v1/environments", map[string]any{"name": "mine"}, 200)

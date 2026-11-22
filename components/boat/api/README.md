@@ -12,7 +12,7 @@ boat-api serve -data /var/lib/boat-api -boatd /run/boat/boatd.sock \
   [-rate 10 -burst 40] [-team-rate 30 -team-burst 120] \
   [-max-keys-per-team 100] [-max-webhooks-per-team 20] \
   [-desktop-url https://HOST/desktop -desktop-key-file F] [-vm-domain vm.HOST] [-port-url-ttl 1h] \
-  [-ssh-user dev] [-ssh-jump jump@HOST:2222 -ssh-jump-keys-file F] [-images ubuntu-24.04,ubuntu-22.04] \
+  [-ssh-user dev] [-ssh-jump jump@HOST:2222] [-ssh-policy-helper-file F] [-ssh-policy-users dev,user] [-images ubuntu-24.04,ubuntu-22.04] \
   [-audit-log F -audit-max-bytes 104857600 -audit-keep 20 -audit-max-age 2160h] \
   [-ai-proxy-listen 10.200.0.1:8744] [-ai-proxy-url URL] [-ai-rate 20] [-public-url https://HOST] \
   [-otlp-endpoint URL -otlp-header k=v] [-webhook-team-inflight 8 -webhook-team-pending 1000]
@@ -47,36 +47,65 @@ Run `admin init` before `serve`. The server loads its state at startup.
 The full schema is in `openapi.json` (OpenAPI 3.1), which the server also serves at
 `GET /v1/openapi.json`. Each operation's `x-boat-scope` field names the scope it needs.
 
+The `/api/v1` compatibility surface accounts for all **122** upstream method/path pairs:
+**98 mapped**, **24 always 501 `not_supported`**, plus four local operations:
+`GET /api/v1/openapi.json`, `GET /api/v1/provider-models`,
+`GET /api/v1/file-downloads/{token}`, and `PUT /api/v1/file-uploads/{token}`.
+Environment upgrades are mapped; creator-authority share/unshare and sandbox billing usage are
+unsupported. Counts normalize path parameter names against the live [upstream spec](https://docs.boat.dev/openapi/boat-v1.yaml)
+(checked 2026-11-18), excluding those four additions. The mapped count includes default-profile
+delete's deliberate 409 `is_default`. Run `tools/compat_openapi.py SOURCE.json openapi.json --check`
+to check operation coverage and generation drift; omit `--check` to regenerate.
+
+Compat sandbox lists accept `stoppedBefore` (RFC 3339 date-time, strict earlier-than against a
+native stopped VM's persisted `stopped_at`, also exposed as `stoppedAt`; includes auto-stops,
+and later edits preserve it. Legacy records without `stopped_at` fall back to `updated_at`) and
+`dataExpired=true|false` before cursor pagination. Local
+sandbox data stays until explicit deletion, which removes its list entry: `true` returns an
+empty list and `false` keeps the other matches. Auto-stop `expires_at` is not data expiry.
+Every non-empty `include`, including `cost`, `deletedCost` and their combination, returns
+501 `not_supported`; the backend has no calendar-month list-price meter or filtered deleted
+sandbox cost ledger. Empty `include` preserves the normal list response. Per-sandbox compat
+`GET …/usage` also returns 501: boat.dev billing usage has no honest self-hosted price basis.
+Use native `GET /v1/vms/{id}/usage` for measured runtime seconds and `vm_seconds_by_size`.
+
+The pinned official SDK drivers assert the share/unshare 501 envelopes and continue through
+the remaining lifecycle calls. Local `TestOfficialSDKDrivers` uses fake boatd; it does not
+establish deployed TLS, live desktop or live-VM evidence for these changes. Native private-port
+and port-token revocation checks remain separate.
+
 | Method & path | Scope | Notes |
 |---|---|---|
 | `GET /healthz`, `GET /v1/openapi.json` | none | no auth |
 | `GET /v1/me` | any | user, team, role, effective scopes |
 | `GET /v1/images` | any | from `-images`; the first one is the default |
-| `GET /v1/usage[?from&to]` | vms:read | boatd `/v1/usage?team=`: VM-seconds by size, snapshot-days, starts |
-| `GET/POST /v1/vms` | vms:read / vms:write | create body `{name,size,image,ttl_s,idle_stop_s,snapshot,labels,env,secrets,environment,no_env,from}`; `secrets:[names]` picks the injected team secrets (absent = the ones an admin marked default-injected, `[]` = none); label keys starting with `boat.` are reserved (boat-api stores the selection in `boat.secrets`) |
-| `GET/DELETE /v1/vms/{id}` | vms:read / vms:write | |
-| `POST /v1/vms/{id}/start\|stop\|fork` | vms:write | start re-injects secrets `{env}`; fork `{name, env, labels}` (labels replace the parent's; its `boat.*` ones carry over) |
-| `POST /v1/vms/{id}/exec` | exec | `{cmd[],env,cwd,stdin_b64,timeout_s}` → NDJSON `{stream,data_b64}` … `{exit}` |
-| `POST /v1/vms/{id}/prompt` | exec | `{prompt,agent:claude\|codex\|opencode,model,cwd,timeout_s}`, streamed like exec; team secrets go in as env |
+| `GET /v1/usage[?from&to]` | vms:read | boatd `/v1/usage?team=`: VM-seconds by size, snapshot-days, starts. `from`/`since`/`to` take RFC 3339 or a date-only `YYYY-MM-DD` (UTC midnight) |
+| `GET/POST /v1/vms` | vms:read / vms:write | create body `{name,size,image,ttl_s,idle_stop_s,snapshot,labels,env,secrets,environment,no_env,from,self_api,count}`; `secrets:[names]` picks the injected team secrets (absent or `["default"]` = the ones an admin marked default-injected via `inject:true`, `[]` = none); label keys starting with `boat.` are reserved (boat-api stores the selection in `boat.secrets`) |
+| `GET/DELETE/PATCH /v1/vms/{id}` | vms:read / vms:write | `PATCH` updates `{name,ttl_s,idle_stop_s}` (`0` clears TTL/idle-stop); `name` is free text, 1-120 characters (boatd keeps its DNS slug as the hostname) |
+| `POST /v1/vms/{id}/start\|stop\|fork\|clone` | vms:write | start re-injects secrets `{env,no_env,ttl_s,fail_fast}`; fork/clone `{name,size,ttl_s,fail_fast,env,no_env,labels}` (labels are the child's own, absent = none: a fork never takes the parent's user labels; its `boat.*` ones carry over; caller `env` overrides require `exec`); `no_env` is sticky: a VM created, started or forked with it stays no_env (a fork, clone or create-from-snapshot of it too), and a start/fork of it that names an `environment` or sends `no_env:false` is 400 `no_env_sticky`; a no_env start or fork never replays the stored `env`; a fork without `ttl_s` gets 3600 |
+| `POST /v1/vms/{id}/exec` | exec | `{cmd[],env,cwd,stdin_b64,timeout_s}` → NDJSON `{stream,data_b64}` … `{exit}` (`cwd` accepts absolute paths, `~`/`~/…`, or relative paths resolved against the guest user's home; NUL and control characters are rejected) |
+| `POST /v1/vms/{id}/prompt` | exec | `{prompt,agent:claude\|codex\|opencode\|pi\|prime\|kimi\|mistral,model,cwd,timeout_s}` (aliases `claude-code\|prime-agent\|kimi-code`), streamed like exec; team secrets go in as env; same `cwd` forms as exec |
 | `GET/PUT /v1/vms/{id}/files?path=` | exec | raw bytes; the path must be absolute; `-max-file-bytes` |
-| `GET/POST /v1/vms/{id}/ports`, `DELETE …/ports/{port}` | vms:read / vms:write | `{port,auth:private\|public}`, default private; `public:true` is shorthand for `auth:public` |
+| `GET/POST /v1/vms/{id}/ports`, `DELETE …/ports/{port}` | vms:read / vms:write (`exec` for `auth:public`) | `{port,auth:private\|public}`, default private; `public:true` is shorthand for `auth:public` |
 | `GET /v1/vms/{id}/ports/{port}/url[?ttl_s=]` | exec | `{url,auth,token?,expires_at?}`; private routes get a signed token (see Port routes) |
-| `POST /v1/vms/{id}/port-tokens/revoke` | exec | `{ok,generation}`; ends every token, link and cookie of the VM's private ports within about 2 s. Removing a port does this too |
+| `POST /v1/vms/{id}/port-tokens/revoke` | exec | `{ok,generation}`; ends every token, link and cookie of the VM's private ports within about 2 s. Removing a port does this too; compat `/share` and `/unshare` return 501 without changes |
 | `GET/POST /v1/vms/{id}/snapshots`, `DELETE …/snapshots/{sid}` | vms:read / vms:write | proxied to boatd |
-| `POST /v1/vms/{id}/ssh` | exec | `{public_key}` is appended (deduped) to `/home/<ssh-user>/.ssh/authorized_keys`; returns `{host,port,user,jump?}` |
+| `POST /v1/vms/{id}/ssh`, `GET /v1/vms/{id}/ssh`, `DELETE /v1/vms/{id}/ssh/{fingerprint}` | exec / vms:read / exec | `POST {public_key}` durably commits a managed grant and returns `{host,port,user,jump?}`; `GET` lists live grants; `DELETE` revokes one |
+| `POST /v1/vms/{id}/ssh/authorize` | lookup bearer | guest helper lookup `{user,key_type,key_blob}` → 200 `{authorized_key}` or 204 |
 | `GET /v1/vms/{id}/desktop` | exec | `{url,expires_at}`, signed and short-lived (`-desktop-ttl`, default 5m) |
 | `GET/POST /v1/teams`, `GET/DELETE /v1/teams/{id}` | any / admin + operator | create and delete are operator-only (see Tenant model) |
 | `POST /v1/teams/{id}/members`, `DELETE …/members/{user}` | admin + team owner/admin role | creating a member returns their first key; the last owner cannot be removed |
-| `GET/POST /v1/keys`, `DELETE /v1/keys/{id}` | any | the token is shown only once; `expires_in_s` (≤ 365 days) makes the key expire (then 401). Deleting a key revokes the private port links it minted and its signed file URLs |
-| `GET /v1/secrets`, `PUT/DELETE /v1/secrets/{NAME}` | vms:read / admin | values are never returned |
-| `POST/GET /v1/vms/{id}/commands`, `GET/DELETE …/commands/{cid}` | exec | detached commands: `{cmd[],env,cwd}` → `{id,cmd,state}`; DELETE sends TERM |
+| `PUT /v1/teams/{id}/self-token`, `PUT /v1/teams/{id}/share-allowlist` | admin + team owner/admin role | `{public_ports, ssh}` controls whether a VM's self-token may open public ports or authorize SSH keys on itself (`self_api` on `POST /v1/vms` controls per-VM `BOAT_API_KEY` injection); `{teams[]}` allowlists sender teams for cross-team snapshot grants |
+| `GET/POST /v1/keys`, `DELETE /v1/keys/{id}` | any | the token is shown only once; `expires_in_s` (≤ 365 days) makes the key expire (then 401). Deleting a key revokes the private port links, snapshot shares and signed file URLs it minted |
+| `GET /v1/secrets`, `PUT/DELETE /v1/secrets/{NAME}` | vms:read / admin | `{value,inject?}` (`inject:true` marks default-injected); values are never returned |
+| `POST/GET /v1/vms/{id}/commands`, `GET/DELETE …/commands/{cid}` | exec | detached commands: `{cmd[],env,cwd}` → `{id,cmd,state,pid?}` (`cwd` accepts absolute, `~`/`~/…`, or relative paths resolved against the guest user's home); DELETE sends TERM |
 | `GET …/commands/{cid}/logs?offset=&limit=&follow=1` | exec | one chunk, or with `follow=1` NDJSON until the command ends |
 | `POST …/commands/{cid}/signal` | exec | `{signal: TERM\|INT\|KILL\|HUP}` |
-| `GET /v1/vms/{id}/command-history`, `GET …/processes` | exec | history is boat-api's own record, so it answers for a stopped VM |
+| `GET /v1/vms/{id}/command-history`, `GET …/processes` | exec | history retains at most 200 detached commands and prompt/setup process records per VM (no sync/stream execution records), including while stopped; compat history filters `mode`/`q` before cursor paging, `limit` 1-100 (default 20) |
 | `GET …/files/list`, `DELETE …/files`, `POST …/files/move`, `GET …/files/search`, `GET …/files/info`, `POST …/files/folder`, `POST …/files/permissions` | exec | `search`: names, or contents with `content=1`; `regex=1` |
 | `POST/GET /v1/vms/{id}/prompts`, `GET …/prompts/{pid}`, `GET …/prompts/{pid}/logs` | exec | background turns; 202 `{id,conversation_id,cmd_id,state}`; 409 while its conversation runs a turn |
 | `POST …/prompts/{pid}/steer`, `POST …/prompts/{pid}/interrupt`, `GET …/conversations` | exec | see Agents |
-| `GET/POST /v1/environments`, `GET/PUT/DELETE …/{id}`, `POST …/{id}/build` | vms:read / admin | `{name,image,size,setup_script,env,secrets,is_default}`; by id or name |
+| `GET/POST /v1/environments`, `GET/PUT/DELETE …/{id}`, `POST …/{id}/build`, `POST …/{id}/upgrade` | vms:read / admin | `{name,image,size,setup_script,env,secrets,is_default}`; by id or name |
 | `POST /v1/vms/{id}/resize` | vms:write | `{size,disk_gib,discard_memory}`; size needs a stopped VM, and `discard_memory` if it has a stop snapshot |
 | `GET /v1/vms/{id}/usage`, `GET /v1/events` | vms:read | one VM's seconds; SSE lifecycle events for the team (`after=`, `Last-Event-ID`) |
 | `GET /v1/snapshots`, `DELETE /v1/snapshots/{sid}`, `POST /v1/snapshots/import?name=` | vms:read / vms:write | the team's snapshots, imports included; import takes the raw archive |
@@ -181,8 +210,9 @@ without a team key. A team that stores its own `BOAT_API_KEY` secret keeps it.
   strips the `env` field from any VM object it returns.
   - **Per VM:** `secrets:[names]` at create limits what a VM gets; `[]` gives it none.
     Forks inherit their parent's selection, because they inherit its disk anyway.
-    The default (no field) is every team secret, except on a disk the team did not
-    build (a share, an import, or a fork or snapshot of such a VM): that gets none
+    The default (no field, or `["default"]` / `@default`) is only the secrets an admin
+    marked default-injected (`inject:true`), not every team secret — and on a disk the team
+    did not build (a share, an import, or a fork or snapshot of such a VM), it gets none
     unless named, which needs the `exec` scope, and it starts blocked at the AI proxy.
   - **What encryption does not cover:** anyone with the `exec` scope on a VM can read
     every secret injected into it. They sit in `/etc/boat/env`, in the environment of
@@ -239,11 +269,14 @@ like a secret. Providers: anthropic, openai, openrouter, deepseek, mistral, moon
 
 ## Agents
 
-`POST /v1/vms/{id}/prompts` runs the agent CLI as a detached command, with the team's
-secrets and proxy tokens. A conversation maps to the CLI's own session:
-`claude --session-id/--resume`; `codex exec resume <thread_id>` and
-`opencode run --session <sessionID>`, whose ids are read from the first turn's JSON
-output. A fork copies the conversations along with the disk that holds their sessions.
+`POST /v1/vms/{id}/prompts` runs the agent CLI (`claude`, `codex`, `opencode`, `pi`,
+`prime`, `kimi`, `mistral` / `vibe`, plus aliases `claude-code`, `prime-agent`,
+`kimi-code`) as a detached command, with the team's secrets and proxy tokens. A
+conversation maps to the CLI's own session: `claude --session-id/--resume` and
+`pi --session-id`; `codex exec resume <thread_id>`, `opencode run --session <sessionID>`,
+`kimi -S` and `vibe --resume`, whose ids are read from the first turn's output (`prime`
+starts each turn fresh). A fork copies the conversations along with the disk that holds
+their sessions.
 
 **Steer is interrupt + resume**, not in-turn injection. These CLIs take no input during
 a headless turn, so steer sends SIGINT (SIGKILL after 5 s), then starts a new turn in
@@ -259,6 +292,17 @@ Changing the image, size, script, vars or secrets makes a build stale, and new V
 the setup again. The builder VM stays stopped because deleting a VM deletes its
 snapshots; it counts against `maxTotalVMs` and `maxDiskGiB`. **Secrets given to a
 build end up on the snapshot's disk**, so select only what the setup needs.
+
+A VM is **pinned to the environment version it started on** (`environment_version`): its
+vars are copied at create, at a start or fork that names the environment, and from the
+parent at a fork. A plain start replays the pin, so editing the environment changes no
+existing VM. `POST …/{id}/upgrade` re-pins every team VM on the environment to its
+current version, or only the `agentIds` supplied in an optional request body (an empty list
+selects none). A successful live upgrade applies the new vars immediately and preserves
+per-sandbox overrides. Live policy removal that cannot be certified safe fails without
+moving the pin; stop the VM before upgrading it. Stopped VMs apply their new pin at the
+next start, with cold-boot intent persisted when removal requires it. Check the `failed`
+count alongside `upgraded`, `upgraded_live`, and `upgraded_stopped` in the upgrade response.
 
 ## Snapshot sharing
 
@@ -339,18 +383,53 @@ The gateway sends this token to the guest proxy as `Cookie: boat_desktop=T`.
 
 ## SSH jump host
 
-With `-ssh-jump-keys-file /var/lib/boat/ssh/jump_authorized_keys`, every `POST /ssh`
-records a grant (team, key, VM) and then rewrites the file atomically with mode 0640.
-The file has one line per key:
+Managed SSH uses a fresh authorization lookup for every new authentication. `POST
+/v1/vms/{id}/ssh` prepares the verified guest policy, then durably commits its grant.
+It never appends managed keys to guest or gateway files. The legacy
+`-ssh-jump-keys-file` option only clears the old file during cleanup.
 
-```
-restrict,port-forwarding,permitopen="10.200.x.y:22",… ssh-ed25519 AAAA…
-```
+Supply `-ssh-policy-helper-file` with the packaged guest helper and an HTTPS
+`-vm-api-url` (or `-public-url`). `-ssh-policy-users dev,user` explicitly enables
+both guest aliases only after the helper verifies both installed uid1000 accounts;
+the default allows only `-ssh-user`. Unsupported accounts fail closed.
 
-boat-api rebuilds the file from the live boatd VM list. It does this after each `/ssh`
-call, after `DELETE /v1/vms/{id}`, on every `vm.*` event and at startup. When a VM is
-deleted or moves to another team, its IP drops out of the file, so a reused IP is never
-reachable through an old grant. Grants for VMs that no longer exist are pruned.
+The guest calls `POST /v1/vms/{id}/ssh/authorize` with `{user,key_type,key_blob}`
+(maximum 32 KiB) and its dedicated lookup bearer. Responses have `Cache-Control:
+no-store`: 200 `{authorized_key:"TYPE BLOB"}`, 204 deny, 401/404 identity failure,
+or 503 inventory/policy unavailable. Regular API and self bearers cannot use this
+endpoint, and lookup bearers cannot use regular API routes. Lookup identity binds
+team, VM, generation, host boot epoch and copy-policy version. Generation refresh
+updates the root-owned helper config independently of tenant `BOAT_API_KEY` values.
+Committed durable self grants survive generation rotation and self-issuance policy
+changes; issuing a new grant still requires the current policy and credential.
+
+The gateway helper calls loopback-only `POST /internal/ssh/authorize`, which
+rejects forwarded requests and returns 200 `{authorized_keys:[restricted lines]}`
+or 204 deny. Caddy must never expose `/internal/`. Restricted lines contain only
+fresh, ready VM IPv4 destinations and live committed grants. Final lookup decisions
+share the store publication fence with credential, membership and grant changes.
+The guarantee covers that decision, not delivery to sshd or existing sessions.
+
+Boatd accepts only its Unix-socket policy interface:
+`POST /v1/vms/{id}/ssh-policy {version:1,boot_epoch,config,helper_b64}`. Config is
+`{version:1,url,token,vm_id,team_id,generation,boot_epoch,users}`; its digest is
+SHA256 of sorted-key compact UTF-8 JSON without a newline. The response must attest
+`{version:1,config_digest,boot_epoch,readiness:true}` and fresh inventory must match
+`ssh_boot_epoch`, `ssh_policy_ready` and `ssh_policy_digest` before grants publish.
+The helper lives at `/usr/local/libexec/boat-ssh-authorize`; its config is
+`/etc/boat/ssh-auth.json` (root:boat-ssh 0640), outside tenant env.
+
+Revocation removes authority durably before cleanup. Cleanup VM IDs coalesce on
+the original grant; failed cleanup never creates authorizing records. Unowned
+historical grants remain quarantined evidence and count against capacity. They
+never authorize managed SSH. Explicit tenant-enrolled keys use the separately
+verified `authorized_keys.tenant` policy and are outside managed revocation.
+
+Migration requires maintenance ingress closure and suspended VM access until all
+guest, boatd, API and gateway slices are installed and independently verified.
+Unknown legacy keys must be archived, never promoted. Keep access suspended on
+installation, firewall or route failure. Rollback must preserve denial; restoring
+the old static-key policy is not a safe rollback. No initial deployment is implied.
 
 ## Store and scaling limits
 
@@ -366,7 +445,8 @@ All state lives in a single `state.json`, sealed under the master key:
   and reusing a lost first generation could revive a token captured by a later copy.
   These required writes can wait behind snapshot I/O. `latency_test.go` checks cacheable
   lifecycle metadata; each create, fork, stop and start logs its phases and total time.
-- Readers, authentication included, get immutable snapshots and never wait for a write.
+- Most readers use immutable snapshots. Managed SSH final authorization decisions
+  share the durable writer fence to observe concurrent invalidations.
 - Per team: 200 secrets and 2 MiB of sealed values, 100 live shares, 4 MiB of environment
   scripts and vars, 200 ssh keys. See `limits.go`.
 
@@ -377,10 +457,8 @@ grows past roughly 10 MB or writes pass roughly 50/s. There are more limits:
 - Webhook retries waiting in memory are lost when the server restarts.
 - Rate-limit buckets live in each process, so running several replicas needs a shared limiter.
 - `admin init` must run while the server is stopped (or restart the server afterwards).
-- Removing a member revokes their API keys, but not ssh public keys they already
-  registered. Those stay in the VMs' `authorized_keys` and in the jump-host grants,
-  because grants are per team and key, not per user. To cut off a departing member,
-  delete or re-key the VMs they could reach.
+- Removing a member revokes new managed SSH authentication at the committed
+  lookup decision. Existing SSH sessions and independent tenant keys are unaffected.
 
 ## Assumptions about boatd
 
@@ -403,13 +481,14 @@ These details go beyond the published boatd contract:
 `compat.go`, `compat_exec.go`, `compat_idem.go`: boat.dev's sandbox create/list/get/delete,
 stop/resume/fork, commands, files and `/limits`, with its `{ok, type}` envelope and error
 shape (every error under `/api/v1` is reshaped in `ServeHTTP`), cursor pagination and
-`Idempotency-Key` (in memory, per team, 24 h). The handlers call the native ones in-process
+`Idempotency-Key` (persisted in `state.json`, per team, 24 h, bound to minting key
+generation and sandbox route state). The handlers call the native ones in-process
 (`callNative`), so auth, scopes, secrets and tokens are the same code. What is mapped and
 what is not: docs/boat.md, "boat.dev API compatibility".
 
 ## Parity with docs.boat.dev
 
-Checked against docs.boat.dev on 2026-11-01. Our paths are `/v1/vms`, theirs `/sandboxes`.
+Checked against docs.boat.dev on 2026-11-15. Our paths are `/v1/vms`, theirs `/sandboxes`.
 Not built, and why:
 
 | boat.dev | Status here |
@@ -421,19 +500,15 @@ Not built, and why:
 | Claude/ChatGPT/Grok **subscription sign-ins** behind the proxy | Not built: they need OAuth flows and token renewal with each vendor. API keys only |
 | AWS Bedrock credentials | Not built, and not proxied there either |
 | Custom APIs through the proxy (`<NAME>_BASE_URL`) | Not built: the proxy has a fixed provider list |
-| Harnesses pi, prime, kimi, mistral | Not built: claude, codex, opencode only |
 | Steer **inside** a running turn | Interrupt + resume instead (see Agents) |
 | Prompts queued while a turn runs | 409 instead; use `new` for a parallel conversation |
-| Agent event stream (`/events`, tool calls) | Raw turn output only, through the logs route |
-| Environment repositories (`env add-repo`, GitHub App, repo setup scripts), secret files, registries, versions and `upgrade` | Not built: one setup script, env vars and secrets |
-| `boat extend`, `PATCH /sandboxes/{id}` (TTL, name), `recover` | Not built: boatd has no update route |
-| Sandbox sharing inside an org; org roles beyond owner/admin/member | Teams only |
-| Signed file upload/download URLs, `files/replace`, artifacts | Not built; files go through the API |
+| Environment repositories (`env add-repo`, GitHub App, repo setup scripts), secret files, registries | Not built: one setup script, env vars and secrets |
+| Org-private sandboxes; org roles beyond owner/admin/member | Sandboxes are team-scoped; `POST /api/v1/sandboxes/{id}/share`, `/unshare`, `boat share <vm>` and `boat unshare <vm>` return 501 `not_supported` without changing ports, tokens or teammate API/SSH access |
 | Snapshot tree and single-file read without starting the VM | Not built: download the archive |
 | Browser-only streaming, desktop recording | Not built here; see the desktop gateway |
-| Data retention policies, deletion operations, zero data retention | Not built: deletes are immediate |
+| Data retention policies, zero data retention | Not built: deletes are immediate (deletion and stop operation records are persisted in `state.json`) |
 | OTLP metrics | Not built: traces + lifecycle logs instead |
-| SDKs generated from the spec, `boat_sdk` names | Hand-written, with our own names |
+| SDKs generated from the spec, `boat_sdk` names | Hand-written native SDKs (`sdk/compat/` runs boat.dev's official `boat-sdk` and `@boatdev/sdk` against `/api/v1`) |
 
 ## Development
 

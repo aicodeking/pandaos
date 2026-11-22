@@ -7,7 +7,9 @@
   },
   "boatdev": {
     "usd_per_hour": 0.036,
-    "source": "https://docs.boat.dev/pricing.md default size",
+    "max_topup_bonus_pct": 25,
+    "usd_per_hour_max_bonus": 0.0288,
+    "source": "https://docs.boat.dev/pricing.md default size ($0.036/h list PAYG; up to +25% top-up credit bonus = $0.0288/h effective compute rate)",
     "sizes": {
       "small": 0.018,
       "default": 0.036,
@@ -16,11 +18,61 @@
     },
     "plan_min_usd_per_month": 20,
     "included_default_hours_at_min_plan": 555,
+    "plans": [
+      {
+        "name": "Plan $20/mo (minimum)",
+        "monthly_fee_usd": 20,
+        "topup_bonus_pct": 0,
+        "effective_usd_per_hour": 0.036,
+        "note": "555 included default VM-hours; 100 concurrent; 12/60/200 starts per min/h/day; 10 saved snapshots"
+      },
+      {
+        "name": "Plan $100/mo",
+        "monthly_fee_usd": 100,
+        "topup_bonus_pct": 0,
+        "effective_usd_per_hour": 0.036,
+        "note": "2,777 included default VM-hours; 300 concurrent; 30/210/840 starts per min/h/day (needed for 5-repeat boatbench); 50 saved snapshots"
+      },
+      {
+        "name": "Plan $500/mo",
+        "monthly_fee_usd": 500,
+        "topup_bonus_pct": 0,
+        "effective_usd_per_hour": 0.036,
+        "note": "13,888 included default VM-hours; 1,000 concurrent; 65/420/1,680 starts per min/h/day; 250 saved snapshots"
+      },
+      {
+        "name": "Plan $2,000/mo",
+        "monthly_fee_usd": 2000,
+        "topup_bonus_pct": 0,
+        "effective_usd_per_hour": 0.036,
+        "note": "55,555 included default VM-hours; 2,000 concurrent; 90/600/2,400 starts per min/h/day; 1,000 saved snapshots"
+      },
+      {
+        "name": "Wallet top-up ($200+ min bonus, +2%)",
+        "monthly_fee_usd": 0,
+        "topup_bonus_pct": 2,
+        "effective_usd_per_hour": 0.0353,
+        "note": "Wallet bonus starts at +2% on top-up payments of $200 or more ($0.036 / 1.02, separate from monthly plan fee)"
+      },
+      {
+        "name": "Wallet top-up (max published bonus, +25%)",
+        "monthly_fee_usd": 0,
+        "topup_bonus_pct": 25,
+        "effective_usd_per_hour": 0.0288,
+        "note": "$0.036 / 1.25 = $0.0288/VM-hour at maximum published +25% wallet top-up bonus"
+      }
+    ],
     "extra_snapshot_usd_per_day": 0.056,
     "extra_start_usd": [
       0.03,
       0.07
     ],
+    "ai_proxy": {
+      "usd_per_utc_day_on": 1.0,
+      "usd_per_1000_requests": 1.0,
+      "source": "https://docs.boat.dev/pricing.md (Overage: 'AI credentials proxy | $1 for each day it is on, plus $1 per 1,000 requests') and https://docs.boat.dev/ai-credentials.md (Pricing: 'Each UTC day the proxy is on | $1 | The wallet of the account with the switch on'; 'Proxied requests | $1 per 1,000 | The wallet each sandbox bills'); both fetched 2026-11-17",
+      "note": "Charged on top of VM time and also while sandboxes are stopped. The day fee is per account switch (one per user, one per organization), not per VM. Request counting rules (errors, 403-blocked placeholders) are not defined on either page. boat.dev has no automatic AI spend cap. A sandbox that holds real keys (proxy off) pays nothing and gets no usage tracking. PandaOS's proxy has no fee."
+    },
     "cpu": "AMD Ryzen 9 9950X (Zen 5), as boat.dev's guest reported it in the vendor's benchmark run"
   },
   "servers": [
@@ -49,8 +101,11 @@
       "vms_untrusted": 7,
       "memtotal_mib_measured": 63381,
       "memtotal_source": "measured 2026-11-11 (Ubuntu) and 63,383 MiB 2026-11-12 (PandaOS install); counts unchanged",
+      "raw_nvme_gb": 512,
+      "usable_nvme_gb": 435,
       "store_gib": 476,
-      "store_source": "measured: PandaOS install, boat store = btrfs on one 512 GB NVMe, df 477G (2026-11-12)"
+      "usable_store_gib": 404,
+      "store_source": "measured: PandaOS install, boat store = btrfs on one 512 GB NVMe, df 477G (2026-11-12); 404 GiB usable after 15% reserve (10% boatd minFreePct + 5% base images & btrfs metadata)"
     },
     {
       "key": "ax102",
@@ -75,8 +130,11 @@
       "vms_as_sold_overcommit_1_0": 15,
       "vms_as_sold_overcommit_1_5": 23,
       "vms_untrusted": 15,
+      "raw_nvme_gb": 1920,
+      "usable_nvme_gb": 1632,
       "store_gib": 1788,
-      "store_source": "estimate: 1.92 TB = 1,788 GiB before btrfs and the OS (not measured)"
+      "usable_store_gib": 1519,
+      "store_source": "estimate: one 1.92 TB NVMe = 1,788 GiB raw; 1,519 GiB usable after 15% reserve (10% boatd minFreePct + 5% OS/base images & btrfs metadata)"
     },
     {
       "key": "ax162",
@@ -100,7 +158,12 @@
       "est_memtotal_mib": 128768,
       "vms_as_sold_overcommit_1_0": 15,
       "vms_as_sold_overcommit_1_5": 23,
-      "vms_untrusted": 15
+      "vms_untrusted": 15,
+      "raw_nvme_gb": 1920,
+      "usable_nvme_gb": 1632,
+      "store_gib": 1788,
+      "usable_store_gib": 1519,
+      "store_source": "estimate: one 1.92 TB NVMe = 1,788 GiB raw; 1,519 GiB usable after 15% reserve (10% boatd minFreePct + 5% OS/base images & btrfs metadata)"
     },
     {
       "key": "ovh-advance-3",
@@ -123,7 +186,12 @@
       "est_memtotal_mib": 64256,
       "vms_as_sold_overcommit_1_0": 7,
       "vms_as_sold_overcommit_1_5": 11,
-      "vms_untrusted": 7
+      "vms_untrusted": 7,
+      "raw_nvme_gb": 960,
+      "usable_nvme_gb": 816,
+      "store_gib": 894,
+      "usable_store_gib": 759,
+      "store_source": "estimate: one 960 GB NVMe = 894 GiB raw; 759 GiB usable after 15% reserve (10% boatd minFreePct + 5% OS/base images & btrfs metadata)"
     },
     {
       "key": "latitude-m4-medium",
@@ -148,7 +216,12 @@
       "est_memtotal_mib": 128768,
       "vms_as_sold_overcommit_1_0": 15,
       "vms_as_sold_overcommit_1_5": 23,
-      "vms_untrusted": 15
+      "vms_untrusted": 15,
+      "raw_nvme_gb": 1900,
+      "usable_nvme_gb": 1615,
+      "store_gib": 1769,
+      "usable_store_gib": 1503,
+      "store_source": "estimate: one 1.9 TB data NVMe = 1,769 GiB raw; 1,503 GiB usable after 15% reserve (10% boatd minFreePct + 5% OS/base images & btrfs metadata)"
     }
   ],
   "assumptions": {
@@ -191,6 +264,38 @@
         ]
       ],
       "thin_measured_note": "A fresh stopped default VM held 0.47 GiB exclusive; the 2.76 GiB guest image is shared by reflinks and counted once per host, not per VM. Thin provisioning is a MODEL: boatd ships no such setting for untrusted mode."
+    },
+    "storage_reserve": {
+      "min_free_pct": 10,
+      "min_free_gib": 5,
+      "btrfs_and_images_pct": 5,
+      "usable_disk_factor": 0.85,
+      "note": "boatd defaultConfig() enforces minFreePct=10 (and minFreeGiB=5) as a free-space floor via checkFloor (boatd snapshot.go; hostStorageCheck is the separate nominal-commitment check) before create/fork/snapshot, and ~5% of partition capacity goes to OS/base images and btrfs metadata reserve (~85% usable tenant storage: usable_store_gib = floor(store_gib * 0.85)). Disk-bound slot density in cost_tables.py uses usable_store_gib, never 100% raw drive capacity."
+    },
+    "ha_and_backup": {
+      "offhost_backup_usd_per_month": 14.784,
+      "offhost_backup_source": "One shared Hetzner Storage Box BX21 (5 TB off-host snapshot archive, EUR 13.20/mo x 1.12 = $14.784/mo, i.e. $14.78/mo; net +$11.20/mo delta over Hetzner's single-host 1 TB BX11 EUR 3.20/mo = $3.584/mo) replacing s['backup_usd_per_month'] so single-host backup is never multiplied by cluster_factor or double-counted. Divide this one archive by serving_hosts for per-serving-host allocations (4 in 4+1, 1 in 1+1).",
+      "topologies": [
+        {
+          "label": "Single host (1.00x, basic backup)",
+          "cluster_factor": 1.0,
+          "replace_backup_usd_per_month": null,
+          "note": "Single dedicated server + 1 TB backup; host reboot or hardware replacement incurs downtime"
+        },
+        {
+          "label": "4+1 N+1 cluster + 5 TB off-host backup (1.25x)",
+          "cluster_factor": 1.25,
+          "serving_hosts": 4,
+          "replace_backup_usd_per_month": 14.784,
+          "note": "4 serving hosts + 1 warm spare: total = 5 x hardware/setup + one shared $14.784/mo 5 TB BX21 archive; divide total by 4 serving hosts. Archive replaces single-host backup."
+        },
+        {
+          "label": "1+1 HA pair + 5 TB off-host backup (2.00x)",
+          "cluster_factor": 2.0,
+          "replace_backup_usd_per_month": 14.784,
+          "note": "1 active host + 1 spare host (2.00x hardware/setup) + one shared $14.78/mo 5 TB BX21 off-host archive replacing single-host 1 TB backup"
+        }
+      ]
     }
   }
 }

@@ -142,7 +142,7 @@ func TestAgentDeadlineAfterHandshake(t *testing.T) {
 	}
 }
 
-// Fork labels: nil keeps the parent's, a map replaces them, bad keys are refused.
+// Fork labels: nil drops the parent's user labels (see r48_test.go for boat.*), a map replaces them, bad keys are refused.
 func TestForkLabels(t *testing.T) {
 	m, _ := newTestManager(t, nil)
 	ctx := context.Background()
@@ -150,7 +150,7 @@ func TestForkLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c, err := m.Fork(ctx, v.ID, "", "t1", nil); err != nil || fmt.Sprint(c.Labels) != "map[p:1]" {
+	if c, err := m.Fork(ctx, v.ID, "", "t1", nil); err != nil || fmt.Sprint(c.Labels) != "map[]" {
 		t.Fatalf("fork without labels: %v %v", c.Labels, err)
 	}
 	if c, err := m.Fork(ctx, v.ID, "", "t1", map[string]string{"c": "2"}); err != nil || fmt.Sprint(c.Labels) != "map[c:2]" {

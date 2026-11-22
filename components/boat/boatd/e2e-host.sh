@@ -25,9 +25,15 @@
 #   fork src  forks of a VM during a long exec, a long exec after them (boatd/e2e-forksrc.sh)
 
 # shellcheck disable=SC2154 # host_ip, PIDS come from e2e.sh
-# A command failing under set -e ends the run without a word; say which one, before
-# cleanup's pkill makes it look like something else (boat-e2e 41669516359).
-trap 'echo "e2e: exit $? at ${BASH_SOURCE[0]##*/}:$LINENO: $BASH_COMMAND" >&2' ERR
+# Subshells share the marker so their original error is not repeated by callers.
+e2e_error() {
+  [[ $- == *e* ]] || return 0 # Expected failures and cleanup disable errexit.
+  if (set -C; : >"$WORK/e2e-error.reported") 2>/dev/null || [ ! -e "$WORK/e2e-error.reported" ]; then
+    printf 'e2e: exit %s at %s:%s: %s\n' "$1" "${2##*/}" "$3" "$4" >&2
+  fi
+}
+rm -f "$WORK/e2e-error.reported"
+trap 'e2e_error "$?" "${BASH_SOURCE[0]}" "$LINENO" "$BASH_COMMAND"' ERR
 # From 12 runs of this job, 41379327901 to 41625739091 (shared runner, 4 vCPU):
 #   fork_cli 0.77-1.42 s, fork 0.90-2.63 s; a first stop (stop_cli) 0.65-5.90 s, it writes
 #   and fsyncs all the guest touched since boot; a diff stop (stop_diff) 0.61-4.15 s. Gates:
@@ -73,6 +79,17 @@ restart_boatd() { # CONFIG: SIGKILL boatd (no snapshot-all), start it with CONFI
   for _ in $(seq 600); do curl -fs --unix-socket "$SOCK" http://boatd/v1/health >/dev/null && return; sleep 0.1; done
   fail "boatd did not come back"
 }
+
+# Lifecycle uses these helpers and the guarded perf dispatcher, never the full host suite.
+if [ "${E2E_PHASE:-full}" = lifecycle ]; then
+  # shellcheck source=boatd/e2e-perf.sh
+  . "$HERE/boatd/e2e-perf.sh"
+  return
+fi
+
+# Host-level boatd phases talk to boatd directly without boat-api: opt in to standaloneSSH.
+jq '.standaloneSSH = true' "$WORK/boatd.json" >"$WORK/boatd.json.tmp" && mv "$WORK/boatd.json.tmp" "$WORK/boatd.json"
+restart_boatd "$WORK/boatd.json"
 
 # shellcheck source=boatd/e2e-forksrc.sh
 . "$HERE/boatd/e2e-forksrc.sh"

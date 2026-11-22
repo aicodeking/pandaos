@@ -6,7 +6,7 @@
 // waitForDesktop, stop, resume, fork, recover, snapshot listings and downloads,
 // named and saved snapshots, share codes, secrets, webhooks (create, get,
 // update, rotate, list), scoped keys (create, list, rotate, usage, revoke),
-// environments (create, update, set and delete a variable, list, delete), the
+// environments (create, update, set and delete a variable, list, upgrade, delete), the
 // AI proxy switch and delete. Run by ../e2e-live.sh with NODE_PATH at the installed node_modules
 // (NODE_EXTRA_CA_CERTS for a private CA; BOAT_LIVE_DESKTOP_NAME as in
 // official_sdk.py):
@@ -19,7 +19,211 @@
 // the credential-profile calls; without it a stub `claude` answers, so CI
 // needs no key.
 "use strict";
+const assert = require("node:assert");
 const crypto = require("node:crypto");
+
+async function verifySharingUnsupported(apiClient, sandboxId, checkFn, responseErrorClass) {
+  for (const action of ["share", "unshare"]) {
+    let refused = false;
+    try {
+      await apiClient[action]({ sandboxId });
+    } catch (err) {
+      if (!(err instanceof responseErrorClass) || err.response.status !== 501) throw err;
+      const wire = await err.response.json();
+      checkFn(
+        wire.ok === false && wire.code === "not_supported" && wire.status === 501 && Boolean(wire.message),
+        action + " returns 501 not_supported",
+      );
+      refused = true;
+    }
+    assert.strictEqual(refused, true, action + " unexpectedly succeeded; expected 501 not_supported");
+  }
+}
+
+async function verifyEnvironmentDeleteConflict(apiClient, environmentId, checkFn, responseErrorClass) {
+  let refused = false;
+  try {
+    await apiClient.deleteEnvironment({ environmentId });
+  } catch (err) {
+    if (!(err instanceof responseErrorClass) || err.response.status !== 409) throw err;
+    const wire = await err.response.json();
+    checkFn(
+      wire.ok === false && wire.code === "conflict" && wire.status === 409 && Boolean(wire.message),
+      "final environment delete returns 409 conflict",
+    );
+    refused = true;
+  }
+  assert.strictEqual(refused, true, "final environment delete unexpectedly succeeded");
+}
+
+async function verifyEnvironmentUpgrade(apiClient, environmentId, checkFn, agentIds = []) {
+  const validCounts = (resp) =>
+    Boolean(
+      resp &&
+        resp.success === true &&
+        Number.isInteger(resp.upgraded) &&
+        Number.isInteger(resp.upgradedLive) &&
+        Number.isInteger(resp.upgradedStopped) &&
+        resp.upgraded === resp.upgradedLive + resp.upgradedStopped &&
+        resp.failed === 0 &&
+        Boolean(resp.latestVersionId),
+    );
+  const allRes = await apiClient.upgradeEnvironment({ environmentId });
+  checkFn(validCounts(allRes), "upgrade environment (all pinned sandboxes)");
+  const targeted = await apiClient.upgradeEnvironment({
+    environmentId,
+    upgradeSandboxEnvironmentRequest: { agentIds: [...agentIds] },
+  });
+  checkFn(
+    validCounts(targeted) && targeted.latestVersionId === allRes.latestVersionId,
+    "upgrade environment (targeted agentIds)",
+  );
+  return { allRes, targeted };
+}
+
+async function verifyNullTtlLifecycle(apiClient, sandboxId, forkName, checkFn, afterResumeFn) {
+  const resumed = await apiClient.resume({ sandboxId, resumeRequest: { ttlSeconds: null } });
+  checkFn(
+    Boolean(
+      resumed &&
+        resumed.sandbox &&
+        resumed.sandbox.id === sandboxId &&
+        resumed.sandbox.ttlSeconds == null &&
+        resumed.sandbox.archiveAfter == null,
+    ),
+    "resume with ttlSeconds: null",
+  );
+  if (afterResumeFn) await afterResumeFn();
+  const fork = await apiClient.fork({ sandboxId, forkRequest: { name: forkName, ttlSeconds: null } });
+  checkFn(
+    Boolean(
+      fork &&
+        fork.sandbox &&
+        fork.sandbox.id !== sandboxId &&
+        fork.sandbox.ttlSeconds == null &&
+        fork.sandbox.archiveAfter == null,
+    ),
+    "fork " + (fork && fork.sandbox && fork.sandbox.id) + " with ttlSeconds: null",
+  );
+  return { resumed, fork };
+}
+
+async function runSelfTest() {
+  const calls = [];
+  class FakeResponseError extends Error {
+    constructor(status = 501, code = "not_supported") {
+      super("team-scoped access");
+      this.response = { status, async json() { return { ok: false, status, code, message: "team-scoped access" }; } };
+    }
+  }
+  const fakeApi = {
+    async share({ sandboxId }) {
+      calls.push(["share", sandboxId]);
+      throw new FakeResponseError();
+    },
+    async unshare({ sandboxId }) {
+      calls.push(["unshare", sandboxId]);
+      throw new FakeResponseError();
+    },
+    async resume({ sandboxId, resumeRequest }) {
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(resumeRequest, "ttlSeconds"), true);
+      assert.strictEqual(resumeRequest.ttlSeconds, null);
+      calls.push(["resume", sandboxId, resumeRequest.ttlSeconds]);
+      return { sandbox: { id: sandboxId, ttlSeconds: null, archiveAfter: null } };
+    },
+    async fork({ sandboxId, forkRequest }) {
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(forkRequest, "ttlSeconds"), true);
+      assert.strictEqual(forkRequest.ttlSeconds, null);
+      calls.push(["fork", sandboxId, forkRequest.name, forkRequest.ttlSeconds]);
+      return { sandbox: { id: "bx_fork2345", ttlSeconds: null, archiveAfter: null } };
+    },
+  };
+  const checks = [];
+  const recCheck = (ok, what) => {
+    assert.strictEqual(ok, true, what);
+    checks.push(what);
+  };
+  await verifySharingUnsupported(fakeApi, "bx_parent23", recCheck, FakeResponseError);
+  await verifyNullTtlLifecycle(fakeApi, "bx_parent23", "ts-fork", recCheck);
+  assert.deepStrictEqual(calls, [
+    ["share", "bx_parent23"],
+    ["unshare", "bx_parent23"],
+    ["resume", "bx_parent23", null],
+    ["fork", "bx_parent23", "ts-fork", null],
+  ]);
+  assert.strictEqual(checks.length, 4);
+  for (const unexpected of [new FakeResponseError(403), new FakeResponseError(501, "unexpected"), new Error("transport failed"), null]) {
+    await assert.rejects(() => verifySharingUnsupported({ async share() {
+      if (unexpected) throw unexpected;
+      return { sandbox: { id: "bx_parent23" } };
+    } }, "bx_parent23", recCheck, FakeResponseError));
+  }
+  const envApi = (error) => ({ async deleteEnvironment({ environmentId }) {
+    assert.strictEqual(environmentId, "env-test");
+    if (error) throw error;
+  } });
+  await verifyEnvironmentDeleteConflict(envApi(new FakeResponseError(409, "conflict")), "env-test", recCheck, FakeResponseError);
+  for (const unexpected of [new FakeResponseError(403), new FakeResponseError(409, "unexpected"), new Error("transport failed"), null]) {
+    await assert.rejects(() => verifyEnvironmentDeleteConflict(envApi(unexpected), "env-test", recCheck, FakeResponseError));
+  }
+  const mkUpgradeResp = (overrides = {}) => ({
+    success: true,
+    upgraded: 0,
+    upgradedLive: 0,
+    upgradedStopped: 0,
+    failed: 0,
+    latestVersionId: "11111111-2222-3333-4444-555555555555",
+    ...overrides,
+  });
+  const mkUpgradeApi = (allResp = mkUpgradeResp(), targetedResp = mkUpgradeResp()) => {
+    const upCalls = [];
+    return {
+      upCalls,
+      async upgradeEnvironment({ environmentId, upgradeSandboxEnvironmentRequest }) {
+        if (upgradeSandboxEnvironmentRequest === undefined) {
+          upCalls.push([environmentId, null]);
+          return allResp;
+        }
+        upCalls.push([environmentId, [...upgradeSandboxEnvironmentRequest.agentIds]]);
+        return targetedResp;
+      },
+    };
+  };
+  const upApi = mkUpgradeApi();
+  await verifyEnvironmentUpgrade(upApi, "env-uuid-1", recCheck);
+  assert.deepStrictEqual(upApi.upCalls, [
+    ["env-uuid-1", null],
+    ["env-uuid-1", []],
+  ]);
+  const upNonzero = mkUpgradeApi(
+    mkUpgradeResp({ upgraded: 3, upgradedLive: 2, upgradedStopped: 1 }),
+    mkUpgradeResp({ upgraded: 1, upgradedLive: 1, upgradedStopped: 0 }),
+  );
+  await verifyEnvironmentUpgrade(upNonzero, "env-uuid-1", recCheck, ["bx_parent23"]);
+  assert.deepStrictEqual(upNonzero.upCalls, [
+    ["env-uuid-1", null],
+    ["env-uuid-1", ["bx_parent23"]],
+  ]);
+  for (const badResp of [
+    mkUpgradeResp({ success: false, failed: 1 }),
+    mkUpgradeResp({ failed: 1 }),
+    mkUpgradeResp({ latestVersionId: undefined }),
+    mkUpgradeResp({ upgraded: 2, upgradedLive: 1, upgradedStopped: 0 }),
+  ]) {
+    await assert.rejects(() => verifyEnvironmentUpgrade(mkUpgradeApi(badResp), "env-uuid-1", recCheck));
+  }
+}
+
+if (process.argv.includes("--self-test")) {
+  runSelfTest()
+    .then(() => console.log("official_sdk.cjs self-test: ok"))
+    .catch((e) => {
+      console.error("official_sdk.cjs self-test: FAIL:", e);
+      process.exit(1);
+    });
+  return;
+}
+
 const { BoatApi, Configuration, ResponseError, runCommand, followCommand, waitForDesktop } = require("@boatdev/sdk");
 
 const REAL = !process.env.BOAT_LIVE_FAKE;
@@ -176,6 +380,7 @@ async function main() {
   check(!REAL || !(await api.listFiles({ sandboxId, path: "compat" })).files.some((f) => f.name === "dir"), "delete a folder");
   const hosted = await api.hostPort({ sandboxId, hostPortRequest: { port: 8080 } });
   check(hosted.access === "private" && hosted.isProtected === true, "host a port");
+  await verifySharingUnsupported(api, sandboxId, check, ResponseError);
   const key = await api.sshKey({ sandboxId, sshKeyRequest: { key: SSH_KEY } });
   check(Boolean(key.sshUser), "authorize an ssh key");
   if (process.env.BOAT_LIVE_DESKTOP_NAME) {
@@ -224,7 +429,8 @@ async function main() {
   check((await api.apiKeyUsage({ apiKeyId })).id === apiKeyId, "key usage");
   check((await api.revokeApiKey({ apiKeyId })).apiKeys.every((k) => k.id !== apiKeyId), "revoke the key");
   const envName = prefix + "-env";
-  const env = (await api.createEnvironment({ createSandboxEnvironmentRequest: { name: envName } })).environments.find((x) => x.name === envName);
+  const envs = (await api.createEnvironment({ createSandboxEnvironmentRequest: { name: envName } })).environments;
+  const env = envs.find((x) => x.name === envName);
   check(Boolean(env), "create an environment");
   const environmentId = String(env.id);
   const updEnv = (await api.updateEnvironment({ environmentId, updateSandboxEnvironmentRequest: { envContents: "GREETING=hi\n" } })).environment;
@@ -232,15 +438,23 @@ async function main() {
   check((await api.setEnvironmentVar({ environmentId, key: "PROBE", setEnvironmentVarRequest: { value: "1" } })).success, "set one environment variable");
   check((await api.deleteEnvironmentVar({ environmentId, key: "PROBE" })).success, "delete one environment variable");
   check((await api.environments()).environments.some((x) => String(x.id) === environmentId), "list environments");
-  await api.deleteEnvironment({ environmentId });
+  await verifyEnvironmentUpgrade(api, environmentId, check);
+  // Preserve one environment on an initially empty account; existing accounts
+  // already have another, so only the isolated fixture needs a retained spare.
+  if (envs.length === 1) {
+    await verifyEnvironmentDeleteConflict(api, environmentId, check, ResponseError);
+    await api.createEnvironment({ createSandboxEnvironmentRequest: { name: prefix + "-spare" } });
+  }
+  const deletedEnv = await api.deleteEnvironment({ environmentId });
+  check(deletedEnv.success && String(deletedEnv.environment.id) === environmentId, "delete a non-final environment");
+  check((await api.environments()).environments.every((x) => String(x.id) !== environmentId), "deleted environment is no longer listed");
   const stopped = await api.stop({ sandboxId });
   check(stopped.sandbox.state === "archived" && stopped.sandbox.stop.status === "completed", "stop");
-  await api.resume({ sandboxId });
-  await ready(sandboxId);
-  if (REAL) check((await api.readFile({ sandboxId, path: "compat/ts.txt" })).content === payload, "the file survived stop and resume");
-  const fork = await api.fork({ sandboxId, forkRequest: { name: prefix + "-fork" } });
+  const { fork } = await verifyNullTtlLifecycle(api, sandboxId, prefix + "-fork", check, async () => {
+    await ready(sandboxId);
+    if (REAL) check((await api.readFile({ sandboxId, path: "compat/ts.txt" })).content === payload, "the file survived stop and resume");
+  });
   made.push(fork.sandbox.id);
-  check(fork.sandbox.id !== sandboxId, "fork " + fork.sandbox.id);
   await ready(fork.sandbox.id);
   check((await api.recover({ sandboxId: fork.sandbox.id })).status === "recovering", "recover (power-cycle) the fork");
   await ready(fork.sandbox.id);

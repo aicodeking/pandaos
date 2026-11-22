@@ -1,9 +1,30 @@
 # Benchmarks
 
-Every number PandaOS publishes comes from the NixOS VM tests and host-side checks in `tests/`, run by
-CI with `nix flake check` on nixos-26.05. All of them are measured in QEMU VMs on GitHub runners;
-**nothing has been measured on real hardware yet**. Each test prints a `METRIC {json}` line in its build log and writes
-the same object to `$out/metrics.json`; `bench/collect.py` gathers them into a table.
+The OS footprint, boot, round-trip and installer numbers on this page come from the NixOS VM tests and
+host-side checks in `tests/`, run by CI with `nix flake check` on nixos-26.05 inside QEMU VMs on GitHub
+runners. Each test prints a `METRIC {json}` line in its build log and writes the same object to
+`$out/metrics.json`; `bench/collect.py` gathers them into a table.
+
+For benchmarks measured outside `tests/`:
+- **Dedicated server hardware (`boat` / server profile):** [`cost.md`](cost.md) and
+  [`bench/boatbench/results/`](../bench/boatbench/results/) publish real-hardware Firecracker microVM
+  CPU, disk, network, lifecycle and multi-VM density measurements on a dedicated Hetzner AX42 (both
+  Ubuntu loop-file and native-btrfs PandaOS 26.05 installs). **Provenance & caveats:** (1) the checked-in
+  AX42 `trusted` lifecycle baselines (`0d160dd`: `0.15s` resume, `0.30s` fork, `0.32s` warm create,
+  `0.89s` cold create, with `Unsafe` drive cache / `warmPool`) predate `-ssh-policy-helper-file` across
+  presets — Round 23–24 batch SSH policy (`ssh-policy-batch`) and non-disruptive `rotate-token` are
+  unit-tested to avoid `sshd` restarts and `nft` reloads on steady-state token refreshes, while live
+  AX42 timing for both initial cold/restore SSH policy bootstrap and `rotate-token` awaits a fresh
+  AX42 capture; (2) `bench/boatbench/presets.json` and `bench/boatbench/stack.sh` `untrusted`
+  configuration (now setting `memOvercommit: 1` alongside `jailGid` `io_uring`, `losetup --direct-io=on`,
+  and online SSH quarantine) is fixed and validated offline against `boatd`'s `loadConfig()` checks
+  (alongside `components/boat/boatd/e2e-perf.sh`), while the live rebooted PandaOS AX42 `untrusted` run
+  (`nosmt=force`, `memOvercommit: 1`, `blk-iocost`, `jailGid` `io_uring`, online SSH quarantine) remains
+  pending an owner-approved hardware reboot; and (3) live `boat.dev` remains unmeasured because
+  `BOATDEV_API_KEY` was not provided.
+- **Cross-distro idle footprint comparison:** [`comparison.md`](comparison.md) and
+  [`bench/compare/`](../bench/compare/) measure PandaOS headless alongside Ubuntu Server 24.04/26.04,
+  Debian 13, Fedora Cloud 44 and Alpine 3.24 in identical QEMU/KVM VMs.
 
 ## Current results
 
@@ -103,18 +124,32 @@ python3 bench/collect.py result-* *.log
 The nightly workflow (`.github/workflows/nightly.yml`) runs every check one by one and uploads the
 results as an artifact. VM numbers vary a little between runs and runners.
 
-## Planned: Ubuntu and Debian comparison
+## Cross-distro and dedicated-hardware benchmarks
 
-**Not built yet.** We make no claims against other systems until it runs.
-
-The plan (also in `bench/README.md`): a nightly job on dedicated hardware provisions **identical VMs**
-(same size, region and disk) running PandaOS headless and desktop, Ubuntu Server, Ubuntu Desktop and
-Debian, and records for each:
-
-- idle RAM after boot and settle, with both methods above
-- installed footprint on disk
-- boot time to multi-user and to the greeter
-- agent job round trip, where it applies
-
-The results go into the same `bench/results/<date>.json` format as a `baseline` section, so
-`collect.py` can print PandaOS next to each distro.
+- **Headless OS comparison (built and published):** [`bench/compare/`](../bench/compare/) boots stock
+  cloud images of Ubuntu Server 24.04 LTS, Ubuntu Server 26.04 LTS, Debian 13, Fedora Cloud 44 and
+  Alpine 3.24 alongside `nixosConfigurations.headless` in identical 2 vCPU / 2 GiB KVM VMs and records
+  both idle-RAM metrics, process/service counts, root disk usage and boot-to-SSH / first-boot times.
+  See [`comparison.md`](comparison.md) and [`bench/compare/results/`](../bench/compare/results/).
+  Desktop cross-distro runs (PandaOS desktop vs Ubuntu Desktop) are still planned.
+- **Dedicated server microVM benchmarks (built and published):** [`bench/boatbench/`](../bench/boatbench/)
+  measures CPU, disk (`Unsafe` vs `Writeback` durable flushes, pinned vs unpinned virtio-blk IRQ),
+  network, VM lifecycle and packed-host density on a dedicated Hetzner AX42, plus TCO / retention
+  tables from [`bench/boatbench/prices.json`](../bench/boatbench/prices.json). Caveats: the committed
+  AX42 `trusted` lifecycle baselines (`0d160dd`: `0.15s` resume, `0.30s` fork, `0.32s` warm create)
+  predate `-ssh-policy-helper-file` across presets (Round 23–24 batch SSH policy + non-disruptive
+  `rotate-token` are unit-tested with live AX42 timing awaiting a fresh capture); `stack.sh`'s `untrusted`
+  config (including `memOvercommit: 1`) is fixed and validated offline against `boatd`'s `loadConfig()`,
+  while live rebooted PandaOS `untrusted` (`nosmt=force`, `memOvercommit: 1`, `blk-iocost`, `jailGid`
+  `io_uring`, online SSH quarantine) remains pending hardware re-run; and live `boat.dev` remains
+  unmeasured (`BOATDEV_API_KEY` not provided). See [`cost.md`](cost.md) for full
+  methodology and `trusted` vs `untrusted` provenance notes.
+  Vendor reference (published by boat.dev / StarSling, not measured by us): the Node.js web-tooling
+  figure is now **28.06 index units** (StarSling run 37073680030, 2026-10-03, 4 vCPU / 8 GiB guest on a
+  Ryzen 9 9950X, median of 10 trials on 5 sandboxes, 95% interval 23.27-28.22, run marked partial,
+  [leaderboard](https://github.com/starslingdev/hpc-sandbox-benchmarks/blob/297198a96ee827df5edcd918bd37b949526cfe20/LEADERBOARD.md)).
+  It replaces **27.67 index units** (AnicetNgrt harness, 2026-08-24, 21 trials, CI 26.01-28.34), kept as a
+  dated historical note in `published.json`; the two are within each other's intervals. The three
+  fio disk figures are still from the August run. The cost-per-index-unit reference is now $0.000356 per
+  1000 index units (was $0.000361). boat.dev's AI credentials proxy fee ($1 per UTC day on + $1 per 1,000
+  requests; PandaOS's proxy is free) is modeled in `cost.md`.

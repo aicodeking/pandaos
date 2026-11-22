@@ -25,6 +25,10 @@ type secsFlag struct {
 
 func (f *secsFlag) String() string { return strconv.FormatInt(f.v, 10) }
 func (f *secsFlag) Set(s string) error {
+	if s == "infinite" {
+		f.v, f.set = 0, true
+		return nil
+	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		d, derr := time.ParseDuration(s)
@@ -40,20 +44,16 @@ func (f *secsFlag) Set(s string) error {
 	return nil
 }
 
-// envFlag is boat.dev's --env: KEY=VALUE is a variable for this VM; a bare
-// name selects an environment (this CLI's older meaning, same as --environment).
-type envFlag struct {
-	name *string
-	vars labels
-}
+// envVarFlag is boat.dev's -e/--env on fork and resume: KEY=VALUE only. A bare
+// name is a usage error that points at --environment NAME.
+type envVarFlag struct{ vars labels }
 
-func (f envFlag) String() string { return "" }
-func (f envFlag) Set(s string) error {
-	if strings.Contains(s, "=") {
-		return f.vars.Set(s)
+func (f envVarFlag) String() string { return "" }
+func (f envVarFlag) Set(s string) error {
+	if !strings.Contains(s, "=") {
+		return fmt.Errorf("%q is not KEY=VALUE; to apply an environment use --environment %s", s, s)
 	}
-	*f.name = s
-	return nil
+	return f.vars.Set(s)
 }
 
 // refused is a boat.dev flag with no equivalent here: parsing it records why.
@@ -196,14 +196,36 @@ func (a *app) hostPort(id, portStr string, public bool) (obj, error) {
 
 // setTTL is boat.dev's --ttl / --no-auto-stop after a fork or resume (the
 // native calls keep the VM's own lifetime): PATCH ttl_s, 0 = no auto-stop.
-func (a *app) setTTL(id string, ttl secsFlag, never bool) error {
+// Returns the updated VM object decoded from PATCH when a change was sent.
+func (a *app) setTTL(id string, ttl secsFlag, never bool) (obj, error) {
+	var out obj
 	switch {
 	case never:
-		return a.c.call("PATCH", vmPath(id), obj{"ttl_s": 0}, nil)
+		err := a.c.call("PATCH", vmPath(id), obj{"ttl_s": 0}, &out)
+		return out, err
 	case ttl.set:
-		return a.c.call("PATCH", vmPath(id), obj{"ttl_s": ttl.v}, nil)
+		err := a.c.call("PATCH", vmPath(id), obj{"ttl_s": ttl.v}, &out)
+		return out, err
 	}
-	return nil
+	return nil, nil
+}
+
+func mergePatchedVM(dst, patched obj, id string) obj {
+	if patched == nil {
+		return dst
+	}
+	if dst == nil {
+		dst = obj{}
+	}
+	delete(dst, "expires_at")
+	delete(dst, "ttl_s")
+	for k, v := range patched {
+		dst[k] = v
+	}
+	if id != "" {
+		dst["id"] = id
+	}
+	return dst
 }
 
 func ttlConflict(ttl secsFlag, never bool) error {
@@ -216,20 +238,55 @@ func ttlConflict(ttl secsFlag, never bool) error {
 // cmdStopStatus: boat stop <vm> --status STOP_ID reads a stop operation.
 func cmdStopStatus(a *app, id, stopID string) error {
 	var out struct {
-		Operation obj `json:"operation"`
+		ID        string `json:"id"`
+		Stop      obj    `json:"stop"`
+		Operation obj    `json:"operation"`
 	}
 	if err := a.c.call("GET", compatVMPath(id, "stops", url.PathEscape(stopID)), nil, &out); err != nil {
 		return err
 	}
-	return a.show(out.Operation, "id", "status", "sandboxId", "createdAt")
+	op := out.Stop
+	if op == nil {
+		op = out.Operation
+	}
+	if op != nil {
+		if s(op, "id") == "" && out.ID != "" {
+			op["id"] = out.ID
+		}
+		if s(op, "sandboxId") == "" {
+			op["sandboxId"] = id
+		}
+		if s(op, "requestedAt") == "" && s(op, "createdAt") != "" {
+			op["requestedAt"] = op["createdAt"]
+		}
+	}
+	return a.show(op, "id", "status", "sandboxId", "requestedAt")
 }
 
 // cmdHealth is boat.dev's boat status with no VM: the API, the key, the
 // config and this binary. --check exits 1 when not logged in.
 func cmdHealth(a *app, check bool) error {
-	cfg, _ := loadConfig(a.getenv)
+	cfg, _ := a.loadCfg()
 	exe, _ := os.Executable()
 	v := obj{"api": obj{"url": cfg.URL}, "account": obj{"signedIn": false}, "config": configPath(a.getenv), "binary": exe, "version": version}
+	if cfg.URL != "" && cfg.Key == "" { // signed out: still report API health
+		hc := &http.Client{Timeout: 10 * time.Second}
+		ok, herr := false, ""
+		if r, err := hc.Get(cfg.URL + "/healthz"); err != nil {
+			herr = err.Error()
+		} else {
+			r.Body.Close()
+			ok = r.StatusCode/100 == 2
+			if !ok {
+				herr = fmt.Sprintf("HTTP %d", r.StatusCode)
+			}
+		}
+		api := obj{"url": cfg.URL, "ok": ok}
+		if herr != "" {
+			api["error"] = herr
+		}
+		v["api"] = api
+	}
 	if cfg.URL != "" && cfg.Key != "" {
 		c := &client{base: cfg.URL, key: cfg.Key, hc: &http.Client{Timeout: 10 * time.Second}}
 		var me obj

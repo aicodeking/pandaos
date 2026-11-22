@@ -1,0 +1,14 @@
+[Unit]
+Description=Prepare volatile boat managed environment before guest services
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+RequiresMountsFor=/etc/boat /run
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/lib/boat/prepare-managed-env
+RemainAfterExit=yes
+
+[Install]
+RequiredBy=sysinit.target

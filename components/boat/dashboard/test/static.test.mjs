@@ -63,3 +63,62 @@ test("the README's CSP is the one the browser tests run under", () => {
 test("apiBase ships as same origin", () => {
   assert.match(read("config.js"), /apiBase: ""/);
 });
+
+test("start refreshes the VM view after every attempt, success or failure", () => {
+  const src = read("src/vms.js");
+  assert.match(src, /startVM\(vm\.id\)[\s\S]*?finally \{\s*await refresh\(\)/);
+});
+
+test("create and fork surface env_error as an error toast, not a plain success", () => {
+  const src = read("src/vms.js");
+  assert.match(src, /createVM\([\s\S]*?env_error[\s\S]*?toast\([^\n]*not delivered[^\n]*, true\);\s*\n?\s*else toast\(`Created/);
+  assert.match(src, /forkVM\([\s\S]*?env_error[\s\S]*?toast\([^\n]*not delivered[^\n]*, true\);\s*\n?\s*else toast\(`Forked/);
+});
+
+test("prompt form is replaced by a note while env_error or provisioning", () => {
+  const src = read("src/vm-detail.js");
+  assert.match(src, /function promptSection[\s\S]*?envGated\(vm\)[\s\S]*?Prompts are disabled[\s\S]*?const pane/);
+});
+
+test("detached-command form is replaced by a note while env is pending/failed", () => {
+  const src = read("src/vm-detail.js");
+  assert.match(src, /function commandsSection[\s\S]*?envGated\(vm\)[\s\S]*?Commands are disabled[\s\S]*?const logs/);
+});
+
+test("vm detail poll re-renders prompt and command sections when the env gate changes", () => {
+  const src = read("src/vm-detail.js");
+  assert.match(src, /envGateKey\(latest\) !== gateKey[\s\S]*?promptEl\.replaceWith\(nextPrompt\)[\s\S]*?commandsEl\.replaceWith\(nextCommands\)/);
+  assert.match(src, /return \[[\s\S]*?promptEl,[\s\S]*?commandsEl,/);
+});
+
+test("envBadge shows a pending env badge for env_pending (list and header)", () => {
+  assert.match(read("src/ui.js"), /env_pending === true[\s\S]*?"pending env"/);
+  assert.match(read("src/vms.js"), /envBadge\(vm\)/);
+  assert.match(read("src/vm-detail.js"), /envBadge\(vm\)/);
+});
+
+test("env gate covers starting/creating/forking/stopping and keys on the state", async () => {
+  const src = read("src/vm-detail.js");
+  assert.match(src, /GATED_STATES = \["provisioning", "starting", "creating", "forking", "stopping"\]/);
+  const fn = (name) => new Function(`${src.match(new RegExp(`const GATED_STATES[^\\n]*`))[0]}
+    ${src.match(/export function envGated[\s\S]*?\n}\n/)[0].replace("export ", "")}
+    ${src.match(/export function envGateKey[\s\S]*?\n}\n/)[0].replace("export ", "")}
+    return ${name};`)();
+  const gated = fn("envGated"), key = fn("envGateKey");
+  for (const state of ["starting", "creating", "forking", "stopping", "provisioning"]) assert.equal(gated({ state }), true, state);
+  assert.equal(gated({ state: "running" }), false);
+  assert.equal(gated({ state: "running", env_pending: true }), true);
+  assert.notEqual(key({ state: "starting" }), key({ state: "running" }));
+  assert.notEqual(key({ state: "starting" }), key({ state: "forking" }));
+  assert.notEqual(key({ state: "running" }), key({ state: "stopped" }));
+  assert.notEqual(key({ state: "stopped" }), key({ state: "error" }));
+});
+
+test("stopping copy says stopping; stopped refresh uses command-history", () => {
+  const src = read("src/vm-detail.js");
+  const gatedWhy = new Function(`${src.match(/export function gatedWhy[\s\S]*?\n}\n/)[0].replace("export ", "")} return gatedWhy;`)();
+  assert.match(gatedWhy({ state: "stopping" }, "Commands"), /VM is stopping/);
+  assert.doesNotMatch(gatedWhy({ state: "stopping" }, "Prompts"), /environment/);
+  assert.match(gatedWhy({ state: "starting" }, "Prompts"), /environment is being delivered/);
+  assert.match(src, /vm\.state === "running" \? ctx\.api\.listCommands\(vm\.id\) : ctx\.api\.commandHistory\(vm\.id\)/);
+});

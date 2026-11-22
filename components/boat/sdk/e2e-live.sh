@@ -81,7 +81,7 @@ if command -v boat >/dev/null 2>&1; then
   fail() { echo "cli live: FAIL: $*" >&2; exit 1; }
   name=$BOAT_LIVE_PREFIX-cli-$$
   vm=$(boat new --name "$name" --no-secrets --json | jq -r .id)
-  trap 'boat rm "$vm" --json >/dev/null 2>&1 || true' EXIT
+  trap 'boat rm --yes "$vm" --json >/dev/null 2>&1 || true' EXIT
   # PATCH /v1/vms/{id}: rename through the API, auto-stop through boat extend.
   ren=$(curl -fsS -X PATCH "$BOAT_URL/v1/vms/$vm" -H "Authorization: Bearer $BOAT_API_KEY" -H 'content-type: application/json' \
     -d "{\"name\":\"$name-r\"}") || fail "rename (PATCH /v1/vms/$vm)"
@@ -127,14 +127,14 @@ if command -v boat >/dev/null 2>&1; then
   boat ports rm "$vm" 8123 --json >/dev/null || fail "ports rm"
   boat ssh-config "$vm" --print | grep -q "HostKeyAlias boat-$vm" || fail "ssh-config"
   fi
-  boat rm "$vm" --json >/dev/null || fail "rm"
+  boat rm --yes "$vm" --json >/dev/null || fail "rm"
   if [ -z "${BOAT_LIVE_FAKE:-}" ]; then
   # current is per process that calls boat, so no $(...) here: this script is the "shell".
-  trap 'boat rm current >/dev/null 2>&1 || true' EXIT
+  trap 'boat rm --yes current >/dev/null 2>&1 || true' EXIT
   boat new --name "$name-c" --no-secrets >/dev/null || fail "new for current"
   boat exec current -- true || fail "exec current"
   boat exec -- true || fail "exec with no id uses current"
-  boat rm current >/dev/null || fail "rm current"
+  boat rm --yes current >/dev/null || fail "rm current"
   trap - EXIT
   before=$(boat list --json | wc -l)
   out=$(cd "$work" && boat run --no-env --push proj -e RUN_VAR=yes -- sh -c 'cat f.txt; echo "$RUN_VAR"; pwd; exit 7' 2>"$work/err") && fail "run should exit 7" || code=$?

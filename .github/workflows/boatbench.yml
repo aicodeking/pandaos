@@ -55,6 +55,7 @@ jobs:
           python3 -m py_compile bench/boatbench/*.py
           python3 bench/boatbench/test_boatbench.py
           python3 bench/boatbench/test_boatdev.py
+          python3 bench/boatbench/test_stack_config.py
           python3 bench/boatbench/cost_tables.py >/dev/null
           bash -n bench/boatbench/stack.sh bench/boatbench/run-on-server.sh
       - id: plan
@@ -102,18 +103,17 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
-      # Same cache key as boat-e2e.yml: a guest built there is reused here.
+      # Slim-only key, shared with the slim jobs in boat-e2e.yml (the full image has its own key).
       - name: Restore guest image
         id: guest
-        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             /mnt/guest-out/vmlinux
             /mnt/guest-out/rootfs-slim.ext4.zst
-            /mnt/guest-out/rootfs-full.ext4.zst
             /mnt/guest-out/size-*.txt
             /mnt/guest-out/manifest-*.txt
-          key: boat-guest-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py') }}
+          key: boat-guest-slim-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py', 'components/boat/guest/ssh-authorize.py', 'components/boat/cli/**') }}
       - name: Build the slim guest image (no cache for this source yet)
         if: steps.guest.outputs.cache-hit != 'true'
         run: |
@@ -128,14 +128,14 @@ jobs:
         with:
           go-version-file: components/boat/boatd/go.mod
           cache: false
+      - name: Stack up (boatd + boat-api from source)
+        run: bench/boatbench/stack.sh up "$OUT"
       - name: Runner hardware
         run: |
           lscpu | grep -E 'Model name|^CPU\(s\)|Hypervisor|Virtualization' | tee hw.txt
           free -m | tee -a hw.txt
           curl -fsS https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(colo|loc)=' | tee -a hw.txt
           echo "BOATBENCH_HOST_DESC=GitHub ubuntu-latest runner: $(lscpu | sed -n 's/^Model name: *//p' | head -1), $(nproc) shared vCPU, $(free -g | awk '/Mem:/{print $2}') GiB, KVM in a cloud VM, region $(curl -fsS https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^colo=//p') (US)" >>"$GITHUB_ENV"
-      - name: Stack up (boatd + boat-api from source)
-        run: bench/boatbench/stack.sh up "$OUT"
       # Workloads a and d alternate between this runner and a fresh VM on it, so slow
       # phases of a shared runner hit both. fio's host directory is on the btrfs
       # store that holds the VM disks (stack.sh's STATE), NOCOW like those disks.

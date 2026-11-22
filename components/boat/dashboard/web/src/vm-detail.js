@@ -1,8 +1,8 @@
 // One VM: exec console, prompt, detached commands, files, ports, snapshots, connect.
 
 import { errorText, eventDecoder, isMissing } from "./api.js";
-import { fmtBytes, fmtCmd, fmtIP, fmtSize, fmtTime, fmtTTL, parseOptionalInt, safeHttpUrl, sshCommand } from "./format.js";
-import { askDialog, badge, button, copyOrShow, downloadBlob, field, h, run, section, table, toast } from "./ui.js";
+import { fmtBytes, fmtCmd, fmtIP, fmtSize, fmtTime, fmtTTL, parseOptionalInt, safeHttpUrl, shouldDeferPoll, sshCommand, updateVMSpec } from "./format.js";
+import { askDialog, badge, envBadge, button, copyOrShow, downloadBlob, field, h, run, section, table, toast } from "./ui.js";
 import { vmButtons } from "./vms.js";
 
 const POLL_MS = 10000;
@@ -136,6 +136,11 @@ function promptHistory(ctx, vm) {
 
 function promptSection(ctx, vm) {
   const el = section("Prompt an agent", async () => {
+    if (envGated(vm)) {
+      return h("p", { class: "muted", role: "note" }, vm.env_error
+        ? "Prompts are disabled: the environment was not delivered (secrets and BOAT_ID/token missing). Use exec or the terminal, or press Retry environment to push it again."
+        : gatedWhy(vm, "Prompts"));
+    }
     const pane = outputPane();
     const runner = streamRunner(ctx, pane, () => { el.hidden = true; });
     const prompt = h("textarea", { rows: "3", required: true });
@@ -163,8 +168,30 @@ function promptSection(ctx, vm) {
   return el;
 }
 
+// envGateKey changes whenever the env delivery state that gates the prompt and command forms changes.
+const GATED_STATES = ["provisioning", "starting", "creating", "forking", "stopping"];
+
+// envGated: prompts and commands are unavailable while env failed/pending or the VM is in a transitional state.
+export function envGated(vm) {
+  return Boolean(vm?.env_error || vm?.env_pending || GATED_STATES.includes(vm?.state));
+}
+
+// gatedWhy explains a disabled form: a stopping VM is not an env delivery.
+export function gatedWhy(vm, what) {
+  return vm?.state === "stopping" ? `${what} are disabled while the VM is stopping.` : `${what} are disabled while the environment is being delivered.`;
+}
+
+export function envGateKey(vm) {
+  return `${vm?.env_error ?? ""}|${vm?.env_pending === true}|${vm?.state ?? ""}`;
+}
+
 function commandsSection(ctx, vm) {
   return section("Detached commands", async (refresh) => {
+    if (envGated(vm)) {
+      return h("p", { class: "muted", role: "note" }, vm.env_error
+        ? "Commands are disabled: the environment was not delivered (secrets and BOAT_ID/token missing). Use exec or the terminal, or press Retry environment to push it again."
+        : gatedWhy(vm, "Commands"));
+    }
     // Live processes need a running VM. History also answers for a stopped one.
     const commands = await (vm.state === "running" ? ctx.api.listCommands(vm.id) : ctx.api.commandHistory(vm.id));
     const logs = outputPane();
@@ -229,8 +256,13 @@ function filesSection(ctx, vm) {
     const listing = h("div");
     const upload = h("input", { type: "file" });
 
-    const list = async (dir) => {
-      path.value = dir;
+    const parentDir = (p) => {
+      const trimmed = String(p ?? "").replace(/\/+$/, "");
+      const idx = trimmed.lastIndexOf("/");
+      return idx <= 0 ? "/" : trimmed.slice(0, idx);
+    };
+    const list = async (dir, { updatePath = true } = {}) => {
+      if (updatePath) path.value = dir;
       try {
         const entries = await ctx.api.listFiles(vm.id, dir);
         const joined = (name) => `${dir.replace(/\/+$/, "")}/${name}`;
@@ -268,9 +300,11 @@ function filesSection(ctx, vm) {
     const send = async () => {
       const file = upload.files[0];
       if (!file) throw new Error("Choose a file first");
-      if (!path.value.startsWith("/") || path.value.endsWith("/")) throw new Error("Upload path must be an absolute file path");
-      await ctx.api.writeFile(vm.id, path.value, file);
-      toast(`Uploaded to ${path.value}`);
+      const target = path.value;
+      if (!target.startsWith("/") || target.endsWith("/")) throw new Error("Upload path must be an absolute file path");
+      await ctx.api.writeFile(vm.id, target, file);
+      toast(`Uploaded to ${target}`);
+      await list(parentDir(target), { updatePath: false }).catch(() => {});
     };
     const remove = async () => {
       const target = path.value;
@@ -278,6 +312,7 @@ function filesSection(ctx, vm) {
       if (!ok) return;
       await ctx.api.deleteFile(vm.id, target);
       toast(`Deleted ${target}`);
+      await list(parentDir(target)).catch(() => {});
     };
     // A stopped VM or a missing /home is normal here, so this first listing fails quietly.
     list(path.value).catch((err) => listing.replaceChildren(h("p", { class: "muted" }, errorText(err))));
@@ -440,10 +475,40 @@ function connectSection(ctx, vm) {
   });
 }
 
+function settingsSection(ctx, vm, refresh) {
+  return section("Settings", async () => {
+    const name = h("input", { type: "text", maxlength: "120", autocomplete: "off", value: vm.name ?? "" });
+    const ttl = h("input", { type: "number", min: "0", max: "2592000", inputmode: "numeric", value: vm.ttl_s !== undefined ? String(vm.ttl_s) : "" });
+    const idle = h("input", { type: "number", min: "-1", max: "2592000", inputmode: "numeric", value: vm.idle_stop_s !== undefined ? String(vm.idle_stop_s) : "" });
+    const onsubmit = (e) => {
+      e.preventDefault();
+      run(async () => {
+        const spec = updateVMSpec({ name: name.value, ttl_s: ttl.value, idle_stop_s: idle.value });
+        await ctx.api.updateVM(vm.id, spec);
+        toast("Updated VM settings");
+        await refresh();
+      }, e.currentTarget.querySelector("button[type=submit]"));
+    };
+    return h(
+      "form",
+      { class: "form", onsubmit },
+      field("Name", name, "Optional display name (1–120 characters)."),
+      h(
+        "div",
+        { class: "grid2" },
+        field("TTL (seconds)", ttl, "0 clears auto-stop; blank leaves unchanged."),
+        field("Idle stop (seconds)", idle, "-1 = never; blank leaves unchanged."),
+      ),
+      h("div", { class: "row" }, h("button", { type: "submit", class: "primary" }, "Save settings")),
+    );
+  }, { open: false });
+}
+
 function summary(vm, actions) {
   const fact = (term, value) => h("div", {}, h("dt", {}, term), h("dd", {}, value));
   return [
-    h("div", { class: "row spread" }, h("h1", { tabindex: "-1" }, vm.name || vm.id), badge(vm.state)),
+    h("div", { class: "row spread" }, h("h1", { tabindex: "-1" }, vm.name || vm.id), h("span", {}, badge(vm.state), " ", envBadge(vm))),
+    vm.env_error ? h("p", { class: "error", role: "alert" }, `Environment not delivered (secrets and BOAT_ID/token missing): ${vm.env_error}`) : null,
     vm.error ? h("p", { class: "error", role: "alert" }, vm.error) : null,
     h(
       "dl",
@@ -464,12 +529,25 @@ export async function vmDetailScreen(ctx, id) {
   const screenCtx = { ...ctx, afterDelete: async () => ctx.navigate("#/vms") };
   const header = h("div", { class: "vm-header" });
   let lastSeen = null;
+  let promptEl = promptSection(ctx, vm);
+  let commandsEl = commandsSection(ctx, vm);
+  let gateKey = envGateKey(vm);
 
   const refresh = async () => {
     const latest = await ctx.api.getVM(id);
     const seen = JSON.stringify(latest);
     if (seen !== lastSeen) {
       lastSeen = seen;
+      if (envGateKey(latest) !== gateKey) {
+        // Re-render both forms so they enable/disable with the env delivery state.
+        gateKey = envGateKey(latest);
+        const nextPrompt = promptSection(ctx, latest);
+        const nextCommands = commandsSection(ctx, latest);
+        promptEl.replaceWith(nextPrompt);
+        commandsEl.replaceWith(nextCommands);
+        promptEl = nextPrompt;
+        commandsEl = nextCommands;
+      }
       header.replaceChildren(...summary(latest, vmButtons(screenCtx, latest, refresh)).filter(Boolean));
     }
   };
@@ -477,8 +555,10 @@ export async function vmDetailScreen(ctx, id) {
   header.replaceChildren(...summary(vm, vmButtons(screenCtx, vm, refresh)).filter(Boolean));
 
   // Keeps keyboard focus in the header: a poll waits until focus moves off it or a dialog closes.
+  let lastFocusAt = 0;
+  header.addEventListener("focusin", () => { lastFocusAt = Date.now(); });
   const timer = setInterval(() => {
-    if (header.contains(document.activeElement) || document.querySelector("dialog[open]")) return;
+    if (shouldDeferPoll({ focusInside: header.contains(document.activeElement), dialogOpen: Boolean(document.querySelector("dialog[open]")), lastFocusAt })) return;
     refresh().catch(() => {});
   }, POLL_MS);
   ctx.onCleanup(() => clearInterval(timer));
@@ -488,11 +568,12 @@ export async function vmDetailScreen(ctx, id) {
     header,
     connectSection(ctx, vm),
     consoleSection(ctx, vm),
-    promptSection(ctx, vm),
+    promptEl,
     promptHistory(ctx, vm),
-    commandsSection(ctx, vm),
+    commandsEl,
     filesSection(ctx, vm),
     portsSection(ctx, vm),
     snapshotsSection(ctx, vm),
+    settingsSection(ctx, vm, refresh),
   ];
 }

@@ -44,7 +44,7 @@ var reEventFilter = regexp.MustCompile(`^(\*|[a-z_]+(\.[a-z_]+)*(\.\*)?)$`)
 func (s *server) listHooks(w http.ResponseWriter, r *http.Request, p *principal) {
 	out := []webhookView{}
 	for _, h := range s.store.Snapshot().Webhooks {
-		if h.TeamID == p.Team.ID {
+		if h.TeamID == p.Team.ID && h.Format != hookFormatBoatDev {
 			out = append(out, viewHook(h, ""))
 		}
 	}
@@ -88,6 +88,9 @@ func (s *server) saveNewHook(w http.ResponseWriter, r *http.Request, p *principa
 	}
 	h.SealedSecret = sealed
 	err = s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
 		if !underLimit(teamHookCount(st, p.Team.ID), s.cfg.MaxHooksPerTeam) {
 			return errLimit
 		}
@@ -141,8 +144,11 @@ func (s *server) updateHook(w http.ResponseWriter, r *http.Request, p *principal
 	}
 	var out Webhook
 	err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
 		cur := st.Webhooks[h.ID]
-		if cur == nil {
+		if cur == nil || cur.TeamID != p.Team.ID {
 			return errConflict
 		}
 		if body.URL != nil {
@@ -202,8 +208,11 @@ func (s *server) rotateHook(w http.ResponseWriter, r *http.Request, p *principal
 	until := time.Now().Add(overlap).UTC()
 	var out Webhook
 	err = s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
 		cur := st.Webhooks[h.ID]
-		if cur == nil {
+		if cur == nil || cur.TeamID != p.Team.ID {
 			return errConflict
 		}
 		cur.PrevSealedSecret, cur.PrevUntil = cur.SealedSecret, &until
@@ -237,6 +246,9 @@ func (s *server) deleteHook(w http.ResponseWriter, r *http.Request, p *principal
 		return
 	}
 	err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
 		delete(st.Webhooks, h.ID)
 		delete(st.Deliveries, h.ID)
 		return nil
@@ -265,7 +277,14 @@ func (s *server) testHook(w http.ResponseWriter, r *http.Request, p *principal) 
 	if !ok {
 		return
 	}
-	ev := Event{ID: "evt_" + randHex(8), Type: "webhook.test", Created: time.Now().UTC(), TeamID: p.Team.ID,
+	if s.revalidatePrincipal(w, r, p, "admin") == nil {
+		return
+	}
+	evID := "evt_" + randHex(8)
+	if h.Format == hookFormatBoatDev {
+		evID = "evt_" + randHex(16)
+	}
+	ev := Event{ID: evID, Type: "webhook.test", Created: time.Now().UTC(), TeamID: p.Team.ID,
 		Data: json.RawMessage(`{"message":"hello from boat"}`)}
 	go s.hooks.deliver(context.Background(), *h, ev)
 	writeJSON(w, 202, map[string]any{"event_id": ev.ID})
@@ -291,6 +310,7 @@ type dispatcher struct {
 	// dead endpoint cannot use up the slots or memory of the others.
 	teamInflight int
 	teamPending  int
+	gate         envGate // holds sandbox.ready until the VM's env push settled (compat_hooks.go)
 	mu           sync.Mutex
 	teamSem      map[string]chan struct{}
 	pending      map[string]int
@@ -500,17 +520,20 @@ func (d *dispatcher) post(ctx context.Context, h Webhook, ev Event, body, secret
 }
 
 func (d *dispatcher) record(rec Delivery) {
-	err := d.s.store.Update(func(st *State) error {
+	err := d.s.store.ApplyLazy(func(st *State) error {
 		if st.Webhooks[rec.WebhookID] == nil {
 			return nil
 		}
-		list := append(st.Deliveries[rec.WebhookID], rec)
-		if len(list) > maxDeliveriesPerHook {
-			list = list[len(list)-maxDeliveriesPerHook:]
+		prev := st.Deliveries[rec.WebhookID]
+		if len(prev) >= maxDeliveriesPerHook {
+			prev = prev[len(prev)-(maxDeliveriesPerHook-1):]
 		}
+		list := make([]Delivery, len(prev), len(prev)+1)
+		copy(list, prev)
+		list = append(list, rec)
 		st.Deliveries[rec.WebhookID] = list
 		return nil
-	})
+	}, idemPersistDelay)
 	if err != nil {
 		log.Printf("record delivery: %v", err)
 	}
@@ -518,6 +541,7 @@ func (d *dispatcher) record(rec Delivery) {
 
 // watch follows boatd's SSE event stream forever, reconnecting with backoff.
 func (d *dispatcher) watch(ctx context.Context) {
+	d.gate.setCtx(ctx)
 	wait := time.Second
 	for ctx.Err() == nil {
 		err := d.consume(ctx)
@@ -543,6 +567,14 @@ func (d *dispatcher) consume(ctx context.Context) error {
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
+	go func() {
+		rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := d.s.reconcileCopyCredentials(rctx); err != nil && ctx.Err() == nil && !errors.Is(err, errStoreClosed) {
+			log.Printf("boatd events reconnect reconcile credentials: %v", err)
+		}
+		d.s.syncJumpKeys(rctx)
+	}()
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
 	var evType string
@@ -580,6 +612,7 @@ func (d *dispatcher) handleRaw(ctx context.Context, sseType, data string) {
 	}
 	team := str(raw, "team")
 	vmID := str(raw, "vm_id")
+	state := str(raw, "state")
 	if vm, ok := raw["vm"].(map[string]any); ok {
 		if team == "" {
 			team = str(vm, "team")
@@ -587,28 +620,39 @@ func (d *dispatcher) handleRaw(ctx context.Context, sseType, data string) {
 		if vmID == "" {
 			vmID = str(vm, "id")
 		}
-		raw["vm"] = publicVM(vm)
+		if state == "" {
+			state = str(vm, "state")
+		}
+		raw["vm"] = d.s.withDisplay(vm)
 	}
 	if team == "" && vmID != "" {
 		var vm VM
 		if d.s.boatd.call(ctx, "GET", vmPath(vmID), nil, &vm) == nil {
 			team = str(vm, "team")
+			if state == "" {
+				state = str(vm, "state")
+			}
 		}
-	}
-	if strings.HasPrefix(typ, "vm.") {
-		go d.s.syncJumpKeys(ctx) // ips change on start/fork/delete
 	}
 	if typ == "vm.deleted" && vmID != "" { // also TTL/operator deletes outside boat-api
 		d.s.forgetVM(vmID)
 	}
+	if d.s.needsJumpKeysSyncForEvent(typ, vmID, team, state) {
+		d.s.triggerJumpKeysSync(ctx)
+	}
+	if typ == "vm.state" && state == "running" && vmID != "" {
+		d.s.triggerReconcileRunningVM(ctx, vmID, team)
+	}
 	// Every stop kills the run's AI proxy token (TTL and idle stops included).
-	if typ == "vm.state" && str(raw, "state") == "stopped" && vmID != "" && d.s.store.Snapshot().AIVMs[vmID] != nil {
-		if _, err := d.s.aiBumpVM(vmID, team, true); err != nil {
-			log.Printf("rotate AI token of %s: %v", vmID, err)
+	if typ == "vm.state" && state == "stopped" && vmID != "" {
+		if ai := d.s.store.Snapshot().AIVMs[vmID]; ai != nil && !ai.Retired {
+			if _, err := d.s.aiBumpVM(vmID, team, true); err != nil {
+				log.Printf("rotate AI token of %s: %v", vmID, err)
+			}
 		}
 	}
 	if strings.HasPrefix(typ, "vm.") && team != "" {
-		d.s.emitVMEvent(ctx, typ, team, vmID, str(raw, "state"))
+		d.s.emitVMEvent(ctx, typ, team, vmID, state)
 	}
 	if typ == "" || team == "" {
 		return

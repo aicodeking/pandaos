@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -182,7 +183,7 @@ func cmdEnvMore(a *app, op string, args []string) error {
 	var hit string
 	refuse(fs, &hit, "a self-hosted server has one team per key, no organizations", "org=")
 	refuse(fs, &hit, "every member of the team can use every environment", "everyone", "only=", "add=", "remove=")
-	pos, _, err := parse(fs, args)
+	pos, after, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
@@ -246,7 +247,38 @@ func cmdEnvMore(a *app, op string, args []string) error {
 			err = a.c.call("DELETE", p+"/repos/"+url.PathEscape(pos[1]), nil, &out)
 		}
 	case "upgrade":
-		err = a.c.call("POST", p+"/upgrade", nil, &out)
+		if len(after) > 0 || strings.TrimSpace(pos[0]) == "" {
+			return fmt.Errorf("expected <env> [VM...]: %w", errUsage)
+		}
+		for _, ref := range pos[1:] {
+			if strings.TrimSpace(ref) == "" {
+				return fmt.Errorf("expected nonempty sandbox IDs or names: %w", errUsage)
+			}
+		}
+		var body any
+		if len(pos) > 1 {
+			ids := make([]string, 0, len(pos)-1)
+			for _, ref := range pos[1:] {
+				vm, err := a.c.resolveVM(ref)
+				if err != nil {
+					return err
+				}
+				ids = append(ids, s(vm, "id"))
+			}
+			body = obj{"agentIds": ids}
+		}
+		if err := a.c.call("POST", p+"/upgrade", body, &out); err != nil {
+			return err
+		}
+		summary := fmt.Sprintf("env %s: %s upgraded (%s live, %s stopped), %s failed", pos[0],
+			numStr(out, "upgraded"), numStr(out, "upgradedLive"), numStr(out, "upgradedStopped"), numStr(out, "failed"))
+		if err := a.okLine(out, summary); err != nil {
+			return err
+		}
+		if failed, _ := out["failed"].(float64); failed > 0 || out["success"] == false {
+			return fmt.Errorf("environment upgrade incomplete: %s", summary)
+		}
+		return nil
 	}
 	if err != nil {
 		return err
@@ -260,8 +292,8 @@ func cmdSnapshotMore(a *app, op string, args []string) error {
 	outDir := fs.String("o", "", "directory to write into")
 	fs.StringVar(outDir, "out", "", "same as -o")
 	all := fs.Bool("all", false, "delete every snapshot of this VM")
-	fs.Bool("yes", false, "accepted: delete never asks here")
-	fs.Bool("y", false, "same as --yes")
+	yes := fs.Bool("yes", false, "confirm deletion (required with --json or without a terminal)")
+	fs.BoolVar(yes, "y", false, "same as --yes")
 	var paths multi
 	fs.Var(&paths, "path", "extract only this path (repeatable)")
 	pos, _, err := parse(fs, args)
@@ -279,6 +311,9 @@ func cmdSnapshotMore(a *app, op string, args []string) error {
 			return err
 		}
 		sn, _ := out["snapshot"].(map[string]any)
+		if sn == nil {
+			return a.emit(nil, func() { fmt.Fprintln(a.out, "no snapshots") })
+		}
 		return a.show(obj(sn), "id", "status", "createdAt", "sizeBytes")
 	case "tree":
 		if err := need(pos, 1, "<snapshot-id>"); err != nil {
@@ -295,11 +330,20 @@ func cmdSnapshotMore(a *app, op string, args []string) error {
 		return a.pullSnapshot(pos[0], *outDir)
 	case "delete":
 		if *all {
+			if err := need(pos, 1, "<vm>"); err != nil {
+				return err
+			}
+			if err := a.requireConfirmFlag(*yes); err != nil {
+				return err
+			}
 			id, err := oneVMID(a, pos)
 			if err != nil {
 				return err
 			}
-			if err := a.c.call("DELETE", compatVMPath(id, "snapshots"), nil, &out); err != nil {
+			if err := a.confirmDestroy(*yes, "all snapshots of "+id); err != nil {
+				return err
+			}
+			if err := a.c.callH("DELETE", compatVMPath(id, "snapshots"), nil, &out, map[string]string{"X-Ascii-Confirm-Delete": id}); err != nil {
 				return err
 			}
 			return a.okLine(out, "deleted the snapshots of "+id)
@@ -307,8 +351,15 @@ func cmdSnapshotMore(a *app, op string, args []string) error {
 		if len(pos) == 0 {
 			return fmt.Errorf("boat snapshot delete SNAPSHOT_ID... | --all <vm>: %w", errUsage)
 		}
+		target := "snapshot " + pos[0]
+		if len(pos) > 1 {
+			target = fmt.Sprintf("%d snapshots (%s)", len(pos), strings.Join(pos, ", "))
+		}
+		if err := a.confirmDestroy(*yes, target); err != nil {
+			return err
+		}
 		for _, sid := range pos {
-			if err := a.c.call("DELETE", "/api/v1/snapshots/"+url.PathEscape(sid), nil, nil); err != nil {
+			if err := a.c.callH("DELETE", "/api/v1/snapshots/"+url.PathEscape(sid), nil, nil, map[string]string{"X-Ascii-Confirm-Delete": sid}); err != nil {
 				return fmt.Errorf("%s: %w", sid, err)
 			}
 			if !a.json {
@@ -351,6 +402,9 @@ func cmdSnapshotMore(a *app, op string, args []string) error {
 // pullSnapshot downloads the snapshot's one chunk (this server's archive)
 // into dir.
 func (a *app) pullSnapshot(sid, dir string) error {
+	if filepath.Base(sid) != sid || !validSSHConfigID(sid) {
+		return fmt.Errorf("invalid snapshot id %q", sid)
+	}
 	var d struct {
 		Chunks []obj `json:"chunks"`
 	}
@@ -360,13 +414,22 @@ func (a *app) pullSnapshot(sid, dir string) error {
 	if len(d.Chunks) != 1 || s(d.Chunks[0], "signedUrl") == "" {
 		return errors.New("the server answered no download chunk")
 	}
-	if dir == "" {
-		dir = "."
+	signedURL := s(d.Chunks[0], "signedUrl")
+	baseURL := a.c.base
+	if baseURL == "" {
+		baseURL = a.cfg.URL
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := validateSnapshotDownloadURL(signedURL, baseURL); err != nil {
 		return err
 	}
-	resp, err := a.c.hc.Get(s(d.Chunks[0], "signedUrl")) // signed: no API key
+	hc := *a.c.hc
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return validateSnapshotDownloadURL(req.URL.String(), baseURL)
+	}
+	resp, err := hc.Get(signedURL) // signed: no API key
 	if err != nil {
 		return err
 	}
@@ -374,12 +437,86 @@ func (a *app) pullSnapshot(sid, dir string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download: HTTP %d", resp.StatusCode)
 	}
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	dst := filepath.Join(dir, sid+".tar.zst")
-	n, err := writeFile(dst, resp.Body)
+	n, err := writePrivateFile(dst, resp.Body)
 	if err != nil {
 		return err
 	}
 	return a.emit(obj{"ok": true, "path": dst, "bytes": n}, func() {
 		fmt.Fprintf(a.out, "%s (%d bytes): a PandaOS snapshot archive; boat snapshots import %s restores it\n", dst, n, dst)
 	})
+}
+
+func validateSnapshotDownloadURL(rawURL, baseURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" || u.Hostname() == "" {
+		return fmt.Errorf("refusing snapshot download URL %q: invalid URL", rawURL)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		bu, berr := url.Parse(baseURL)
+		if berr != nil || strings.ToLower(bu.Scheme) != "http" || bu.Host == "" || bu.Hostname() == "" {
+			return fmt.Errorf("refusing insecure snapshot download URL %q: must use https (or http matching configured BOAT_URL origin)", rawURL)
+		}
+		if !sameOrigin(u, bu) {
+			return fmt.Errorf("refusing insecure snapshot download URL %q: http origin %q does not match configured BOAT_URL origin %q", rawURL, urlOrigin(u), urlOrigin(bu))
+		}
+		return nil
+	default:
+		return fmt.Errorf("refusing snapshot download URL %q: unsupported scheme %q (must be https)", rawURL, u.Scheme)
+	}
+}
+
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	}
+	return ""
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+func urlOrigin(u *url.URL) string {
+	return strings.ToLower(u.Scheme) + "://" + u.Host
+}
+
+func writePrivateFile(dst string, r io.Reader) (int64, error) {
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) // may hold secrets
+	if err != nil {
+		return 0, err
+	}
+	if runtime.GOOS != "windows" {
+		if err := f.Chmod(0o600); err != nil {
+			f.Close()
+			os.Remove(dst)
+			return 0, err
+		}
+	}
+	n, err := io.Copy(f, r)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(dst)
+		return 0, err
+	}
+	return n, nil
 }

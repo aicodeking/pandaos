@@ -273,14 +273,25 @@ func TestR16ConcurrentCopiesRevokeCapturedCapabilities(t *testing.T) {
 	vm, team := e.createVM(), e.teamID()
 	_, base := e.do(e.owner, "POST", "/v1/vms/"+vm+"/snapshots", nil)
 	captured, continueFirst := make(chan struct{}), make(chan struct{})
-	var first atomic.Bool
-	e.boatd.mu.Lock()
-	e.boatd.afterCopy = func() {
-		if first.CompareAndSwap(false, true) {
+	var first, resumed atomic.Bool
+	resumeFirst := func() {
+		if resumed.CompareAndSwap(false, true) {
+			close(continueFirst)
+		}
+	}
+	// Pause after fork preparation releases the parent's startLocks.rlock so
+	// concurrent pushSelf/refreshCredentials can take the exclusive lock.
+	forkPreparedHook = func(srv *server, parent string) {
+		if srv == e.srv && parent == vm && first.CompareAndSwap(false, true) {
 			close(captured)
 			<-continueFirst
 		}
 	}
+	t.Cleanup(func() {
+		resumeFirst()
+		forkPreparedHook = nil
+	})
+	e.boatd.mu.Lock()
 	e.boatd.beforeRelease = func(kind, id string) {
 		vars := e.boatd.copyEnvs[id]
 		if tok, _ := vars["BOAT_API_KEY"].(string); tok != "" && e.srv.authenticateSelf(tok) != nil {
@@ -324,7 +335,7 @@ func TestR16ConcurrentCopiesRevokeCapturedCapabilities(t *testing.T) {
 		}
 	}
 	e.srv.pushSelf(context.Background(), vm, oldGen) // a delayed refresh from before capture
-	close(continueFirst)
+	resumeFirst()
 	select {
 	case status := <-done:
 		if status != 201 {
@@ -640,54 +651,35 @@ func TestR16FirstAITokenSurvivesCrashBeforeNextCopy(t *testing.T) {
 		}
 	}
 	defer unlock()
-	type result struct {
-		env map[string]string
-		err error
+	// First issuance for a brand-new AI VM identity commits via Store.Apply
+	// without waiting on disk writes; abrupt process loss before flush is
+	// recovered from the live guest env by reconcileCopyCredentials.
+	env, err := e.srv.aiEnvNewVM(vm, team)
+	if err != nil {
+		t.Fatal(err)
 	}
-	issued := make(chan result, 1)
-	started := make(chan struct{})
-	go func() { close(started); env, err := e.srv.aiEnvNewVM(vm, team); issued <- result{env, err} }()
-	<-started
-	var r result
-	early := false
-	select {
-	case r = <-issued:
-		early = true
-		t.Error("first managed AI token returned before its row could be persisted")
-	case <-time.After(100 * time.Millisecond):
-		unlock()
-		select {
-		case r = <-issued:
-		case <-time.After(5 * time.Second):
-			t.Fatal("durable first issuance stalled")
-		}
-	}
-	if r.err != nil {
-		t.Fatal(r.err)
+	if row := oldStore.Snapshot().AIVMs[vm]; row == nil || e.srv.aiToken(vm, row.Gen) != env["ANTHROPIC_API_KEY"] {
+		t.Error("published AI token has no matching in-memory generation")
 	}
 	data, err := os.ReadFile(oldStore.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var persisted State
-	if err := json.Unmarshal(data, &persisted); err != nil {
+	var preCrash State
+	if err := json.Unmarshal(data, &preCrash); err != nil {
 		t.Fatal(err)
 	}
-	if row := persisted.AIVMs[vm]; row == nil || e.srv.aiToken(vm, row.Gen) != r.env["ANTHROPIC_API_KEY"] {
-		t.Error("published AI token has no matching durable generation")
+	if preCrash.AIVMs[vm] != nil {
+		t.Error("Store.Apply waited on or bypassed held wmu")
 	}
 	vars := map[string]string{"BOAT_ID": vm}
-	for k, v := range r.env {
+	for k, v := range env {
 		vars[k] = v
 	}
 	if err := e.srv.boatd.call(context.Background(), "POST", vmPath(vm, "env"), map[string]any{"vars": vars}, nil); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate abrupt process loss, not Close (which would flush the missing row).
-	if !early {
-		oldStore.wmu.Lock()
-		held = true
-	}
+	// Simulate abrupt process loss before Store.flusher can write state.json.
 	oldStore.closed = true
 	unlock()
 	reopened, err := OpenStore(e.dir)
@@ -699,8 +691,8 @@ func TestR16FirstAITokenSurvivesCrashBeforeNextCopy(t *testing.T) {
 	if err := reloaded.reconcileCopyCredentials(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := reloaded.aiCheckToken(r.env["ANTHROPIC_API_KEY"]); !ok {
-		t.Error("durable guest token did not authenticate after reload")
+	if _, _, ok := reloaded.aiCheckToken(env["ANTHROPIC_API_KEY"]); !ok {
+		t.Error("recovered guest token did not authenticate after reload")
 	}
 	snap, err := reloaded.captureSnapshot(context.Background(), vm, team, "")
 	if err != nil {
@@ -709,7 +701,7 @@ func TestR16FirstAITokenSurvivesCrashBeforeNextCopy(t *testing.T) {
 	e.boatd.mu.Lock()
 	captured := e.boatd.copyEnvs[snap["id"].(string)]["ANTHROPIC_API_KEY"]
 	e.boatd.mu.Unlock()
-	if captured != r.env["ANTHROPIC_API_KEY"] {
+	if captured != env["ANTHROPIC_API_KEY"] {
 		t.Fatal("copy did not capture the crash-surviving guest token")
 	}
 	if _, _, ok := reloaded.aiCheckToken(captured.(string)); ok {

@@ -97,18 +97,25 @@ RUN curl -fsSLo /tmp/rustup-init https://static.rust-lang.org/rustup/archive/${R
 
 COPY rootfs/ /
 COPY agent/boat-agent.py agent/boat_ops.py /usr/local/lib/boat/
+COPY ssh-authorize.py /usr/local/libexec/boat-ssh-authorize
 COPY --from=boat-cli /boat /usr/local/bin/boat
 
 RUN ln -s boat /usr/local/bin/host \
  && chmod 0440 /etc/sudoers.d/dev && visudo -cf /etc/sudoers.d/dev \
  && chmod 755 /usr/local/lib/boat/boat-agent.py \
- && install -d -m 755 /etc/boat \
+ && chmod 0555 /usr/local/libexec/boat-ssh-authorize \
+ && useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin boat-ssh \
+ && install -d -m 755 -o root -g root /etc/boat \
+ && chmod 0555 /usr/local/lib/boat/prepare-managed-env \
+ && python3 -I /usr/local/lib/boat/prepare-managed-env --image-setup \
+ && install -d -m 700 -o root -g root /etc/boat/ssh-legacy-archive /var/lib/boat-ssh/legacy \
+ && python3 -I -c 'import importlib.machinery, importlib.util, os; loader = importlib.machinery.SourceFileLoader("a", "/usr/local/libexec/boat-ssh-authorize"); spec = importlib.util.spec_from_loader("a", loader); mod = importlib.util.module_from_spec(spec); loader.exec_module(mod); mod.DROPIN_PATH.parent.mkdir(mode=0o755, parents=True, exist_ok=True); mod.DROPIN_PATH.write_bytes(mod.SYSTEMD_POLICY.encode()); os.chmod(mod.DROPIN_PATH, 0o644); assert mod.exact_root_file(mod.DROPIN_PATH, mod.SYSTEMD_POLICY.encode(), 0o644); policy = mod.sshd_policy(mod.installed_users()).encode(); mod.SSHD_CONFIG.parent.mkdir(mode=0o755, parents=True, exist_ok=True); mod.SSHD_CONFIG.write_bytes(policy); os.chmod(mod.SSHD_CONFIG, 0o644); assert mod.exact_root_file(mod.SSHD_CONFIG, policy, 0o644)' \
  && echo 'export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"' >> /home/dev/.profile \
  && printf '\nif [ -r /etc/boat/env ]; then . /etc/boat/env; fi\n' >> /etc/bash.bashrc \
  && mkdir -p /etc/systemd/network && ln -sf /dev/null /etc/systemd/network/99-default.link \
- && systemctl enable boat-agent.service boat-growfs.service docker.service ssh.service \
+ && systemctl enable boat-managed-env.service boat-agent.service boat-growfs.service docker.service ssh.service \
  && (systemctl disable ssh.socket 2>/dev/null || true) \
- && systemctl mask apt-daily.timer apt-daily-upgrade.timer motd-news.timer \
+ && systemctl mask ssh.socket apt-daily.timer apt-daily-upgrade.timer motd-news.timer \
       e2scrub_reap.service systemd-networkd-wait-online.service cloud-init.target \
  && systemctl set-default multi-user.target \
  && rm -f /etc/ssh/ssh_host_* && : > /etc/machine-id \
@@ -284,7 +291,8 @@ RUN useradd -o -u 1000 -g dev -G sudo,docker -M -d /home/user -s /bin/bash user 
  && usermod -p '*' user && ln -s dev /home/user \
  && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user && chmod 0440 /etc/sudoers.d/user \
  && visudo -cf /etc/sudoers.d/user \
- && [ "$(id -un 1000)" = dev ] && [ "$(id -u user)" = 1000 ] && [ "$(getent passwd 1000 | cut -d: -f1)" = dev ]
+ && [ "$(id -un 1000)" = dev ] && [ "$(id -u user)" = 1000 ] && [ "$(getent passwd 1000 | cut -d: -f1)" = dev ] \
+ && python3 -I -c 'import importlib.machinery, importlib.util, os; loader = importlib.machinery.SourceFileLoader("a", "/usr/local/libexec/boat-ssh-authorize"); spec = importlib.util.spec_from_loader("a", loader); mod = importlib.util.module_from_spec(spec); loader.exec_module(mod); policy = mod.sshd_policy(mod.installed_users()).encode(); mod.SSHD_CONFIG.write_bytes(policy); os.chmod(mod.SSHD_CONFIG, 0o644); assert mod.exact_root_file(mod.SSHD_CONFIG, policy, 0o644)'
 
 RUN chmod 755 /usr/local/bin/boat-desktop-session /usr/local/bin/boat-desktop-animate \
  && rm -rf /var/cache/* /var/log/*.log /tmp/*

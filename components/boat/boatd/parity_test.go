@@ -4,8 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -166,7 +170,7 @@ func TestSnapshotExportImport(t *testing.T) {
 	key, _ := m.exportKey()
 	mf := exportManifest{Snapshot: s, VMState: "aa", Mem: "bb", Kernel: "cc"}
 	mf.Sig, _ = manifestSig(key, mf)
-	if ok, _ := m.verifyManifest(mf, m.snapDir(s.ID)); ok {
+	if ok, _ := m.verifyManifest(mf, m.snapDir(s.ID), s.Team); ok {
 		t.Fatal("hash mismatch accepted")
 	}
 }
@@ -255,7 +259,357 @@ func TestResizeGuestTimeout(t *testing.T) {
 		t.Fatalf("retry: %+v %v", got, err)
 	}
 	// Other failures keep their own status.
-	if guestTimeout(&agentErr{"resize2fs exited 1"}) || !guestTimeout(fmt.Errorf("x: %w", os.ErrDeadlineExceeded)) {
+	if guestTimeout(&agentErr{msg: "resize2fs exited 1"}) || !guestTimeout(fmt.Errorf("x: %w", os.ErrDeadlineExceeded)) {
 		t.Fatal("guestTimeout")
+	}
+}
+
+func TestSha256DiskSparseAndDenseEquivalence(t *testing.T) {
+	dir := t.TempDir()
+
+	check := func(name string, build func(f *os.File)) {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		build(f)
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(raw)
+		want := hex.EncodeToString(sum[:])
+		gotFile, err := sha256File(p)
+		if err != nil || gotFile != want {
+			t.Fatalf("%s: sha256File=%q want=%q err=%v", name, gotFile, want, err)
+		}
+		gotDisk, gotSize, err := sha256Disk(p)
+		if err != nil {
+			t.Fatalf("%s: sha256Disk err=%v", name, err)
+		}
+		if gotDisk != want || gotSize != int64(len(raw)) {
+			t.Fatalf("%s: sha256Disk=(%q, %d), want (%q, %d)", name, gotDisk, gotSize, want, len(raw))
+		}
+	}
+
+	check("empty", func(*os.File) {})
+	check("dense", func(f *os.File) {
+		buf := bytes.Repeat([]byte("boat-dense-block-"), 20000)
+		if _, err := f.Write(buf); err != nil {
+			t.Fatal(err)
+		}
+	})
+	check("all-hole", func(f *os.File) {
+		if err := f.Truncate(2<<20 + 137); err != nil {
+			t.Fatal(err)
+		}
+	})
+	check("multi-hole-sparse", func(f *os.File) {
+		// Leading hole, first extent across chunk boundaries, middle hole, second extent, trailing hole.
+		if _, err := f.WriteAt(bytes.Repeat([]byte{0x5a, 0xa5, 0x11}, 90000), 512<<10); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteAt([]byte("second-extent-payload"), 2<<20+4096); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(4<<20 + 777); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestSnapshotExportImportDiskIntegrityAndQuotaClamp(t *testing.T) {
+	t.Setenv("COPYFILE_DISABLE", "1")
+	m, _ := newTestManager(t, func(c *Config) {
+		c.Sizes["big"] = Size{VCPU: 2, MemMiB: 512, DiskGiB: 2}
+		c.Teams = map[string]TeamPolicy{
+			"qteam": {MaxDiskGiB: 3},
+		}
+	})
+	testExporter(m)
+	srv := httptest.NewServer(m.routes())
+	defer srv.Close()
+	ctx := context.Background()
+
+	v, err := m.Create(ctx, CreateReq{Team: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := m.CreateSnapshot(ctx, v.ID, "signed")
+	if err != nil || !s.HasMem {
+		t.Fatalf("CreateSnapshot: %+v %v", s, err)
+	}
+	// Keep test export archive compact while exercising real disk bytes.
+	if err := os.WriteFile(filepath.Join(m.snapDir(s.ID), diskFile), []byte("valid-ext4-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var arch []byte
+	if c := call(t, srv, "GET", "/v1/vms/"+v.ID+"/snapshots/"+s.ID+"/download", nil, &arch); c != 200 || len(arch) == 0 {
+		t.Fatalf("download: %d %d", c, len(arch))
+	}
+
+	// (a) Tampering with rootfs.ext4 inside a signed archive causes verifyManifest to return false
+	// and downgrades ImportSnapshot to untrusted disk-only (dropping vmstate and mem).
+	unpackDir := t.TempDir()
+	tr := tar.NewReader(bytes.NewReader(arch))
+	var memberOrder []string
+	members := map[string][]byte{}
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		memberOrder = append(memberOrder, hdr.Name)
+		members[hdr.Name] = b
+		if err := os.WriteFile(filepath.Join(unpackDir, hdr.Name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var exportedMF exportManifest
+	if err := json.Unmarshal(members[manifestFile], &exportedMF); err != nil {
+		t.Fatal(err)
+	}
+	if exportedMF.Disk == "" || exportedMF.DiskSize == 0 {
+		t.Fatalf("expected non-empty disk_sha256 and disk_size in manifest, got %+v", exportedMF)
+	}
+	if ok, err := m.verifyManifest(exportedMF, unpackDir, "t"); err != nil || !ok {
+		t.Fatalf("untampered manifest failed verifyManifest: ok=%v err=%v", ok, err)
+	}
+
+	tamperedDisk := append([]byte(nil), members[diskFile]...)
+	if len(tamperedDisk) == 0 {
+		tamperedDisk = []byte("tampered")
+	} else {
+		tamperedDisk[0] ^= 0xff
+	}
+	if err := os.WriteFile(filepath.Join(unpackDir, diskFile), tamperedDisk, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := m.verifyManifest(exportedMF, unpackDir, "t"); err != nil || ok {
+		t.Fatalf("tampered rootfs.ext4 accepted by verifyManifest: ok=%v err=%v", ok, err)
+	}
+
+	tamperedTar := tarOf(t, func(tw *tar.Writer) {
+		for _, name := range memberOrder {
+			data := members[name]
+			if name == diskFile {
+				data = tamperedDisk
+			}
+			tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(data)), Typeflag: tar.TypeReg})
+			tw.Write(data)
+		}
+	})
+	downgraded, err := m.ImportSnapshot(ctx, bytes.NewReader(tamperedTar.Bytes()), "t", "tampered-disk", "", "")
+	if err != nil {
+		t.Fatalf("ImportSnapshot on tampered disk failed instead of downgrading: %v", err)
+	}
+	if downgraded.HasMem {
+		t.Fatalf("tampered disk archive kept trusted memory: %+v", downgraded)
+	}
+	for _, f := range []string{vmstate, memFile} {
+		if exists(filepath.Join(m.snapDir(downgraded.ID), f)) {
+			t.Fatalf("tampered archive retained %s", f)
+		}
+	}
+
+	// (b) Signed archive claiming disk_gib: 1 with a 2 GiB sparse rootfs.ext4 clamps DiskGiB >= 2
+	// even when trusted == true, and charges the full 2 GiB against team quota.
+	craftDir := t.TempDir()
+	for _, name := range []string{kernFile, vmstate, memFile} {
+		if err := os.WriteFile(filepath.Join(craftDir, name), members[name], 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sparseDisk := filepath.Join(craftDir, diskFile)
+	df, err := os.OpenFile(sparseDisk, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := df.Write([]byte("ext4-header")); err != nil {
+		t.Fatal(err)
+	}
+	if err := df.Truncate(2 << 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := df.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	craftedMF := exportedMF
+	craftedMF.Snapshot.Team = "qteam"
+	craftedMF.Snapshot.DiskGiB = 1 // deliberately under-declared
+	craftedMF.Disk, craftedMF.DiskSize, err = sha256Disk(sparseDisk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := m.exportKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	craftedMF.Sig, err = manifestSig(key, craftedMF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := m.verifyManifest(craftedMF, craftDir, "qteam"); err != nil || !ok {
+		t.Fatalf("crafted signed manifest failed verifyManifest: ok=%v err=%v", ok, err)
+	}
+	if err := writeJSONAtomic(filepath.Join(craftDir, manifestFile), craftedMF, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(craftDir, manifestFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Stream a standard USTAR tar archive carrying the 2 GiB logical rootfs.ext4
+	// (zero heap bloat; writeSparse skips zero blocks and truncates to 2 GiB).
+	const logical2GiB = int64(2) << 30
+	headerPrefix := []byte("ext4-header")
+	streamCraftedArchive := func() io.Reader {
+		pr, pw := io.Pipe()
+		go func() {
+			tw := tar.NewWriter(pw)
+			tarFile(tw, manifestFile, string(manifestBytes))
+			if err := tw.WriteHeader(&tar.Header{
+				Name:     diskFile,
+				Mode:     0o600,
+				Size:     logical2GiB,
+				Typeflag: tar.TypeReg,
+			}); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			if _, err := tw.Write(headerPrefix); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			if err := writeZeros(tw, logical2GiB-int64(len(headerPrefix))); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			for _, name := range []string{kernFile, vmstate, memFile} {
+				tarFile(tw, name, string(members[name]))
+			}
+			pw.CloseWithError(tw.Close())
+		}()
+		return pr
+	}
+
+	clamped, err := m.ImportSnapshot(ctx, streamCraftedArchive(), "qteam", "clamped-1", "", "")
+	if err != nil {
+		t.Fatalf("ImportSnapshot(clamped-1): %v", err)
+	}
+	if !clamped.HasMem {
+		t.Fatalf("expected trusted import with HasMem=true, got %+v", clamped)
+	}
+	if clamped.DiskGiB < 2 {
+		t.Fatalf("trusted import under-accounted DiskGiB=%d for 2 GiB sparse disk", clamped.DiskGiB)
+	}
+	// qteam has MaxDiskGiB=3: a second 2 GiB import must fail quota (2+2 > 3), proving quota accounting uses clamped DiskGiB.
+	if _, err := m.ImportSnapshot(ctx, streamCraftedArchive(), "qteam", "clamped-2", "", ""); err == nil {
+		t.Fatal("second 2 GiB import into MaxDiskGiB=3 team succeeded; quota under-accounted")
+	}
+}
+
+func TestVerifyManifestTeamImageSizeAndNoEnvPropagation(t *testing.T) {
+	t.Setenv("COPYFILE_DISABLE", "1")
+	m, _ := newTestManager(t, nil)
+	testExporter(m)
+	srv := httptest.NewServer(m.routes())
+	defer srv.Close()
+	ctx := context.Background()
+
+	// Create a sticky no_env VM and snapshot it.
+	v, err := m.Create(ctx, CreateReq{Team: "team-a", Labels: map[string]string{"boat.no_env": "1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := m.CreateSnapshot(ctx, v.ID, "noenv-snap")
+	if err != nil || !s.HasMem || !s.NoEnv || s.Labels["boat.no_env"] != "1" {
+		t.Fatalf("expected snapshot to carry no_env: %+v %v", s, err)
+	}
+	if err := os.WriteFile(filepath.Join(m.snapDir(s.ID), diskFile), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var arch []byte
+	if c := call(t, srv, "GET", "/v1/vms/"+v.ID+"/snapshots/"+s.ID+"/download", nil, &arch); c != 200 || len(arch) == 0 {
+		t.Fatalf("download: %d %d", c, len(arch))
+	}
+
+	// 1. Same-team import is trusted (keeps memory) AND preserves no_env / boat.no_env.
+	sameTeam, err := m.ImportSnapshot(ctx, bytes.NewReader(arch), "team-a", "same-team", "", "")
+	if err != nil || !sameTeam.HasMem || !sameTeam.NoEnv || sameTeam.Labels["boat.no_env"] != "1" {
+		t.Fatalf("same-team no_env import: %+v %v", sameTeam, err)
+	}
+	// Creating a VM from that imported snapshot propagates boat.no_env=1 automatically.
+	child, err := m.Create(ctx, CreateReq{Team: "team-a", Snapshot: sameTeam.ID})
+	if err != nil || child.Labels["boat.no_env"] != "1" {
+		t.Fatalf("create from imported no_env snapshot did not propagate boat.no_env: %+v %v", child, err)
+	}
+
+	// 2. Cross-team import of a signed archive MUST downgrade to untrusted (strip memory/vmstate),
+	//    while STILL preserving sticky no_env.
+	crossTeam, err := m.ImportSnapshot(ctx, bytes.NewReader(arch), "team-b", "cross-team", "", "")
+	if err != nil {
+		t.Fatalf("cross-team import: %v", err)
+	}
+	if crossTeam.HasMem {
+		t.Fatalf("cross-team import trusted another team's signed manifest: %+v", crossTeam)
+	}
+	for _, f := range []string{vmstate, memFile} {
+		if exists(filepath.Join(m.snapDir(crossTeam.ID), f)) {
+			t.Fatalf("cross-team import retained %s", f)
+		}
+	}
+	if !crossTeam.NoEnv || crossTeam.Labels["boat.no_env"] != "1" {
+		t.Fatalf("cross-team import dropped sticky no_env: %+v", crossTeam)
+	}
+
+	// 3. Signed archive whose size or image is no longer valid on this host MUST downgrade to untrusted.
+	// Export a fresh archive from a custom size, then remove that size from host config before importing.
+	m.cfg.Sizes["ephemeral"] = Size{VCPU: 2, MemMiB: 512, DiskGiB: 1}
+	v2, err := m.Create(ctx, CreateReq{Team: "team-a", Size: "ephemeral"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := m.CreateSnapshot(ctx, v2.ID, "eph-snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(m.snapDir(s2.ID), diskFile), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var arch2 []byte
+	if c := call(t, srv, "GET", "/v1/vms/"+v2.ID+"/snapshots/"+s2.ID+"/download", nil, &arch2); c != 200 {
+		t.Fatalf("download arch2: %d", c)
+	}
+	delete(m.cfg.Sizes, "ephemeral")
+	badSizeImport, err := m.ImportSnapshot(ctx, bytes.NewReader(arch2), "team-a", "removed-size", "", "default")
+	if err != nil {
+		t.Fatalf("import with removed manifest size: %v", err)
+	}
+	if badSizeImport.HasMem || badSizeImport.Size != "default" {
+		t.Fatalf("removed size manifest must downgrade to untrusted default size: %+v", badSizeImport)
+	}
+
+	// Invalid/uninstalled image in manifest must also be rejected by verifyManifest.
+	mfBadImg := exportManifest{Snapshot: s}
+	mfBadImg.Snapshot.Image = "not-installed-image"
+	key, _ := m.exportKey()
+	mfBadImg.Sig, _ = manifestSig(key, mfBadImg)
+	if ok, err := m.verifyManifest(mfBadImg, m.snapDir(s.ID), "team-a"); err != nil || ok {
+		t.Fatalf("verifyManifest accepted uninstalled image: ok=%v err=%v", ok, err)
 	}
 }

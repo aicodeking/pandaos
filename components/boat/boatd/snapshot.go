@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -38,7 +40,7 @@ func (m *Manager) takeSnapshot(ctx context.Context, v VM, fsync bool) (VM, error
 	if err != nil {
 		return v, err
 	}
-	nv, err := m.installSnapshot(v, diff)
+	nv, err := m.installSnapshot(v, diff, fsync)
 	if err != nil {
 		m.setMemLimits(v)
 	}
@@ -53,6 +55,11 @@ func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, uin
 	t0 := time.Now()
 	m.guestSync(ctx, v)
 	t1 := time.Now()
+	releaseDump, err := m.acquireDumpSlot(ctx)
+	if err != nil {
+		return false, 0, err
+	}
+	defer releaseDump()
 	fc := newFC(filepath.Join(root, apiSock))
 	if err := fc.pause(ctx); err != nil {
 		return false, 0, err
@@ -68,12 +75,13 @@ func (m *Manager) dumpSnapshot(ctx context.Context, v VM, fsync bool) (bool, uin
 	}
 	stopWB := func() {}
 	if !fsync {
-		stopWB = startWriteback(filepath.Join(root, memPath))
+		stopWB = m.startWriteback(filepath.Join(root, memPath))
 	}
 	log.Printf("%s: dump-write generation=%d phase=start unix_ms=%d", v.ID, generation, time.Now().UnixMilli())
-	err := fc.snapshot(ctx, typ, snapState, memPath, fsync)
+	err = fc.snapshot(ctx, typ, snapState, memPath, fsync)
 	log.Printf("%s: dump-write generation=%d phase=end unix_ms=%d error=%v", v.ID, generation, time.Now().UnixMilli(), err)
 	stopWB()
+	closeAgentConns(filepath.Join(root, vsockUDS)) // a snapshot resets the guest's vsock conns
 	if err != nil {
 		m.setMemLimits(v)
 		m.failSnapshot(v)
@@ -100,13 +108,13 @@ func (m *Manager) failSnapshot(v VM) VM {
 // installSnapshot makes what dumpSnapshot wrote root/mem. The VM may be running:
 // root/mem is only replaced, and this is where a dirty base gets flushed (a reflink
 // waits for its source's writeback), which is no reason to keep the guest paused.
-func (m *Manager) installSnapshot(v VM, diff bool) (VM, error) {
+func (m *Manager) installSnapshot(v VM, diff, diffSynced bool) (VM, error) {
 	root, stage := m.root(v.ID), filepath.Join(m.vmDir(v.ID), memStage)
 	t0 := time.Now()
 	os.Remove(stage)
 	var err error
 	if diff {
-		err = m.mergeDiff(v, filepath.Join(root, snapDiff), stage)
+		err = m.mergeDiff(v, filepath.Join(root, snapDiff), stage, diffSynced)
 	} else {
 		err = os.Rename(filepath.Join(root, memNew), stage) // out of the VMM's reach; a planted link fails below
 	}
@@ -142,7 +150,7 @@ func replaceMem(stage, mem string) error {
 // mergeDiff makes dst the VM's full memory: the data extents of the sparse
 // diff on a reflink copy of root/mem. Without a base (first snapshot since a
 // cold boot) the holes are all zeros, so the diff already is the full memory.
-func (m *Manager) mergeDiff(v VM, diff, dst string) error {
+func (m *Manager) mergeDiff(v VM, diff, dst string, diffSynced bool) error {
 	base := filepath.Join(m.root(v.ID), memFile)
 	if !exists(base) {
 		if err := os.Rename(diff, dst); err != nil {
@@ -166,11 +174,16 @@ func (m *Manager) mergeDiff(v VM, diff, dst string) error {
 	// snapshot's can be GiBs, and once flushed its extents are cloned below, not written
 	// again (boat-e2e r11: a 2 GiB diff's copy took 2.3-10.5 s on top of its 1.8-11.4 s
 	// flush, and a create meanwhile waited up to 12.6 s for its guest's disk).
-	if err := fsyncFile(diff); err != nil {
-		return err
+	if !diffSynced {
+		if m.isBooting() {
+			m.waitBootQuiet(mergeDiffBootWait)
+		}
+		if err := fsyncFile(diff); err != nil {
+			return err
+		}
 	}
 	t2 := time.Now()
-	err := copyExtents(diff, dst)
+	err := m.copyExtents(diff, dst)
 	log.Printf("%s: merge reflink=%dms flush=%dms copy=%dms", v.ID, t1.Sub(t0).Milliseconds(), t2.Sub(t1).Milliseconds(), time.Since(t2).Milliseconds())
 	return err
 }
@@ -210,6 +223,14 @@ func (m *Manager) copyMem(src, dst string, sameTeam bool) error {
 
 // copyExtents overlays the data regions of src on dst.
 func copyExtents(src, dst string) error {
+	return copyExtentsPaced(src, dst, nil)
+}
+
+func (m *Manager) copyExtents(src, dst string) error {
+	return copyExtentsPaced(src, dst, m.paceDumpCopy)
+}
+
+func copyExtentsPaced(src, dst string, pace func(int64)) error {
 	in, err := openJail(src, os.O_RDONLY)
 	if err != nil {
 		return err
@@ -224,31 +245,140 @@ func copyExtents(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	return copyData(in, out, st.Size(), true)
+	return copyDataPaced(in, out, st.Size(), true, pace)
+}
+
+type snapSyncCall struct {
+	done chan struct{}
+}
+
+// startSyncSnapshot ensures a background syncSnapshot is running for id,
+// registering it in m.snapSyncs before returning so concurrent callers (such as
+// stopAll) observe and wait on it instead of duplicating fsyncs.
+func (m *Manager) startSyncSnapshot(id string) {
+	m.mu.Lock()
+	v, ok := m.vms[id]
+	if !ok || !v.HasSnapshot || v.SnapSynced {
+		m.mu.Unlock()
+		return
+	}
+	if inFlight := m.snapSyncs[id]; inFlight != nil {
+		m.mu.Unlock()
+		// An earlier snapshot's sync is still finishing; wait for it and re-check
+		// so a replaced snapshot (Stop -> Start -> Stop) is never left unsynced.
+		go func() {
+			<-inFlight.done
+			m.syncSnapshot(id)
+		}()
+		return
+	}
+	if m.snapSyncs == nil {
+		m.snapSyncs = map[string]*snapSyncCall{}
+	}
+	call := &snapSyncCall{done: make(chan struct{})}
+	m.snapSyncs[id] = call
+	syncFn := m.fsyncSnapFile
+	m.mu.Unlock()
+	go m.finishSyncSnapshot(id, call, syncFn)
+}
+
+// waitSnapSyncs waits for any already in-flight background syncSnapshot calls
+// to complete (or ctx cancellation) without starting new fsyncs.
+func (m *Manager) waitSnapSyncs(ctx context.Context) {
+	m.mu.Lock()
+	dones := make([]<-chan struct{}, 0, len(m.snapSyncs))
+	for _, call := range m.snapSyncs {
+		dones = append(dones, call.done)
+	}
+	m.mu.Unlock()
+	for _, ch := range dones {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // syncSnapshot fsyncs a stop snapshot and records that it is durable. Stop
 // does not wait for it (it is most of a stop's cost on a slow disk); until the
 // flag is set, reconcile treats the snapshot as lost in a host crash and the
 // VM cold-boots from its disk, which Firecracker fsyncs itself when
-// snapshotting.
+// snapshotting. Calls for the same VM are deduplicated so a shutdown sync
+// joins an in-flight background sync or skips an already-synced snapshot
+// rather than fsyncing the same files twice.
 func (m *Manager) syncSnapshot(id string) {
+	for {
+		m.mu.Lock()
+		v, ok := m.vms[id]
+		if !ok || !v.HasSnapshot || v.SnapSynced {
+			m.mu.Unlock()
+			return
+		}
+		if inFlight := m.snapSyncs[id]; inFlight != nil {
+			m.mu.Unlock()
+			<-inFlight.done
+			continue
+		}
+		if m.snapSyncs == nil {
+			m.snapSyncs = map[string]*snapSyncCall{}
+		}
+		call := &snapSyncCall{done: make(chan struct{})}
+		m.snapSyncs[id] = call
+		syncFn := m.fsyncSnapFile
+		m.mu.Unlock()
+
+		m.finishSyncSnapshot(id, call, syncFn)
+		return
+	}
+}
+
+func (m *Manager) finishSyncSnapshot(id string, call *snapSyncCall, syncFn func(string) (os.FileInfo, error)) {
+	defer func() {
+		m.mu.Lock()
+		delete(m.snapSyncs, id)
+		close(call.done)
+		m.mu.Unlock()
+	}()
+	m.runSyncSnapshot(id, syncFn)
+}
+
+func (m *Manager) runSyncSnapshot(id string, syncFn func(string) (os.FileInfo, error)) {
+	if syncFn == nil {
+		syncFn = fsyncFileInfo
+	}
+	m.waitBootQuiet(postDumpSyncBootWait)
 	root := m.root(id)
-	for _, f := range []string{memFile, vmstate} {
-		if err := fsyncFile(filepath.Join(root, f)); err != nil {
+	var infos [2]os.FileInfo
+	for i, f := range []string{memFile, vmstate} {
+		m.waitBootQuiet(postDumpSyncBootWait)
+		info, err := syncFn(filepath.Join(root, f))
+		if err != nil {
 			return // restored or deleted meanwhile
 		}
+		infos[i] = info
 	}
 	unlock := m.lock(id) // not racing Delete, which removes the dir vm.json lives in
 	defer unlock()
+	for i, f := range []string{memFile, vmstate} {
+		st, err := os.Lstat(filepath.Join(root, f))
+		if err != nil || !os.SameFile(infos[i], st) {
+			return // replaced or removed while syncing
+		}
+	}
 	m.update(id, "", func(x *VM) { x.SnapSynced = x.HasSnapshot })
 }
 
 // settleAfterDump starts the base's writeback now, so that the next merge finds
 // it clean, then gives the VM its memory limits back only if this dump still owns them.
 func (m *Manager) settleAfterDump(v VM, generation uint64) {
-	if err := fsyncFile(filepath.Join(m.root(v.ID), memFile)); err != nil {
-		log.Printf("%s: flush mem: %v", v.ID, err)
+	m.waitBootQuietWhile(postDumpSyncBootWait, func() bool {
+		return m.dumpGeneration(v.ID) == generation
+	})
+	if m.dumpGeneration(v.ID) == generation {
+		if err := fsyncFile(filepath.Join(m.root(v.ID), memFile)); err != nil {
+			log.Printf("%s: flush mem: %v", v.ID, err)
+		}
 	}
 	unlock := m.lock(v.ID) // not lowering the limits under the next dump's lift
 	defer unlock()
@@ -266,19 +396,29 @@ func allocatedBytes(path string) int64 {
 }
 
 func fsyncFile(path string) error {
+	_, err := fsyncFileInfo(path)
+	return err
+}
+
+func fsyncFileInfo(path string) (os.FileInfo, error) {
 	f, err := openJail(path, os.O_RDONLY)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		return nil, err
+	}
+	return f.Stat()
 }
 
 // syncSaved makes a saved snapshot's memory durable behind the API call: until
 // snap.json says so, reconcile treats it as disk-only after a host crash.
 func (m *Manager) syncSaved(s Snapshot) {
+	m.waitBootQuiet(postDumpSyncBootWait)
 	dir := m.snapDir(s.ID)
 	for _, f := range []string{memFile, vmstate} {
+		m.waitBootQuiet(postDumpSyncBootWait)
 		if err := fsyncFile(filepath.Join(dir, f)); err != nil {
 			return // deleted meanwhile
 		}
@@ -301,6 +441,7 @@ func (m *Manager) syncSaved(s Snapshot) {
 	defer m.mu.Unlock()
 	if _, ok := m.snaps[s.ID]; ok {
 		m.snaps[s.ID] = s
+		m.snapsChangedLocked()
 	}
 }
 
@@ -333,8 +474,10 @@ func (m *Manager) guestSync(ctx context.Context, v VM) {
 }
 
 // freeze copies v's disk+kernel (+vmstate/mem) into dst. A running VM is
-// paused only for the (diff) snapshot and the disk reflink.
-func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
+// paused only for the (diff) snapshot and the disk reflink. When reprovisionSSH
+// is true, the caller (boat-api) is rotating SSH credentials right after prepare,
+// so the source VM stays quarantined after resuming until its new policy is installed.
+func (m *Manager) freeze(ctx context.Context, v VM, dst string, reprovisionSSH bool) (bool, error) {
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return false, err
 	}
@@ -357,6 +500,21 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 		}
 		return v.HasSnapshot, nil
 	}
+	// Same VMM continuity keeps its epoch; ingress is fenced across the pause.
+	// When boat-api will immediately rotate credentials on an already-ready VM
+	// (reprovisionSSH), use the transient SSH-only pause-fence so live parent
+	// sessions stay in routes.json and installSSHPolicy takes the rotate-token
+	// fast path with 0 full nft reloads. Unready VMs always take full quarantine.
+	pauseFence := reprovisionSSH && v.SSHPolicyReady && len(v.sshConfig) > 0 && v.sshHelperDigest != ""
+	if pauseFence {
+		if err := m.quarantineSSHPause(v); err != nil {
+			return false, err
+		}
+	} else {
+		if err := m.quarantineSSH(v); err != nil {
+			return false, err
+		}
+	}
 	diff, generation, err := m.dumpSnapshot(ctx, v, false)
 	t0 := time.Now()
 	if err == nil {
@@ -366,11 +524,25 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 		}
 	}
 	t1 := time.Now()
-	if rerr := resumeAfterSnapshot(context.WithoutCancel(ctx), newFC(filepath.Join(root, apiSock))); rerr != nil {
+	rerr := resumeAfterSnapshot(context.WithoutCancel(ctx), newFC(filepath.Join(root, apiSock)))
+	resumeFailed := rerr != nil
+	if resumeFailed && pauseFence {
+		if qerr := m.quarantineSSH(v); qerr != nil {
+			log.Printf("%s: full quarantine after failed resume: %v", v.ID, qerr)
+		}
+	}
+	if rerr == nil && !reprovisionSSH {
+		rerr = m.restoreSSHAfterPause(context.WithoutCancel(ctx), v)
+	}
+	if rerr != nil {
 		log.Printf("%s: resume after snapshot: %v", v.ID, rerr)
 		if err == nil {
 			m.failSnapshot(v)
-			err = fmt.Errorf("vm left paused: resume after snapshot: %w", rerr)
+			if resumeFailed {
+				err = fmt.Errorf("vm left paused: resume after snapshot: %w", rerr)
+			} else {
+				err = fmt.Errorf("SSH policy verification after snapshot: %w", rerr)
+			}
 		}
 	}
 	m.resets.fire(v.ID) // the snapshot reset the guest's vsock connections, now it runs again
@@ -381,7 +553,7 @@ func (m *Manager) freeze(ctx context.Context, v VM, dst string) (bool, error) {
 		return false, err
 	}
 	// The rest is immutable (root/mem is only ever renamed over): no need to stay paused.
-	_, err = m.installSnapshot(v, diff)
+	_, err = m.installSnapshot(v, diff, false)
 	if err == nil {
 		err = m.cp(filepath.Join(root, kernFile), filepath.Join(dst, kernFile))
 	}
@@ -430,6 +602,10 @@ func (m *Manager) CreateSnapshot(ctx context.Context, vmID, name string) (Snapsh
 }
 
 func (m *Manager) createSnapshot(ctx context.Context, vmID, name string, pending bool) (Snapshot, error) {
+	return m.createSnapshotOpts(ctx, vmID, name, pending, false)
+}
+
+func (m *Manager) createSnapshotOpts(ctx context.Context, vmID, name string, pending, reprovisionSSH bool) (Snapshot, error) {
 	if len(name) > 128 {
 		return Snapshot{}, errf(400, "name too long")
 	}
@@ -445,8 +621,14 @@ func (m *Manager) createSnapshot(ctx context.Context, vmID, name string, pending
 	if v.PendingCopy || (v.State != Running && v.State != Stopped) {
 		return Snapshot{}, errf(http.StatusConflict, "vm is %s", v.State)
 	}
+	noEnv := v.Labels["boat.no_env"] == "1"
+	var snapLabels map[string]string
+	if noEnv {
+		snapLabels = map[string]string{"boat.no_env": "1"}
+	}
 	s := Snapshot{PendingCopy: pending, ID: newID("snap-"), Name: name, VMID: v.ID, Team: v.Team, Image: v.Image, Size: v.Size,
-		VCPU: v.VCPU, MemMiB: v.MemMiB, DiskGiB: v.DiskGiB, CreatedAt: m.now(), HasMem: v.State == Running || v.HasSnapshot}
+		VCPU: v.VCPU, MemMiB: v.MemMiB, DiskGiB: v.DiskGiB, CreatedAt: m.now(), HasMem: v.State == Running || v.HasSnapshot,
+		NoEnv: noEnv, Labels: snapLabels}
 	res, err := m.reserve(v.Team, 1, snapCommit(s)) // held while the dump runs, other VMs of the team included
 	if err != nil {
 		return Snapshot{}, err
@@ -459,7 +641,7 @@ func (m *Manager) createSnapshot(ctx context.Context, vmID, name string, pending
 		return Snapshot{}, err
 	}
 	dir := m.snapDir(s.ID)
-	s.HasMem, err = m.freeze(ctx, v, dir)
+	s.HasMem, err = m.freeze(ctx, v, dir, reprovisionSSH)
 	s.Unsynced = s.HasMem
 	if err == nil {
 		// No fsync here: 3-4 s behind a dump in writeback. syncSaved persists it.
@@ -476,6 +658,7 @@ func (m *Manager) createSnapshot(ctx context.Context, vmID, name string, pending
 	m.mu.Lock()
 	res.releaseLocked()
 	m.snaps[s.ID] = s
+	m.snapsChangedLocked()
 	m.mu.Unlock()
 	if s.HasMem {
 		go m.syncSaved(s)
@@ -503,6 +686,7 @@ func (m *Manager) releaseSnapshot(vmID, sid string) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	m.snaps[sid] = s
+	m.snapsChangedLocked()
 	m.ev.publish(Event{Type: "snapshot.created", VMID: vmID, SnapID: sid, Team: s.Team})
 	return s, nil
 }
@@ -512,6 +696,7 @@ func (m *Manager) DeleteSnapshot(vmID, sid string) error {
 	s, ok := m.snaps[sid]
 	if ok && s.VMID == vmID {
 		delete(m.snaps, sid)
+		m.snapsChangedLocked()
 	}
 	m.mu.Unlock()
 	if !ok || s.VMID != vmID {
@@ -590,18 +775,19 @@ func (r *reservation) release() {
 }
 
 // storageQuotaLocked: total VMs (any state), snapshot count, committed bytes, for the
-// team and for the host. Committed bytes are a true upper bound on what a VM or
-// snapshot can occupy, so at storageOvercommit 1 no tenant can fill the disk at all.
+// team and for the host. Committed bytes upper-bound nominal VM and snapshot size;
+// hostStorageCheck caps nominal committed bytes at total * storageOvercommit, while
+// checkFloor enforces the live minFreePct / minFreeGiB reserve on actual free space.
 func (m *Manager) storageQuotaLocked(team string, addVMs, addSnaps int, addBytes int64) error {
 	p := m.cfg.team(team)
 	vms, snaps, bytes := addVMs, addSnaps+m.reservedSnaps[team], addBytes+m.reservedBytes[team]
 	host := addBytes
-	for _, v := range m.vms {
+	m.eachVMLocked(func(v VM) {
 		if v.Team == team {
 			vms, bytes = vms+1, bytes+vmCommit(v)
 		}
 		host += vmCommit(v)
-	}
+	})
 	for _, s := range m.snaps {
 		if s.Team == team {
 			snaps, bytes = snaps+1, bytes+snapCommit(s)
@@ -625,8 +811,9 @@ func (m *Manager) storageQuotaLocked(team string, addVMs, addSnaps int, addBytes
 	return nil
 }
 
-// hostStorageCheck caps what all teams together may commit. Only growth is refused:
-// a host already past the cap (a lowered setting) can still stop, delete and shrink.
+// hostStorageCheck caps nominal committed bytes across all teams at total * storageOvercommit
+// (checkFloor separately enforces the live minFreePct / minFreeGiB reserve on free space).
+// Only growth is refused: a host already past the cap (a lowered setting) can still stop, delete and shrink.
 func (m *Manager) hostStorageCheck(committed, adding int64) error {
 	if m.cfg.StorageOvercommit <= 0 || adding <= 0 {
 		return nil
@@ -703,9 +890,155 @@ type teamStorage struct {
 	SnapAllocBytes    int64  `json:"snapshot_allocated_bytes"`
 }
 
-// ponytail: walks every VM/snapshot dir per call; cache if usage is polled often.
+// storageCacheTTL bounds how stale storage() may be: a walk of every VM and
+// snapshot dir is the cost of a usage GET, and dashboards poll it.
+var storageCacheTTL = 5 * time.Second
+
+// storageCache memoises storage() for storageCacheTTL, with one walk shared by
+// concurrent callers (singleflight). It is invalidated on snapshot create/delete
+// and VM create, and keyed on a fingerprint of what exists (ids, teams, committed
+// bytes) so a VM delete, or any path that forgot to invalidate, misses it too.
+// The zero value is ready to use.
+type storageCache struct {
+	mu     sync.Mutex
+	at     time.Time
+	print  uint64
+	gen    uint64 // bumped by invalidate
+	valid  bool
+	out    map[string]teamStorage
+	disk   diskSpace
+	flight *storageFlight
+	walks  atomic.Int64 // walks done, for tests
+	hits   atomic.Int64 // peek hits (no O(n) copy of the VMs), for tests
+
+	key   storageKey // generation of what out was walked for; keyed marks it set
+	keyed bool
+}
+
+// storageKey is the O(1) identity of the inventory storage() sums: Manager.storageGen
+// (bumped on VM/snapshot create, delete and size changes) and the two counts. The
+// counts catch a path that forgot to bump the generation (a snapshot import).
+type storageKey struct {
+	gen        uint64
+	vms, snaps int
+}
+
+// peek returns the cached walk without walking or copying anything, if it is fresh
+// and was walked for key. The returned map is never mutated by the cache: copy it.
+func (c *storageCache) peek(key storageKey, ttl time.Duration) (map[string]teamStorage, diskSpace, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.valid && c.keyed && c.key == key && time.Since(c.at) < ttl {
+		c.hits.Add(1)
+		return c.out, c.disk, true
+	}
+	return nil, diskSpace{}, false
+}
+
+type storageFlight struct {
+	gen   uint64
+	print uint64
+	key   storageKey
+	keyed bool
+	done  chan struct{}
+	out   map[string]teamStorage
+	disk  diskSpace
+}
+
+func (c *storageCache) invalidate() {
+	c.mu.Lock()
+	c.gen++
+	c.valid = false
+	c.mu.Unlock()
+}
+
+// fingerprint summarises the VMs and snapshots (order-independent).
+func storagePrint(vms []VM, snaps []Snapshot) uint64 {
+	h := func(s string) uint64 {
+		x := uint64(14695981039346656037)
+		for i := 0; i < len(s); i++ {
+			x = (x ^ uint64(s[i])) * 1099511628211
+		}
+		return x
+	}
+	var p uint64
+	for _, v := range vms {
+		p += h("v/"+v.ID+"/"+v.Team) ^ uint64(vmCommit(v))
+	}
+	for _, s := range snaps {
+		p += h("s/"+s.ID+"/"+s.Team) ^ uint64(snapCommit(s))
+	}
+	return p ^ uint64(len(vms))<<48 ^ uint64(len(snaps))<<32
+}
+
+func copyStorage(in map[string]teamStorage) map[string]*teamStorage {
+	out := make(map[string]*teamStorage, len(in))
+	for k, v := range in {
+		v := v
+		out[k] = &v
+	}
+	return out
+}
+
+// get returns the cached walk if fresh and for the same VM/snapshot set, else walks
+// once for all concurrent callers.
+func (c *storageCache) get(print uint64, ttl time.Duration, walk func() (map[string]teamStorage, diskSpace)) (map[string]*teamStorage, diskSpace) {
+	return c.getKeyed(storageKey{}, false, print, ttl, walk)
+}
+
+// getKeyed is get that also records key (when keyed) as the identity of the result,
+// for peek.
+func (c *storageCache) getKeyed(key storageKey, keyed bool, print uint64, ttl time.Duration, walk func() (map[string]teamStorage, diskSpace)) (map[string]*teamStorage, diskSpace) {
+	c.mu.Lock()
+	if c.valid && c.print == print && time.Since(c.at) < ttl {
+		if keyed {
+			c.key, c.keyed = key, true // same content under a newer generation
+		}
+		out, d := copyStorage(c.out), c.disk
+		c.mu.Unlock()
+		return out, d
+	}
+	f := c.flight
+	if f == nil || f.gen != c.gen || f.print != print {
+		f = &storageFlight{gen: c.gen, print: print, key: key, keyed: keyed, done: make(chan struct{})}
+		c.flight = f
+		go func() {
+			c.walks.Add(1)
+			f.out, f.disk = walk()
+			c.mu.Lock()
+			if c.flight == f {
+				c.flight = nil
+			}
+			if f.gen == c.gen { // not invalidated while walking
+				c.out, c.disk, c.print, c.at, c.valid = f.out, f.disk, f.print, time.Now(), true
+				c.key, c.keyed = f.key, f.keyed
+			}
+			c.mu.Unlock()
+			close(f.done)
+		}()
+	}
+	c.mu.Unlock()
+	<-f.done
+	return copyStorage(f.out), f.disk
+}
+
+// snapsChangedLocked: a snapshot was created, replaced or deleted. Caller holds m.mu.
+func (m *Manager) snapsChangedLocked() {
+	m.storageCache.invalidate()
+	m.storageGen++
+	m.stateGen++ // snapshots are billed: they are part of the usage report
+}
+
+// storage: per-team committed and on-disk bytes, cached for storageCacheTTL. A hit
+// costs O(teams) under m.mu: the cache is checked against the inventory generation
+// before any VM or snapshot is copied.
 func (m *Manager) storage() (map[string]*teamStorage, diskSpace) {
 	m.mu.Lock()
+	key := storageKey{m.storageGen, len(m.vms), len(m.snaps)}
+	if out, d, ok := m.storageCache.peek(key, storageCacheTTL); ok {
+		m.mu.Unlock()
+		return copyStorage(out), d
+	}
 	vms := make([]VM, 0, len(m.vms))
 	for _, v := range m.vms {
 		vms = append(vms, v)
@@ -715,6 +1048,13 @@ func (m *Manager) storage() (map[string]*teamStorage, diskSpace) {
 		snaps = append(snaps, s)
 	}
 	m.mu.Unlock()
+	return m.storageCache.getKeyed(key, true, storagePrint(vms, snaps), storageCacheTTL, func() (map[string]teamStorage, diskSpace) {
+		return m.walkStorage(vms, snaps)
+	})
+}
+
+// walkStorage walks every VM and snapshot dir.
+func (m *Manager) walkStorage(vms []VM, snaps []Snapshot) (map[string]teamStorage, diskSpace) {
 	out := map[string]*teamStorage{}
 	team := func(t string) *teamStorage {
 		if out[t] == nil {
@@ -733,5 +1073,9 @@ func (m *Manager) storage() (map[string]*teamStorage, diskSpace) {
 		t.Snapshots, t.CommittedBytes, t.SnapApparentBytes, t.SnapAllocBytes = t.Snapshots+1, t.CommittedBytes+snapCommit(s), t.SnapApparentBytes+a, t.SnapAllocBytes+b
 	}
 	d, _ := m.space()
-	return out, d
+	res := make(map[string]teamStorage, len(out))
+	for k, v := range out {
+		res[k] = *v
+	}
+	return res, d
 }

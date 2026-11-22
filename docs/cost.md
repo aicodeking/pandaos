@@ -1,6 +1,8 @@
 # Cost: self-hosted boat vs boat.dev
 
-All prices were read from public list-price pages on **2026-11-02**. They exclude VAT and are in USD unless marked. EUR prices are converted at **1.12 USD/EUR**, an approximate October 2026 spot rate ([30rates](https://30rates.com/eur-usd-forecast-tomorrow-this-week)) that was not checked for today. Unverified numbers are marked *(unverified)*. The machine-readable copy is [`bench/boatbench/prices.json`](../bench/boatbench/prices.json).
+All prices were read from public list-price pages on **2026-11-02**; boat.dev's AI proxy fee and its vendor benchmark figure (28.06 index units) were re-read on **2026-11-17**. They exclude VAT and are in USD unless marked. EUR prices are converted at **1.12 USD/EUR**, an approximate October 2026 spot rate ([30rates](https://30rates.com/eur-usd-forecast-tomorrow-this-week)) that was not checked for today. Unverified numbers are marked *(unverified)*. The machine-readable copy is [`bench/boatbench/prices.json`](../bench/boatbench/prices.json).
+
+**Benchmark units.** The Node.js web-tooling **geometric-mean index** is the geometric mean of subtest rates (subtest runs/s). It does not count completed Node jobs or full suites per second. The host index is a sum of per-VM indices. All Node cost figures below are USD per 1000 index units, an index-normalized price; the ratios describe that benchmark index only. They do not establish the cost of completing 1000 jobs. Historical JSON keys ending in `_runs_s` retain their spelling. Completed-suite throughput is shown separately from saved pass counts and wall times; no compatible vendor completed-suite rate is available.
 
 ## Headline
 
@@ -8,17 +10,21 @@ One `default` VM (4 vCPU / 8 GiB), cost per VM-hour. Self-hosted figures include
 - **Conservative / untrusted** rows use `memOvercommit` 1.0. That is the setting `services.boat.untrustedTenants` forces, so **a public boat.dev alternative, which hosts strangers, runs these rows.**
 - **Default** rows use boatd's default of 1.5, which is a bet that guests stay idle (see [Load](#what-happens-under-load)). They are only for one trust domain (your own agents).
 
-The AX42 is the only server that has been benchmarked (see [Measured on a real dedicated server](#measured-on-a-real-dedicated-server-hetzner-ax42)). Its measured `MemTotal` (63,381 MiB) gives the 7 and 11 VMs below. Every other row's VM count is boatd's admission rule applied to an *estimated* `MemTotal` ([§4](#4-model)). **These are prices per VM-hour, not per unit of work**, and the two lead to opposite answers. Per VM-hour, a full AX42 is cheaper than boat.dev. Per unit of CPU-bound work, a full AX42 costs 1.44× (trusted) to 1.65× (untrusted) boat.dev's cost per run, because a VM on a packed host runs at 38–55% of its solo speed ([cost per run](#cost-per-run-measured-on-the-ax42)). The [verdict](#verdict) separates the two by workload type.
+The AX42 is the only server that has been benchmarked (see [Measured on a real dedicated server](#measured-on-a-real-dedicated-server-hetzner-ax42)). Its measured `MemTotal` (63,381 MiB) gives the 7 and 11 VMs below. Every other row's VM count is boatd's admission rule applied to an *estimated* `MemTotal` ([§4](#4-model)). **These are prices per VM-hour, not per benchmark index unit**, and the two lead to opposite answers. Per VM-hour, a full AX42 is cheaper than boat.dev. Per geometric-mean index unit, a full AX42 costs 1.46× (trusted) to 1.67× (untrusted) boat.dev's cost per index unit, because a VM on a packed host runs at 38–55% of its solo speed ([cost per index unit](#cost-per-index-unit-measured-on-the-ax42)). The [verdict](#verdict) separates the two by workload type.
 
-**What is not measured (as of 2026-11-13).** Untrusted mode, the default a public service runs, is **unbenchmarked on the AX42**: it needs SMT off (`nosmt=force`, a reboot of the owner's box), and that is waiting for the owner's approval. There is **no measured boat.dev column** anywhere on this page (no boat.dev API key): every boat.dev figure is its published price or its own published benchmark. **AX102 numbers are projections** from the AX42's measured curve; nobody has run PandaOS on an AX102.
+**What is not measured, and provenance of checked-in AX42 artifacts (as of 2026-11-18).**
+- **AX42 `trusted` lifecycle baselines (`0d160dd`):** the checked-in PandaOS AX42 lifecycle baselines (`0.15s` resume, `0.30s` fork, `0.32s` warm create, `0.89s` cold create in `ax42-r11-2026-11-13`, plus `ax42-pandaos-2026-11-12` and `ax42-r12-2026-11-13`) ran in **`trusted` mode** (`fc_cache_type=Unsafe` except the dedicated `Writeback` disk run, `warmPool` enabled in the default r11/r12 runs, and SMT on) and **predate `-ssh-policy-helper-file`** / online SSH quarantine across all presets. Round 23–24 batch SSH policy (`POST /v1/vms/ssh-policy-batch`) and the non-disruptive `rotate-token` guest helper subcommand are unit-tested to avoid `sshd` restarts and `nft -f -` reloads on steady-state token refreshes, while live AX42 hardware timings for both initial cold/restore SSH policy bootstrap and `rotate-token` await the next AX42 capture.
+- **PandaOS rebooted `untrusted` pending hardware re-run:** production `untrusted` mode (`services.boat.untrustedTenants = true`: `nosmt=force`, `memOvercommit` 1.0, `storageOvercommit` 1, `warmPool` off, `blk-iocost` + `io.max`, `jailGid` `io_uring` `Async`, and online vsock/HTTPS SSH quarantine) is **pending an owner-approved rebooted AX42 hardware re-run**; the earlier Ubuntu loop-file `untrusted` run (`ax42-ubuntu-2026-11-11`) predated `stack.sh`'s `memOvercommit: 1` enforcement, `jailGid` `io_uring` (`Async`) setup, `losetup --direct-io=on` loop pass-through, and online SSH quarantine (`-ssh-policy-helper-file`). `bench/boatbench/presets.json` and `bench/boatbench/stack.sh` now enforce `memOvercommit: 1` for `untrusted` (matching `untrusted.json`) and are validated offline against `boatd`'s actual `loadConfig()` checks (`test_stack_config.py`), alongside `components/boat/boatd/e2e-perf.sh`, ready for the next hardware capture.
+- **Live `boat.dev` unmeasured (`BOATDEV_API_KEY` not provided):** there is **no measured `boat.dev` column** anywhere on this page because `BOATDEV_API_KEY` was not provided; every `boat.dev` figure is its published list price or its own vendor-published solo-VM benchmark. **AX102 numbers are projections** from the AX42's measured curve; nobody has run PandaOS on an AX102.
 
 **The VM counts are boatd's RAM admission, not the team quota.** Every team also has a quota (check `services.boat` team quota, boatd's `defaultTeam`). On the AX42 install it was 32 vCPU / 10 VMs / 64 GiB, which admits 8 `default` VMs, and the install run hit that cap. That is the default with `untrustedTenants` (the server profile's default); with `untrustedTenants = false` the default is 0, no per-team cap. To run the 11, 15 or 22 VMs priced below, raise that quota for the team that runs them.
 
-Generated by `python3 bench/boatbench/boatbench.py costs` from `prices.json`. Self-hosted figures include amortized setup and backup. Utilization is the share of VM slots that run around the clock. Stopped-VM retention is not included here; it has [its own tables](#stopped-vm-retention-what-boatdevs-free-14-days-cost-on-own-hardware). boat.dev charges $0.036 for every hour a sandbox runs, at any utilization.
+Generated by `python3 bench/boatbench/boatbench.py costs` from `prices.json`. Self-hosted figures include amortized setup and backup. Utilization is the share of VM slots that run around the clock. Stopped-VM retention is not included here; it has [its own tables](#stopped-vm-retention-what-boatdevs-free-14-days-cost-on-own-hardware). boat.dev charges $0.036 per running `default` VM-hour subject to its **$20/mo minimum plan floor** (555 included `default` VM-hours/mo); at low-utilization cells below 555 VM-h/mo (e.g., 10% utilization on a 7-VM or 6-VM host is 511 or 438 VM-h/mo), boat.dev's effective rate rises to **$0.039–$0.046/h** ($20 ÷ VM-hours) rather than $0.036/h — still far below self-hosted $0.233–$0.272/h at 10% utilization.
 
 | Server, mode (VMs) | 10% util. | 25% util. | 50% util. | 100% util. | + operator time, 100% | Break-even vs boat.dev ($0.036/h) |
 |---|---|---|---|---|---|---|
 | Hetzner AX42, conservative / untrusted (7) | $0.233 | $0.093 | $0.047 | $0.023 | $0.053 | 3,307 VM-h/mo, 65%; with operator time never (146%) |
+| Hetzner AX42, untrusted full-disk worst-case, 100%-full 59 GiB disks (6) | $0.272 | $0.109 | $0.054 | $0.027 | $0.061 | 3,307 VM-h/mo, 75%; with operator time never (171%) |
 | Hetzner AX42, default 1.5 (11) | $0.148 | $0.059 | $0.030 | $0.015 | $0.034 | 3,307 VM-h/mo, 41%; with operator time 93% |
 | Hetzner AX102, conservative / untrusted (15) | $0.279 | $0.112 | $0.056 | $0.028 | $0.042 | 8,492 VM-h/mo, 78%; with operator time never (116%) |
 | Hetzner AX102, default 1.5 (22) | $0.190 | $0.076 | $0.038 | $0.019 | $0.028 | 8,492 VM-h/mo, 53%; with operator time 79% |
@@ -31,9 +37,9 @@ Generated by `python3 bench/boatbench/boatbench.py costs` from `prices.json`. Se
 
 E2B, Daytona, Modal and Vercel cost $0.22–$0.68/h ([§2](#2-other-sandbox-providers-about-4-vcpu--8-gb)).
 
-**Disk binds before RAM in untrusted mode, and that is our own policy.** `untrustedTenants` forces `storageOvercommit` 1. Under that setting every VM, running or stopped, is charged its full nominal disk plus its memory snapshot (51 + 8 GiB ≈ 59 GiB) against the store's size ([`snapshot.go`](../components/boat/boatd/snapshot.go) `hostStorageCheck`). boat.dev keeps a stopped sandbox's disk **14 days at no charge**. A PandaOS host that offers the same must hold each sandbox's nominal 59 GiB for its run time plus 336 h. On an AX102 (~30 storage slots) that leaves 509 running VM-hours a month for 8 h sessions, which is $0.600 per running VM-hour. A thin-provisioning setting that charged actual use would lift most of that limit (*model*, see [retention](#stopped-vm-retention-what-boatdevs-free-14-days-cost-on-own-hardware)). boatd does not ship such a setting for untrusted mode, because a tenant could then fill the disk.
+**AX42 `7` RAM-bound sparse VMs vs `6` full-disk worst-case VMs, and stopped-VM retention.** `untrustedTenants` forces `storageOvercommit` 1, where [`snapshot.go`](../components/boat/boatd/snapshot.go) enforces two distinct checks: `hostStorageCheck` compares nominal committed bytes (`51 + 8 GiB ≈ 59 GiB` per running or stopped `default` VM) against raw `total * storageOvercommit`, while `checkFloor` enforces a live `minFreePct = 10` free-space floor on actual allocated blocks. On the AX42's single 512 GB NVMe (`476 GiB` raw partition, `404 GiB` usable after `minFreePct = 10` + ~5% OS/base images/btrfs metadata), `hostStorageCheck` admits up to `⌊476 / 59⌋ = 8` nominal VMs, so all **7** RAM-bound `default` VMs (`5,110 VM-h/mo, $0.023/h`) boot and run as long as disks remain sparse; however, if every tenant fills 100% of its 59 GiB disk, `checkFloor` (`minFreePct = 10%` on `404 GiB` usable) caps worst-case full-disk capacity at **6** VMs (`4,380 VM-h/mo, $0.027/h`), shown as its own worst-case row above. Once stopped sandboxes are kept (`R > 0`), nominal `storageOvercommit` 1 binds sharply. Raw-capacity sparse admission gives 8 AX42 / 30 AX102 storage slots; the full-disk reserve projection below uses 6 / 25: boat.dev keeps a stopped sandbox's disk **at least 14 days at no charge** (the tables price exactly 14), whereas holding each sandbox's nominal 59 GiB for its run time plus 336 h on an AX102 (**25 usable storage slots** on `1,519 GiB` usable of `1,788 GiB` raw partition) leaves 424 running VM-hours a month for 8 h sessions, or **$0.720** per running VM-hour ($1.169/h on an AX42). A thin-provisioning setting that charged actual use would lift most of that limit (*model*, see [retention](#stopped-vm-retention-what-boatdevs-free-14-days-cost-on-own-hardware)). boatd does not ship such a setting for untrusted mode, because a tenant could then fill the disk.
 
-**What the table shows.** At $0.036/h for 4 vCPU / 8 GB, boat.dev costs about as much as running the hardware yourself. In untrusted mode (no RAM overcommit), self-hosting is cheaper per VM-hour only on Hetzner, only when the box is more than 65–78% full around the clock, only if stopped VMs are deleted quickly, and only if your own time is free. At the default overcommit, which is for trusted guests only, the AX102 and AX42 beat boat.dev's hourly rate even with operator time, at 79% and 93% full. Those VM counts hold only while guests stay mostly idle. Per unit of CPU-bound work, the measured AX42 loses at every fill level. Against the other sandbox providers (about $0.33–$0.48 per hour), an AX102 is about 6–9× cheaper at 50% utilization with no overcommit.
+**What the table shows.** At $0.036/h list ($0.0288/h with boat.dev's published +25% top-up credit bonus) for 4 vCPU / 8 GB, boat.dev costs about as much as running the hardware yourself. In untrusted mode (no RAM overcommit), a single Hetzner host is cheaper per VM-hour than boat.dev's list rate only above 65–78% around-the-clock utilization (`75%` on AX42 full-disk worst-case; **81–97%** against boat.dev's +25% bonus rate of $0.0288/h, `94%` on AX42 full-disk worst-case), only if stopped VMs are deleted quickly, only without N+1 HA spare capacity ([TCO sensitivity](#credit-bonus-plan-fee--habackup-tco-sensitivity)), and only if your own time is free. At the default overcommit, which is for trusted guests only, the AX102 and AX42 beat boat.dev's list hourly rate even with operator time, at 79% and 93% full. Those VM counts hold only while guests stay mostly idle. Per geometric-mean index unit, the measured AX42 loses at every fill level. Against the other sandbox providers (about $0.33–$0.48 per hour), an AX102 is about 6–9× cheaper at 50% utilization with no overcommit. All of this assumes boat.dev's AI credentials proxy is off: with it on, boat.dev adds $1/day plus $1 per 1,000 requests, which for AI-heavy fleets can flip the result ([sensitivity](#boatdev-ai-proxy-fee-sensitivity-from-pricesjson)).
 
 ## 1. boat.dev pricing
 
@@ -55,16 +61,18 @@ Source: <https://docs.boat.dev/pricing.md>, accessed 2026-11-02. (`https://boat.
   - VM time is billed at the size rates above.
   - Saved snapshots beyond the included count cost $0.056 each per day ($1.68 per 30 days).
   - Extra starts cost $0.03–$0.07 each.
-  - The AI credentials proxy costs $1 per day plus $1 per 1,000 requests.
+  - The AI credentials proxy costs **$1 for each UTC day it is on, plus $1 per 1,000 proxied requests**, on top of VM time ([pricing.md](https://docs.boat.dev/pricing.md), [ai-credentials.md](https://docs.boat.dev/ai-credentials.md), both re-read 2026-11-17). It also charges while sandboxes are stopped. The day fee is per account switch (one for you, one per organization), not per VM; the request charge goes to the wallet of the sandbox that made the request. Neither page defines what counts as a request (errors, blocked placeholders) or whether idle days are waived, and boat.dev has no automatic AI spend cap. A sandbox that holds real keys (proxy off) pays nothing and gets no usage tracking. **PandaOS's proxy has no fee.** The fee is modeled in the [AI-proxy sensitivity](#boatdev-ai-proxy-fee-sensitivity-from-pricesjson) below.
 - **Included at no charge:**
-  - Automatic snapshots, kept 14 days after a stop.
+  - Automatic snapshots, kept at least 14 days after a stop (the live page says "at least 14 days"; cleanup is currently report-only, so a disk can outlive that).
   - Egress.
   - Public IPv6.
   - Public URLs.
-- **Not stated:** a per-GB snapshot storage price. A stopped sandbox keeps its disk for 14 days.
+- **Not stated:** a per-GB snapshot storage price. A stopped sandbox keeps its disk for at least 14 days (the page's wording; cleanup is currently report-only). The retention tables below price exactly 14 days, the stated minimum.
 - **Other terms:** No GPUs. 7-day trial (card required). Wallet bonus of 2–25% on payments of $200 or more.
 
 ## 2. Other sandbox providers, about 4 vCPU / 8 GB
+
+**API compatibility vs cloud pricing reference:** PandaOS `boat` implements its native `/v1` API plus drop-in **`boat.dev` `/api/v1`** compatibility (98 of 122 operations mapped, tested against official `boat-sdk` and `@boatdev/sdk`; 24 SaaS-only routes return `501 not_supported` — see [`boat.md`](boat.md#boatdev-api-compatibility-apiv1)). E2B (`e2b.dev`), Daytona, Modal Sandbox, Vercel Sandbox, and Sprites are included strictly as **cloud per-VM-hour pricing references** — `boat` does **not** implement `e2b.dev`'s SDK/ConnectRPC protocol, Jupyter code-interpreter kernels, or Daytona/Modal/Vercel/Sprites SDKs.
 
 | Provider | List rates | 4 vCPU / 8 GB per hour | Plan fee, caveats |
 |---|---|---|---|
@@ -73,7 +81,7 @@ Source: <https://docs.boat.dev/pricing.md>, accessed 2026-11-02. (`https://boat.
 | [Modal Sandbox](https://modal.com/pricing) | $0.00003942/core-s (1 core = 2 vCPU), $0.00000667/GiB-s | **$0.476** (2 cores + 8 GiB) | Starter $0 with $30/mo credit, Team $250/mo. Sandbox rates are 3× function rates. |
 | [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox/pricing) (Pro, iad1) | $0.128/active-CPU-h, $0.0212/GB-h provisioned memory, $0.60/1M creations | **$0.221** at 10% CPU, **$0.682** at 100% | **Not like-for-like:** CPU is billed only while busy, so cost depends on the workload. Pro $20/mo credit. 8 vCPU / 16 GB max on Pro. 24 h session max. |
 
-E2B and Daytona bill by the resource you size, so they are roughly like-for-like. Modal "cores" are physical cores. Vercel ties memory to vCPUs (2 GB each) and charges CPU only while it is active. None of these four bills idle time differently from boat.dev except Vercel's CPU.
+E2B and Daytona bill by the resource you size, so they are roughly like-for-like. Modal "cores" are physical cores. Vercel (and active-CPU-billed sandboxes like Fly.io Sprites) bills CPU only while active; Vercel ties memory to vCPUs (2 GB each). None of the provisioned-hour providers above bills idle time differently from boat.dev.
 
 ## 3. Dedicated servers
 
@@ -133,64 +141,215 @@ These counts are RAM admission only. The team quota is checked separately, so ch
 
 At 1× CPU (no overcommit) the AX42, AX102, ADVANCE-3 and Latitude boxes become CPU-bound at 4, 8, 6 and 8 VMs, and their cost per VM-hour roughly doubles. The AX162 is the only box with CPU to spare, but at its 128 GB base RAM it holds the same VMs as an AX102 for 2.4× the price. It only pays off with a RAM upgrade (512 GB would admit 60 VMs at 1.0 with the same MemTotal estimate; upgrade price not checked).
 
-**Cost per VM-hour** = monthly cost / (VMs × 730 × utilization). The headline table shows the results. boat.dev charges $0.036 for every hour that actually runs, whatever the utilization.
+**Cost per VM-hour** = monthly cost / (VMs × 730 × utilization). The headline table shows the results. boat.dev charges $0.036 per running `default` VM-hour subject to its $20/mo minimum plan floor (555 included VM-hours/mo, so low-utilization workloads below 555 VM-h/mo — such as the 10% utilization cells on 6- and 7-VM hosts — pay the $20/mo floor, i.e. $0.039–$0.046/h effective).
 
-**Break-even.** boat.dev costs max($20, $0.036 × VM-hours) per month. Self-hosting is cheaper once VM-hours exceed monthly cost / $0.036. The last column of the [headline table](#headline) gives that point as a share of capacity (VMs × 730); above 100% means never. That column ignores retention.
+**Break-even.** At list rates boat.dev costs max($20, $0.036 × VM-hours) per month across its published **$20, $100, $500 and $2,000** monthly plans (whose fee comes back as `555 / 2,777 / 13,888 / 55,555` included `default` VM-hours at `$0.0360/h`, with higher concurrency and start-rate limits — `$100/mo` gives `30/210/840` starts per min/h/day, needed for a 5-repeat `boatbench` run). Separately, wallet top-up payments of **$200+** earn a **+2% to +25%** credit bonus, bringing effective compute down from `$0.0353/h` (`+2%`) to `$0.036 / 1.25 =` **$0.0288/h** (`+25%`). Self-hosting is cheaper once VM-hours exceed monthly cost / boat.dev's effective hourly rate. The last column of the [headline table](#headline) gives that point against the $0.036/h list rate as a share of capacity (VMs × 730); the sensitivity table below adds the +25% bonus rate ($0.0288/h), operator time, and N+1 HA / off-host snapshot backup topologies. Above 100% means never. Both columns ignore stopped-VM retention.
 
-**When self-hosting does win:**
-- **Against E2B, Daytona, Modal or Vercel.** At about $0.33/h, an AX102 breaks even at 924 VM-hours/month (8% of capacity at 1.0).
-- **When guests really do stay idle.** The default rows then apply: an AX102 at 100% utilization costs $0.019/h, about half of boat.dev's rate. That is for trusted guests only: untrustedTenants forbids the overcommit. boat.dev's rate has no such condition.
-- **When you need something boat.dev doesn't sell.** That includes your own kernel or images, data on your own hardware, more than 12 starts per minute on the $20 plan, or no per-start and per-snapshot fees.
+### Credit-bonus, plan-fee & HA/backup TCO sensitivity
+
+Generated by `python3 bench/boatbench/boatbench.py costs` from `prices.json`.
+
+Published `boat.dev` monthly plans (`$20`, `$100`, `$500`, `$2,000`) and separate wallet top-up credit bonus tiers (`+2%` to `+25%` on `$200+` payments, `default` 4 vCPU / 8 GB):
+
+| boat.dev tier | Monthly fee | Top-up bonus | Effective $/VM-hour | Notes |
+|---|---|---|---|---|
+| Plan $20/mo (minimum) | $20/mo | +0% | $0.0360/h | 555 included default VM-hours; 100 concurrent; 12/60/200 starts per min/h/day; 10 saved snapshots |
+| Plan $100/mo | $100/mo | +0% | $0.0360/h | 2,777 included default VM-hours; 300 concurrent; 30/210/840 starts per min/h/day (needed for 5-repeat boatbench); 50 saved snapshots |
+| Plan $500/mo | $500/mo | +0% | $0.0360/h | 13,888 included default VM-hours; 1,000 concurrent; 65/420/1,680 starts per min/h/day; 250 saved snapshots |
+| Plan $2,000/mo | $2,000/mo | +0% | $0.0360/h | 55,555 included default VM-hours; 2,000 concurrent; 90/600/2,400 starts per min/h/day; 1,000 saved snapshots |
+| Wallet top-up ($200+ min bonus, +2%) | $0/mo | +2% | $0.0353/h | Wallet bonus starts at +2% on top-up payments of $200 or more ($0.036 / 1.02, separate from monthly plan fee) |
+| Wallet top-up (max published bonus, +25%) | $0/mo | +25% | $0.0288/h | $0.036 / 1.25 = $0.0288/VM-hour at maximum published +25% wallet top-up bonus |
+
+**Architecture & TCO formula note:** **`boatd` and `boat-api` are single-host daemons (no built-in multi-node scheduler, shared control plane, or automatic failover)**, so the `4+1` and `1+1` rows below model independent hosts behind external routing plus periodic off-host snapshot export, not built-in live HA. Let `H = usd_per_month + setup_usd / 12`. **4+1 total cluster TCO = `5 × H + 14.784`; per serving host = `(5 × H + 14.784) / 4`**. The table allocates this across four serving hosts; the fifth is spare. Single host = `H + backup_usd_per_month`; 1+1 pair = `2 × H + 14.784` per one serving host. Multi-host topologies replace the single-host archive with **one shared `$14.78/mo` (`€13.20 × 1.12`) 5 TB Hetzner BX21 off-host archive**. The archive is counted once per cluster. Archive capacity and restore time are assumptions, not measured availability. The `+ op ($150/mo)` column adds `$150/mo` per serving host (a conservative operator allowance).
+
+Self-hosted `untrusted` (`memOvercommit 1.0`, SMT off) TCO sensitivity across single-node vs N+1 HA + off-host snapshot backup storage, compared against both `boat.dev` list PAYG ($0.0360/h) and max +25% credit bonus ($0.0288/h):
+
+| Server (untrusted VMs) | Self-hosted topology | Monthly TCO / serving host | 50% util. $/VM-h | 100% util. $/VM-h | + op ($150/mo) 100% $/VM-h | Break-even vs list ($0.0360/h) | Break-even vs +25% bonus ($0.0288/h) |
+|---|---|---|---|---|---|---|---|
+| Hetzner AX42 (7) | Single host (1.00x, basic backup) | $119.04 | $0.047 | $0.023 | $0.053 | 3,307 VM-h/mo (65%) | 4,133 VM-h/mo (81%) |
+| Hetzner AX42 (7) | 4+1 N+1 cluster + 5 TB off-host backup (1.25x) | $148.01 | $0.058 | $0.029 | $0.058 | 4,111 VM-h/mo (80%) | 5,139 VM-h/mo (never (101%)) |
+| Hetzner AX42 (7) | 1+1 HA pair + 5 TB off-host backup (2.00x) | $245.69 | $0.096 | $0.048 | $0.077 | 6,825 VM-h/mo (never (134%)) | 8,531 VM-h/mo (never (167%)) |
+| Hetzner AX42 full-disk worst-case (6) | Single host (1.00x, basic backup) | $119.04 | $0.054 | $0.027 | $0.061 | 3,307 VM-h/mo (75%) | 4,133 VM-h/mo (94%) |
+| Hetzner AX42 full-disk worst-case (6) | 4+1 N+1 cluster + 5 TB off-host backup (1.25x) | $148.01 | $0.068 | $0.034 | $0.068 | 4,111 VM-h/mo (94%) | 5,139 VM-h/mo (never (117%)) |
+| Hetzner AX42 full-disk worst-case (6) | 1+1 HA pair + 5 TB off-host backup (2.00x) | $245.69 | $0.112 | $0.056 | $0.090 | 6,825 VM-h/mo (never (156%)) | 8,531 VM-h/mo (never (195%)) |
+| Hetzner AX102 (15) | Single host (1.00x, basic backup) | $305.70 | $0.056 | $0.028 | $0.042 | 8,492 VM-h/mo (78%) | 10,615 VM-h/mo (97%) |
+| Hetzner AX102 (15) | 4+1 N+1 cluster + 5 TB off-host backup (1.25x) | $381.35 | $0.070 | $0.035 | $0.049 | 10,593 VM-h/mo (97%) | 13,241 VM-h/mo (never (121%)) |
+| Hetzner AX102 (15) | 1+1 HA pair + 5 TB off-host backup (2.00x) | $619.02 | $0.113 | $0.057 | $0.070 | 17,195 VM-h/mo (never (157%)) | 21,494 VM-h/mo (never (196%)) |
+| Hetzner AX162 (15) | Single host (1.00x, basic backup) | $719.64 | $0.131 | $0.066 | $0.079 | 19,990 VM-h/mo (never (183%)) | 24,987 VM-h/mo (never (228%)) |
+| Hetzner AX162 (15) | 4+1 N+1 cluster + 5 TB off-host backup (1.25x) | $898.76 | $0.164 | $0.082 | $0.096 | 24,966 VM-h/mo (never (228%)) | 31,207 VM-h/mo (never (285%)) |
+| Hetzner AX162 (15) | 1+1 HA pair + 5 TB off-host backup (2.00x) | $1,446.89 | $0.264 | $0.132 | $0.146 | 40,191 VM-h/mo (never (367%)) | 50,239 VM-h/mo (never (459%)) |
+| OVH US ADVANCE-3 (2024) (7) | Single host (1.00x, basic backup) | $282.25 | $0.110 | $0.055 | $0.085 | 7,840 VM-h/mo (never (153%)) | 9,800 VM-h/mo (never (192%)) |
+| OVH US ADVANCE-3 (2024) (7) | 4+1 N+1 cluster + 5 TB off-host backup (1.25x) | $349.01 | $0.137 | $0.068 | $0.098 | 9,695 VM-h/mo (never (190%)) | 12,118 VM-h/mo (never (237%)) |
+| OVH US ADVANCE-3 (2024) (7) | 1+1 HA pair + 5 TB off-host backup (2.00x) | $567.28 | $0.222 | $0.111 | $0.140 | 15,758 VM-h/mo (never (308%)) | 19,697 VM-h/mo (never (385%)) |
+| Latitude.sh m4.metal.medium (15) | Single host (1.00x, basic backup) | $462.00 | $0.084 | $0.042 | $0.056 | 12,833 VM-h/mo (never (117%)) | 16,042 VM-h/mo (never (146%)) |
+| Latitude.sh m4.metal.medium (15) | 4+1 N+1 cluster + 5 TB off-host backup (1.25x) | $573.70 | $0.105 | $0.052 | $0.066 | 15,936 VM-h/mo (never (146%)) | 19,920 VM-h/mo (never (182%)) |
+| Latitude.sh m4.metal.medium (15) | 1+1 HA pair + 5 TB off-host backup (2.00x) | $926.78 | $0.169 | $0.085 | $0.098 | 25,744 VM-h/mo (never (235%)) | 32,180 VM-h/mo (never (294%)) |
+
+### boat.dev AI-proxy fee sensitivity (from prices.json)
+
+boat.dev's AI credentials proxy is billed apart from VM time: **$1 per UTC day it is on plus $1 per 1,000 proxied requests**, from `prices.json` `boatdev.ai_proxy`. It matters only for agents that use boat.dev's proxy instead of holding real keys. Assumptions: the requests are the fleet's total per UTC day; the fleet runs 24/7 for the effective rate (the day fee also accrues while sandboxes are stopped); list rate $0.036/h, no wallet bonus (a bonus would shrink the fee too); 730 h = 30.42 days a month; self-hosted cost is whole hosts at the `untrusted` VM count (`ceil(fleet / VMs per host)` × monthly cost, no operator time or HA); **break-even duty** is the share of each VM's hours that must run before boat.dev costs as much as those hosts, where `boat.dev = fleet × 730 × duty × $0.036 + proxy fee` (the fee does not shrink with duty) and `any` means the fee alone exceeds the hosts. `0` requests/day is proxy-on-but-idle ($1/day).
+
+| Proxied requests/day (fleet) | Fleet (VMs) | Proxy fee $/mo | boat.dev effective $/VM-h, 24/7 | Break-even duty vs Hetzner AX42 (7 VMs/host, $119.04/mo/host) | Break-even duty vs Hetzner AX102 (15 VMs/host, $305.70/mo/host) |
+|---|---|---|---|---|---|
+| 0 | 1 | $30.42 | $0.078 | never (337%) (1 host) | never (1048%) (1 host) |
+| 0 | 7 | $30.42 | $0.042 | 48% (1 host) | never (150%) (1 host) |
+| 0 | 15 | $30.42 | $0.039 | 83% (3 hosts) | 70% (1 host) |
+| 0 | 50 | $30.42 | $0.037 | 70% (8 hosts) | 91% (4 hosts) |
+| 0 | 100 | $30.42 | $0.036 | 67% (15 hosts) | 80% (7 hosts) |
+| 2,000 | 1 | $91.25 | $0.161 | never (106%) (1 host) | never (816%) (1 host) |
+| 2,000 | 7 | $91.25 | $0.054 | 15% (1 host) | never (117%) (1 host) |
+| 2,000 | 15 | $91.25 | $0.044 | 67% (3 hosts) | 54% (1 host) |
+| 2,000 | 50 | $91.25 | $0.038 | 66% (8 hosts) | 86% (4 hosts) |
+| 2,000 | 100 | $91.25 | $0.037 | 64% (15 hosts) | 78% (7 hosts) |
+| 20,000 | 1 | $638.75 | $0.911 | any (fee alone > hosts) (1 host) | any (fee alone > hosts) (1 host) |
+| 20,000 | 7 | $638.75 | $0.161 | any (fee alone > hosts) (1 host) | any (fee alone > hosts) (1 host) |
+| 20,000 | 15 | $638.75 | $0.094 | any (fee alone > hosts) (3 hosts) | any (fee alone > hosts) (1 host) |
+| 20,000 | 50 | $638.75 | $0.053 | 24% (8 hosts) | 44% (4 hosts) |
+| 20,000 | 100 | $638.75 | $0.045 | 44% (15 hosts) | 57% (7 hosts) |
+| 100,000 | 1 | $3,072.08 | $4.244 | any (fee alone > hosts) (1 host) | any (fee alone > hosts) (1 host) |
+| 100,000 | 7 | $3,072.08 | $0.637 | any (fee alone > hosts) (1 host) | any (fee alone > hosts) (1 host) |
+| 100,000 | 15 | $3,072.08 | $0.317 | any (fee alone > hosts) (3 hosts) | any (fee alone > hosts) (1 host) |
+| 100,000 | 50 | $3,072.08 | $0.120 | any (fee alone > hosts) (8 hosts) | any (fee alone > hosts) (4 hosts) |
+| 100,000 | 100 | $3,072.08 | $0.078 | any (fee alone > hosts) (15 hosts) | any (fee alone > hosts) (7 hosts) |
+
+Reading it: with the proxy off (real keys in the VM) the fee is $0 and the earlier tables apply unchanged. At 2,000 requests/day the fee is $91/mo, which moves the AX42 break-even for a 7-VM fleet from 65% to 15% of hours. At 20,000 requests/day ($639/mo) a fleet of up to 15 VMs is cheaper on one AX102 (or three AX42s) at any utilization, and at 100,000 requests/day ($3,072/mo) the fee alone exceeds 7 AX102s. **For AI-heavy fleets the proxy fee, not the VM rate, decides the comparison.** The fee matches a whole AX102 ($305.70/mo) at about 9,050 requests/day. The fee is moot when real keys are held in the VM, but boat.dev then has no usage tracking or blocking for that sandbox.
 
 ### Stopped-VM retention: what boat.dev's free 14 days cost on own hardware
 
-**Where the cost comes from.** The retention cost is not a hardware fact. It comes from our own `storageOvercommit` 1 policy, which `untrustedTenants` forces: every VM, running or stopped, is charged its nominal disk plus its memory snapshot (about 59 GiB for a `default` VM), whatever it actually uses. A stopped VM therefore takes one of the host's storage slots exactly as a running VM does, while using none of its RAM slots. Under that policy the marginal cost of keeping one stopped VM is monthly cost / storage slots. On an AX102 that is $305.70 / 30 = **$10.19 a month** ($4.69 for boat.dev's 14 days). On an AX42 it is $119.04 / 8 = $14.88 a month.
+**Where the cost comes from.** The retention cost comes from our own `storageOvercommit` 1 policy, which `untrustedTenants` forces, combined with usable NVMe headroom: `boatd` holds back `minFreePct = 10` (10% of the filesystem) and OS/base guest images/btrfs metadata reserve another ~5%, leaving **85% usable tenant storage** (`usable_disk_factor = 0.85`: **404 GiB** usable of `476 GiB` raw on the AX42, **1,519 GiB** of `1,788 GiB` on the AX102 and AX162, **759 GiB** of `894 GiB` on OVH Advance-3, and **1,503 GiB** of `1,769 GiB` on Latitude m4.metal.medium). Every VM, running or stopped, is charged its nominal disk plus its memory snapshot (about 59 GiB for a `default` VM) against raw capacity, whatever it actually uses. A stopped VM therefore takes one nominal storage slot and no RAM slot. Raw-capacity sparse admission permits 8 AX42 / 30 AX102 storage slots as long as actual blocks remain below the live floor. With fully occupied quotas and reserve headroom, the projection uses 6 / 25 slots. In that full-disk case the marginal cost of keeping one stopped VM is monthly cost / usable storage slots: on an AX102 that is $305.70 / 25 = **$12.23 a month** ($5.63 for boat.dev's 14 days); on an AX42 it is $119.04 / 6 = **$19.84 a month** — where `boatd`'s `hostStorageCheck` (`⌊476 / 59⌋ = 8`) lets all **7** RAM-bound VMs (`5,110 VM-h/mo, $0.023/h`) boot while disks stay sparse, whereas worst-case 100%-full 59 GiB disks hit `checkFloor` (`minFreePct = 10%` on `404 GiB` usable) at **6** VMs (`4,380 VM-h/mo, $0.027/h`) even at `R = 0`.
 
-Running VM-hours per month ≤ min(RAM slots × 730, storage slots × 730 × H / (H + R)), for sessions of H hours kept R hours after stopping. Cost per running VM-hour is at 100% of that capacity, with no operator time. The tables below come from `python3 bench/boatbench/boatbench.py costs`.
+Running VM-hours per month ≤ min(RAM slots × 730, case-specific storage slots × 730 × H / (H + R)), for sessions of H hours kept R hours after stopping. Cost per running VM-hour is at 100% of that capacity, with no operator time. The tables below come from `python3 bench/boatbench/boatbench.py costs`.
 
-- **storageOvercommit 1 rows:** what boatd ships for untrusted tenants.
+- **PROJECTION, shipped raw-capacity sparse rows:** raw nominal admission under the shipped policy, conditional on sparse allocation.
+- **PROJECTION, full-disk reserve rows:** fully occupied quotas after the free-space and metadata reserves. Both are projections, not measured retained fleets.
 - **MODEL rows:** a thin-provisioning setting that charges each VM its actual use. **They are a model, not a measurement, and boatd has no such setting for untrusted mode today.** Charging actual use lets a tenant grow into space the admission check did not reserve, so it needs a quota per VM (btrfs qgroups exist) and a policy for a full disk. **Not built in r12, because boatd is not half-way there:** each *team* already has a qgroup limit (its subvolume, 1.25 × its `maxDiskGiB`) and the free-space floor refuses creates and snapshots, but a per-VM limit needs a subvolume per VM, which boatd gave up because a memory file hard-linked across subvolumes becomes a reflink that waits for its writeback; and returning a VM's free blocks is not possible: Firecracker's virtio-blk offers no discard (`discard_max_bytes` 0 in the guest, boat-e2e 43379945048), and punching them from the host (`e2fsck -E discard` on a stopped VM's disk) would replay the guest's journal under a memory snapshot that still holds that filesystem, as root, on tenant-controlled ext4. The cost inputs stay as measured (3.35 GiB per stopped VM, `thin.json`). The per-VM use figures and their sources are in `prices.json` (`assumptions.retention`).
 
 #### Stopped-VM retention: Hetzner AX42
 
-Hetzner AX42, untrusted (7 RAM slots), store 476 GiB (measured: PandaOS install, boat store = btrfs on one 512 GB NVMe, df 477G (2026-11-12)). Cells: running VM-hours per month, and $ per running VM-hour at 100% of that capacity.
+Hetzner AX42, untrusted (7 RAM slots), usable tenant store **404 GiB** of 476 GiB raw partition (deducts OS/images/btrfs metadata + `boatd` `minFreePct=10%`; measured: PandaOS install, boat store = btrfs on one 512 GB NVMe, df 477G (2026-11-12); 404 GiB usable after 15% reserve (10% boatd minFreePct + 5% base images & btrfs metadata)). Note: `boatd` `hostStorageCheck` checks raw partition capacity (`⌊476 / 59⌋ = 8` nominal VMs), so all **7** RAM-bound VMs (`5,110 VM-h/mo, $0.023/h`) boot while disks remain sparse; if every tenant fills 100% of its 59 GiB quota, live `checkFloor` (`minFreePct=10%`) caps worst-case full-disk capacity at **6** VMs (`4,380 VM-h/mo, $0.027/h`). All retention cells are projections, not measured retained fleets. Raw-capacity sparse uses nominal admission against the raw partition and assumes allocated blocks stay below the live floor; full-disk reserve budgets fully occupied quotas against usable storage. Thin rows model a policy that is not shipped. Cells: running VM-hours per month, and $ per running VM-hour at 100% of that capacity.
 
-| Storage policy | Storage slots | Session H | R = 0 (delete on stop) | R = 1 day | R = 14 days |
+| Storage policy | Storage slots (case) | Session H | R = 0 (delete on stop) | R = 1 day | R = 14 days |
 |---|---|---|---|---|---|
-| storageOvercommit 1 (shipped): 59 GiB per VM | 8 | 1 h | 5,110 (RAM-bound), $0.023/h | 234, $0.510/h | 17, $6.869/h |
-| storageOvercommit 1 (shipped): 59 GiB per VM | 8 | 8 h | 5,110 (RAM-bound), $0.023/h | 1,460, $0.082/h | 136, $0.876/h |
-| storageOvercommit 1 (shipped): 59 GiB per VM | 8 | 24 h | 5,110 (RAM-bound), $0.023/h | 2,920, $0.041/h | 389, $0.306/h |
-| storageOvercommit 1 (shipped): 59 GiB per VM | 8 | 168 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 1,947, $0.061/h |
-| MODEL, thin: 3.4 GiB actual use per VM (a) | 140 | 1 h | 5,110 (RAM-bound), $0.023/h | 4,088, $0.029/h | 303, $0.393/h |
-| MODEL, thin: 3.4 GiB actual use per VM (a) | 140 | 8 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 2,377, $0.050/h |
-| MODEL, thin: 3.4 GiB actual use per VM (a) | 140 | 24 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h |
-| MODEL, thin: 3.4 GiB actual use per VM (a) | 140 | 168 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h |
-| MODEL, thin: 10 GiB actual use per VM (b) | 47 | 1 h | 5,110 (RAM-bound), $0.023/h | 1,372, $0.087/h | 102, $1.169/h |
-| MODEL, thin: 10 GiB actual use per VM (b) | 47 | 8 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 798, $0.149/h |
-| MODEL, thin: 10 GiB actual use per VM (b) | 47 | 24 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 2,287, $0.052/h |
-| MODEL, thin: 10 GiB actual use per VM (b) | 47 | 168 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 8 | 1 h | 5,110 (RAM-bound), $0.023/h | 234, $0.510/h | 17, $6.869/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 8 | 8 h | 5,110 (RAM-bound), $0.023/h | 1,460, $0.082/h | 136, $0.876/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 8 | 24 h | 5,110 (RAM-bound), $0.023/h | 2,920, $0.041/h | 389, $0.306/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 8 | 168 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 1,947, $0.061/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 6 | 1 h | 4,380, $0.027/h | 175, $0.679/h | 13, $9.159/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 6 | 8 h | 4,380, $0.027/h | 1,095, $0.109/h | 102, $1.169/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 6 | 24 h | 4,380, $0.027/h | 2,190, $0.054/h | 292, $0.408/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 6 | 168 h | 4,380, $0.027/h | 3,832, $0.031/h | 1,460, $0.082/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 118 | 1 h | 5,110 (RAM-bound), $0.023/h | 3,446, $0.035/h | 256, $0.466/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 118 | 8 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 2,003, $0.059/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 118 | 24 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 118 | 168 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 40 | 1 h | 5,110 (RAM-bound), $0.023/h | 1,168, $0.102/h | 87, $1.374/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 40 | 8 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 679, $0.175/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 40 | 24 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 1,947, $0.061/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 40 | 168 h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h | 5,110 (RAM-bound), $0.023/h |
 
 (a) measured: a stopped default VM after the Node loop setup, btrfs exclusive bytes incl. memory snapshot, 3.35 GiB; PandaOS AX42 2026-11-12, results/ax42-pandaos-2026-11-12/thin.json.
 (b) illustrative: a heavier session.
 
 #### Stopped-VM retention: Hetzner AX102
 
-Hetzner AX102, untrusted (15 RAM slots), store 1,788 GiB (estimate: 1.92 TB = 1,788 GiB before btrfs and the OS (not measured)). Cells: running VM-hours per month, and $ per running VM-hour at 100% of that capacity.
+Hetzner AX102, untrusted (15 RAM slots), usable tenant store **1,519 GiB** of 1,788 GiB raw partition (deducts OS/images/btrfs metadata + `boatd` `minFreePct=10%`; estimate: one 1.92 TB NVMe = 1,788 GiB raw; 1,519 GiB usable after 15% reserve (10% boatd minFreePct + 5% OS/base images & btrfs metadata)). All retention cells are projections, not measured retained fleets. Raw-capacity sparse uses nominal admission against the raw partition and assumes allocated blocks stay below the live floor; full-disk reserve budgets fully occupied quotas against usable storage. Thin rows model a policy that is not shipped. Cells: running VM-hours per month, and $ per running VM-hour at 100% of that capacity.
 
-| Storage policy | Storage slots | Session H | R = 0 (delete on stop) | R = 1 day | R = 14 days |
+| Storage policy | Storage slots (case) | Session H | R = 0 (delete on stop) | R = 1 day | R = 14 days |
 |---|---|---|---|---|---|
-| storageOvercommit 1 (shipped): 59 GiB per VM | 30 | 1 h | 10,950 (RAM-bound), $0.028/h | 876, $0.349/h | 65, $4.704/h |
-| storageOvercommit 1 (shipped): 59 GiB per VM | 30 | 8 h | 10,950 (RAM-bound), $0.028/h | 5,475, $0.056/h | 509, $0.600/h |
-| storageOvercommit 1 (shipped): 59 GiB per VM | 30 | 24 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 1,460, $0.209/h |
-| storageOvercommit 1 (shipped): 59 GiB per VM | 30 | 168 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 7,300, $0.042/h |
-| MODEL, thin: 3.4 GiB actual use per VM (a) | 525 | 1 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 1,137, $0.269/h |
-| MODEL, thin: 3.4 GiB actual use per VM (a) | 525 | 8 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 8,913, $0.034/h |
-| MODEL, thin: 3.4 GiB actual use per VM (a) | 525 | 24 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h |
-| MODEL, thin: 3.4 GiB actual use per VM (a) | 525 | 168 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h |
-| MODEL, thin: 10 GiB actual use per VM (b) | 178 | 1 h | 10,950 (RAM-bound), $0.028/h | 5,198, $0.059/h | 386, $0.793/h |
-| MODEL, thin: 10 GiB actual use per VM (b) | 178 | 8 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 3,022, $0.101/h |
-| MODEL, thin: 10 GiB actual use per VM (b) | 178 | 24 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 8,663, $0.035/h |
-| MODEL, thin: 10 GiB actual use per VM (b) | 178 | 168 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 30 | 1 h | 10,950 (RAM-bound), $0.028/h | 876, $0.349/h | 65, $4.704/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 30 | 8 h | 10,950 (RAM-bound), $0.028/h | 5,475, $0.056/h | 509, $0.600/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 30 | 24 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 1,460, $0.209/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 30 | 168 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 7,300, $0.042/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 1 h | 10,950 (RAM-bound), $0.028/h | 730, $0.419/h | 54, $5.645/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 8 h | 10,950 (RAM-bound), $0.028/h | 4,562, $0.067/h | 424, $0.720/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 24 h | 10,950 (RAM-bound), $0.028/h | 9,125, $0.034/h | 1,217, $0.251/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 168 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 6,083, $0.050/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 446 | 1 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 966, $0.316/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 446 | 8 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 7,572, $0.040/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 446 | 24 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 446 | 168 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 151 | 1 h | 10,950 (RAM-bound), $0.028/h | 4,409, $0.069/h | 327, $0.935/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 151 | 8 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 2,563, $0.119/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 151 | 24 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 7,349, $0.042/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 151 | 168 h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h | 10,950 (RAM-bound), $0.028/h |
+
+(a) measured: a stopped default VM after the Node loop setup, btrfs exclusive bytes incl. memory snapshot, 3.35 GiB; PandaOS AX42 2026-11-12, results/ax42-pandaos-2026-11-12/thin.json.
+(b) illustrative: a heavier session.
+
+#### Stopped-VM retention: Hetzner AX162
+
+Hetzner AX162, untrusted (15 RAM slots), usable tenant store **1,519 GiB** of 1,788 GiB raw partition (deducts OS/images/btrfs metadata + `boatd` `minFreePct=10%`; estimate: one 1.92 TB NVMe = 1,788 GiB raw; 1,519 GiB usable after 15% reserve (10% boatd minFreePct + 5% OS/base images & btrfs metadata)). All retention cells are projections, not measured retained fleets. Raw-capacity sparse uses nominal admission against the raw partition and assumes allocated blocks stay below the live floor; full-disk reserve budgets fully occupied quotas against usable storage. Thin rows model a policy that is not shipped. Cells: running VM-hours per month, and $ per running VM-hour at 100% of that capacity.
+
+| Storage policy | Storage slots (case) | Session H | R = 0 (delete on stop) | R = 1 day | R = 14 days |
+|---|---|---|---|---|---|
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 30 | 1 h | 10,950 (RAM-bound), $0.066/h | 876, $0.822/h | 65, $11.074/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 30 | 8 h | 10,950 (RAM-bound), $0.066/h | 5,475, $0.131/h | 509, $1.413/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 30 | 24 h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h | 1,460, $0.493/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 30 | 168 h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h | 7,300, $0.099/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 1 h | 10,950 (RAM-bound), $0.066/h | 730, $0.986/h | 54, $13.289/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 8 h | 10,950 (RAM-bound), $0.066/h | 4,562, $0.158/h | 424, $1.696/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 24 h | 10,950 (RAM-bound), $0.066/h | 9,125, $0.079/h | 1,217, $0.591/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 168 h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h | 6,083, $0.118/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 446 | 1 h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h | 966, $0.745/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 446 | 8 h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h | 7,572, $0.095/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 446 | 24 h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 446 | 168 h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 151 | 1 h | 10,950 (RAM-bound), $0.066/h | 4,409, $0.163/h | 327, $2.200/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 151 | 8 h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h | 2,563, $0.281/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 151 | 24 h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h | 7,349, $0.098/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 151 | 168 h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h | 10,950 (RAM-bound), $0.066/h |
+
+(a) measured: a stopped default VM after the Node loop setup, btrfs exclusive bytes incl. memory snapshot, 3.35 GiB; PandaOS AX42 2026-11-12, results/ax42-pandaos-2026-11-12/thin.json.
+(b) illustrative: a heavier session.
+
+#### Stopped-VM retention: OVH US ADVANCE-3 (2024)
+
+OVH US ADVANCE-3 (2024), untrusted (7 RAM slots), usable tenant store **759 GiB** of 894 GiB raw partition (deducts OS/images/btrfs metadata + `boatd` `minFreePct=10%`; estimate: one 960 GB NVMe = 894 GiB raw; 759 GiB usable after 15% reserve (10% boatd minFreePct + 5% OS/base images & btrfs metadata)). All retention cells are projections, not measured retained fleets. Raw-capacity sparse uses nominal admission against the raw partition and assumes allocated blocks stay below the live floor; full-disk reserve budgets fully occupied quotas against usable storage. Thin rows model a policy that is not shipped. Cells: running VM-hours per month, and $ per running VM-hour at 100% of that capacity.
+
+| Storage policy | Storage slots (case) | Session H | R = 0 (delete on stop) | R = 1 day | R = 14 days |
+|---|---|---|---|---|---|
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 15 | 1 h | 5,110 (RAM-bound), $0.055/h | 438, $0.644/h | 32, $8.687/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 15 | 8 h | 5,110 (RAM-bound), $0.055/h | 2,738, $0.103/h | 255, $1.108/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 15 | 24 h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h | 730, $0.387/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 15 | 168 h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h | 3,650, $0.077/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 12 | 1 h | 5,110 (RAM-bound), $0.055/h | 350, $0.806/h | 26, $10.858/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 12 | 8 h | 5,110 (RAM-bound), $0.055/h | 2,190, $0.129/h | 204, $1.385/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 12 | 24 h | 5,110 (RAM-bound), $0.055/h | 4,380, $0.064/h | 584, $0.483/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 12 | 168 h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h | 2,920, $0.097/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 223 | 1 h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h | 483, $0.584/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 223 | 8 h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h | 3,786, $0.075/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 223 | 24 h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 223 | 168 h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 75 | 1 h | 5,110 (RAM-bound), $0.055/h | 2,190, $0.129/h | 162, $1.737/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 75 | 8 h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h | 1,273, $0.222/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 75 | 24 h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h | 3,650, $0.077/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 75 | 168 h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h | 5,110 (RAM-bound), $0.055/h |
+
+(a) measured: a stopped default VM after the Node loop setup, btrfs exclusive bytes incl. memory snapshot, 3.35 GiB; PandaOS AX42 2026-11-12, results/ax42-pandaos-2026-11-12/thin.json.
+(b) illustrative: a heavier session.
+
+#### Stopped-VM retention: Latitude.sh m4.metal.medium
+
+Latitude.sh m4.metal.medium, untrusted (15 RAM slots), usable tenant store **1,503 GiB** of 1,769 GiB raw partition (deducts OS/images/btrfs metadata + `boatd` `minFreePct=10%`; estimate: one 1.9 TB data NVMe = 1,769 GiB raw; 1,503 GiB usable after 15% reserve (10% boatd minFreePct + 5% OS/base images & btrfs metadata)). All retention cells are projections, not measured retained fleets. Raw-capacity sparse uses nominal admission against the raw partition and assumes allocated blocks stay below the live floor; full-disk reserve budgets fully occupied quotas against usable storage. Thin rows model a policy that is not shipped. Cells: running VM-hours per month, and $ per running VM-hour at 100% of that capacity.
+
+| Storage policy | Storage slots (case) | Session H | R = 0 (delete on stop) | R = 1 day | R = 14 days |
+|---|---|---|---|---|---|
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 29 | 1 h | 10,950 (RAM-bound), $0.042/h | 847, $0.546/h | 63, $7.354/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 29 | 8 h | 10,950 (RAM-bound), $0.042/h | 5,292, $0.087/h | 492, $0.938/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 29 | 24 h | 10,950 (RAM-bound), $0.042/h | 10,585, $0.044/h | 1,411, $0.327/h |
+| PROJECTION, shipped raw-capacity sparse: 59 GiB nominal per VM | 29 | 168 h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h | 7,057, $0.065/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 1 h | 10,950 (RAM-bound), $0.042/h | 730, $0.633/h | 54, $8.531/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 8 h | 10,950 (RAM-bound), $0.042/h | 4,562, $0.101/h | 424, $1.089/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 24 h | 10,950 (RAM-bound), $0.042/h | 9,125, $0.051/h | 1,217, $0.380/h |
+| PROJECTION, full-disk reserve: 59 GiB per VM | 25 | 168 h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h | 6,083, $0.076/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 442 | 1 h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h | 957, $0.483/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 442 | 8 h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h | 7,504, $0.062/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 442 | 24 h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h |
+| MODEL, thin: 3.4 GiB actual use per VM (a) | 442 | 168 h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 150 | 1 h | 10,950 (RAM-bound), $0.042/h | 4,380, $0.105/h | 325, $1.422/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 150 | 8 h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h | 2,547, $0.181/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 150 | 24 h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h | 7,300, $0.063/h |
+| MODEL, thin: 10 GiB actual use per VM (b) | 150 | 168 h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h | 10,950 (RAM-bound), $0.042/h |
 
 (a) measured: a stopped default VM after the Node loop setup, btrfs exclusive bytes incl. memory snapshot, 3.35 GiB; PandaOS AX42 2026-11-12, results/ax42-pandaos-2026-11-12/thin.json.
 (b) illustrative: a heavier session.
@@ -207,14 +366,14 @@ Every table assumes each sandbox runs one session and is then kept the full R ho
 | SMT | on | **off** (`nosmt=force`): an AX102 has 16 threads, not 32 |
 | VMs by CPU at `cpuOvercommit` 4 | 32 on an AX102 | **16**: RAM (15) still binds first, but 15 VMs are 60 vCPUs on 16 cores, 3.75 per core instead of 1.9 per thread |
 | VMs at 1× CPU (no CPU overcommit) | 8 | **4** |
-| Disk | `auto` engine (io_uring), no I/O cap | io_uring only for the VMMs' shared group (`io_uring_disabled` 1; until `46507a8`: `Sync` engine, io_uring off); busy VMs share the disk by weight (blk-iocost with the disk's measured model and p95 latency targets), `io.max` 4,000 MB/s and 200,000 IOPS per VM as a ceiling. Until 2026-11-10: `io.max` 500 MB/s and 20,000 IOPS (the run below) |
+| Disk | `auto` engine (io_uring), no I/O cap | `Async` (`io_uring`) scoped strictly to the jailed VMM group (`kernel.io_uring_disabled = 1` + `kernel.io_uring_group = jailGid` in both `nixos/profiles/server.nix` and `bench/boatbench/stack.sh`; historical `ax42-ubuntu-2026-11-11` and CI runs before R22 fell back to `Sync`); busy VMs share the disk by weight (blk-iocost with the disk's measured model and p95 latency targets), `io.max` 4,000 MB/s and 200,000 IOPS per VM as a ceiling. Until 2026-11-10: `io.max` 500 MB/s and 20,000 IOPS (the run below) |
 | Network | no cap | 25% uplink share per VM with fair queueing, 4,096 tracked connections, no SMTP (until `46507a8`: 1,000 Mbit/s egress and ingress per VM, which the AX42 Ubuntu run used) |
-| Storage | `storageOvercommit` 10 | **1**: committed storage (51 GiB disk + 8 GiB memory + logs, about 59 GiB per VM, running or stopped, plus snapshots) must fit the disk. About 30 kept VMs on an AX102's 1.92 TB mirror *(estimate: usable size after RAID 1 and btrfs not measured)*. About 8 on the AX42: the PandaOS install's store measured **476 GiB** (btrfs directly on **one** 512 GB NVMe, `df` 477G, 2026-11-12), 476 / 59 = 8. That store has **no redundancy**: the installer used one disk and no RAID, while the Ubuntu run used mdadm RAID 1 across both. A mirrored install has about the same usable size and survives a disk failure. **This binds before RAM as soon as stopped VMs are kept** ([retention](#stopped-vm-retention-what-boatdevs-free-14-days-cost-on-own-hardware)) |
+| Storage | `storageOvercommit` 10 | **1**: nominal committed storage (51 GiB disk + 8 GiB memory + logs, about 59 GiB per VM, running or stopped, plus snapshots) is checked against `total * storageOvercommit` in `hostStorageCheck`, while `checkFloor` enforces a live `minFreePct = 10` free-space floor (~85% usable tenant storage after `minFreePct = 10` + ~5% OS/base images/btrfs metadata). **25 usable storage slots** (`1,519 GiB` usable of `1,788 GiB` raw) on an AX102's 1.92 TB mirror *(estimate: raw size before RAID 1 and btrfs)*. On the AX42 (**476 GiB** raw btrfs directly on **one** 512 GB NVMe, `df` 477G, 2026-11-12, `404 GiB` usable), `hostStorageCheck` admits `⌊476 / 59⌋ = 8` nominal VMs so all **7** RAM-bound VMs (`$0.023/h`) boot while disks stay sparse, whereas `checkFloor` (`minFreePct = 10%`) caps worst-case 100%-full 59 GiB disks at **6** usable storage slots (`404 / 59 = 6`, `$0.027/h`). That single-disk install store has **no redundancy** (the Ubuntu run used mdadm RAID 1 across both; a mirrored install has about the same usable size and survives a disk failure). **Storage binds before RAM as soon as stopped VMs are kept — and on the AX42 (6 full-disk slots vs 7 RAM slots) whenever tenants fill their full 59 GiB quota** ([retention](#stopped-vm-retention-what-boatdevs-free-14-days-cost-on-own-hardware)) |
 | `warmPool`, `ksmTeam` | `warmPool` on by default (NixOS module), `ksmTeam` off by default | both refused |
 | Team quota (`services.boat.quotas`) | 0: no per-team cap, host admission only | 10 VMs, 32 vCPU, 64 GiB per team |
-| Cost per VM-hour, AX102, 100% | $0.019 (22 VMs) | **$0.028** (15 VMs), 78% full to break even with boat.dev, never with operator time |
+| Cost per VM-hour, AX102, 100% | $0.019 (22 VMs) | **$0.028** (15 VMs), 78% full to break even with boat.dev list ($0.036/h), 97% vs +25% credit bonus ($0.0288/h), never with operator time or 1+1 HA |
 
-So against boat.dev, a public PandaOS service is priced by the conservative rows: **$0.028 per VM-hour on an AX102 at 100% utilization versus boat.dev's $0.036, and more expensive than boat.dev below 78% utilization or once operator time counts.** SMT off does not lower the VM count at `cpuOvercommit` 4, but it halves the CPU behind each busy vCPU. [Measured on an AX42](#measured-on-a-real-dedicated-server-hetzner-ax42) below: SMT off cost 6% of host throughput at 7 VMs. The runner measurements follow it.
+So against boat.dev, a public PandaOS service is priced by the conservative rows: **$0.028 per VM-hour on a single AX102 at 100% utilization versus boat.dev's $0.036 list ($0.0288 with +25% credit bonus), and more expensive than boat.dev below 78% utilization (97% vs bonus) or with operator time; a 4+1 spare-host projection requires 97% utilization versus list and never breaks even versus the bonus rate.** SMT off does not lower the VM count at `cpuOvercommit` 4, but it halves the CPU behind each busy vCPU. [Measured on an AX42](#measured-on-a-real-dedicated-server-hetzner-ax42) below: SMT off cost 6% of aggregate host index at 7 VMs. The runner measurements follow it.
 
 ### Untrusted disk: the old caps and what replaced them
 
@@ -228,7 +387,7 @@ Same-runner disk matrix ([42769967285](https://github.com/aicodeking/pandaos/act
 | rand read, IOPS | 49.6-56.7k | 79.8k | 82.9k |
 
 - **The old caps were per VM and always on**: 41% of sequential write on a runner whose disk does 400-750 MB/s, and on an NVMe server (3-7 GB/s, 500k-1M IOPS) a ceiling 6-14x below the disk on bandwidth and 25-50x on IOPS, busy disk or idle.
-- **What replaced them protects only modestly.** A victim VM next to one flooding 1 MiB writes kept 24-26% of its fsync'd 4k writes with iocost + QoS, against 11-17% unprotected, and 40-53% of its sequential write against 46-61% (same run). iocost needs the disk's model: `services.boat.ioCostModel`, or `boat-iocost-model.service` measures it once (`boatd -measure-disk`); without either, boatd refuses to start in untrusted mode and names that command.
+- **What replaced them protects only modestly.** A victim VM next to one flooding 1 MiB writes kept 24-26% of its fsync'd 4k writes with iocost + QoS, against 11-17% unprotected, and 40-53% of its sequential write against 46-61% (same run). In `untrustedTenants`, `boatd` fails closed at startup unless cgroup v2 `+io` delegation, a resolvable whole block `stateDisk`, `ioCost` + `ioCostQoS`, and per-VM **`ioMax` (`io.max` hard BPS/IOPS ceiling)** are enforced; `ioCostModel` (`blk-iocost` proportional weight sharing) is enabled automatically once hardware model parameters are measured or configured (`boat-iocost-model.service` runs `boatd -measure-disk` once into `/var/lib/boat/iocost-model`, or set `services.boat.ioCostModel`) and logs a startup warning while sharing under `io.max` ceilings rather than blocking `boatd` startup if unset.
 - **`Writeback` cannot protect fsync.** With honest flushes, a flooding neighbour stalled the victim's fsync loop to 0 IOPS with or without iocost (runs 42759114633, 42769967285): both VMs' I/O passes through the host's page cache and one writeback queue. Tenants who need durable writes next to hostile neighbours need their own disk; price that in.
 
 ## Measured on a real dedicated server (Hetzner AX42)
@@ -258,7 +417,7 @@ BOATBENCH_DENSITY_LEVELS=1,2,4,7,11 python3 $B run --driver pandaos --repeats 2 
 # trusted-warm: --repeats 3 --only bc        trusted-writeback: --repeats 3 --only d
 ```
 
-- **Density levels follow the box.** boatd admits **7** `default` VMs on it at `memOvercommit` 1.0 (conservative / untrusted) and **11** at the default 1.5. Measured `MemTotal` is **63,381 MiB**, 875 MiB under this page's estimate of 64,256, which still gives 7 and 11 (11 needs 62,976). Untrusted stops at 7, its admission count. As on CI, `memOvercommit` stayed at the bench's 8, which only matters for admission (workload c's 10 VMs).
+- **Density levels follow the box.** boatd admits **7** `default` VMs on it at `memOvercommit` 1.0 (conservative / untrusted) and **11** at the default 1.5. Measured `MemTotal` is **63,381 MiB**, 875 MiB under this page's estimate of 64,256, which still gives 7 and 11 (11 needs 62,976). Untrusted stops at 7, its admission count. In that historical 2026-11-11 run, `memOvercommit` stayed at the bench's 8 for admission (workload c's 10 VMs); `presets.json` and `stack.sh` now enforce `memOvercommit: 1` for `untrusted` and are validated against `boatd`'s `loadConfig()`.
 - **Untrusted ran with SMT off** at runtime (`/sys/devices/system/cpu/smt/control`, 8 CPUs online), as `nosmt=force` would give. SMT was switched back on afterwards.
 - trusted-warm ran only b and c (the warm pool changes lifecycle, not steady-state speed) and trusted-writeback only d (the cache mode changes disk only). The other presets ran a–g.
 - Two of trusted's three host / VM pairs came from a first session. The stack was restarted before pair 3 (same build, same config). A first pass of trusted-warm and trusted-writeback was thrown away because the previous preset's options had leaked into it (see `unset` above).
@@ -266,13 +425,15 @@ BOATBENCH_DENSITY_LEVELS=1,2,4,7,11 python3 $B run --driver pandaos --repeats 2 
 
 ### Per preset, AX42
 
-Medians, n = 9 passes for (a) and 3 for the rest (8 for trusted and untrusted creates, which every repeat does).
+Medians across independent VMs (`n = 3` VMs for (a), per-VM median of 3 intra-VM passes; `n = 3` for the rest, and `n = 8` for `trusted` and `untrusted` creates, which every repeat does).
+
+> **Provenance & scope caveats for this table:** (1) All four columns in this `2026-11-11` Ubuntu loop-file run (as well as the later `0d160dd` `trusted` baselines: `0.15s` resume, `0.30s` fork, `0.32s` warm create) **predate `-ssh-policy-helper-file`** across presets; Round 23–24 batch SSH policy (`ssh-policy-batch`) and non-disruptive `rotate-token` are unit-tested to avoid `sshd` restarts and `nft` reloads on token refreshes, while live AX42 hardware timing for initial cold/restore SSH policy bootstrap and `rotate-token` awaits a fresh AX42 capture. (2) The `untrusted, SMT off` column predated `stack.sh`'s `memOvercommit: 1` enforcement (now fixed and validated offline against `boatd`'s `loadConfig()`), `jailGid` `io_uring` (`Async`) setup (falling back to `Sync`), `losetup --direct-io=on` loop pass-through, and online SSH quarantine; **rebooted PandaOS `untrusted` (`nosmt=force`, `memOvercommit: 1`, `blk-iocost`, `jailGid` `io_uring`, online SSH quarantine) remains pending hardware re-run**. (3) **Live `boat.dev` remains unmeasured** (`BOATDEV_API_KEY` not provided).
 
 | Metric | trusted | trusted-warm | trusted-writeback | untrusted, SMT off |
 |---|---|---|---|---|
-| (a) Node loop, VM, runs/s | **21.13** [21.09–21.19] | | | **21.21** [21.18–21.30] |
-| (a) Node loop, same box without a VM, runs/s | 23.06 | | | 23.02 |
-| (a) VM / host | **0.916** | | | **0.921** |
+| (a) Node loop, VM, index units | **21.15** [21.14–21.17] | | | **21.25** [21.17–21.45] |
+| (a) Node loop, same box without a VM, index units | 23.06 | | | 23.04 |
+| (a) VM / host | **0.917** | | | **0.922** |
 | (b) API round trip, p50 of 25, ms | 0.283 | 0.240 | | 0.286 |
 | (b) exec `true` p50 / p95, ms | 2.29 / 3.06 | 2.37 / 2.97 | | 2.21 / 2.65 |
 | (b) create → exec-ready, s | 1.40 | **0.318** | 1.73 | 1.39 |
@@ -313,7 +474,7 @@ Lifecycle "net of API" values differ from raw by under 1 ms here (the API round 
 
 All N VMs ran 2 passes of the Node loop at once, on this one host, 2 repeats (they agreed within 1%). Every VM was set up and measured at every level, with no errors.
 
-| N | trusted, 16 threads: per-VM / host runs/s | efficiency | CPU per loop | untrusted, SMT off, 8 cores: per-VM / host runs/s | efficiency | CPU per loop |
+| N | trusted, 16 threads: per-VM / host index units | efficiency | CPU per loop | untrusted, SMT off, 8 cores: per-VM / host index units | efficiency | CPU per loop |
 |---|---|---|---|---|---|---|
 | 1 | 20.79 / 20.79 | 1.00 | 1.49 | 20.96 / 20.96 | 1.00 | 1.48 |
 | 2 | 18.94 / 37.89 | 0.911 | 1.50 | 19.38 / 38.76 | 0.925 | 1.49 |
@@ -321,11 +482,11 @@ All N VMs ran 2 passes of the Node loop at once, on this one host, 2 repeats (th
 | 7 | 11.51 / 80.47 | 0.553 | 1.47 | 10.82 / **75.91** | 0.516 | 1.08 |
 | 11 | 7.92 / **87.06** | 0.381 | 1.27 | | | |
 
-- **A real server scales far better than the runners did.** Host throughput still rises at 11 VMs on 16 threads (87.1 runs/s, 4.2× one VM), where every 4-vCPU runner had peaked by N = 4. The runners' curves were 2–4 CPU artefacts, and this page no longer uses them for any server projection.
-- **SMT off costs little at 7 VMs:** 75.9 against 80.5 runs/s (−6%) on half the threads. The single-VM speed is the same (20.96 vs 20.79).
+- **A real server scales far better than the runners did.** Host throughput still rises at 11 VMs on 16 threads (87.1 index units, 4.2× one VM), where every 4-vCPU runner had peaked by N = 4. The runners' curves were 2–4 CPU artefacts, and this page no longer uses them for any server projection.
+- **SMT off costs little at 7 VMs:** 75.9 against 80.5 index units (−6%) on half the threads. The single-VM speed is the same (20.96 vs 20.79).
 - **Per-VM speed still falls under load:** a packed VM runs at 52–55% of its solo speed at 7 VMs and 38% at 11. A VM-hour on a full host buys about half the work of one on an idle host.
 
-### Cost per run, measured on the AX42
+### Cost per index unit, measured on the AX42
 
 The first CPU-consistent PandaOS figure: price and speed come from the same machine. AX42 = **$119.04 / month** (`prices.json`: €99 + €49 setup / 12 + €3.20 backup, at 1.12 USD/EUR) = $0.1631 / h. With 2 h of operator time at $75 it is $269.04 / month = $0.3685 / h. Both tables are generated from the committed raw results:
 - trusted: `bench/boatbench/results/ax42-ubuntu-2026-11-11/trusted/`, density run `699e4a`, started 2026-11-11T09:17:30Z;
@@ -335,44 +496,44 @@ Command: `boatbench.py report <dir>/results-*.json --server ax42`.
 
 **Trusted, 16 threads**
 
-USD per 1000 runs = $0.1631/h / 3.6 / measured host runs/s, at 100% busy, no retention; + operator time: $0.3685/h. boatd admits 11 `default` VMs on it in trusted mode (prices.json). boat.dev reference: $0.000361 (its price at its PUBLISHED solo speed; its speed under load is unmeasured).
+USD per 1000 index units = $0.1631/h / 3.6 / measured host index units, at 100% busy, no retention; + operator time: $0.3685/h. boatd admits 11 `default` VMs on it in trusted mode (prices.json). boat.dev reference: $0.000356 (its price at its PUBLISHED solo speed; its speed under load is unmeasured).
 
-| N VMs | host runs/s (measured) | USD per 1000 runs | + operator time | vs boat.dev reference |
+| N VMs | host index units (measured) | USD per 1000 index units | + operator time | vs boat.dev reference |
 |---|---|---|---|---|
-| 1 | 20.79 | $0.002178 | $0.004924 | 6.03x |
-| 2 | 37.89 | $0.001196 | $0.002702 | 3.31x |
-| 4 | 62.01 | $0.000730 | $0.001651 | 2.02x |
-| 7 | 80.47 | $0.000563 | $0.001272 | 1.56x |
-| 11 | 87.06 | $0.000520 | $0.001176 | 1.44x |
+| 1 | 20.79 | $0.002178 | $0.004924 | 6.11x |
+| 2 | 37.89 | $0.001196 | $0.002702 | 3.35x |
+| 4 | 62.01 | $0.000730 | $0.001651 | 2.05x |
+| 7 | 80.47 | $0.000563 | $0.001272 | 1.58x |
+| 11 | 87.06 | $0.000520 | $0.001176 | 1.46x |
 
 **Untrusted, SMT off, 8 cores**
 
-USD per 1000 runs = $0.1631/h / 3.6 / measured host runs/s, at 100% busy, no retention; + operator time: $0.3685/h. boatd admits 7 `default` VMs on it in untrusted mode (prices.json). boat.dev reference: $0.000361 (its price at its PUBLISHED solo speed; its speed under load is unmeasured).
+USD per 1000 index units = $0.1631/h / 3.6 / measured host index units, at 100% busy, no retention; + operator time: $0.3685/h. boatd admits 7 `default` VMs on it in untrusted mode (prices.json). boat.dev reference: $0.000356 (its price at its PUBLISHED solo speed; its speed under load is unmeasured).
 
-| N VMs | host runs/s (measured) | USD per 1000 runs | + operator time | vs boat.dev reference |
+| N VMs | host index units (measured) | USD per 1000 index units | + operator time | vs boat.dev reference |
 |---|---|---|---|---|
-| 1 | 20.96 | $0.002161 | $0.004885 | 5.98x |
-| 2 | 38.76 | $0.001169 | $0.002641 | 3.23x |
-| 4 | 63.96 | $0.000708 | $0.001601 | 1.96x |
-| 7 | 75.91 | $0.000597 | $0.001349 | 1.65x |
+| 1 | 20.96 | $0.002161 | $0.004885 | 6.06x |
+| 2 | 38.76 | $0.001169 | $0.002641 | 3.28x |
+| 4 | 63.96 | $0.000708 | $0.001601 | 1.99x |
+| 7 | 75.91 | $0.000597 | $0.001349 | 1.67x |
 
-- **Per run, a full AX42 costs 1.44–1.65× boat.dev's published price**, before operator time (3.3–3.7× with it). To match boat.dev, the box would need **125 host runs/s** (284 with operator time). It reached 87.
-- **Per VM-hour, the AX42 is cheaper** ($0.023 untrusted at 7 VMs, 100% utilization, against $0.036). The two statements do not conflict. A packed AX42 VM runs at 10.8–11.5 runs/s, and boat.dev's figure is a solo VM at 27.67. boat.dev's speed under load has never been measured, so this comparison flatters boat.dev by an unknown amount, just as "100% busy" flatters the AX42.
+- **Per index unit, a full AX42 costs 1.46–1.67× boat.dev's published price**, before operator time (3.3–3.8× with it). To match boat.dev, the box would need **127 host index units** (287 with operator time). It reached 87.
+- **Per VM-hour, the AX42 is cheaper** ($0.023 untrusted at 7 VMs, 100% utilization, against $0.036). The two statements do not conflict. A packed AX42 VM runs at 10.8–11.5 index units, and boat.dev's figure is a solo VM at 28.06. boat.dev's speed under load has never been measured, so this comparison flatters boat.dev by an unknown amount, just as "100% busy" flatters the AX42.
 
 ### Against boat.dev's published figures (different CPU)
 
-boat.dev's 27.67 runs/s is a 4 vCPU guest on an **AMD Ryzen 9 9950X (Zen 5**, 16 cores, 170 W). The AX42 is a **Ryzen 7 PRO 8700GE (Zen 4**, 8 cores, 35 W). The CPUs differ by a generation and in power budget, so a gap in single-VM speed is mostly hardware.
+boat.dev's 28.06 index units (StarSling run 37073680030, 2026-10-03; it replaces the 27.67 of the 2026-08-24 AnicetNgrt run, the same 9950X, within both runs' intervals) is a 4 vCPU guest on an **AMD Ryzen 9 9950X (Zen 5**, 16 cores, 170 W; per boat.dev's page the fleet also has Ryzen 7 9700X hosts that run did not measure). The AX42 is a **Ryzen 7 PRO 8700GE (Zen 4**, 8 cores, 35 W). The CPUs differ by a generation and in power budget, so a gap in single-VM speed is mostly hardware.
 
 | | boat.dev PUBLISHED (9950X guest) | PandaOS MEASURED (AX42 guest) |
 |---|---|---|
-| Node loop, one 4 vCPU VM, runs/s | 27.67 | 21.13 (trusted), 21.21 (untrusted) |
-| Same CPU without a VM, runs/s | not published (OpenBenchmarking's 9950X average: 28.8) | 23.06 |
-| VM / host | about 0.96 *if* their host scores the public average (inference) | **0.916–0.921** (measured) |
+| Node loop, one 4 vCPU VM, index units | 28.06 | 21.15 (trusted), 21.25 (untrusted) |
+| Same CPU without a VM, index units | not published (OpenBenchmarking's 9950X average: 28.8) | 23.06 |
+| VM / host | about 0.97 *if* their host scores the public average (inference) | **0.917–0.922** (measured) |
 | PTS rand read 4k, IOPS | 433,500 | 155,795–202,589 |
 | PTS rand write 4k, IOPS | 412,500 | 159,704–171,442 † |
 | PTS seq write 1M, MiB/s | 5,838 | 2,476–2,740 †; 4,056 with `Writeback` |
 
-- **CPU:** the AX42 VM is 24% slower than boat.dev's published VM, and the AX42 host is 20% below the 9950X's public average. Almost all of the gap is the CPU. *Projection, not a measurement:* a PandaOS VM on a 9950X would score about 28.8 × 0.92 ≈ 26.4 runs/s.
+- **CPU:** the AX42 VM is 24–25% slower than boat.dev's published VM, and the AX42 host is 20% below the 9950X's public average. Almost all of the gap is the CPU. *Projection, not a measurement:* a PandaOS VM on a 9950X would score about 28.8 × 0.92 ≈ 26.4 index units.
 - **Disk: boat.dev's published numbers are 2–3× higher.** Part of that is our storage stack (below). Part may be boat.dev's, whose fio target and cache mode are not published.
 
 ### What the disk numbers are, and how a real btrfs partition differs
@@ -385,8 +546,8 @@ boat's store here is **a sparse btrfs loop file on the box's ext4 root, on md RA
 
 ### What is measured now, and what is still a projection
 
-- **Measured on real hardware (this AX42, on Ubuntu and on the PandaOS install):** single-VM speed and the VM / host ratio (0.92); lifecycle latencies; density under CPU load up to 11 VMs (8 on the install, its quota), with a host-native baseline on the install; host throughput; cost per run at the AX42's list price; `MemTotal` and admission counts on a 64 GB box; the cost of SMT off (−6% at 7 VMs); the CPU governor (no effect); a stopped VM's actual disk use; disk on a loop file and on native btrfs, with a host-native fio baseline on the install.
-- **Still projections or unmeasured:** everything about the AX102 and the other servers (no run there; the AX102 is also Zen 4, so the AX42 curve is the best proxy, see [below](#cost-per-run-from-host-throughput)); PandaOS on a 9950X; boat.dev under load, boat.dev's lifecycle times, and boat.dev's VM / host ratio (no key); density under *memory* load (the Node loop uses little RAM); utilization below 100%; thin provisioning (a model).
+- **Measured on real hardware (this AX42, on Ubuntu and on the PandaOS install):** single-VM speed and the VM / host ratio (0.92); lifecycle latencies; density under CPU load up to 11 VMs (8 on the install, its quota), with a host-native baseline on the install; aggregate host index; cost per index unit at the AX42's list price; `MemTotal` and admission counts on a 64 GB box; the cost of SMT off (−6% at 7 VMs); the CPU governor (no effect); a stopped VM's actual disk use; disk on a loop file and on native btrfs, with a host-native fio baseline on the install.
+- **Still projections or unmeasured:** everything about the AX102 and the other servers (no run there; the AX102 is also Zen 4, so the AX42 curve is the best proxy, see [below](#cost-per-index-unit-from-aggregate-host-index)); PandaOS on a 9950X; boat.dev under load, boat.dev's lifecycle times, and boat.dev's VM / host ratio (no key); density under *memory* load (the Node loop uses little RAM); utilization below 100%; thin provisioning (a model).
 
 ## Measured on the PandaOS install (AX42, native btrfs)
 
@@ -398,13 +559,13 @@ boat's store here is **a sparse btrfs loop file on the box's ext4 root, on md RA
 
 ### PandaOS install vs the Ubuntu loop-file run, AX42
 
-Medians. PandaOS: Node loop n = 9 passes (runs dc7c96, cb2137, ca2db2, with host runs 25e7d9, f6a03c, 1056a7), d n = 3, everything else n = 3 repeats (run 595790). Ubuntu: the trusted column [above](#per-preset-ax42). The two columns differ in more than the filesystem: kernel (6.18 vs 6.8), boatd build (the install vs `bcf0cda`), guest image (the install's `ubuntu-24.04` vs a locally built `slim`), RAID (one NVMe vs mdadm RAID1) and overcommit (defaults vs the bench's 8). A difference is therefore not proof of a btrfs effect.
+Medians across independent VMs (`n = 3` VMs for (a), per-VM median of 3 intra-VM passes: runs dc7c96, cb2137, ca2db2, with host runs 25e7d9, f6a03c, 1056a7; d `n = 3`, everything else `n = 3` repeats, run 595790). Ubuntu: the trusted column [above](#per-preset-ax42). The two columns differ in more than the filesystem: kernel (6.18 vs 6.8), boatd build (the install vs `bcf0cda`), guest image (the install's `ubuntu-24.04` vs a locally built `slim`), RAID (one NVMe vs mdadm RAID1) and overcommit (defaults vs the bench's 8). A difference is therefore not proof of a btrfs effect. **Caveats:** both columns ran in **`trusted` mode** (`Unsafe` cache) and **predate `-ssh-policy-helper-file`** across presets (Round 23–24 batch SSH policy + non-disruptive `rotate-token` are unit-tested with live AX42 timing awaiting the next capture); `stack.sh` `untrusted` config (including `memOvercommit: 1`) is fixed and validated offline against `boatd`'s `loadConfig()`, while **rebooted PandaOS `untrusted`** (`nosmt=force`, `memOvercommit: 1`, `blk-iocost`, `jailGid` `io_uring`, online SSH quarantine) remains pending hardware re-run; and **live `boat.dev` remains unmeasured** (`BOATDEV_API_KEY` not provided).
 
 | Metric | PandaOS install, native btrfs | Ubuntu, btrfs loop file on ext4 / RAID1 |
 |---|---|---|
-| (a) Node loop, VM, runs/s | **21.25** [21.14–21.35] | 21.13 |
-| (a) Node loop, same box without a VM, runs/s | 23.08 | 23.06 |
-| (a) VM / host | **0.921** | 0.916 |
+| (a) Node loop, VM, index units | **21.25** [21.20–21.29] | 21.15 |
+| (a) Node loop, same box without a VM, index units | 23.08 | 23.06 |
+| (a) VM / host | **0.921** | 0.917 |
 | (b) API round trip p50, ms | 0.311 | 0.283 |
 | (b) exec `true` p50 / p95, ms | 2.51 / 4.99 | 2.29 / 3.06 |
 | (b) create → exec-ready, s | 1.58 | 1.40 |
@@ -426,7 +587,7 @@ Medians. PandaOS: Node loop n = 9 passes (runs dc7c96, cb2137, ca2db2, with host
 | (e) Go tarball download, Mbit/s | 818.8 | 812.4 |
 | (f) cold `npm ci`, s | 2.46 | 2.56 |
 
-- **CPU-bound speed is the same as on Ubuntu:** 21.25 vs 21.13 runs/s in a VM, 0.921 vs 0.916 of the host.
+- **CPU-bound speed is the same as on Ubuntu:** 21.25 vs 21.15 index units in a VM, 0.921 vs 0.917 of the host.
 - **Disk is mixed, not better across the board.** Random 4k writes and reads (our job, iodepth 32) are 1.5–2.6× the loop-file numbers. Sequential writes and the PTS random-read job are lower: two of three PTS random-read repeats gave about 56k IOPS (56,154 and 56,693) and one 221,635. The bracket in the table is the interpolated IQR, not a sample: 139,164 is the midpoint of 56,693 and 221,635. The split is examined in [Host disk baseline](#host-disk-baseline-and-the-56k--222k-random-read-split-ax42-pandaos-install). All of it stays below boat.dev's published PTS numbers (433k / 413k IOPS, 5,838 MiB/s). A durable-write (`Writeback`) run was made later: [84 fsyncs/s](#re-measured-after-the-fixes-ax42-main-0d160dd-2026-11-13).
 - **Lifecycle:** resume (0.20 s) and fork (0.82 s) are faster than on the Ubuntu box; create, snapshot and new-from-snapshot are slower ([why](#why-create-snapshot-and-new-from-snapshot-are-slower-on-the-install)). No boat.dev lifecycle number exists to compare with.
 
@@ -464,7 +625,12 @@ The disk-interrupt split above is not fixed (see the last bullet).
 
 ### Re-measured after the fixes (AX42, main 0d160dd, 2026-11-13)
 
-The install updated in place to main `0d160dd` (no reboot, same kernel), **still trusted mode**: `services.boat.untrustedTenants = false` is now set explicitly, so SMT stays on. Untrusted mode was **not** benchmarked here: it needs SMT off and a reboot, which the owner has not approved. Guest image rebuilt at `0d160dd`. Governor `performance` as found. Raw results, scripts and every step: [`ax42-r11-2026-11-13/`](../bench/boatbench/results/ax42-r11-2026-11-13/README.md); reports from `results/regen.sh`. Medians [min–max], 3 repeats each, all measured.
+The install updated in place to main `0d160dd` (no reboot, same kernel), **still trusted mode**: `services.boat.untrustedTenants = false` is now set explicitly, so SMT stays on. Guest image rebuilt at `0d160dd`. Governor `performance` as found. Raw results, scripts and every step: [`ax42-r11-2026-11-13/`](../bench/boatbench/results/ax42-r11-2026-11-13/README.md); reports from `results/regen.sh`. Medians [min–max], 3 repeats each, all measured.
+
+> **Important caveats alongside these AX42 lifecycle baselines:**
+> - **Pre-`-ssh-policy-helper-file` `trusted` baselines:** the `0d160dd` lifecycle medians below (`0.15s` resume, `0.30s` fork, `0.32s` warm create, `0.89s` cold create) **predate enabling `-ssh-policy-helper-file`** across presets. Round 23–24 batch SSH policy (`POST /v1/vms/ssh-policy-batch`) and the non-disruptive `rotate-token` guest helper subcommand are unit-tested to avoid `sshd` restarts and `nft -f -` reloads on steady-state token refreshes, while live AX42 timing for both initial per-VM cold/restore SSH policy bootstrap and `rotate-token` awaits a fresh AX42 capture.
+> - **Rebooted PandaOS `untrusted` pending hardware re-run:** production `untrusted` (`nosmt=force`, `memOvercommit: 1`, `blk-iocost`, `jailGid` `io_uring`, online SSH quarantine, `warmPool` off) was **not** benchmarked here because SMT off requires an owner-approved reboot (`stack.sh`'s `untrusted` config is fixed and validated offline against `boatd`'s `loadConfig()`).
+> - **Live `boat.dev` unmeasured:** `BOATDEV_API_KEY` was not provided, so there are no live `boat.dev` lifecycle or disk measurements.
 
 With trusted tenants the module now turns boatd's warm pool on, which the install run did not have, so creates are restores of a booted template. The like-for-like column is the one with the warm pool off.
 
@@ -473,12 +639,14 @@ With trusted tenants the module now turns boatd's warm pool on, which the instal
 | create → exec-ready, s | 1.56 [1.56–1.60] | 1.57 [1.56–1.58] | **0.89 [0.87–0.90]** | 0.32 [0.31–0.32] |
 | fork → exec-ready, s | 0.82 [0.79–0.85] | 0.57 [0.56–0.57] | **0.30 [0.29–0.31]** | 0.36 [0.35–0.37] |
 | new-from-snapshot → exec-ready, s | 0.51 [0.48–0.54] | 0.40 [0.36–0.42] | **0.19 [0.19–0.20]** | 0.22 [0.22–0.23] |
+| `fresh_boot` penalty (derived, not measured): cold boot instead of snapshot resume, s | +1.05 (1.56 − 0.51) | +1.17 (1.57 − 0.40) | **+0.70 (0.89 − 0.19)** | n/a (a fresh boot is a cold boot, not a warm-pool restore) |
 | snapshot until usable, s | 2.67 [2.55–3.07] | 0.66 [0.63–0.67] | **0.48 [0.48–0.55]** | 0.38 [0.38–0.40] |
 | stop, s | 0.73 [0.73–0.74] | 0.37 [0.29–0.43] | **0.33 [0.30–0.35]** | 0.40 [0.39–0.40] |
 | resume → exec-ready, s | 0.20 [0.19–0.24] | 0.17 [0.16–0.17] | **0.15 [0.15–0.16]** | 0.16 [0.16–0.17] |
 | exec `true` p50, ms | 2.51 [2.42–2.55] | 2.17 [2.12–2.24] | **2.06 [2.04–2.08]** | 2.24 [2.21–2.33] |
 | exec `true` p95, ms | 4.99 [4.57–5.21] | 3.87 [3.81–4.53] | **3.21 [2.48–3.41]** | 4.37 [2.86–4.48] |
 
+- **`fresh_boot` costs about 0.7 s (like-for-like column).** boatd's `fresh_boot` makes a start, create-from-snapshot or fork ignore the memory snapshot and boot the disk cold, so it costs the cold-create time (0.89 s) instead of the from-snapshot time (0.19 s): about **+0.70 s** per VM, and the source's running processes are not carried over. The row above is derived from the two measured rows; no `fresh_boot` run was timed on its own. It applies where the memory snapshot holds secrets the new run must not have: a `no_env` start, fork or create (and a create from a snapshot) whose secret selection is **narrower than the source's** (a `no_env` run after a run that had secrets; a `no_env` fork of a normal run; a create from a snapshot with fewer secrets). A `no_env` start after a `no_env` run, a normal start and a fork of a `no_env` run resume as usual and pay nothing. A fresh boot that cannot apply its env fails closed (the VM is force-stopped), so the cost is paid once per attempt.
 - **Cold create −0.67 s (1.57 → 0.89 s), same governor.** Inferred split: materialize was 149–236 ms of it (now 1 ms in boatd's journal), the rest the guest boot (`quiet`, no `ldconfig`). The per-step journal of the cold runs was not captured, so the split is not measured.
 - **Snapshot, fork and new-from-snapshot** are 0.18–0.27 s faster against the same governor; the uncompressed memory files and the dense image reflink are the likely causes (not separated).
 
@@ -527,7 +695,7 @@ The guest's queue reports **`max_segments` 1**: Firecracker's virtio-blk does no
 - **The VM's fast random reads do not touch the disk.** With `Unsafe` caching, the guest's O_DIRECT reads become buffered reads of the host page cache: nvme0n1 served **0** read I/Os during the guest's 60 s reads (`out-wb2`). That is why the VM's 219k and its iodepth-1 33k beat the host's direct NVMe numbers.
 - **The 56k / 222k split is the guest's fio sharing a vCPU with the disk interrupt.** Firecracker's virtio-blk has one queue, whose interrupt went to one guest vCPU (vCPU 3, `/proc/interrupts`). With fio pinned to that vCPU, three of three reads gave **59.5–59.9k** IOPS; pinned to another vCPU, three of three gave **219.1–219.8k** (`out-irq`). Unpinned, the guest scheduler picks the vCPU: 5 of 16 reads right after a write were slow. In slow runs only one guest vCPU thread was busy and the VMM thread used 0.32 CPU; in fast runs two were busy and the VMM used 0.81 (`out-wb3`).
 - **Ruled out:** host page-cache misses (0 NVMe reads in slow runs too), cgroup reclaim (the VM's cgroup stayed at 2.6–5.7 GiB of its 8.25 GiB `memory.high`), btrfs CoW (the VM disk is NOCOW, and the host's CoW file is slower but not bimodal), first touch of sparse blocks (the file is written first and is fully resident), the io engine (io_uring and libaio both reach ~220–245k in fast mode), and queue depth (the same iodepth 64 gives both modes). A host `sync` before the read gave 6 of 6 fast reads against 11 of 16 without it, but pinning shows the cause directly. With 16 and 6 trials, that difference is not significant (one-sided Fisher p ≈ 0.17).
-- **So of the 7.6× random-read loss in the verdict** (56,693 against 433,500), about 2× is what this host's storage reaches on this job (2.2× for the host's direct NVMe reads, 2.0× for the VM's page-cache reads), and about 3.9× (219k / 56.7k) is the guest putting fio on the interrupt vCPU, a per-run accident the benchmark did not control. With fio on another vCPU, the VM reads at about 219k, half of boat.dev's published figure. A guest with more virtio-blk queues would remove the split. *Observed on 2026-11-12, archived since in r12* ([`ax42-r12-2026-11-13/before/`](../bench/boatbench/results/ax42-r12-2026-11-13/README.md), same box, fio pinned per vCPU, 8 s each, 3 rounds; 58.4k / 58.8k / 57.7k on the new interrupt vCPU, 213–218k elsewhere; `rq_affinity` 2: 58.7k and 171.8–174.7k): moving the interrupt to another vCPU moved the slow vCPU with it (58.9k on the new one, 214–218k elsewhere), and `rq_affinity` 2 made it worse (60k on the interrupt vCPU, 172–175k elsewhere, against 215–220k at 1). One edge-triggered IO-APIC interrupt is delivered to one vCPU at a time, so irqbalance could only move it, not spread it. *Measured and archived since* ([re-measured](#re-measured-after-the-fixes-ax42-main-0d160dd-2026-11-13)): with fio unpinned, steering the interrupt off vCPU 0 does not help the common case. Not fixed: the guest image keeps `rq_affinity` 1 and the interrupt where the kernel puts it. **boatbench now runs the 4k rand read three times** (unpinned, pinned to the interrupt vCPU, pinned off it), so the number no longer depends on where fio lands: on this AX42 (r12, [`report-disk-pinned.md`](../bench/boatbench/results/ax42-r12-2026-11-13/report-disk-pinned.md), 3 repeats) 58,891–59,341 on the interrupt vCPU, 216,919–217,216 off it, 215,100–219,617 unpinned, while the unpinned PTS job gave 59,143 / 59,484 / 218,278. Reports from before this change hold only the unpinned row and are labelled so. boat.dev's fio target and cache mode are not published, so the remaining 2× is not attributed.
+- **So of the 7.6× random-read loss in the verdict** (56,693 against 433,500), about 2× is what this host's storage reaches on this job (2.2× for the host's direct NVMe reads, 2.0× for the VM's page-cache reads), and about 3.9× (219k / 56.7k) is the guest putting fio on the interrupt vCPU, a scheduling accident the benchmark did not control. With fio on another vCPU, the VM reads at about 219k, half of boat.dev's published figure. A guest with more virtio-blk queues would remove the split. *Observed on 2026-11-12, archived since in r12* ([`ax42-r12-2026-11-13/before/`](../bench/boatbench/results/ax42-r12-2026-11-13/README.md), same box, fio pinned per vCPU, 8 s each, 3 rounds; 58.4k / 58.8k / 57.7k on the new interrupt vCPU, 213–218k elsewhere; `rq_affinity` 2: 58.7k and 171.8–174.7k): moving the interrupt to another vCPU moved the slow vCPU with it (58.9k on the new one, 214–218k elsewhere), and `rq_affinity` 2 made it worse (60k on the interrupt vCPU, 172–175k elsewhere, against 215–220k at 1). One edge-triggered IO-APIC interrupt is delivered to one vCPU at a time, so irqbalance could only move it, not spread it. *Measured and archived since* ([re-measured](#re-measured-after-the-fixes-ax42-main-0d160dd-2026-11-13)): with fio unpinned, steering the interrupt off vCPU 0 does not help the common case. Not fixed: the guest image keeps `rq_affinity` 1 and the interrupt where the kernel puts it. **boatbench now runs the 4k rand read three times** (unpinned, pinned to the interrupt vCPU, pinned off it), so the number no longer depends on where fio lands: on this AX42 (r12, [`report-disk-pinned.md`](../bench/boatbench/results/ax42-r12-2026-11-13/report-disk-pinned.md), 3 repeats) 58,891–59,341 on the interrupt vCPU, 216,919–217,216 off it, 215,100–219,617 unpinned, while the unpinned PTS job gave 59,143 / 59,484 / 218,278. Reports from before this change hold only the unpinned row and are labelled so. boat.dev's fio target and cache mode are not published, so the remaining 2× is not attributed.
 
 ### Density at the admission limit, and the host-native baseline
 
@@ -535,7 +703,7 @@ Run `849e85` (VMs, 2 repeats) and run `28a141` (the same N Node loops directly o
 
 **VMs**
 
-| N | per-VM runs/s | host runs/s (sum) | efficiency | CPU per loop | loops per host CPU | host CPUs |
+| N | per-VM index units | host index units (sum) | efficiency | CPU per loop | loops per host CPU | host CPUs |
 |---|---|---|---|---|---|---|
 | 1 | 20.97 [20.97-20.98] n=2 | 20.97 [20.97-20.98] n=2 | 1.00 [1.00-1.00] n=2 | 1.46 [1.46-1.47] n=2 | 0.092 [0.091-0.092] n=2 | 16.00 |
 | 2 | 18.97 [18.97-18.98] n=2 | 37.95 [37.93-37.96] n=2 | 0.905 [0.904-0.905] n=2 | 1.49 [1.49-1.49] n=2 | 0.183 [0.183-0.183] n=2 | 16.00 |
@@ -545,7 +713,7 @@ Run `849e85` (VMs, 2 repeats) and run `28a141` (the same N Node loops directly o
 
 **Host-native baseline vs VMs**
 
-| N | host loops: per-loop / total runs/s | efficiency | VMs: per-VM / total runs/s | efficiency | VM / host at this N |
+| N | host loops: per-loop / total index units | efficiency | VMs: per-VM / total index units | efficiency | VM / host at this N |
 |---|---|---|---|---|---|
 | 1 | 21.96 / 21.96 | 1.00 | 20.97 / 20.97 | 1.00 | 0.955 |
 | 2 | 21.11 / 42.23 | 0.962 | 18.97 / 37.95 | 0.905 | 0.899 |
@@ -555,20 +723,20 @@ Run `849e85` (VMs, 2 repeats) and run `28a141` (the same N Node loops directly o
 | 11 | 9.02 / 99.10 | 0.411 | - / - | - | - |
 
 - **Most of the per-VM slowdown under load is CPU saturation, not virtualization.** Eight bare Node loops on the host fall to 0.53 of their solo speed. Eight VMs fall to 0.50. At every N from 2 to 8, the VMs deliver 0.89–0.90 of what the same number of bare loops does (0.955 at N = 1 in this mode).
-- **The VMs' share of host throughput is what virtualization costs:** 83.45 against 93.66 runs/s at N = 8, so about 11% of throughput, in line with the 0.92 single-VM ratio.
-- **Even with no virtualization at all, this CPU loses per run.** The bare host's best measured throughput is 99.10 runs/s (11 loops), which is $0.000457 per 1000 runs at the AX42's price: 1.26× boat.dev's published cost per run. Matching boat.dev's published figure needs 125 runs/s.
+- **The VMs' share of aggregate host index is what virtualization costs:** 83.45 against 93.66 index units at N = 8, so about 11% of throughput, in line with the 0.92 single-VM ratio.
+- **Even with no virtualization at all, this CPU loses per index unit.** The bare host's best measured throughput is 99.10 index units (11 loops), which is $0.000457 per 1000 index units at the AX42's price: 1.28× boat.dev's published cost per index unit. Matching boat.dev's published figure needs 127 index units.
 
-### Cost per run on the PandaOS install
+### Cost per index unit on the PandaOS install
 
 Price and speed from the same machine (AX42 list price, $0.1631 / h; $0.3685 / h with 2 h of operator time), at 100% busy, with no retention.
 
-| N VMs | host runs/s (measured) | USD per 1000 runs | + operator time | vs boat.dev reference |
+| N VMs | host index units (measured) | USD per 1000 index units | + operator time | vs boat.dev reference |
 |---|---|---|---|---|
-| 1 | 20.97 | $0.002160 | $0.004881 | 5.98x |
-| 2 | 37.95 | $0.001194 | $0.002698 | 3.30x |
-| 4 | 62.42 | $0.000726 | $0.001640 | 2.01x |
-| 7 | 81.14 | $0.000558 | $0.001262 | 1.54x |
-| 8 | 83.45 | $0.000543 | $0.001227 | 1.50x |
+| 1 | 20.97 | $0.002160 | $0.004881 | 6.06x |
+| 2 | 37.95 | $0.001194 | $0.002698 | 3.35x |
+| 4 | 62.42 | $0.000726 | $0.001640 | 2.04x |
+| 7 | 81.14 | $0.000558 | $0.001262 | 1.57x |
+| 8 | 83.45 | $0.000543 | $0.001227 | 1.52x |
 
 ### CPU governor: performance vs powersave / balance_performance
 
@@ -576,13 +744,13 @@ The box runs amd-pstate in active mode with `powersave` and EPP `balance_perform
 
 | | powersave / balance_performance | performance | Change |
 |---|---|---|---|
-| (a) Node loop, VM, runs/s | 21.25 (n = 9) | 21.43 (n = 3) | +0.8% |
-| (a) Node loop, host, runs/s | 23.08 (n = 9) | 22.93 (n = 3) | −0.6% |
-| (g) 8 VMs, host runs/s | 83.45 (n = 2) | 84.06 (n = 1) | +0.7% |
-| (g) 8 host loops, runs/s | 93.66 (n = 2) | 93.08 (n = 1) | −0.6% |
-| (g) 11 host loops, runs/s | 99.10 (n = 2) | 98.64 (n = 1) | −0.5% |
+| (a) Node loop, VM, index units | 21.25 (n = 3 VMs, 3 passes each) | 21.43 (n = 1 VM, 3 passes) | +0.8% |
+| (a) Node loop, host, index units | 23.08 (n = 3 runs, 3 passes each) | 22.93 (n = 1 run, 3 passes) | −0.6% |
+| (g) 8 VMs, host index units | 83.45 (n = 2) | 84.06 (n = 1) | +0.7% |
+| (g) 8 host loops, index units | 93.66 (n = 2) | 93.08 (n = 1) | −0.6% |
+| (g) 11 host loops, index units | 99.10 (n = 2) | 98.64 (n = 1) | −0.5% |
 
-**The governor makes no measurable difference** on this CPU-bound workload. Both directions stay within 1%, about the run-to-run spread. EPP `balance_performance` already lets the cores boost. The cost per run does not change: $0.000539 vs $0.000543 per 1000 runs at 8 VMs.
+**The governor makes no measurable difference** on this CPU-bound workload. Both directions stay within 1%, about the run-to-run spread. EPP `balance_performance` already lets the cores boost. The cost per index unit does not change: $0.000539 vs $0.000543 per 1000 index units at 8 VMs.
 
 ### Stopped-VM disk use (input to the thin-provisioning model)
 
@@ -604,8 +772,8 @@ The `boatdev` job printed SKIPPED or was skipped (no `BOATDEV_API_KEY` secret), 
 |---|---|---|---|---|
 | Runner CPU, region | EPYC 7763, IAD | EPYC 9V74, SEA | **Xeon 6973P-C**, MSP | EPYC 9V74, LAX, **SMT off: 2 CPUs online** |
 | Firecracker cache | Unsafe | Unsafe | **Writeback** | Unsafe |
-| (a) Node loop, VM, runs/s | 10.49 [10.41–10.54] | 13.49 [13.28–13.74] | 16.45 [16.30–16.63] | 13.41 [13.08–13.81] |
-| (a) Node loop, same runner without a VM, runs/s | 11.88 | 15.49 | 19.98 | 15.11 |
+| (a) Node loop, VM, index units | 10.49 [10.41–10.54] | 13.49 [13.28–13.74] | 16.45 [16.30–16.63] | 13.41 [13.08–13.81] |
+| (a) Node loop, same runner without a VM, index units | 11.88 | 15.49 | 19.98 | 15.11 |
 | (a) VM / host | **0.883** | **0.871** | **0.823** | **0.887** |
 | (b) API round trip, authenticated GET, p50 of 25, ms | 0.759 | 0.494 | 0.616 | 0.576 |
 | (b) exec `true` p50, raw / net of API, ms | 6.52 / 5.74 | 5.14 / 4.64 | 5.19 / 4.54 | 6.52 / 6.00 |
@@ -624,23 +792,23 @@ The `boatdev` job printed SKIPPED or was skipped (no `BOATDEV_API_KEY` secret), 
 Medians; brackets are IQR. n = 15 passes for (a), 5 for the rest. Lifecycle rows use the 5 repeats that ran (b).
 
 ¹ A `warmPool` create is about 3× faster than a cold one; its snapshot and new-from-snapshot are slower.
-² `stack.sh` turned SMT off as `nosmt=force` would, so the runner had 2 CPUs online, and the VM's 4 vCPUs and the host-side runs shared those 2. `memOvercommit` stayed at the bench's 8 (see the [bench README](../bench/boatbench/README.md#boatd-presets-options-and-the-warm-pool)).
+² `stack.sh` turned SMT off as `nosmt=force` would, so the runner had 2 CPUs online, and the VM's 4 vCPUs and the host-side runs shared those 2. In that historical 2026-11-10 run, `memOvercommit` stayed at the bench's 8; `presets.json` and `stack.sh` now enforce `memOvercommit: 1` for `untrusted` to match `boatd`'s `loadConfig()` validation (see the [bench README](../bench/boatbench/README.md#boatd-presets-options-and-the-warm-pool)).
 ³ Fixed: earlier runs failed here with `503 host_capacity` at `cpuOvercommit` 12. `stack.sh` now derives it from the CPUs online (24 on 2 CPUs).
 
-**API baseline.** `net` = raw − k × that side's API round trip, with k the fewest sequential API calls in the timing (`drivers.py` `ROUND_TRIPS`). On localhost the baseline is under 1 ms, so net and raw agree to within about 2 ms on every lifecycle row. It matters only for boat.dev, which is reached over the WAN, and **boat.dev's side has not been measured**, so there is still no equal-footing lifecycle comparison. The harness will produce one when a key exists.
+**API baseline.** `net` = max(0, raw − k × that side's API round trip), where k is the recorded serial critical-path HTTP call count (`api_calls` in new runs with adaptive `0.05s → 0.10s → 0.20s` state polling, excluding intermediate async polls that overlap server-side work, falling back to `drivers.py` `ROUND_TRIPS` for older JSON artifacts). On localhost the baseline is under 1 ms, so net and raw agree to within a few ms on every lifecycle row. It matters only for boat.dev, which is reached over the WAN, and **boat.dev's side has not been measured**, so there is still no equal-footing lifecycle comparison. The harness will produce one when a key exists.
 
 ### Density under load, run 42860774575
 
 N VMs ran the Node loop at the same time, on one runner, from one barrier. Fresh VMs, all N measured, no errors in any level. Two repeats per preset agreed within 5%; the table shows their median.
 
-| N | trusted, EPYC 9V74, 4 CPUs: per-VM / host runs/s | efficiency | trusted-warm, Xeon 8573C, 4 CPUs | efficiency | trusted-writeback, EPYC 7763, 4 CPUs | efficiency | untrusted, Xeon 8370C, **2 CPUs** | efficiency |
+| N | trusted, EPYC 9V74, 4 CPUs: per-VM / host index units | efficiency | trusted-warm, Xeon 8573C, 4 CPUs | efficiency | trusted-writeback, EPYC 7763, 4 CPUs | efficiency | untrusted, Xeon 8370C, **2 CPUs** | efficiency |
 |---|---|---|---|---|---|---|---|---|
 | 1 | 13.62 / 13.62 | 1.00 | 9.42 / 9.42 | 1.00 | 10.89 / 10.89 | 1.00 | 6.91 / 6.91 | 1.00 |
 | 2 | 10.31 / 20.62 | 0.757 | 4.72 / 9.44 ⁴ | 0.501 | 8.44 / 16.88 | 0.775 | 6.85 / 13.70 | 0.992 |
 | 4 | 5.55 / **22.24** | 0.408 | 5.26 / **21.00** | 0.558 | 4.37 / **17.46** | 0.401 | 2.62 / 10.47 | 0.379 |
 | 6 | 3.49 / 20.94 | 0.256 | 2.40 / 14.39 | 0.255 | 2.82 / 16.97 | 0.259 | 1.42 / 8.49 | 0.205 |
 
-Efficiency = per-VM runs/s at N / at N = 1. One loop uses 1.49–1.53 CPUs when it has them (1.23 on 2 CPUs): V8's GC and compiler threads run beside the main thread.
+Efficiency = per-VM index units at N / at N = 1. One loop uses 1.49–1.53 CPUs when it has them (1.23 on 2 CPUs): V8's GC and compiler threads run beside the main thread.
 
 ⁴ Reproduced in both repeats and not explained.
 
@@ -649,23 +817,23 @@ What was measured:
 - **Per-VM speed collapses under oversubscription:** at N = 6 every VM runs at 21–26% of its solo speed.
 - The workload is one Node process per VM, mostly one thread. A workload that keeps all 4 vCPUs busy would contend sooner.
 
-### Cost per run from host throughput
+### Cost per index unit from aggregate host index
 
-The fair figure is the host's price over the host's throughput: **USD per 1000 runs = host $/h ÷ 3.6 ÷ host runs/s**, at 100% busy, no operator time, no retention. **The AX42 rows are measured** ([above](#cost-per-run-measured-on-the-ax42)): $0.000520 trusted and $0.000597 untrusted, against boat.dev's published $0.000361.
+The fair figure is the host's price over the host's aggregate index: **USD per 1000 index units = host $/h ÷ 3.6 ÷ host index units**, at 100% busy, no operator time, no retention. **The AX42 rows are measured** ([above](#cost-per-index-unit-measured-on-the-ax42)): $0.000520 trusted and $0.000597 untrusted, against boat.dev's published $0.000356.
 
 **The AX102 figures below are projections.** Nobody has run PandaOS on an AX102. They use the AX42's measured curve, because the AX42 is a dedicated Zen 4 box like the AX102 (Ryzen 9 7950X3D). Generated with `boatbench.py report <dir>/results-*.json --server ax102` from the same AX42 raw results.
 
 #### PROJECTION: Hetzner AX102, trusted (22 VMs on 32 CPUs), NOT A MEASUREMENT
 
-Load = 22 VMs x 1.49 CPU per loop / 32 CPUs = **1.02 loops per CPU** (ABOVE the measured range: host throughput per CPU is held flat at the highest measured load's, so efficiency = that / this load). Projected efficiency there: **0.381**, so a packed host delivers 22 x 0.381 = 8.4 solo-VM equivalents, and cost per run is **2.63x** the uncontended figure.
-With the measured solo speed (20.79 runs/s, a different CPU) as the per-VM speed: $0.4188/h / (22 x 20.79 x 0.381) = **0.000668 USD per 1000 runs (MIXED CPUs)**. Nobody ran PandaOS on that server; the efficiency curve comes from the measured host, whose CPU, SMT layout and memory bandwidth differ.
+Load = 22 VMs x 1.49 CPU per loop / 32 CPUs = **1.02 loops per CPU** (ABOVE the measured range: aggregate host index per CPU is held flat at the highest measured load's, so efficiency = that / this load). Projected efficiency there: **0.381**, so a packed host delivers 22 x 0.381 = 8.4 solo-VM equivalents, and cost per index unit is **2.63x** the uncontended figure.
+With the measured solo speed (20.79 index units, a different CPU) as the per-VM speed: $0.4188/h / (22 x 20.79 x 0.381) = **0.000668 USD per 1000 index units (MIXED CPUs)**. Nobody ran PandaOS on that server; the efficiency curve comes from the measured host, whose CPU, SMT layout and memory bandwidth differ.
 
 #### PROJECTION: Hetzner AX102, untrusted (15 VMs on 16 CPUs), NOT A MEASUREMENT
 
-Load = 15 VMs x 1.48 CPU per loop / 16 CPUs = **1.39 loops per CPU** (ABOVE the measured range: host throughput per CPU is held flat at the highest measured load's, so efficiency = that / this load). Projected efficiency there: **0.482**, so a packed host delivers 15 x 0.482 = 7.2 solo-VM equivalents, and cost per run is **2.07x** the uncontended figure.
-With the measured solo speed (20.96 runs/s, a different CPU) as the per-VM speed: $0.4188/h / (15 x 20.96 x 0.482) = **0.000768 USD per 1000 runs (MIXED CPUs)**. Nobody ran PandaOS on that server; the efficiency curve comes from the measured host, whose CPU, SMT layout and memory bandwidth differ.
+Load = 15 VMs x 1.48 CPU per loop / 16 CPUs = **1.39 loops per CPU** (ABOVE the measured range: aggregate host index per CPU is held flat at the highest measured load's, so efficiency = that / this load). Projected efficiency there: **0.482**, so a packed host delivers 15 x 0.482 = 7.2 solo-VM equivalents, and cost per index unit is **2.07x** the uncontended figure.
+With the measured solo speed (20.96 index units, a different CPU) as the per-VM speed: $0.4188/h / (15 x 20.96 x 0.482) = **0.000768 USD per 1000 index units (MIXED CPUs)**. Nobody ran PandaOS on that server; the efficiency curve comes from the measured host, whose CPU, SMT layout and memory bandwidth differ.
 
-The 7950X3D clocks higher than the 35 W 8700GE and has more L3, so these projections are likely low. The speed-independent requirement stands: **to match boat.dev's published cost per run, an AX102 must sustain 322 host runs/s, about 20 per core** (480 and 30 with operator time). The AX42 measured **10.9 runs/s per core** with SMT (87.06 on 8 cores) and **9.5** without it, so an AX102 would need roughly twice the AX42's per-core throughput.
+The 7950X3D clocks higher than the 35 W 8700GE and has more L3, so these projections are likely low. The speed-independent requirement stands: **to match boat.dev's published cost per index unit, an AX102 must sustain 326 host index units, about 20 per core** (487 and 30 with operator time). The AX42 measured **10.9 index units per core** with SMT (87.06 on 8 cores) and **9.5** without it, so an AX102 would need roughly twice the AX42's per-core throughput.
 
 boat.dev's figure is its vendor-measured solo speed. How boat.dev behaves under load is unmeasured, so every comparison here is generous to boat.dev by an unknown amount, just as "100% busy" is generous to the self-hosted box.
 
@@ -685,11 +853,11 @@ The older fio jobs never flush, so they cannot tell the two caches apart. Two fl
 
 ### Untrusted after the vCPU-cgroup fix, run 42937179139
 
-Run [42937179139](https://github.com/aicodeking/pandaos/actions/runs/42937179139), main at `bcf0cda` (the boatd-r2 merge: vCPU threads get their own cgroup, apart from the VMM thread). Untrusted preset, **EPYC 9V45 runner, SMT off: 2 CPUs online**, `Unsafe` cache. Medians, IQR in brackets.
+Run [42937179139](https://github.com/aicodeking/pandaos/actions/runs/42937179139), main at `bcf0cda` (the boatd-r2 merge: vCPU threads get their own cgroup, apart from the VMM thread). Untrusted preset, **EPYC 9V45 runner, SMT off: 2 CPUs online**, `Unsafe` cache. Medians, IQR in brackets. (Note: like the other `2026-11-10`–`2026-11-11` runner tables above, this run predates `stack.sh`'s `jailGid` `io_uring`, `losetup --direct-io=on`, and `-ssh-policy-helper-file` online SSH quarantine; rebooted PandaOS `untrusted` on AX42 hardware is pending re-run, and live `boat.dev` is unmeasured without `BOATDEV_API_KEY`.)
 
 | Metric | Runner, no VM | Untrusted VM | VM / host | Old untrusted (run 42818758694, EPYC 9V74, before the fix) |
 |---|---|---|---|---|
-| (a) Node loop, runs/s (n = 9) | 18.26 | 16.54 [16.27–16.76] | **0.906** | 13.41 (VM / host 0.887) |
+| (a) Node loop, index units (n = 9) | 18.26 | 16.54 [16.27–16.76] | **0.906** | 13.41 (VM / host 0.887) |
 | (d) seq write 1M, MB/s † | 8,514 | 297.1 [284.1–317.2] | 0.035 | 304.1 |
 | (d) PTS seq write 1M, MiB/s † | 4,884 | 757.2 | 0.155 | n/a |
 | (d) rand write 4k, IOPS † | 71,382 | 52,798 | 0.740 | 41,578 |
@@ -701,7 +869,7 @@ Run [42937179139](https://github.com/aicodeking/pandaos/actions/runs/42937179139
 | (e) Go tarball download, Mbit/s | | 1,167 (above the 1,000 Mbit/s ingress cap: Firecracker's rx token bucket holds 1 s of the cap and starts full, so the 59.7 MB download fits in the burst; the steady state is capped, which `boatd/e2e-limits.sh` now measures back to back) | | 1,037 |
 | (f) cold `npm ci`, s | | 3.82 | | 4.91 |
 
-Density (g) on those 2 CPUs: per-VM / host runs/s 16.17 / 16.17 at N = 1, 10.96 / 21.92 at N = 2 (efficiency 0.678), 4.62 / 18.52 at N = 4 (0.286), 3.06 / 18.33 at N = 6 (0.189).
+Density (g) on those 2 CPUs: per-VM / host index units 16.17 / 16.17 at N = 1, 10.96 / 21.92 at N = 2 (efficiency 0.678), 4.62 / 18.52 at N = 4 (0.286), 3.06 / 18.33 at N = 6 (0.189).
 
 What this run settles and what it does not:
 - **The 1M sequential write did not recover on main.** The branch run's 626.6 MB/s (n = 2, EPYC 9V74) is not reproduced: 297.1 MB/s here (n = 3, EPYC 9V45), the same as before the fix. The PTS job (iodepth 64) reaches 757 MiB/s. Different runner CPUs, so this does not prove the fix does nothing; it does mean the branch number should not be quoted.
@@ -710,7 +878,7 @@ What this run settles and what it does not:
 
 **Caveats for every number above:**
 - **† Unsafe cache** on every column except trusted-writeback, as above. The write rows are also not the same kind of number as boat.dev's published fio results.
-- **None of these CPUs is the one priced.** boat.dev's published 27.67 runs/s is a VM on an **AMD Ryzen 9 9950X** (Zen 5). The self-hosted price is a Hetzner AX102, a **Ryzen 9 7950X3D** (Zen 4). The speeds come from EPYC and Xeon runners. A cost per run that multiplies one CPU's price by another's speed is no machine's cost, and is marked **MIXED CPUs**. The CPU-consistent figures are boat.dev's price at boat.dev's published speed (**$0.000361 per 1000 runs**) and the [AX42's measured cost](#cost-per-run-measured-on-the-ax42) ($0.000520–$0.000597).
+- **None of these CPUs is the one priced.** boat.dev's published 28.06 index units (earlier: 27.67, 2026-08-24) is a VM on an **AMD Ryzen 9 9950X** (Zen 5). The self-hosted price is a Hetzner AX102, a **Ryzen 9 7950X3D** (Zen 4). The speeds come from EPYC and Xeon runners. A cost per index unit that multiplies one CPU's price by another's speed is no machine's cost, and is marked **MIXED CPUs**. The CPU-consistent figures are boat.dev's price at boat.dev's published speed (**$0.000356 per 1000 index units**) and the [AX42's measured cost](#cost-per-index-unit-measured-on-the-ax42) ($0.000520–$0.000597).
 - **Runner, not server.** These are shared 4-vCPU cloud VMs with nested KVM and a loop-file disk. Each preset ran on its own runner, so runner-to-runner variance is in the column differences too.
 
 ## 5. What self-hosting does not give you
@@ -726,42 +894,64 @@ What this run settles and what it does not:
 
 ## Verdict
 
-As of the AX42 runs (Ubuntu, 2026-11-11; PandaOS install, 2026-11-12; lifecycle and disk re-measured on the install at main `0d160dd` after its fixes, 2026-11-13, trusted mode), CI runs 42818758694, 42860774575 and 42937179139, and the 2026-11-02 prices. **No boat.dev number on this page was measured by us: there is no measured boat.dev column, because no run had a `BOATDEV_API_KEY`.** boat.dev's 27.67 runs/s is one solo VM, not a loaded host. Every boat.dev figure is its published price or its vendor-published benchmark, so each comparison below is PandaOS **measured** against boat.dev **published**, or it is a **projection** (arithmetic, not a run). Where boat.dev publishes nothing, there is no verdict. The Basis column says which kind each row is.
+As of the AX42 runs (Ubuntu, 2026-11-11; PandaOS install, 2026-11-12; lifecycle and disk re-measured on the install at main `0d160dd` after its fixes, 2026-11-13, trusted mode), CI runs 42818758694, 42860774575 and 42937179139, and the 2026-11-02 prices. **No boat.dev number on this page was measured by us: there is no measured boat.dev column, because no run had a `BOATDEV_API_KEY`.** boat.dev's 28.06 index units is one solo VM, not a loaded host. Every boat.dev figure is its published price or its vendor-published benchmark, so each comparison below is PandaOS **measured** against boat.dev **published**, or it is a **projection** (arithmetic, not a run). Where boat.dev publishes nothing, there is no verdict. The Basis column says which kind each row is.
 
 | Workload type | Basis | PandaOS (what we know) | boat.dev (what we know) | Verdict |
 |---|---|---|---|---|
-| **CPU-bound work, cost per run** | Measured vs published (AX102: projection vs published) | Measured, AX42 at list price, box full: $0.000543 per 1000 Node runs on the PandaOS install (8 VMs, quota); $0.000520 trusted (11 VMs) and $0.000597 untrusted (7 VMs) on Ubuntu. AX102: *projection* $0.000668–$0.000768 | Published price × published solo speed: $0.000361 | **Loses: 1.44–1.65× boat.dev** (1.50× on the install), 3.3–3.7× with operator time; AX102 *projected* 1.85–2.1×. boat.dev's figure is a solo VM. Its speed under load is unpublished, which flatters boat.dev by an unknown amount |
-| **Idle / agent-wait work, cost per VM-hour** (sandboxes mostly waiting, CPU speed irrelevant) | Price arithmetic vs published price | Price arithmetic on measured admission counts: AX42 $0.023 (untrusted, 7 VMs), AX102 $0.028 (15 VMs) at 100% utilization; $0.015 / $0.019 at the trusted 1.5 overcommit | Published $0.036 | **Wins only when the box stays full.** Break-even is 65% (AX42) to 78% (AX102) full in untrusted mode, and never once operator time counts (146% / 116%). Trusted overcommit breaks even at 41–53% full (79–93% with operator time). It loses below that, and loses badly if stopped VMs are kept (next rows) |
-| **Lifecycle latency** | Measured vs not measured | Measured on the AX42 at `0d160dd` (trusted): create → exec-ready 0.87–0.90 s cold (1.40–1.58 s before the fixes), 0.31–0.32 s from the warm pool (on by default only with `untrustedTenants = false`); resume 0.15–0.17 s; fork 0.29–0.37 s; new-from-snapshot 0.19–0.23 s; exec round trip 2.0–2.3 ms | **Not measured**, no comparable published figures | **No verdict.** These are PandaOS's own numbers, not a win |
+| **CPU benchmark index, cost per index unit** | Measured vs published (AX102: projection vs published) | Measured, AX42 at list price, box full: $0.000543 per 1000 index units on the PandaOS install (8 VMs, quota); $0.000520 trusted (11 VMs) and $0.000597 untrusted (7 VMs) on Ubuntu. AX102: *projection* $0.000668–$0.000768 | Published price × published solo speed: $0.000356 | **Loses: 1.46–1.67× boat.dev** (1.52× on the install), 3.3–3.8× with operator time; AX102 *projected* 1.9–2.2×. boat.dev's figure is a solo VM. Its speed under load is unpublished, which flatters boat.dev by an unknown amount |
+| **Idle / agent-wait work, cost per VM-hour** (sandboxes mostly waiting, CPU speed irrelevant) | Price arithmetic vs published price | Price arithmetic on measured admission counts: AX42 $0.023 (untrusted, 7 RAM-bound VMs when sparse; $0.027 worst-case at 6 100%-full 59 GiB disks), AX102 $0.028 (15 VMs) at 100% utilization; $0.015 / $0.019 at the trusted 1.5 overcommit | Published $0.036 list ($0.0288 with +25% wallet top-up bonus on $200+ payments; $20/$100/$500/$2,000 monthly plans) | **Wins only when a single box stays nearly full.** Break-even in untrusted mode is 65% on AX42 (75% at 6-VM full-disk worst-case) to 78% on AX102 vs list ($0.036/h), **81% (94% full-disk) to 97%** vs +25% bonus ($0.0288/h), 80–97% (list; 94% on AX42 6-VM full-disk) / never (bonus) on a `4+1` external N+1 cluster + backup, and never with `1+1` HA or operator time (146% / 171% / 116%). Trusted overcommit breaks even at 41–53% full vs list (79–93% with operator time). It loses below that, and loses badly if stopped VMs are kept (next rows). **These break-evens exclude boat.dev's AI proxy fee ($1/day + $1 per 1,000 requests, only with the proxy on):** it can flip the verdict for AI-heavy fleets (above ~9,000 requests/day the fee alone exceeds an AX102; see the [AI-proxy sensitivity](#boatdev-ai-proxy-fee-sensitivity-from-pricesjson)) |
+| **Lifecycle latency** | Measured vs not measured | Measured on the AX42 at `0d160dd` (**trusted mode**, predating `-ssh-policy-helper-file` across presets; Round 23–24 batch SSH policy + non-disruptive `rotate-token` keep steady-state token refreshes lightweight): create → exec-ready 0.87–0.90 s cold (1.40–1.58 s before the fixes), 0.31–0.32 s from the warm pool (on by default only with `untrustedTenants = false`); resume 0.15–0.17 s; fork 0.29–0.37 s; new-from-snapshot 0.19–0.23 s; exec round trip 2.0–2.3 ms | **Not measured** (`BOATDEV_API_KEY` not provided), no comparable published figures | **No verdict.** These are PandaOS's own `trusted`-mode numbers predating `-ssh-policy-helper-file`, not a win; rebooted PandaOS `untrusted` (`nosmt=force`, `blk-iocost`, `jailGid` `io_uring`, online SSH quarantine, `warmPool` off) is pending hardware re-run |
 | **Disk** | Measured vs published | Measured, `Unsafe` cache (guest flushes dropped): PTS job 57–216k random-read IOPS (medians; bimodal on the install, single repeats 56k–222k, median 216k at `0d160dd` and 56.7k before), 160–260k random-write IOPS, 1,651–2,740 MiB/s seq write (loop file and native btrfs). Durable: a `Writeback` VM on the install's native btrfs fsyncs 84 4k writes/s (measured, the drive's flush counter confirms the flushes); the Ubuntu loop stack 38 (host 82) | Published PTS job: 433k / 413k IOPS, 5,838 MiB/s (fio target and cache mode not published) | **Loses** on every published disk number, by 1.6–7.6×. The two are not necessarily the same kind of number. [Host baseline](#host-disk-baseline-and-the-56k--222k-random-read-split-ax42-pandaos-install): the bare NVMe is already 2.2× (random read) and 1.2× (seq write) below; the rest is the VM path, and the 56k reads come from fio sharing the disk-interrupt vCPU |
-| **Single-VM CPU speed** | Measured vs published (boat.dev: one solo VM) | Measured: 21.1–21.3 runs/s (AX42, Zen 4, 35 W) | Published: 27.67 (Ryzen 9 9950X, Zen 5) | **Loses (−23%)**, mostly on CPU. Both are one solo VM. *Projection:* PandaOS on a 9950X ≈ 26.4 |
-| **Virtualization overhead** | Measured vs inferred | Measured: a VM keeps 0.92 of the host's Node throughput; VMs keep 0.89–0.90 of bare-host throughput at 2–8 at once | **Not measured.** 0.96 is only an inference from a public 9950X average; boat.dev's host was never measured | **No verdict.** Measured 0.92 is not compared with an inferred 0.96 |
-| **Stopped-VM retention** (boat.dev keeps 14 days free) | Policy arithmetic and a model vs published terms | Under our own `storageOvercommit` 1 policy (59 GiB charged per VM, running or stopped): AX102 $0.21–$0.60 per running VM-hour for 24 h / 8 h sessions kept 14 days; AX42 worse. *Model:* charging actual use (3.4 GiB measured) brings the AX102 to $0.028–$0.034 and the AX42 to $0.023–$0.050 for the same sessions | Included in the price | **Loses under the shipped policy.** It ties or wins only in the thin-provisioning *model*, which boatd does not ship for untrusted tenants |
+| **Single-VM CPU speed** | Measured vs published (boat.dev: one solo VM) | Measured: 21.15–21.25 index units (AX42, Zen 4, 35 W) | Published: 28.06 (Ryzen 9 9950X, Zen 5; StarSling run, 2026-10-03) | **Loses (−24 to −25%)**, mostly on CPU. Both are one solo VM. *Projection:* PandaOS on a 9950X ≈ 26.4–26.6 |
+| **Virtualization overhead** | Measured vs inferred | Measured: a VM keeps 0.92 of the host's Node index; VMs keep 0.89–0.90 of bare-host index at 2–8 at once | **Not measured.** 0.97 is only an inference from a public 9950X average; boat.dev's host was never measured | **No verdict.** Measured 0.92 is not compared with an inferred 0.97 |
+| **Stopped-VM retention** (boat.dev keeps 14 days free) | Policy arithmetic and a model vs published terms | Full-disk reserve projection under `storageOvercommit` 1 (25 AX102 / 6 AX42 storage slots; raw-capacity sparse projection: 30 / 8): AX102 full-disk **$0.25–$0.72/h**, sparse **$0.21–$0.60/h**, for 24 h / 8 h sessions kept 14 days; AX42 full-disk **$0.41–$1.17/h**, sparse **$0.31–$0.88/h**. *Model:* charging actual use (3.4 GiB measured) brings the AX102 to $0.028–$0.040 and the AX42 to $0.023–$0.059 for the same sessions | Included in the price | **Loses in both nominal-retention projections.** It ties or wins only in the thin-provisioning *model*, which boatd does not ship for untrusted tenants |
 | **Against E2B / Daytona / Modal / Vercel** | Price arithmetic vs published list prices | Price arithmetic | $0.22–$0.68 per VM-hour (their list prices) | **Wins per VM-hour**, 6–9× cheaper at 50% utilization (AX102, no overcommit, retention aside) |
 
-Also measured, without a boat.dev counterpart: SMT off costs untrusted mode 6% of host throughput at 7 VMs, and the CPU governor (`performance` vs `powersave` / `balance_performance`) changes nothing measurable.
+Also measured, without a boat.dev counterpart: SMT off costs untrusted mode 6% of aggregate host index at 7 VMs, and the CPU governor (`performance` vs `powersave` / `balance_performance`) changes nothing measurable.
 
-**Where this page is generous to PandaOS.** Every self-hosted figure prices **one host with no spare capacity**. The density and cost-per-run tables fill that host to boatd's admission limit and sell all of it, and the verdict compares that packed box with boat.dev's per-sandbox price. A service that offers what boat.dev's price includes cannot run that way. It needs somewhere to put tenants while the host is down for a kernel update (every VM stops on a reboot) or a hardware fault ([§5](#5-what-self-hosting-does-not-give-you)), and headroom so that a burst of creates is not refused by admission. With N+1 hosts at small scale (two AX42s to sell one AX42 of VMs), every per-VM-hour and per-run cost here doubles, and at 10 hosts it rises by about 10%. Our own 8–11 VM counts also assume the full RAM promise is sold and nothing is held back. None of this was measured; it is arithmetic on the same prices.
+**Where this page is generous to PandaOS.** The headline per-VM-hour and cost-per-index-unit tables price **one host with no spare capacity**, filling it to boatd's admission limit and comparing that packed box with boat.dev's per-sandbox list price. A service that offers what boat.dev's price includes cannot run that way: `boatd` and `boat-api` are single-host daemons with no built-in multi-node scheduler or automatic failover, so surviving a kernel-reboot window or hardware fault ([§5](#5-what-self-hosting-does-not-give-you)) requires independent spare hosts behind external routing plus off-host snapshot backups and headroom for bursts, while buyers spending $200+ on boat.dev receive up to a +25% wallet credit bonus ($0.0288/h). The [sensitivity table](#credit-bonus-plan-fee--habackup-tco-sensitivity) prices both effects explicitly (without double-counting single-host backup on top of the shared 5 TB BX21 archive): a `1+1` HA pair + 5 TB off-host backup roughly doubles cost (`134–157%` break-even vs list, `167–196%` vs +25% bonus — never breaking even), and even a `4+1` N+1 cluster + backup pushes AX42/AX102 untrusted break-even to 80–97% vs list (`94%` on AX42 6-VM full-disk worst-case) and above 100% (never) vs +25% bonus.
 
-**In one line:** per unit of CPU-bound work, self-hosted PandaOS on the AX42 costs about 1.5× boat.dev's published price. Per VM-hour it is cheaper only on a box kept more than about two-thirds full with free operator time and prompt deletion of stopped VMs. You self-host for control (kernels, images, data locality, no start or snapshot fees), not to undercut boat.dev.
+**In one line:** per geometric-mean index unit, self-hosted PandaOS on the AX42 costs about 1.5× boat.dev's published list price (and ~1.9× its +25% bonus rate). Per VM-hour it is cheaper only on a single box kept more than 65–78% full (`75%` on AX42 full-disk worst-case; 81–97% vs +25% bonus), with free operator time, no HA spare node, and prompt deletion of stopped VMs. You self-host for control (kernels, images, data locality, no start or snapshot fees), not to undercut boat.dev.
 
 **What would change this verdict:**
-- A `BOATDEV_API_KEY` run, for a measured boat.dev column: API baseline, lifecycle, disk and a load curve. That would also turn the "no verdict" rows into verdicts.
+- A `BOATDEV_API_KEY` run (ideally on the $100/mo plan for 30 starts/min), for a measured boat.dev column: API baseline, lifecycle, disk and a load curve. That would also turn the "no verdict" rows into verdicts.
+- A post-reboot AX42 `untrusted` run (`services.boat.untrustedTenants = true`, `nosmt=force`, `io_uring` via `jailGid`, `blk-iocost`, online SSH quarantine) on the PandaOS install.
 - An AX102 (or 9950X) run with `BOATBENCH_DENSITY_LEVELS=1,4,8,15,22`, to replace the AX102 projection.
 - Drives with power-loss protection for durable writes (the native-btrfs `Writeback` run gave 84 fsyncs/s, bound by the NVMe's flush).
 - A thin-provisioning storage policy with per-VM quotas, or an archive tier for stopped VMs, which would lift the retention limit.
 
+### Completed-suite throughput from saved density trials (MEASURED)
+
+One pass invokes the complete pinned web-tooling CLI once. Rate = `N × successful passes per VM / wall_s`, pooled as a median over complete trials. Wall time includes the barrier, execution, and harness overhead. These historical runs predate current production untrusted boot validation. These figures are not compared with the vendor geometric-mean index; the vendor has no compatible completed-suite measurement.
+
+| Existing artifact | Concurrent suites (N) | Completed suites/s | Complete trials |
+|---|---|---|---|
+| [Ubuntu trusted](../bench/boatbench/results/ax42-ubuntu-2026-11-11/trusted/results-pandaos-2026-11-11T091730Z.json) | 1 | 0.01929 | 2 |
+| [Ubuntu trusted](../bench/boatbench/results/ax42-ubuntu-2026-11-11/trusted/results-pandaos-2026-11-11T091730Z.json) | 11 | 0.10319 | 2 |
+| [Ubuntu untrusted (historical)](../bench/boatbench/results/ax42-ubuntu-2026-11-11/untrusted/results-pandaos-2026-11-11T103837Z.json) | 1 | 0.01975 | 2 |
+| [Ubuntu untrusted (historical)](../bench/boatbench/results/ax42-ubuntu-2026-11-11/untrusted/results-pandaos-2026-11-11T103837Z.json) | 7 | 0.08828 | 2 |
+| [PandaOS install performance (trusted)](../bench/boatbench/results/ax42-pandaos-2026-11-12/performance/results-pandaos-2026-11-12T061212Z.json) | 1 | 0.01938 | 1 |
+| [PandaOS install performance (trusted)](../bench/boatbench/results/ax42-pandaos-2026-11-12/performance/results-pandaos-2026-11-12T061212Z.json) | 8 | 0.09884 | 1 |
+| [Bare host performance](../bench/boatbench/results/ax42-pandaos-2026-11-12/performance/results-host-2026-11-12T061932Z.json) | 1 | 0.02043 | 1 |
+| [Bare host performance](../bench/boatbench/results/ax42-pandaos-2026-11-12/performance/results-host-2026-11-12T061932Z.json) | 11 | 0.11652 | 1 |
+
 ## Reproduce
 
 All derived numbers come from the inputs in `bench/boatbench/prices.json` and boatd's source:
-- monthly cost = `usd_per_month + setup_usd/12 + backup_usd_per_month`
+- monthly cost = `usd_per_month + setup_usd/12 + backup_usd_per_month` (4+1 total cluster: `5·(usd_per_month + setup_usd/12) + 14.784`, divided across 4 serving hosts; 1+1: `2·(usd_per_month + setup_usd/12) + 14.784`; each replaces single-host backup with one shared 5 TB archive)
 - VMs = `⌊(MemTotal − hostReserveMiB)·memOvercommit / (8192 + vmOverheadMiB)⌋`, capped by `⌊threads·cpuOvercommit/4⌋`, with MemTotal ≈ RAM·63/64 − 256 MiB and the constants read from `components/boat/boatd/config.go` by `bench/boatbench/admission.py`. Untrusted: overcommit 1.0, threads = cores. `bench/boatbench/test_boatbench.py` recomputes every count in `prices.json` and fails if boatd's constants or its admission formula change.
 - cost per VM-hour = cost / (VMs · 730 · utilization)
-- break-even VM-hours = cost / 0.036
-- untrusted storage slots = ⌊store GiB / 59⌋ (1,788 GiB on an AX102: 30); running VM-hours ≤ min(VMs·730, slots·730·H/(H+R)); a kept stopped VM costs cost / slots per month
+- break-even VM-hours = cost / 0.036 (list PAYG) or cost / 0.0288 (max +25% wallet bonus)
+- usable tenant store GiB = `usable_store_gib` (`⌊store_gib · 0.85⌋`, deducting 10% `boatd` `minFreePct` + 5% OS/base images/btrfs metadata: 404 GiB on AX42, 1,519 GiB on AX102 and AX162, 759 GiB on OVH Advance-3, 1,503 GiB on Latitude m4.metal.medium); untrusted full-disk storage slots = `⌊usable_store_gib / 59⌋` (6 on AX42, 25 on AX102/AX162/Latitude, 12 on OVH Advance-3; on AX42 `hostStorageCheck` checks raw `⌊476 / 59⌋ = 8` nominal VMs so all 7 RAM-bound sparse VMs boot); running VM-hours ≤ min(VMs·730, slots·730·H/(H+R)); a kept stopped VM costs cost / slots per month
 
 Every cost table on this page is generated by boatbench from committed inputs:
-- `boatbench.py costs`: per VM-hour, break-even and retention, from `prices.json`.
-- `boatbench.py report <results> --server ax42|ax102|...`: cost per run, from the raw results under `bench/boatbench/results/`.
+- `boatbench.py costs`: per VM-hour, credit-bonus / plan-fee / HA-backup sensitivity, break-even and retention, from `prices.json`.
+- `boatbench.py report <results> --server ax42|ax102|...`: cost per index unit, from the raw results under `bench/boatbench/results/`.
 
-The PandaOS price is derived from the chosen server in `prices.json` (`report.load_prices`): month + setup/12 + backup, per host hour, and per VM at the `memOvercommit` 1.0 count. Where the speed was measured on the priced CPU, the report prints a **measured** cost per run: host $/h ÷ 3.6 ÷ measured host runs/s. Elsewhere it prints a **projection** from the measured efficiency curve, with every per-run figure marked **MIXED CPUs**.
+The PandaOS price is derived from the chosen server in `prices.json` (`report.load_prices`): month + setup/12 + backup, per host hour, and per VM at the `memOvercommit` 1.0 count. Where the speed was measured on the priced CPU, the report prints a **measured** cost per index unit: host $/h ÷ 3.6 ÷ measured host index units. Elsewhere it prints a **projection** from the measured efficiency curve, with every index-normalized figure marked **MIXED CPUs**.
+
+Benchmark report prices follow the recorded VM size. boat.dev measurements use the saved `sizes` rate card;
+the published-speed reference is a `default` VM. PandaOS admission counts, per-VM prices and density
+projections model `default` only; costs for unsupported or missing shapes are suppressed. Host-native
+density ratios require matching recorded host descriptions, client CPU/OS and host CPU counts; other
+evidence is marked **UNMATCHED**, with ratios suppressed rather than attributed to VM overhead.

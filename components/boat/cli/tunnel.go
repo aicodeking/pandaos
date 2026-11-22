@@ -45,6 +45,12 @@ func (a *app) currentFile() string {
 // ponytail: keyed by parent PID, so a reused PID could see a stale VM within
 // currentMaxAge; store the shell's start time if that ever bites.
 func (a *app) setCurrent(id string) {
+	if !validSSHConfigID(id) {
+		if a.errw != nil {
+			fmt.Fprintf(a.errw, "boat: cannot remember the current VM: invalid VM id %q\n", id)
+		}
+		return
+	}
 	p := a.currentFile()
 	err := os.MkdirAll(filepath.Dir(p), 0o700)
 	if err == nil {
@@ -184,26 +190,45 @@ func (a *app) sshTarget(id, ident string) (obj, error) {
 		return nil, err
 	}
 	var info obj
-	err = a.c.call("POST", vmPath(id, "ssh"), obj{"public_key": pub}, &info)
-	return info, err
+	if err = a.c.call("POST", vmPath(id, "ssh"), obj{"public_key": pub}, &info); err != nil {
+		return info, err
+	}
+	if err = validateSSHInfo(info); err != nil {
+		return nil, err
+	}
+	return info, nil
 }
 
 // sshArgv builds the ssh command for a target, with extra options before the host.
-func sshArgv(id string, info obj, extra ...string) []string {
+func sshArgv(id string, info obj, extra ...string) ([]string, error) {
+	if !validSSHConfigID(id) {
+		return nil, fmt.Errorf("server returned an invalid VM id %q", id)
+	}
+	if err := validateSSHInfo(info); err != nil {
+		return nil, err
+	}
 	// VM ips are reused after a delete and every VM has its own host keys, so
 	// known_hosts is keyed by VM id: a new VM on an old ip is not a "changed key".
 	argv := []string{"ssh", "-p", s(info, "port"), "-o", "StrictHostKeyChecking=accept-new",
 		"-o", "HostKeyAlias=boat-" + id}
 	if j := s(info, "jump"); j != "" {
+		pc, err := proxyCommand(j)
+		if err != nil {
+			return nil, err
+		}
 		// accept-new here too: with no tty the inner ssh cannot ask about the jump host.
-		argv = append(argv, "-o", "ProxyCommand="+proxyCommand(j))
+		argv = append(argv, "-o", "ProxyCommand="+pc)
 	}
 	argv = append(argv, extra...)
-	return append(argv, s(info, "user")+"@"+s(info, "host"))
+	return append(argv, s(info, "user")+"@"+s(info, "host")), nil
 }
 
-func proxyCommand(jump string) string {
-	return "ssh -o StrictHostKeyChecking=accept-new -W %h:%p " + sshJumpArgs(jump)
+func proxyCommand(jump string) (string, error) {
+	args, err := sshJumpArgs(jump)
+	if err != nil {
+		return "", err
+	}
+	return "ssh -o StrictHostKeyChecking=accept-new -W %h:%p " + args, nil
 }
 
 // cmdForward holds a tunnel in the foreground until Ctrl+C (which also ends ssh,
@@ -247,7 +272,11 @@ func cmdForward(a *app, args []string) error {
 		if err != nil {
 			return err
 		}
-		info["argv"] = sshArgv(id, info, opts...)
+		argv, err := sshArgv(id, info, opts...)
+		if err != nil {
+			return err
+		}
+		info["argv"] = argv
 		return a.emit(info, nil)
 	}
 	fmt.Fprintf(a.errw, "forwarding %s %s on %s; Ctrl+C to stop\n", flagName, spec, id)
@@ -259,8 +288,12 @@ func (a *app) holdTunnel(id, ident string, opts []string) error {
 	for {
 		start := time.Now()
 		info, err := a.sshTarget(id, ident)
+		var argv []string
 		if err == nil {
-			err = a.runProg(sshArgv(id, info, opts...))
+			argv, err = sshArgv(id, info, opts...)
+		}
+		if err == nil {
+			err = a.runProg(argv)
 		}
 		if err == nil {
 			return nil
@@ -294,12 +327,15 @@ func cmdSSHConfig(a *app, args []string) error {
 		return err
 	}
 	id := s(vm, "id")
+	if !validSSHConfigID(id) {
+		return fmt.Errorf("server returned an invalid VM id %q", id)
+	}
 	info, err := a.sshTarget(id, *ident)
 	if err != nil {
 		return err
 	}
 	names := id
-	if n := s(vm, "name"); n != "" && n != id {
+	if n := s(vm, "name"); n != "" && n != id && validSSHConfigSlug(n) {
 		names += " " + n
 	}
 	var b strings.Builder
@@ -309,7 +345,11 @@ func cmdSSHConfig(a *app, args []string) error {
 	}
 	fmt.Fprintf(&b, "  HostKeyAlias boat-%s\n  StrictHostKeyChecking accept-new\n", id)
 	if j := s(info, "jump"); j != "" {
-		fmt.Fprintf(&b, "  ProxyCommand %s\n", proxyCommand(j))
+		pc, err := proxyCommand(j)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "  ProxyCommand %s\n", pc)
 	}
 	if *toStdout {
 		return a.okLine(obj{"id": id, "config": b.String()}, strings.TrimRight(b.String(), "\n"))

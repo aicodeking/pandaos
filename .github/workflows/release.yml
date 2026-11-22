@@ -25,6 +25,11 @@ jobs:
     uses: ./.github/workflows/nix-checks.yml
     secrets: inherit
 
+  unit-checks:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/unit-checks.yml
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 240
@@ -172,7 +177,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push'
-    needs: [checks, build, boat-assets]
+    needs: [checks, unit-checks, build, boat-assets]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and move the release branch
@@ -207,4 +212,12 @@ jobs:
           fail_on_unmatched_files: true
 
       - name: Move the release branch to the tag
-        run: git push origin "$GITHUB_SHA:refs/heads/release" --force
+        run: |
+          if git ls-remote --exit-code --heads origin release >/dev/null; then
+            git fetch origin release
+            git merge-base --is-ancestor FETCH_HEAD "$GITHUB_SHA" \
+              || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) would rewind or diverge from origin/release"; exit 1; }
+            git push origin "$GITHUB_SHA:refs/heads/release"
+          else
+            git push origin "$GITHUB_SHA:refs/heads/release"
+          fi

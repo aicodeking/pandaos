@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Size is a VM shape. DiskGiB is the sparse disk the rootfs is grown to.
@@ -63,7 +65,8 @@ type Config struct {
 	PublicIPv4    []string `json:"publicIPv4"` // 1:1 NAT pool, routed to this host
 	PortMin       int      `json:"portMin"`
 	PortMax       int      `json:"portMax"`
-	DesktopPort   int      `json:"desktopPort"` // guest port the gateway proxies the desktop to
+	ReservedPorts []int    `json:"reservedPorts,omitempty"` // host service ports that must stay outside portMin..portMax and never be allocated
+	DesktopPort   int      `json:"desktopPort"`             // guest port the gateway proxies the desktop to
 
 	Sizes        map[string]Size `json:"sizes"`
 	DefaultSize  string          `json:"defaultSize"`
@@ -72,23 +75,27 @@ type Config struct {
 	BootTimeoutS int             `json:"bootTimeoutS"`  // wait for the guest agent
 	IdleStopS    int             `json:"idleStopS"`     // 0 = never auto-stop on idle
 	ReapS        int             `json:"reapIntervalS"` // TTL/idle check period
+	// UsageRetentionDays: usage.jsonl intervals older than this are folded into daily
+	// per-team aggregates (ledger_compact.go). 0 = 400; negative = never compact.
+	UsageRetentionDays int `json:"usageRetentionDays"`
 
 	// Host protection.
-	MinFreePct        int     `json:"minFreePct"`        // refuse create/fork/snapshot below this free % of stateDir
-	MinFreeGiB        int     `json:"minFreeGiB"`        // ... or below this many GiB (the larger floor wins)
-	MemOvercommit     float64 `json:"memOvercommit"`     // active VM RAM <= (host RAM - reserve) * this
-	CPUOvercommit     float64 `json:"cpuOvercommit"`     // active vCPUs <= host CPUs * this
-	HostReserveMiB    int     `json:"hostReserveMiB"`    // RAM kept for the host itself
-	HostMemMiB        int     `json:"hostMemMiB"`        // 0 = /proc/meminfo
-	HostCPUs          int     `json:"hostCPUs"`          // 0 = runtime.NumCPU
-	VMOverheadMiB     int     `json:"vmOverheadMiB"`     // cgroup memory.high = VM RAM + this
-	VMPageCacheMiB    int     `json:"vmPageCacheMiB"`    // memory.max = memory.high + this: host page cache of the VM's disk I/O
-	CgroupParent      string  `json:"cgroupParent"`      // jailer --parent-cgroup, outside boatd's unit so VMs survive a crash
-	CgroupsOptional   bool    `json:"cgroupsOptional"`   // start even if VMs would run without cgroup limits
-	BtrfsQgroups      bool    `json:"btrfsQgroups"`      // each team's data is a subvolume with an exclusive-bytes limit
-	StorageOvercommit float64 `json:"storageOvercommit"` // committed storage of all teams <= stateDir's size * this; 0 = no limit
-	UntrustedTenants  bool    `json:"untrustedTenants"`  // refuse to run without the limits and host settings hostile tenants call for
-	DiffSnapshots     bool    `json:"diffSnapshots"`     // dirty-page snapshots merged onto a reflinked base
+	MinFreePct        int     `json:"minFreePct"`              // refuse create/fork/snapshot below this free % of stateDir
+	MinFreeGiB        int     `json:"minFreeGiB"`              // ... or below this many GiB (the larger floor wins)
+	MemOvercommit     float64 `json:"memOvercommit"`           // active VM RAM <= (host RAM - reserve) * this
+	CPUOvercommit     float64 `json:"cpuOvercommit"`           // active vCPUs <= host CPUs * this
+	HostReserveMiB    int     `json:"hostReserveMiB"`          // RAM kept for the host itself
+	HostMemMiB        int     `json:"hostMemMiB"`              // 0 = /proc/meminfo
+	HostCPUs          int     `json:"hostCPUs"`                // 0 = runtime.NumCPU
+	VMOverheadMiB     int     `json:"vmOverheadMiB"`           // cgroup memory.high = VM RAM + this
+	VMPageCacheMiB    int     `json:"vmPageCacheMiB"`          // memory.max = memory.high + this: host page cache of the VM's disk I/O
+	CgroupParent      string  `json:"cgroupParent"`            // jailer --parent-cgroup, outside boatd's unit so VMs survive a crash
+	CgroupsOptional   bool    `json:"cgroupsOptional"`         // start even if VMs would run without cgroup limits
+	BtrfsQgroups      bool    `json:"btrfsQgroups"`            // each team's data is a subvolume with an exclusive-bytes limit
+	StorageOvercommit float64 `json:"storageOvercommit"`       // committed storage of all teams <= stateDir's size * this; 0 = no limit
+	UntrustedTenants  bool    `json:"untrustedTenants"`        // refuse to run without the limits and host settings hostile tenants call for
+	StandaloneSSH     bool    `json:"standaloneSSH,omitempty"` // standalone boatd without boat-api: start VMs with SSHPolicyReady=true (forbidden with untrustedTenants)
+	DiffSnapshots     bool    `json:"diffSnapshots"`           // dirty-page snapshots merged onto a reflinked base
 
 	// Performance and density. See PROTOCOL.md "Performance and density".
 	DiskEngine     string `json:"diskEngine"`     // auto (Async, else Sync), Async or Sync
@@ -116,10 +123,18 @@ type Config struct {
 	// UplinkFairQueue: cake on the uplink's egress with `nat dual-srchost`, so VMs share the
 	// port by source host (each VM, before masquerade) and then by flow.
 	UplinkFairQueue bool `json:"uplinkFairQueue"`
-	// HostHTTPSPort: tcp port VMs may reach on any host-local address (Caddy's
+	// HostHTTPSPort: tcp port VMs may reach on host-local addresses (Caddy's
 	// 443, so boat-api at its public URL, BOAT_URL, works from a guest on a
-	// single-host install); 0 = closed. Nothing else on the host is opened.
-	HostHTTPSPort int `json:"hostHttpsPort"`
+	// single-host install); 0 = closed. HostHTTPSAddrs restricts destination
+	// IPv4/IPv6 addresses or canonical CIDRs literally (list the bridge IPv4
+	// gateway explicitly when guests reach it on hostHttpsPort); when empty,
+	// all privateV4 and privateV6 ranges are dropped before fib daddr type local.
+	HostHTTPSPort  int      `json:"hostHttpsPort"`
+	HostHTTPSAddrs []string `json:"hostHttpsAddrs,omitempty"`
+	// SSHControlEndpoints: deprecated config field retained for schema
+	// validation compatibility; quarantined VMs no longer receive network
+	// exceptions (SSH policy installation runs offline over vsock).
+	SSHControlEndpoints []string `json:"sshControlEndpoints"`
 
 	// Per-VM limits. 0 = none. Firecracker limiters apply from the next cold boot
 	// (a restored VM keeps those saved in its snapshot).
@@ -212,6 +227,17 @@ func defaultConfig() Config {
 			"xlarge":  {16, 32768, 251},
 		},
 	}
+}
+
+// usageRetention is the compaction window of usage.jsonl; <= 0 means never compact.
+func (c Config) usageRetention() time.Duration {
+	switch {
+	case c.UsageRetentionDays < 0:
+		return 0
+	case c.UsageRetentionDays == 0:
+		return ledgerDefaultRetention
+	}
+	return time.Duration(c.UsageRetentionDays) * 24 * time.Hour
 }
 
 func loadConfig(path string) (Config, error) {
@@ -334,6 +360,24 @@ func (c Config) validate() error {
 	if c.HostHTTPSPort < 0 || c.HostHTTPSPort > 65535 || (c.HostHTTPSPort >= c.PortMin && c.HostHTTPSPort <= c.PortMax) {
 		return fmt.Errorf("hostHttpsPort must be 0-65535 and outside portMin-portMax")
 	}
+	if c.AIProxyPort < 0 || c.AIProxyPort > 65535 || (c.AIProxyPort >= c.PortMin && c.AIProxyPort <= c.PortMax) {
+		return fmt.Errorf("aiProxyPort must be 0-65535 and outside portMin-portMax")
+	}
+	for _, p := range c.ReservedPorts {
+		if p < 1 || p > 65535 || (p >= c.PortMin && p <= c.PortMax) {
+			return fmt.Errorf("reservedPorts entry %d must be 1-65535 and outside portMin-portMax", p)
+		}
+	}
+	for _, raw := range c.HostHTTPSAddrs {
+		if _, err := parseHostHTTPSAddr(raw); err != nil {
+			return err
+		}
+	}
+	for _, ep := range c.SSHControlEndpoints {
+		if _, err := parseSSHControlEndpoint(ep); err != nil {
+			return err
+		}
+	}
 	for _, n := range []int{c.AIProxyPort, c.EgressMbit, c.IngressMbit, c.DiskMBps, c.DiskIOPS, c.IOMaxMBps, c.IOMaxIOPS, c.CtPerVM, c.MaxPortsPerVM, c.VMOverheadMiB, c.VMPageCacheMiB, c.IndexQuarantineS} {
 		if n < 0 {
 			return fmt.Errorf("limits must be >= 0")
@@ -359,6 +403,7 @@ type untrustedRule struct {
 }
 
 var untrustedRules = []untrustedRule{
+	{"standaloneSSH", true, func(c Config) bool { return !c.StandaloneSSH }, "cannot be enabled when untrustedTenants is true"},
 	{"btrfsQgroups", false, func(c Config) bool { return c.BtrfsQgroups }, "each team's data needs a quota"},
 	{"storageOvercommit", 2, func(c Config) bool { return c.StorageOvercommit > 0 && c.StorageOvercommit <= 1 },
 		"must be in (0, 1]: committed storage fits the disk, so no tenant can fill it"},
@@ -406,4 +451,143 @@ func (c Config) team(name string) TeamPolicy {
 		return p
 	}
 	return c.DefaultTeam
+}
+
+func (c Config) standaloneReady(v VM) bool {
+	return c.StandaloneSSH && !c.UntrustedTenants && v.Team != warmTeam
+}
+
+func validHostHTTPSAddr(addr netip.Addr) bool {
+	if !addr.IsValid() || addr.Zone() != "" || addr.Is4In6() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsMulticast() {
+		return false
+	}
+	if addr.Is4() {
+		if netip.MustParsePrefix("0.0.0.0/8").Contains(addr) || addr == netip.MustParseAddr("255.255.255.255") {
+			return false
+		}
+	}
+	return true
+}
+
+func validHostHTTPSPrefix(p netip.Prefix) bool {
+	if !p.IsValid() || p.Bits() <= 0 || p.Masked() != p || !validHostHTTPSAddr(p.Addr()) {
+		return false
+	}
+	if p.Addr().Is4() {
+		for _, bad := range []string{"0.0.0.0/8", "127.0.0.0/8", "224.0.0.0/4", "255.255.255.255/32"} {
+			if netip.MustParsePrefix(bad).Overlaps(p) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, bad := range []string{"::/128", "::1/128", "::ffff:0:0/96", "ff00::/8"} {
+		if netip.MustParsePrefix(bad).Overlaps(p) {
+			return false
+		}
+	}
+	return true
+}
+
+func parseHostHTTPSAddr(raw string) (string, error) {
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return "", fmt.Errorf("hostHttpsAddrs %q: want a canonical unicast IPv4/IPv6 address or CIDR", raw)
+	}
+	if strings.Contains(raw, "/") {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil || p.String() != raw || !validHostHTTPSPrefix(p) {
+			return "", fmt.Errorf("hostHttpsAddrs %q: want a canonical unicast IPv4/IPv6 CIDR", raw)
+		}
+		return p.String(), nil
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil || addr.String() != raw || !validHostHTTPSAddr(addr) {
+		return "", fmt.Errorf("hostHttpsAddrs %q: want a canonical unicast IPv4/IPv6 address or CIDR", raw)
+	}
+	return addr.String(), nil
+}
+
+func (c Config) hostHTTPSAllowlists() (v4, v6 []string) {
+	if len(c.HostHTTPSAddrs) == 0 {
+		return nil, nil
+	}
+	seen4, seen6 := map[string]bool{}, map[string]bool{}
+	for _, raw := range c.HostHTTPSAddrs {
+		parsed, err := parseHostHTTPSAddr(raw)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(parsed, ":") {
+			if !seen6[parsed] {
+				seen6[parsed] = true
+				v6 = append(v6, parsed)
+			}
+		} else {
+			if !seen4[parsed] {
+				seen4[parsed] = true
+				v4 = append(v4, parsed)
+			}
+		}
+	}
+	return v4, v6
+}
+
+func (c Config) hostHTTPSAllowlist() []string {
+	v4, v6 := c.hostHTTPSAllowlists()
+	return append(v4, v6...)
+}
+
+type sshControlEndpoint struct {
+	IP   netip.Addr
+	Port int
+}
+
+func parseSSHControlEndpoint(raw string) (sshControlEndpoint, error) {
+	if raw == "" || strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, "[]") {
+		return sshControlEndpoint{}, fmt.Errorf("sshControlEndpoints %q: want <ipv4> or <ipv4>:<port>", raw)
+	}
+	host := raw
+	port := 443
+	if strings.Contains(raw, ":") {
+		var portStr string
+		host, portStr, _ = strings.Cut(raw, ":")
+		if host == "" || portStr == "" || strings.Contains(portStr, ":") {
+			return sshControlEndpoint{}, fmt.Errorf("sshControlEndpoints %q: want <ipv4> or <ipv4>:<port>", raw)
+		}
+		if portStr[0] < '1' || portStr[0] > '9' {
+			return sshControlEndpoint{}, fmt.Errorf("sshControlEndpoints %q: port must be 1-65535", raw)
+		}
+		for i := 1; i < len(portStr); i++ {
+			if portStr[i] < '0' || portStr[i] > '9' {
+				return sshControlEndpoint{}, fmt.Errorf("sshControlEndpoints %q: port must be 1-65535", raw)
+			}
+		}
+		n, err := strconv.Atoi(portStr)
+		if err != nil || n <= 0 || n > 65535 {
+			return sshControlEndpoint{}, fmt.Errorf("sshControlEndpoints %q: port must be 1-65535", raw)
+		}
+		port = n
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil || !addr.Is4() || addr.Zone() != "" {
+		return sshControlEndpoint{}, fmt.Errorf("sshControlEndpoints %q: want an IPv4 literal", raw)
+	}
+	if !isPublicControlIPv4(addr) {
+		return sshControlEndpoint{}, fmt.Errorf("sshControlEndpoints %q: private, metadata or reserved IPv4 address not allowed", raw)
+	}
+	return sshControlEndpoint{IP: addr, Port: port}, nil
+}
+
+func isPublicControlIPv4(addr netip.Addr) bool {
+	if !addr.Is4() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsPrivate() ||
+		addr.IsMulticast() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() ||
+		addr == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+		return false
+	}
+	for _, cidr := range privateV4 {
+		if netip.MustParsePrefix(cidr).Contains(addr) {
+			return false
+		}
+	}
+	return true
 }

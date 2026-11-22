@@ -103,6 +103,11 @@ func (s *server) compatSavedSave(w http.ResponseWriter, r *http.Request, p *prin
 		fail.relay(w)
 		return
 	}
+	// A same-name snapshot is replaced: refuse before taking the new one if the
+	// builder gate protects any of them.
+	if s.refuseAnyBuilderSnapshot(w, r, p, snapshotsNamed(before, body.Name)) {
+		return
+	}
 	res := s.callNative(r, p, "POST /v1/vms/{id}/snapshots", s.proxySnapshots, vmID, map[string]any{"name": body.Name})
 	if !res.ok() {
 		res.relay(w)
@@ -143,6 +148,9 @@ func (s *server) compatSavedDelete(w http.ResponseWriter, r *http.Request, p *pr
 		return
 	}
 	name, found := r.PathValue("name"), false
+	if s.refuseAnyBuilderSnapshot(w, r, p, snapshotsNamed(list, name)) {
+		return
+	}
 	for _, sn := range list {
 		if str(sn, "name") != name {
 			continue
@@ -274,8 +282,11 @@ func (s *server) compatHookUpdate(w http.ResponseWriter, r *http.Request, p *pri
 	}
 	var out Webhook
 	err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err // the key may have been revoked or demoted since the route authorized it
+		}
 		cur := st.Webhooks[h.ID]
-		if cur == nil {
+		if cur == nil || cur.TeamID != p.Team.ID {
 			return errConflict
 		}
 		if body.Name != nil {
@@ -324,8 +335,11 @@ func (s *server) compatHookRotate(w http.ResponseWriter, r *http.Request, p *pri
 	}
 	var out Webhook
 	err = s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
 		cur := st.Webhooks[r.PathValue("id")]
-		if cur == nil {
+		if cur == nil || cur.TeamID != p.Team.ID {
 			return errConflict
 		}
 		cur.SealedSecret, cur.PrevSealedSecret, cur.PrevUntil, cur.Updated = sealed, "", nil, time.Now().UTC()

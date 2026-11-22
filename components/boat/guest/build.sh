@@ -156,11 +156,30 @@ checksums() {
 
 fetch() {
   local url=${BOAT_GUEST_RELEASE_URL:?set BOAT_GUEST_RELEASE_URL to a release download base URL}
+  local line sum f fetched=0
   log "fetch: $url"
   curl -fsSLo "$OUT/SHA256SUMS" "$url/SHA256SUMS"
-  for f in $(awk '{print $2}' "$OUT/SHA256SUMS"); do
-    curl -fsSLo "$OUT/$f" "$url/$f"
-  done
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z $line ]] && continue
+    read -r sum f <<< "$line"
+    if [[ ! $sum =~ ^[0-9a-fA-F]{64}$ ]]; then
+      echo "fetch: refusing malformed SHA256SUMS line: $line" >&2
+      return 1
+    fi
+    case "$f" in
+      vmlinux|rootfs-slim.ext4.zst|rootfs-full.ext4.zst) ;;
+      *)
+        echo "fetch: refusing unexpected filename in SHA256SUMS: $f" >&2
+        return 1
+        ;;
+    esac
+    curl -fsSLo "$OUT/$f" -- "$url/$f"
+    fetched=$((fetched + 1))
+  done < "$OUT/SHA256SUMS"
+  if (( fetched == 0 )); then
+    echo "fetch: SHA256SUMS listed no artifacts" >&2
+    return 1
+  fi
   (cd "$OUT" && sha256sum -c SHA256SUMS)
   for z in "$OUT"/rootfs-*.ext4.zst; do zstd -q -d -f "$z"; done
 }

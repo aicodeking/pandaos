@@ -156,7 +156,7 @@ func TestStaleDumpCleanupKeepsNewDumpLimits(t *testing.T) {
 				}
 				return string(b)
 			}
-			if got := read("io.max"); got != "259:0 rbps=max wbps=157286400 riops=max wiops=max" {
+			if got := read("io.max"); got != "259:0 rbps=max wbps=67108864 riops=max wiops=max" {
 				t.Errorf("stale cleanup uncapped the active dump: %s", got)
 			}
 			_, hard := m.cfg.memLimits(v)
@@ -214,7 +214,7 @@ func TestDumpCappedWhileAVMBoots(t *testing.T) {
 		b, _ := os.ReadFile(filepath.Join(cgroupRoot, "p", id, "io.max"))
 		return string(b)
 	}
-	const capped, open = "259:0 rbps=max wbps=157286400 riops=1000 wiops=1000", "259:0 rbps=max wbps=max riops=1000 wiops=1000"
+	const capped, open = "259:0 rbps=max wbps=67108864 riops=1000 wiops=1000", "259:0 rbps=max wbps=max riops=1000 wiops=1000"
 	m.dumpStarted("a")
 	if ioMax("a") != "" {
 		t.Fatalf("capped with nobody booting: %q", ioMax("a"))
@@ -300,7 +300,7 @@ func TestDumpCapDiagnosticsFailures(t *testing.T) {
 	defer done()
 	output := logs()
 	if !strings.Contains(output, "missing: dump-cap dev=259:0") ||
-		!strings.Contains(output, `requested="259:0 rbps=max wbps=157286400 riops=max wiops=max"`) ||
+		!strings.Contains(output, `requested="259:0 rbps=max wbps=67108864 riops=max wiops=max"`) ||
 		!strings.Contains(output, "booting=1 dumps=1 generation=1") ||
 		strings.Contains(output, "write_error=<nil>") || strings.Contains(output, "read_error=<nil>") {
 		t.Fatalf("failed cap must expose requested limits, both errors and context: %s", output)
@@ -315,7 +315,7 @@ func TestDumpCapDiagnosticsFailures(t *testing.T) {
 	}
 	m.dumpStarted("discard")
 	output = logs()
-	if !strings.Contains(output, `discard: dump-cap dev=259:0 requested="259:0 rbps=max wbps=157286400 riops=max wiops=max" actual="" write_error=<nil> read_error=<nil>`) {
+	if !strings.Contains(output, `discard: dump-cap dev=259:0 requested="259:0 rbps=max wbps=67108864 riops=max wiops=max" actual="" write_error=<nil> read_error=<nil>`) {
 		t.Fatalf("discarded write must expose actual empty readback: %s", output)
 	}
 }
@@ -383,5 +383,69 @@ func TestDumpWriteIntervals(t *testing.T) {
 				m.setMemLimits(v)
 			}
 		})
+	}
+}
+
+func TestBootPacingSkipsWritebackKicksAndDefersSync(t *testing.T) {
+	m := &Manager{watchStop: make(chan struct{})}
+	if m.isBooting() {
+		t.Fatal("expected isBooting() == false initially")
+	}
+	bootDone := m.bootIO()
+	if !m.isBooting() {
+		t.Fatal("expected isBooting() == true during bootIO")
+	}
+
+	var (
+		mu    sync.Mutex
+		kicks int
+	)
+	stop := startWritebackWith("mem.new", m.isBooting, func(string) {
+		mu.Lock()
+		kicks++
+		mu.Unlock()
+	})
+	time.Sleep(writebackEvery + 60*time.Millisecond)
+	stop()
+	mu.Lock()
+	gotWhileBooting := kicks
+	mu.Unlock()
+	if gotWhileBooting != 0 {
+		t.Fatalf("expected 0 writeback kicks while booting, got %d", gotWhileBooting)
+	}
+
+	// waitBootQuiet waits while booting and wakes immediately when bootDone() completes.
+	woke := make(chan time.Duration, 1)
+	go func() {
+		t0 := time.Now()
+		m.waitBootQuiet(2 * time.Second)
+		woke <- time.Since(t0)
+	}()
+	time.Sleep(80 * time.Millisecond)
+	bootDone()
+	if m.isBooting() {
+		t.Fatal("expected isBooting() == false after bootDone")
+	}
+	select {
+	case d := <-woke:
+		if d < 50*time.Millisecond || d > 750*time.Millisecond {
+			t.Fatalf("waitBootQuiet waited %v, expected prompt wakeup after 80ms bootDone", d)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitBootQuiet did not wake after bootDone")
+	}
+
+	// Once boot finishes, startWritebackWith kicks normally.
+	stop2 := startWritebackWith("mem.new", m.isBooting, func(string) {
+		mu.Lock()
+		kicks++
+		mu.Unlock()
+	})
+	stop2()
+	mu.Lock()
+	gotAfterBoot := kicks
+	mu.Unlock()
+	if gotAfterBoot == 0 {
+		t.Fatal("expected writeback kick once no VM is booting")
 	}
 }

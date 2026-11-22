@@ -67,28 +67,6 @@
     }
    }
   },
-  "/api/v1/openapi.json": {
-   "get": {
-    "summary": "boat.dev's API surface: the /api/v1 operations, paths relative to /api/v1",
-    "security": [],
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "additionalProperties": true
-        }
-       }
-      }
-     },
-     "default": {
-      "$ref": "#/components/responses/Error"
-     }
-    }
-   }
-  },
   "/openapi.json": {
    "get": {
     "summary": "Same as /api/v1/openapi.json, at the API root",
@@ -196,7 +174,7 @@
   },
   "/v1/usage": {
    "get": {
-    "summary": "Team usage from boatd: VM-seconds by size, snapshot-days",
+    "summary": "Team usage from boatd: VM-seconds by size, snapshot-days; time a sandbox spent in the env-error state is not billed (subtracted, clipped to the window)",
     "x-boat-scope": "vms:read",
     "parameters": [
      {
@@ -206,7 +184,7 @@
       "schema": {
        "type": "string"
       },
-      "description": "RFC 3339; alias from"
+      "description": "RFC 3339 or date-only YYYY-MM-DD (UTC midnight); alias from"
      },
      {
       "name": "from",
@@ -216,6 +194,15 @@
        "type": "string"
       },
       "description": "alias of since"
+     },
+     {
+      "name": "to",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "end of the window; RFC 3339 (exact) or date-only YYYY-MM-DD, which means the end of that UTC day (next midnight, exclusive), so from==to date-only is that one day; must be after from"
      }
     ],
     "responses": {
@@ -303,7 +290,7 @@
     }
    },
    "post": {
-    "summary": "Create a VM; team secrets and AI proxy tokens go into its env, and an environment's setup runs in it; count > 1 creates a batch, all or none",
+    "summary": "Create a VM; team secrets and AI proxy tokens go into its env, and an environment's setup runs in it; count > 1 creates a batch, all or none. Created from a snapshot with a narrower secret selection than the run the snapshot was taken from (a snapshot of unknown origin is judged as if it held every team secret and cold-boots unless the selection covers every team secret: an import, a share from another team that is not @no_env, a snapshot from before records were kept, a lost record, or a snapshot of a VM whose environment never landed; a share within the same team keeps the sender's record), the VM boots fresh from the snapshot's disk and never resumes its memory (fresh_boot: slower). Such a VM always gets its environment pushed (BOAT_ID at least) and fails closed: if the push fails it is force-stopped (deleted when it cannot be stopped) and the answer is 502 env_start_failed with the stopped VM in vm. A create from a snapshot of an environment builder VM, or an environment's build snapshot, named in snapshot is 403 for a key without admin (the environment's own build snapshot is used through the environment). no_env without secrets injects no team secrets (an empty selection, not @default); no_env with a non-empty secrets list, or a create from a no_env snapshot with one, is 400 no_env_sticky before anything is created; an omitted ttl_s is 3600 (one hour), an explicit 0 is no auto-stop; a no_env create is sticky (every later start is no_env), and a create from a snapshot of a no_env VM is no_env too (naming an environment then is 400 no_env_sticky; the stored env of the source is not copied to it)",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -336,10 +323,31 @@
        }
       }
      },
+     "502": {
+      "description": "env_start_failed: a VM created from a snapshot with a fresh boot could not be given a clean environment; it was force-stopped (vm, state stopped; a batch lists every VM in vms) or, if it could not be stopped, deleted (no vm)",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorWithVM"
+        }
+       }
+      }
+     },
      "default": {
       "$ref": "#/components/responses/Error"
      }
-    }
+    },
+    "parameters": [
+     {
+      "name": "Idempotency-Key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "maxLength": 255
+      }
+     }
+    ]
    }
   },
   "/v1/vms/{id}": {
@@ -411,7 +419,7 @@
    },
    "patch": {
     "summary": "Rename a VM, set its auto-stop TTL, or push its auto-stop out (boat extend)",
-    "description": "ttl_s sets the auto-stop length and, on a running VM, the deadline to now + ttl_s (0 = no auto-stop). extend_s moves the deadline of a running VM extend_s seconds past max(deadline, now). Starting a prompt also gives the VM a fresh full TTL. 501 not_supported when boatd predates PATCH /v1/vms/{id}.",
+    "description": "ttl_s sets the auto-stop length and, on a running VM, the deadline to now + ttl_s (0 = no auto-stop). extend_s moves the deadline of a running VM extend_s seconds past max(deadline, now). Starting a prompt also gives the VM a fresh full TTL. resume_on_boot is managed by the host: a PATCH that carries it is refused with 400 invalid_request. 501 not_supported when boatd predates PATCH /v1/vms/{id}.",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -435,7 +443,10 @@
         "type": "object",
         "properties": {
          "name": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "free text, 1-120 characters, no control characters, trimmed; boatd keeps its DNS slug (lowercase, other characters become -, at most 63) as the hostname; a rename updates the hostname to the new slug (a slug another VM of the team has gets the VM id's tail appended)"
          },
          "ttl_s": {
           "type": "integer",
@@ -446,6 +457,21 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 2592000
+         },
+         "labels": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          }
+         },
+         "idle_stop_s": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 2592000
+         },
+         "resume_on_boot": {
+          "type": "boolean",
+          "description": "Managed by the host: a PATCH that carries it is refused with 400 invalid_request."
          }
         }
        }
@@ -471,7 +497,7 @@
   },
   "/v1/vms/{id}/start": {
    "post": {
-    "summary": "Resume a stopped VM; secrets re-injected, new AI proxy token",
+    "summary": "Resume a stopped VM; secrets re-injected, new AI proxy token. A cold start whose environment could not be set still answers 200 with the running VM (agent_ready=false, env_error). Starting a running VM that has a remembered env failure retries the environment push (rebuilt like the original start, honoring its no_env run); success clears env_error, failure answers 200 with env_error again. A start of a running VM that carries env or no_env replaces the guest env (a run started with no_env stays no_env: no team secrets); if that push fails the guest keeps its previous env: 502 env_update_failed and no state change (no env_error on a healthy VM). A no_env start of a VM that is already running and is not no_env is refused (409 stop_required: stop it first; a no_env start needs a fresh boot, it is never converted in place). no_env is sticky: once a VM was created, started or forked with no_env, every later start (plain, type change, recover) is a no_env start with no team secrets and without the stored per-VM env, and a start that names an environment or sends no_env false is refused with 400 no_env_sticky before anything happens (create a new VM). A no_env start never replays the VM's stored env: only the env sent on that request is used, and it is not stored. A no_env cold start whose environment could not be set fails closed: the VM is force-stopped, its memory snapshot is discarded, and the answer is 502 env_start_failed with the stopped VM in vm. A no_env cold start after a run that had team secrets boots fresh (no memory resume: slower, and processes of the previous run are not restored). A VM's own token cannot start its VM (403). With environment (a cold start): the environment's vars and secret selection become the VM's, as at create; unknown environment is 404 before the VM is touched; on a running VM it is 409 stop_required; on a no_env VM it is 400 no_env_sticky",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -489,11 +515,31 @@
     ],
     "responses": {
      "200": {
-      "description": "OK",
+      "description": "OK; agent_ready=false and env_error when the VM runs but its environment never reached the guest",
       "content": {
        "application/json": {
         "schema": {
          "$ref": "#/components/schemas/VM"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "stop_required: no_env was asked of a running VM whose run is not a no_env run. Stop the VM and start it again with no_env (a fresh boot)",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "502": {
+      "description": "env_update_failed: the VM is running but the env / no_env update this request carried could not be applied. The guest kept its previous env: a healthy VM gets no env_error, no unbilled span and no gated commands, and its no_env mark is unchanged; a VM already in env error stays there (a bare start answers 200 with env_error instead). env_start_failed: a no_env cold start could not apply its environment; the VM was force-stopped (state stopped, no memory snapshot) and vm carries it. If that stop failed too the code is env_update_failed and the VM may be running",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorWithVM"
         }
        }
       }
@@ -518,7 +564,20 @@
           "additionalProperties": {
            "type": "string"
           },
-          "description": "extra env vars over the team secrets (this run / the child); valid env names only"
+          "description": "extra env vars over the team secrets and the environment's vars; valid env names only. Stored with the VM and replayed on every later start; a start sending env replaces the stored map; a fork inherits the parent's unless it sends its own"
+         },
+         "ttl_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2592000
+         },
+         "no_env": {
+          "type": "boolean",
+          "description": "true: a no_env cold start (no team secrets, no stored env; a fresh boot when the previous run may have held secrets); the VM stays no_env for good (sticky). false on a no_env VM: 400 no_env_sticky"
+         },
+         "environment": {
+          "type": "string",
+          "description": "an environment id, else an exact name (omitted or empty = none named; \"base\" = the team default only when no environment is named \"base\"): apply its vars and secret selection as create does, to this run and the VM's later runs; its image, size and setup script apply only at create. A start whose selection does not cover every secret the previous run held cold-boots (fresh_boot). Unknown: 404 unknown_environment before anything is stopped or copied; with no_env: 400; on a no_env VM (sticky): 400 no_env_sticky. Omitted: a start keeps the VM's environment and a fork the source's (the team default applies only at create)"
          }
         }
        }
@@ -580,7 +639,111 @@
   },
   "/v1/vms/{id}/fork": {
    "post": {
-    "summary": "Fork a VM; the child gets its own AI token and copies of the conversations",
+    "summary": "Fork a VM; the child gets its own AI token and copies of the conversations. A no_env child of a parent whose run is not a no_env run is released by a cold boot from disk (fresh_boot: the parent's memory is not resumed, so the child boots slower and its processes are not carried over). If the child's release fails or its environment cannot be set, the child is force-stopped (or deleted when it cannot be stopped) and the answer is 502 env_start_failed with the stopped child in vm. The parent's start lock is held while its run mark is read and the child is prepared, so a start of the parent cannot interleave. The 502 vm is the child as boatd reports it after the stop. With environment the child takes that environment's vars and secret selection instead of the parent's (a child released with a selection that does not cover the parent's run is cold-booted from disk like a no_env child); unknown environment is 404 before anything is copied; environment with a no_env child is 400. A fork of a no_env VM (running or stopped) is always no_env; no_env false or an environment on it is 400 no_env_sticky before anything is copied. A fork without ttl_s gets 3600 (one hour), not the parent's TTL",
+    "x-boat-scope": "vms:write",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "Idempotency-Key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "maxLength": 255
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "free text, 1-120 characters, no control characters, trimmed; boatd keeps its DNS slug (lowercase, other characters become -, at most 63) as the hostname"
+         },
+         "fail_fast": {
+          "type": "boolean",
+          "description": "answer 503 no_ready_machine at once when the host is full (or boatd is still converting its images) instead of waiting"
+         },
+         "env": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          },
+          "description": "extra env vars over the team secrets and the environment's vars; valid env names only. Stored with the VM and replayed on every later start; a start sending env replaces the stored map; a fork inherits the parent's unless it sends its own"
+         },
+         "labels": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string"
+          },
+          "description": "the child's own labels (absent: none: a fork never takes the parent's user labels); at most 32. The reserved boat.* labels always carry over from the parent"
+         },
+         "ttl_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2592000,
+          "description": "the child's auto-stop in seconds; absent = 3600 (one hour), not the parent's TTL; 0 = no auto-stop"
+         },
+         "no_env": {
+          "type": "boolean",
+          "description": "true: a no_env child (a fresh boot from disk when the parent is not no_env). Absent: the child follows a no_env parent. A fork of a no_env VM is always no_env: false on it is 400 no_env_sticky"
+         },
+         "environment": {
+          "type": "string",
+          "description": "an environment id, else an exact name (omitted or empty = none named; \"base\" = the team default only when no environment is named \"base\"): apply its vars and secret selection as create does, to this run and the VM's later runs; its image, size and setup script apply only at create. A start whose selection does not cover every secret the previous run held cold-boots (fresh_boot). Unknown: 404 unknown_environment before anything is stopped or copied; with no_env: 400; on a no_env VM (sticky): 400 no_env_sticky. Omitted: a start keeps the VM's environment and a fork the source's (the team default applies only at create)"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/VM"
+        }
+       }
+      }
+     },
+     "502": {
+      "description": "env_start_failed: a fresh-boot no_env child could not be started with a clean environment; it was force-stopped (vm, state stopped) or, if it could not be stopped, deleted (no vm)",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorWithVM"
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/clone": {
+   "post": {
+    "summary": "Clone (fork) a VM; alias for POST /v1/vms/{id}/fork. environment: as for fork",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -604,7 +767,10 @@
         "type": "object",
         "properties": {
          "name": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "free text, 1-120 characters, no control characters, trimmed; boatd keeps its DNS slug (lowercase, other characters become -, at most 63) as the hostname"
          },
          "fail_fast": {
           "type": "boolean",
@@ -615,14 +781,28 @@
           "additionalProperties": {
            "type": "string"
           },
-          "description": "extra env vars over the team secrets (this run / the child); valid env names only"
+          "description": "extra env vars over the team secrets and the environment's vars; valid env names only. Stored with the VM and replayed on every later start; a start sending env replaces the stored map; a fork inherits the parent's unless it sends its own"
          },
          "labels": {
           "type": "object",
           "additionalProperties": {
            "type": "string"
           },
-          "description": "the child's labels, replacing the parent's (absent: the parent's); at most 32, boat.* reserved and always carried over from the parent"
+          "description": "the child's own labels (absent: none: a fork never takes the parent's user labels); at most 32. The reserved boat.* labels always carry over from the parent"
+         },
+         "ttl_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2592000,
+          "description": "the child's auto-stop in seconds; absent = 3600 (one hour), not the parent's TTL; 0 = no auto-stop"
+         },
+         "no_env": {
+          "type": "boolean",
+          "description": "true: a no_env child (a fresh boot from disk when the parent is not no_env). Absent: the child follows a no_env parent. A fork of a no_env VM is always no_env: false on it is 400 no_env_sticky"
+         },
+         "environment": {
+          "type": "string",
+          "description": "an environment id, else an exact name (omitted or empty = none named; \"base\" = the team default only when no environment is named \"base\"): apply its vars and secret selection as create does, to this run and the VM's later runs; its image, size and setup script apply only at create. A start whose selection does not cover every secret the previous run held cold-boots (fresh_boot). Unknown: 404 unknown_environment before anything is stopped or copied; with no_env: 400; on a no_env VM (sticky): 400 no_env_sticky. Omitted: a start keeps the VM's environment and a fork the source's (the team default applies only at create)"
          }
         }
        }
@@ -704,7 +884,7 @@
   },
   "/v1/vms/{id}/usage": {
    "get": {
-    "summary": "VM-seconds of one VM",
+    "summary": "VM-seconds of one VM (time in the env-error state is not billed: subtracted, clipped to the window)",
     "x-boat-scope": "vms:read",
     "tags": [
      "VMs"
@@ -718,6 +898,24 @@
        "type": "string"
       },
       "description": "VM id"
+     },
+     {
+      "name": "since",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "RFC 3339 or unix seconds (default: all time)"
+     },
+     {
+      "name": "until",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "RFC 3339 or unix seconds (default: now)"
      }
     ],
     "responses": {
@@ -733,17 +931,37 @@
           },
           "vm_seconds": {
            "type": "number"
+          },
+          "since": {
+           "type": "string",
+           "format": "date-time"
+          },
+          "until": {
+           "type": "string",
+           "format": "date-time"
+          },
+          "vm_seconds_by_size": {
+           "type": "object",
+           "additionalProperties": {
+            "type": "number"
+           },
+           "description": "Runtime seconds attributed to each historical VM size in the measured window"
           }
          },
          "required": [
           "id",
-          "vm_seconds"
+          "vm_seconds",
+          "vm_seconds_by_size",
+          "until"
          ]
         }
        }
       }
      },
      "default": {
+      "$ref": "#/components/responses/Error"
+     },
+     "400": {
       "$ref": "#/components/responses/Error"
      }
     }
@@ -796,7 +1014,7 @@
   },
   "/v1/vms/{id}/prompt": {
    "post": {
-    "summary": "Run a coding agent and wait; streams like exec. For a background turn use /prompts",
+    "summary": "Run a coding agent and wait; streams like exec. For a background turn use /prompts; 409 sandbox_not_ready while the VM's environment is being applied (env_pending) or was not applied (env_error)",
     "x-boat-scope": "exec",
     "tags": [
      "VMs"
@@ -969,6 +1187,9 @@
           },
           "state": {
            "type": "string"
+          },
+          "pid": {
+           "type": "integer"
           }
          },
          "required": [
@@ -1928,7 +2149,7 @@
   },
   "/v1/vms/{id}/prompts": {
    "post": {
-    "summary": "Start an agent turn in the background; 409 while the conversation has one running",
+    "summary": "Start an agent turn in the background; 409 while the conversation has one running; 409 sandbox_not_ready while the VM's environment is being applied (env_pending) or was not applied (env_error)",
     "x-boat-scope": "exec",
     "tags": [
      "Prompts"
@@ -2333,7 +2554,7 @@
     }
    },
    "post": {
-    "summary": "Expose a port. auth=private (default): the gateway route needs a token from \u2026/ports/{port}/url. auth=public (or public:true): open route plus a raw TCP host port",
+    "summary": "Expose a port. auth=private (default): the gateway route needs a token from \u2026/ports/{port}/url. auth=public (or public:true): open route plus a raw TCP host port; creating a public port also requires scope exec (403 otherwise)",
     "x-boat-scope": "vms:write",
     "tags": [
      "VMs"
@@ -2695,7 +2916,7 @@
   },
   "/v1/vms/{id}/snapshots/{sid}/download": {
    "get": {
-    "summary": "Download the snapshot archive",
+    "summary": "Download the snapshot archive. A VM's own token is refused (403) while the VM is no_env (sticky), like its snapshot list/create and its command, prompt and conversation history, which may hold team secrets from earlier runs",
     "x-boat-scope": "exec",
     "tags": [
      "Snapshots"
@@ -3093,9 +3314,99 @@
     }
    }
   },
+  "/v1/vms/{id}/ssh/authorize": {
+   "post": {
+    "summary": "Managed SSH authentication lookup; current boot-bound lookup credentials only",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     }
+    ],
+    "security": [
+     {
+      "sshLookupBearer": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "user",
+         "key_type",
+         "key_blob"
+        ],
+        "properties": {
+         "user": {
+          "type": "string"
+         },
+         "key_type": {
+          "type": "string"
+         },
+         "key_blob": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Committed live grant",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": false,
+         "required": [
+          "authorized_key"
+         ],
+         "properties": {
+          "authorized_key": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     },
+     "204": {
+      "description": "No live grant"
+     },
+     "400": {
+      "description": "Invalid lookup body"
+     },
+     "401": {
+      "description": "Invalid lookup identity"
+     },
+     "404": {
+      "description": "Unknown VM"
+     },
+     "429": {
+      "description": "Too many lookups from this client IP; retry after Retry-After seconds"
+     },
+     "503": {
+      "description": "Inventory or SSH policy unready"
+     }
+    }
+   }
+  },
   "/v1/vms/{id}/ssh": {
    "post": {
-    "summary": "SSH connection info; registers public_key in ~/.ssh/authorized_keys",
+    "summary": "SSH connection info; durably commits a managed SSH grant",
     "x-boat-scope": "exec",
     "tags": [
      "VMs"
@@ -3456,6 +3767,89 @@
     }
    }
   },
+  "/v1/environments/{id}/upgrade": {
+   "post": {
+    "summary": "Re-pin sandboxes of the team on this environment (all on the environment, or the optional agentIds subset) to its current version. Running sandboxes receive additive/updated vars live; live removals fail without moving the pin (stop first). Stopped sandboxes apply their new pin on next start",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Environments"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "id or name"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "environment",
+          "version",
+          "upgraded",
+          "upgraded_live",
+          "upgraded_stopped",
+          "failed"
+         ],
+         "properties": {
+          "environment": {
+           "type": "string"
+          },
+          "version": {
+           "type": "integer",
+           "description": "the environment's current version, now every upgraded sandbox's pin"
+          },
+          "upgraded": {
+           "type": "integer",
+           "description": "sandboxes whose pin moved (those already on the latest version are not counted)"
+          },
+          "upgraded_live": {
+           "type": "integer"
+          },
+          "upgraded_stopped": {
+           "type": "integer"
+          },
+          "failed": {
+           "type": "integer"
+          }
+         }
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    },
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "agentIds": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/v1/ai/credentials": {
    "get": {
     "summary": "Providers with a key, last 4 characters only",
@@ -3651,7 +4045,7 @@
   },
   "/v1/ai/usage": {
    "get": {
-    "summary": "Tokens through the proxy, per VM, provider and model",
+    "summary": "Tokens through the proxy, per VM, provider and model (lifetime totals)",
     "x-boat-scope": "vms:read",
     "tags": [
      "AI proxy"
@@ -4937,6 +5331,20 @@
     "tags": [
      "Snapshots"
     ],
+    "parameters": [
+     {
+      "name": "visibility",
+      "in": "query",
+      "description": "visibility=shared filters to snapshots that currently have a live share; omitting visibility (or all) returns all team-visible snapshots",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "all",
+        "shared"
+       ]
+      }
+     }
+    ],
     "responses": {
      "200": {
       "description": "OK",
@@ -5064,6 +5472,107 @@
          "required": [
           "teams"
          ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/vms/{id}/ssh/{fingerprint}": {
+   "delete": {
+    "summary": "Revoke an ssh key on the VM: drops it from the jump host and the VM's authorized_keys. Members revoke their own grants; team admins revoke any, including unowned ones.",
+    "x-boat-scope": "exec",
+    "tags": [
+     "VMs"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "VM id"
+     },
+     {
+      "name": "fingerprint",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "SHA256:<base64> fingerprint (URL-escaped), or the bare base64"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "fingerprint": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "ok",
+          "fingerprint"
+         ]
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/v1/teams/{id}/self-token": {
+   "put": {
+    "summary": "What a VM's own token (BOAT_API_KEY inside the VM) may do on its VM beyond the default: open auth=public ports, add ssh keys. Both off by default.",
+    "x-boat-scope": "admin",
+    "tags": [
+     "Teams"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "team id"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SelfTokenPolicy"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SelfTokenPolicy"
         }
        }
       }
@@ -5375,14 +5884,16 @@
       "schema": {
        "type": "string",
        "format": "date-time"
-      }
+      },
+      "description": "RFC 3339 date-time; only native stopped VMs whose local stoppedAt (boatd stopped_at) is strictly earlier. Includes auto-stops; later edits preserve it. Legacy records without stopped_at fall back to updated_at."
      },
      {
       "name": "dataExpired",
       "in": "query",
       "schema": {
        "type": "boolean"
-      }
+      },
+      "description": "true or false. Local data is retained until explicit deletion; true returns no sandboxes and false keeps all. Auto-stop deadlines are not data expiry."
      },
      {
       "name": "label",
@@ -5401,7 +5912,8 @@
       "in": "query",
       "schema": {
        "type": "string"
-      }
+      },
+      "description": "Any non-empty value, including cost and deletedCost, returns 501 not_supported: calendar-month list-price billing and filtered deleted costs are unavailable."
      }
     ],
     "responses": {
@@ -5411,6 +5923,16 @@
        "application/json": {
         "schema": {
          "$ref": "#/components/schemas/BDSandboxListResponse"
+        }
+       }
+      }
+     },
+     "501": {
+      "description": "Requested include is not supported; no partial successful response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
         }
        }
       }
@@ -5565,7 +6087,7 @@
   },
   "/api/v1/deletion-operations/{opid}": {
    "get": {
-    "summary": "boat.dev getDeletionOperation: deletion operation (in memory)",
+    "summary": "boat.dev getDeletionOperation: deletion operation (persisted)",
     "operationId": "compat_getDeletionOperation",
     "x-boat-scope": "vms:read",
     "tags": [
@@ -5677,7 +6199,7 @@
   },
   "/api/v1/sandboxes/{id}/stops/{stopid}": {
    "get": {
-    "summary": "boat.dev getStop: stop operation (in memory)",
+    "summary": "boat.dev getStop: stop operation (persisted)",
     "operationId": "compat_getStop",
     "x-boat-scope": "vms:read",
     "tags": [
@@ -6080,7 +6602,7 @@
   },
   "/api/v1/sandboxes/{id}/usage": {
    "get": {
-    "summary": "boat.dev usage: usage (GET /v1/vms/{id}/usage)",
+    "summary": "boat.dev usage: boat.dev billing usage: 501 not_supported; use native VM usage for runtime seconds",
     "operationId": "compat_usage",
     "x-boat-scope": "vms:read",
     "tags": [
@@ -6114,12 +6636,12 @@
      }
     ],
     "responses": {
-     "200": {
-      "description": "boat.dev 200",
+     "501": {
+      "description": "boat.dev billing usage is not supported; native VM usage provides runtime seconds",
       "content": {
        "application/json": {
         "schema": {
-         "$ref": "#/components/schemas/BDSandboxUsageResponse"
+         "$ref": "#/components/schemas/CompatError"
         }
        }
       }
@@ -6844,6 +7366,7 @@
     "tags": [
      "boat.dev compatibility"
     ],
+    "description": "Newest first, filtered before pagination. Only locally retained detached commands and prompt/setup processes are available (at most 200 per VM); sync/stream executions are not recorded. Cursors bind to the team, resolved VM, canonical mode set and case-insensitive query.",
     "parameters": [
      {
       "name": "id",
@@ -6859,7 +7382,8 @@
       "in": "query",
       "schema": {
        "type": "string"
-      }
+      },
+      "description": "Comma-separated sync, stream, detached, process; commands expands to sync,stream,detached. Omitted means all modes. Order and duplicates do not change cursor scope; only locally retained records are returned. Unknown modes return 400 invalid_query."
      },
      {
       "name": "q",
@@ -8444,6 +8968,7 @@
     "tags": [
      "boat.dev compatibility"
     ],
+    "description": "Delete a non-default environment while keeping at least one environment in the team; otherwise 409 conflict. The guard and deletion share one store transaction. Existing sandbox pins are retained for replay. Native /v1 deletion remains unrestricted.",
     "responses": {
      "200": {
       "description": "boat.dev 200",
@@ -8457,6 +8982,16 @@
      },
      "default": {
       "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Default or final team environment cannot be deleted",
       "content": {
        "application/json": {
         "schema": {
@@ -8679,7 +9214,7 @@
   },
   "/api/v1/snapshots": {
    "get": {
-    "summary": "boat.dev listSnapshots: team snapshots (GET /v1/snapshots; one page)",
+    "summary": "boat.dev listSnapshots: team snapshots (GET /v1/snapshots; cursor-paginated)",
     "operationId": "compat_listSnapshots",
     "x-boat-scope": "vms:read",
     "tags": [
@@ -9915,6 +10450,75 @@
     }
    }
   },
+  "/api/v1/environments/{id}/upgrade": {
+   "post": {
+    "summary": "boat.dev upgradeEnvironment: upgrade pinned environment versions (POST /v1/environments/{id}/upgrade)",
+    "operationId": "compat_upgradeEnvironment",
+    "x-boat-scope": "admin",
+    "tags": [
+     "boat.dev compatibility"
+    ],
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "org",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "agentIds": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "boat.dev 200",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/BDUpgradeSandboxEnvironmentResponse"
+        }
+       }
+      }
+     },
+     "default": {
+      "description": "boat.dev error envelope",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/CompatError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/v1/sandboxes/{id}/files/replace": {
    "post": {
     "summary": "boat.dev replaceInFiles: replace text (read + write each file, up to 5 MiB)",
@@ -10102,7 +10706,7 @@
   },
   "/api/v1/sandboxes/{id}/share": {
    "post": {
-    "summary": "boat.dev share: share with the team (a no-op: team sandboxes are shared)",
+    "summary": "boat.dev share: creator-authority sandbox sharing: 501 not_supported",
     "operationId": "compat_share",
     "x-boat-scope": "vms:write",
     "tags": [
@@ -10120,23 +10724,12 @@
      }
     ],
     "responses": {
-     "200": {
-      "description": "boat.dev 200",
+     "501": {
+      "description": "Creator-authority sharing is not supported; no mutations",
       "content": {
        "application/json": {
         "schema": {
-         "type": "object",
-         "properties": {
-          "sandbox": {
-           "$ref": "#/components/schemas/BDSandbox"
-          },
-          "restartRequired": {
-           "type": "boolean"
-          },
-          "message": {
-           "type": "string"
-          }
-         }
+         "$ref": "#/components/schemas/CompatError"
         }
        }
       }
@@ -10156,7 +10749,7 @@
   },
   "/api/v1/sandboxes/{id}/unshare": {
    "post": {
-    "summary": "boat.dev unshare: make private: 501 not_supported (no private sandboxes here)",
+    "summary": "boat.dev unshare: creator-only sandbox privacy: 501 not_supported",
     "operationId": "compat_unshare",
     "x-boat-scope": "vms:write",
     "tags": [
@@ -10174,20 +10767,12 @@
      }
     ],
     "responses": {
-     "200": {
-      "description": "boat.dev 200",
+     "501": {
+      "description": "Creator-only API and SSH privacy is not supported; no mutations",
       "content": {
        "application/json": {
         "schema": {
-         "type": "object",
-         "properties": {
-          "sandbox": {
-           "$ref": "#/components/schemas/BDSandbox"
-          },
-          "message": {
-           "type": "string"
-          }
-         }
+         "$ref": "#/components/schemas/CompatError"
         }
        }
       }
@@ -10721,7 +11306,7 @@
     ],
     "responses": {
      "200": {
-      "description": "One chunk: the whole snapshot archive",
+      "description": "boat.dev 200",
       "content": {
        "application/json": {
         "schema": {
@@ -11264,57 +11849,6 @@
     }
    }
   },
-  "/api/v1/environments/{id}/upgrade": {
-   "post": {
-    "summary": "boat.dev upgradeEnvironment: environment upgrades: 501 not_supported",
-    "operationId": "compat_upgradeEnvironment",
-    "x-boat-scope": "",
-    "tags": [
-     "boat.dev compatibility"
-    ],
-    "parameters": [
-     {
-      "name": "id",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string",
-       "format": "uuid"
-      }
-     },
-     {
-      "name": "org",
-      "in": "query",
-      "required": false,
-      "schema": {
-       "type": "string"
-      }
-     }
-    ],
-    "responses": {
-     "200": {
-      "description": "boat.dev 200",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/BDUpgradeSandboxEnvironmentResponse"
-        }
-       }
-      }
-     },
-     "default": {
-      "description": "boat.dev error envelope",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/CompatError"
-        }
-       }
-      }
-     }
-    }
-   }
-  },
   "/api/v1/environments/{id}/secret-files": {
    "put": {
     "summary": "boat.dev setEnvironmentSecretFile: environment secret files: 501 not_supported",
@@ -11598,6 +12132,28 @@
     }
    }
   },
+  "/api/v1/openapi.json": {
+   "get": {
+    "summary": "boat.dev's API surface: the /api/v1 operations, paths relative to /api/v1",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "default": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/api/v1/file-downloads/{token}": {
    "get": {
     "summary": "Download a file through a signed URL from POST /api/v1/sandboxes/{id}/files/download-url (no API key)",
@@ -11793,111 +12349,15 @@
      }
     }
    }
-  },
-  "/v1/vms/{id}/ssh/{fingerprint}": {
-   "delete": {
-    "summary": "Revoke an ssh key on the VM: drops it from the jump host and the VM's authorized_keys. Members revoke their own grants; team admins revoke any, including unowned ones.",
-    "x-boat-scope": "exec",
-    "tags": [
-     "VMs"
-    ],
-    "parameters": [
-     {
-      "name": "id",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      },
-      "description": "VM id"
-     },
-     {
-      "name": "fingerprint",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      },
-      "description": "SHA256:<base64> fingerprint (URL-escaped), or the bare base64"
-     }
-    ],
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "type": "object",
-         "properties": {
-          "ok": {
-           "type": "boolean"
-          },
-          "fingerprint": {
-           "type": "string"
-          }
-         },
-         "required": [
-          "ok",
-          "fingerprint"
-         ]
-        }
-       }
-      }
-     },
-     "default": {
-      "$ref": "#/components/responses/Error"
-     }
-    }
-   }
-  },
-  "/v1/teams/{id}/self-token": {
-   "put": {
-    "summary": "What a VM's own token (BOAT_API_KEY inside the VM) may do on its VM beyond the default: open auth=public ports, add ssh keys. Both off by default.",
-    "x-boat-scope": "admin",
-    "tags": [
-     "Teams"
-    ],
-    "parameters": [
-     {
-      "name": "id",
-      "in": "path",
-      "required": true,
-      "schema": {
-       "type": "string"
-      },
-      "description": "team id"
-     }
-    ],
-    "requestBody": {
-     "required": true,
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/SelfTokenPolicy"
-       }
-      }
-     }
-    },
-    "responses": {
-     "200": {
-      "description": "OK",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/SelfTokenPolicy"
-        }
-       }
-      }
-     },
-     "default": {
-      "$ref": "#/components/responses/Error"
-     }
-    }
-   }
   }
  },
  "components": {
   "securitySchemes": {
+   "sshLookupBearer": {
+    "type": "http",
+    "scheme": "bearer",
+    "description": "Dedicated boot-bound managed SSH lookup credential; never accepted by regular API routes"
+   },
    "bearer": {
     "type": "http",
     "scheme": "bearer"
@@ -11985,6 +12445,10 @@
      "environment": {
       "type": "string"
      },
+     "environment_version": {
+      "type": "integer",
+      "description": "the environment version the VM is pinned to (set by a create, a start or fork that names an environment, a fork's inheritance from its parent, or POST /v1/environments/{id}/upgrade; a plain start replays this version's vars, not the environment's current ones)"
+     },
      "from_build": {
       "type": "boolean"
      },
@@ -11993,6 +12457,27 @@
      },
      "setup_error": {
       "type": "string"
+     },
+     "agent_ready": {
+      "type": "boolean",
+      "description": "false while the guest agent is unreachable or the VM environment could not be set (see env_error)"
+     },
+     "env_error": {
+      "type": "string",
+      "description": "the VM environment push failed; persists until a later push succeeds (GET, list, create, start)"
+     },
+     "no_env_run": {
+      "type": "boolean",
+      "description": "the VM is no_env (sticky: set by a no_env create, start or fork, kept across stop, start, type change and recover; no team secrets ever again)"
+     },
+     "env_pending": {
+      "type": "boolean",
+      "description": "a create or start is still applying the environment, in any VM state (GET, list, start, fork answers): commands and prompts are refused with 409 sandbox_not_ready until it settles"
+     },
+     "stopped_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Persisted actual stop transition; retained across edits while stopped, cleared on restart; absent in legacy records"
      }
     }
    },
@@ -12000,7 +12485,10 @@
     "type": "object",
     "properties": {
      "name": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "description": "free text, 1-120 characters, no control characters, trimmed; boatd keeps its DNS slug (lowercase, other characters become -, at most 63) as the hostname; with count > 1 the VMs are named name-1, name-2, ..."
      },
      "size": {
       "$ref": "#/components/schemas/Size"
@@ -12009,7 +12497,9 @@
       "type": "string"
      },
      "ttl_s": {
-      "type": "integer"
+      "type": "integer",
+      "minimum": 0,
+      "description": "auto-stop length in seconds. Omitted = 3600 (one hour), as boat.dev's and compat create; an explicit 0 = no auto-stop"
      },
      "idle_stop_s": {
       "type": "integer",
@@ -12035,7 +12525,7 @@
       "items": {
        "type": "string"
       },
-      "description": "team secret names (absent = all, [] = none). A disk from a share or import gets none unless named here, which needs the exec scope. Forks inherit it"
+      "description": "team secret names. Absent = the default-injected secrets (@default), [] = none. A disk from a share or import gets none unless named here, which needs the exec scope. Forks inherit it"
      },
      "environment": {
       "type": "string",
@@ -12055,6 +12545,10 @@
      "count": {
       "type": "integer",
       "description": "1-16: create that many VMs, all or none; a name x becomes x-1 \u2026 x-N. More than 1 answers {\"vms\":[\u2026]}"
+     },
+     "self_api": {
+      "type": "boolean",
+      "description": "inject BOAT_URL and BOAT_API_KEY into the VM (default true, or false for foreign/imported disks)"
      }
     }
    },
@@ -12081,6 +12575,9 @@
      },
      "timeout_s": {
       "type": "integer"
+     },
+     "tty": {
+      "type": "boolean"
      }
     },
     "required": [
@@ -12103,7 +12600,8 @@
        "kimi",
        "mistral",
        "claude-code",
-       "prime-agent"
+       "prime-agent",
+       "kimi-code"
       ],
       "default": "claude"
      },
@@ -12137,7 +12635,8 @@
        "kimi",
        "mistral",
        "claude-code",
-       "prime-agent"
+       "prime-agent",
+       "kimi-code"
       ],
       "default": "claude"
      },
@@ -12180,6 +12679,9 @@
       "type": "string"
      },
      "error": {
+      "type": "string"
+     },
+     "code": {
       "type": "string"
      }
     }
@@ -12752,6 +13254,9 @@
        "type": "string"
       }
      },
+     "reset_secrets": {
+      "type": "boolean"
+     },
      "is_default": {
       "type": "boolean"
      }
@@ -12822,6 +13327,10 @@
         "output_tokens": {
          "type": "integer"
         },
+        "unmetered": {
+         "type": "integer",
+         "description": "requests (of requests) whose successful answer showed no usage object: counted with 0 tokens"
+        },
         "updated": {
          "type": "string",
          "format": "date-time"
@@ -12848,12 +13357,17 @@
        },
        "output_tokens": {
         "type": "integer"
+       },
+       "unmetered": {
+        "type": "integer",
+        "description": "requests whose successful answer showed no usage object"
        }
       },
       "required": [
        "requests",
        "input_tokens",
-       "output_tokens"
+       "output_tokens",
+       "unmetered"
       ]
      }
     },
@@ -13218,6 +13732,17 @@
        "message",
        "status"
       ]
+     },
+     "sandbox": {
+      "$ref": "#/components/schemas/BDSandbox",
+      "description": "Only on a failed-closed create, fork or resume (code env_start_failed): the sandbox that was kept, in state archived (stopped). A fork that fails closed keeps the child, so this is where a client finds its id. Absent when the VM was deleted instead."
+     },
+     "sandboxes": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/BDSandbox"
+      },
+      "description": "Only on a failed-closed batch create (count > 1): every sandbox of the batch as it now is."
      }
     },
     "required": [
@@ -13306,6 +13831,91 @@
      "state",
      "desktopAvailable",
      "snapshotAvailable"
+    ]
+   },
+   "SSHGrant": {
+    "type": "object",
+    "properties": {
+     "fingerprint": {
+      "type": "string"
+     },
+     "public_key": {
+      "type": "string"
+     },
+     "key_id": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "user_id": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "unowned": {
+      "type": "boolean",
+      "description": "minted before grants recorded their key; team admins can revoke it"
+     },
+     "created": {
+      "type": "string",
+      "format": "date-time"
+     }
+    },
+    "required": [
+     "fingerprint",
+     "public_key",
+     "key_id",
+     "user_id",
+     "unowned"
+    ]
+   },
+   "SelfTokenPolicy": {
+    "type": "object",
+    "properties": {
+     "public_ports": {
+      "type": "boolean"
+     },
+     "ssh": {
+      "type": "boolean"
+     }
+    }
+   },
+   "ErrorWithVM": {
+    "type": "object",
+    "description": "The standard error envelope plus, for env_start_failed, the VM as it now is (state stopped, as boatd reports it after the stop: no expires_at, no env_error). A batch create (count > 1) lists every VM of the batch in vms.",
+    "properties": {
+     "error": {
+      "type": "object",
+      "properties": {
+       "code": {
+        "type": "string"
+       },
+       "message": {
+        "type": "string"
+       },
+       "request_id": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "code",
+       "message"
+      ]
+     },
+     "vm": {
+      "$ref": "#/components/schemas/VM"
+     },
+     "vms": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/VM"
+      }
+     }
+    },
+    "required": [
+     "error"
     ]
    },
    "BDAccountAiUsageResponse": {
@@ -19621,55 +20231,6 @@
       }
      }
     ]
-   },
-   "SSHGrant": {
-    "type": "object",
-    "properties": {
-     "fingerprint": {
-      "type": "string"
-     },
-     "public_key": {
-      "type": "string"
-     },
-     "key_id": {
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "user_id": {
-      "type": [
-       "string",
-       "null"
-      ]
-     },
-     "unowned": {
-      "type": "boolean",
-      "description": "minted before grants recorded their key; team admins can revoke it"
-     },
-     "created": {
-      "type": "string",
-      "format": "date-time"
-     }
-    },
-    "required": [
-     "fingerprint",
-     "public_key",
-     "key_id",
-     "user_id",
-     "unowned"
-    ]
-   },
-   "SelfTokenPolicy": {
-    "type": "object",
-    "properties": {
-     "public_ports": {
-      "type": "boolean"
-     },
-     "ssh": {
-      "type": "boolean"
-     }
-    }
    }
   },
   "responses": {

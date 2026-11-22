@@ -58,8 +58,12 @@ func (m *Manager) routes() *http.ServeMux {
 		return m.Create(r.Context(), req)
 	})
 	h("GET /v1/vms", func(r *http.Request) (any, error) {
-		vms := m.list(r.URL.Query().Get("team"))
-		if r.URL.Query().Get("include_pending") != "true" {
+		q := r.URL.Query()
+		if q.Get("view") == "ssh" {
+			return map[string]any{"vms": m.listSSHSummary(q.Get("team"), q.Get("include_pending") == "true")}, nil
+		}
+		vms := m.list(q.Get("team"))
+		if q.Get("include_pending") != "true" {
 			visible := vms[:0]
 			for _, v := range vms {
 				if !v.PendingCopy {
@@ -70,12 +74,23 @@ func (m *Manager) routes() *http.ServeMux {
 		}
 		return map[string]any{"vms": vms}, nil
 	})
+	h("GET /v1/vms/ssh-summary", func(r *http.Request) (any, error) {
+		q := r.URL.Query()
+		return map[string]any{"vms": m.listSSHSummary(q.Get("team"), q.Get("include_pending") == "true")}, nil
+	})
 	h("GET /v1/vms/{id}", func(r *http.Request) (any, error) {
+		q := r.URL.Query()
+		if q.Get("view") == "ssh" {
+			return m.getSSHSummary(r.PathValue("id"), q.Get("include_pending") == "true")
+		}
 		v, err := m.get(r.PathValue("id"))
-		if v.PendingCopy {
+		if err != nil {
+			return nil, err
+		}
+		if v.PendingCopy && q.Get("include_pending") != "true" {
 			return nil, errNotFound
 		}
-		return v, err
+		return v, nil
 	})
 	h("PATCH /v1/vms/{id}", func(r *http.Request) (any, error) {
 		var b PatchReq
@@ -100,30 +115,23 @@ func (m *Manager) routes() *http.ServeMux {
 		return m.Stop(r.Context(), r.PathValue("id"), "api")
 	})
 	h("POST /v1/vms/{id}/start", func(r *http.Request) (any, error) {
-		var b struct {
-			Env      map[string]string `json:"env"`
-			FailFast bool              `json:"fail_fast"`
-		}
+		var b StartReq
 		if err := decode(r, &b); err != nil {
 			return nil, err
 		}
-		v, err := m.Start(r.Context(), r.PathValue("id"), b.Env)
+		v, err := m.startVM(r.Context(), r.PathValue("id"), b.Env, b.TTLS, b.FreshBoot)
 		if b.FailFast {
 			err = failFast(err) // admission never waits in boatd; only the label differs
 		}
 		return v, err
 	})
 	fork := func(r *http.Request) (any, error) {
-		var b struct {
-			Name     string            `json:"name"`
-			Team     string            `json:"team"`
-			FailFast bool              `json:"fail_fast"`
-			Labels   map[string]string `json:"labels"` // absent: the parent's
-		}
+		var b ForkReq
 		if err := decode(r, &b); err != nil {
 			return nil, err
 		}
-		v, err := m.fork(r.Context(), r.PathValue("id"), b.Name, b.Team, b.Labels, strings.HasSuffix(r.URL.Path, "/prepare"))
+		pending := strings.HasSuffix(r.URL.Path, "/prepare")
+		v, err := m.forkOpts(r.Context(), r.PathValue("id"), b.Name, b.Team, b.Labels, b.TTLS, pending, pending && b.ReprovisionSSH)
 		if b.FailFast {
 			err = failFast(err)
 		}
@@ -133,12 +141,13 @@ func (m *Manager) routes() *http.ServeMux {
 	h("POST /v1/vms/{id}/fork/prepare", fork)
 	h("POST /v1/vms/{id}/release", func(r *http.Request) (any, error) {
 		var b struct {
-			Env map[string]string `json:"env"`
+			Env       map[string]string `json:"env"`
+			FreshBoot bool              `json:"fresh_boot"`
 		}
 		if err := decode(r, &b); err != nil {
 			return nil, err
 		}
-		return m.releaseCopy(r.Context(), r.PathValue("id"), b.Env)
+		return m.releaseCopy(r.Context(), r.PathValue("id"), b.Env, b.FreshBoot)
 	})
 	h("GET /v1/vms/{id}/env", func(r *http.Request) (any, error) {
 		return m.agentPass(r, map[string]string{"op": "get_env"})
@@ -154,6 +163,20 @@ func (m *Manager) routes() *http.ServeMux {
 			return nil, err
 		}
 		return m.agentPass(r, map[string]any{"op": "set_env", "vars": b.Vars})
+	})
+	h("POST /v1/vms/{id}/ssh-policy", func(r *http.Request) (any, error) {
+		var req sshPolicyRequest
+		if err := decode(r, &req); err != nil {
+			return nil, err
+		}
+		return m.installSSHPolicy(r.Context(), r.PathValue("id"), req)
+	})
+	h("POST /v1/vms/ssh-policy-batch", func(r *http.Request) (any, error) {
+		var req sshPolicyBatchRequest
+		if err := decodeLimit(r, &req, 48<<20); err != nil {
+			return nil, err
+		}
+		return m.installSSHPolicyBatch(r.Context(), req)
 	})
 	h("POST /v1/vms/{id}/agent", m.agentHandler)
 	h("POST /v1/vms/{id}/resize", func(r *http.Request) (any, error) {
@@ -206,11 +229,15 @@ func (m *Manager) routes() *http.ServeMux {
 		return map[string]any{"snapshots": visibleSnapshots(m.Snapshots(r.PathValue("id")), r)}, nil
 	})
 	snapshot := func(r *http.Request) (any, error) {
-		var b struct{ Name string }
+		var b struct {
+			Name           string `json:"name"`
+			ReprovisionSSH bool   `json:"reprovision_ssh"`
+		}
 		if err := decode(r, &b); err != nil {
 			return nil, err
 		}
-		return m.createSnapshot(r.Context(), r.PathValue("id"), b.Name, strings.HasSuffix(r.URL.Path, "/prepare"))
+		pending := strings.HasSuffix(r.URL.Path, "/prepare")
+		return m.createSnapshotOpts(r.Context(), r.PathValue("id"), b.Name, pending, pending && b.ReprovisionSSH)
 	}
 	h("POST /v1/vms/{id}/snapshots", snapshot)
 	h("POST /v1/vms/{id}/snapshots/prepare", snapshot)
@@ -238,13 +265,18 @@ func (m *Manager) routes() *http.ServeMux {
 		return m.CreateSnapshot(r.Context(), b.VMID, b.Name)
 	})
 	h("DELETE /v1/snapshots/{sid}", func(r *http.Request) (any, error) {
+		sid := r.PathValue("sid")
 		m.mu.Lock()
-		s := m.snaps[r.PathValue("sid")]
+		s, ok := m.snaps[sid]
 		m.mu.Unlock()
-		return map[string]bool{"ok": true}, m.DeleteSnapshot(s.VMID, r.PathValue("sid"))
+		if !ok {
+			return nil, errf(http.StatusNotFound, "snapshot not found")
+		}
+		return map[string]bool{"ok": true}, m.DeleteSnapshot(s.VMID, sid)
 	})
 	h("GET /v1/usage", func(r *http.Request) (any, error) { return m.usageHandler(r) })
 	mux.HandleFunc("GET /v1/vms/{id}/snapshots/{sid}/download", m.exportHandler)
+	mux.HandleFunc("GET /v1/snapshots/{sid}/export", m.exportHandler)
 	mux.HandleFunc("POST /v1/vms/{id}/exec", m.execHandler)
 	mux.HandleFunc("GET /v1/vms/{id}/files", m.getFileHandler)
 	mux.HandleFunc("PUT /v1/vms/{id}/files", m.putFileHandler)
@@ -275,26 +307,31 @@ func writeErr(w http.ResponseWriter, err error) {
 	var ae *apiErr
 	var ge *agentErr
 	code := http.StatusInternalServerError
+	errCode := ""
 	switch {
 	case errors.As(err, &ae):
 		code = ae.code
-	case errors.As(err, &ge) && ge.notFound():
-		code = http.StatusNotFound
+		errCode = ae.kind
 	case errors.As(err, &ge):
-		code = http.StatusBadGateway
+		code = ge.httpStatus()
+		errCode = ge.errCode()
 	default:
 		log.Printf("api: %v", err)
 	}
 	body := map[string]string{"error": err.Error()}
-	if ae != nil && ae.kind != "" {
-		body["code"] = ae.kind
+	if errCode != "" {
+		body["code"] = errCode
 	}
 	writeJSON(w, code, body)
 }
 
 // decode reads an optional JSON body (empty = zero value).
 func decode(r *http.Request, v any) error {
-	err := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20)).Decode(v)
+	return decodeLimit(r, v, 1<<20)
+}
+
+func decodeLimit(r *http.Request, v any, maxBytes int64) error {
+	err := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxBytes)).Decode(v)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return errf(400, "bad json: %v", err)
 	}
@@ -355,18 +392,13 @@ func (m *Manager) execHandler(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	id := r.PathValue("id")
 	reset := m.resets.watch(id) // before the dial: a reset after it must not be missed
-	a, err := dialAgent(ctx, sock)
-	if err != nil {
-		writeErr(w, errf(http.StatusBadGateway, "guest agent: %v", err))
-		return
-	}
 	req := map[string]any{"op": "exec", "argv": e.Argv, "env": e.Env, "cwd": e.Cwd, "stdin_b64": e.StdinB64,
 		"timeout_s": e.TimeoutS, "tty": e.TTY, "session": newID("x-")}
 	if e.User != "" {
 		req["user"] = e.User
 	}
-	if err := a.send(req); err != nil {
-		a.Close()
+	a, err := sendExec(ctx, sock, req)
+	if err != nil {
 		writeErr(w, errf(http.StatusBadGateway, "guest agent: %v", err))
 		return
 	}
@@ -412,7 +444,7 @@ func (m *Manager) getFileHandler(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, rep, err := a.recv()
 		if err == nil && rep.Error != "" {
-			err = &agentErr{rep.Error}
+			err = &agentErr{msg: rep.Error, code: rep.Code}
 		}
 		var data []byte
 		if err == nil {
@@ -502,7 +534,7 @@ func (m *Manager) putFileHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		_, rep, err := a.recv()
 		if err == nil && rep.Error != "" {
-			err = &agentErr{rep.Error}
+			err = &agentErr{msg: rep.Error, code: rep.Code}
 		}
 		if err != nil {
 			writeErr(w, err)
@@ -592,6 +624,27 @@ func (m *Manager) usageHandler(r *http.Request) (any, error) {
 		} else if since, err = time.Parse(time.RFC3339, s); err != nil {
 			return nil, errf(400, "since: RFC 3339 or unix seconds")
 		}
+	}
+	if id := r.URL.Query().Get("vm_id"); id != "" {
+		team := r.URL.Query().Get("team")
+		if team == "" {
+			return nil, errf(400, "vm_id requires team")
+		}
+		var until time.Time
+		if v := r.URL.Query().Get("until"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				until = time.Unix(n, 0).UTC()
+			} else if until, err = time.Parse(time.RFC3339Nano, v); err != nil {
+				return nil, errf(400, "until: RFC 3339 or unix seconds")
+			}
+		}
+		if !until.IsZero() && !until.After(since) {
+			return nil, errf(400, "until must be after since")
+		}
+		return m.VMUsageWindow(team, id, since, until)
+	}
+	if r.URL.Query().Has("until") {
+		return nil, errf(400, "until requires vm_id and team")
 	}
 	rep, err := m.Usage(since)
 	if team := r.URL.Query().Get("team"); err == nil && team != "" {

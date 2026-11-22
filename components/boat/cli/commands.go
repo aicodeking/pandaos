@@ -25,7 +25,7 @@ func init() {
 		"whoami": cmdWhoami, "images": cmdImages, "usage": cmdUsage,
 		"new": cmdNew, "list": cmdList, "ls": cmdList,
 		"ssh": cmdSSH, "scp": cmdSCP, "exec": cmdExec, "prompt": cmdPrompt,
-		"fork": cmdFork, "stop": cmdStop, "start": cmdResume, "rm": cmdRm,
+		"fork": cmdFork, "clone": cmdFork, "stop": cmdStop, "start": cmdResume, "rm": cmdRm,
 		"desktop": cmdDesktop, "ports": cmdPorts, "snapshots": cmdSnapshots,
 		"secrets": cmdSecrets, "keys": cmdKeys, "teams": cmdTeams, "webhooks": cmdWebhooks,
 	}
@@ -75,9 +75,31 @@ func cmdImages(a *app, args []string) error {
 	return a.emitList(l, "id", "default")
 }
 
+// cmdUsage: boat usage [--from X] [--to Y]. X and Y are YYYY-MM-DD or RFC3339; a date-only Y means the end of that UTC day (inclusive).
 func cmdUsage(a *app, args []string) error {
+	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
+	from := fs.String("from", "", "window start: YYYY-MM-DD or RFC3339")
+	to := fs.String("to", "", "window end: YYYY-MM-DD (the whole UTC day, inclusive) or RFC3339")
+	pos, _, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) > 0 {
+		return fmt.Errorf("unexpected arguments %v: %w", pos, errUsage)
+	}
+	q := url.Values{}
+	if *from != "" {
+		q.Set("from", *from)
+	}
+	if *to != "" {
+		q.Set("to", *to)
+	}
+	path := "/v1/usage"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
 	var u obj
-	if err := a.c.call("GET", "/v1/usage", nil, &u); err != nil {
+	if err := a.c.call("GET", path, nil, &u); err != nil {
 		return err
 	}
 	return a.emit(u, func() {
@@ -115,8 +137,8 @@ func cmdNew(a *app, args []string) error {
 	noSecrets := fs.Bool("no-secrets", false, "inject no team secrets")
 	envName := fs.String("environment", "", "environment name")
 	envv := labels{}
-	fs.Var(envv, "e", "KEY=VALUE for the VM (repeatable)")
-	fs.Var(envFlag{envName, envv}, "env", "KEY=VALUE for the VM (boat.dev), or an environment name")
+	fs.Var(envVarFlag{envv}, "e", "KEY=VALUE for the VM (repeatable); --environment NAME picks an environment")
+	fs.Var(envVarFlag{envv}, "env", "same as -e")
 	visibility := fs.String("visibility", "", "shared (every sandbox here is usable by its team)")
 	fs.Bool("personal", false, "accepted: self-hosted boat has no org wallets")
 	var extras newExtras
@@ -154,7 +176,14 @@ func cmdNew(a *app, args []string) error {
 	} else if len(pos) > 0 {
 		return fmt.Errorf("unexpected arguments %v: %w", pos, errUsage)
 	}
-	body := obj{"name": *name, "size": *size, "image": *image, "ttl_s": ttl.v} // 0: no auto-stop (--no-auto-stop)
+	body := obj{"name": *name, "size": *size, "image": *image}
+	// ttl_s only when asked: omitted, the server's default (1h, boat.dev's) applies;
+	// --no-auto-stop, --ttl infinite and --ttl 0 send 0 (never auto-stop).
+	if *noAuto {
+		body["ttl_s"] = int64(0)
+	} else if ttl.set {
+		body["ttl_s"] = ttl.v
+	}
 	if *idle == "never" {
 		body["idle_stop_s"] = -1
 	} else if *idle != "" {
@@ -182,6 +211,9 @@ func cmdNew(a *app, args []string) error {
 		body["environment"] = *envName
 	}
 	if *noEnv {
+		if _, set := body["secrets"]; !set {
+			body["secrets"] = []string{} // explicit empty list: no @default team secrets
+		}
 		body["no_env"] = true
 	}
 	if len(envv) > 0 {
@@ -208,7 +240,10 @@ func cmdNew(a *app, args []string) error {
 	}
 	var vm obj
 	if err := a.c.call("POST", "/v1/vms", body, &vm); err != nil {
-		return err
+		return a.createStartFailure(err)
+	}
+	if ee := strings.TrimSpace(s(vm, "env_error")); ee != "" {
+		return a.failEnv(vm, ee)
 	}
 	a.setCurrent(s(vm, "id"))
 	if hosted := extras.apply(a, s(vm, "id")); len(hosted) > 0 {
@@ -235,6 +270,105 @@ func cmdNew(a *app, args []string) error {
 	return nil
 }
 
+// failEnv reports a VM whose environment (secrets, BOAT_ID/token) never
+// reached the guest: it is not ready, so no ready event and a non-zero exit.
+func (a *app) failEnv(vm obj, msg string) error {
+	id := s(vm, "id")
+	if a.json {
+		a.emit(obj{"event": "error", "id": id, "code": "env_error", "error": "environment delivery failed: " + msg}, nil)
+		return exitError{1}
+	}
+	fmt.Fprintf(a.errw, "boat: %s was created but its environment was not delivered (%s); delete it with `boat delete %s`\n", id, msg, id)
+	return exitError{1}
+}
+
+// failEnvUpdate reports a failed env UPDATE to an already-running VM: the API
+// leaves it healthy with its previous environment, so nothing needs deleting.
+func (a *app) failEnvUpdate(id, msg string) error {
+	if a.json {
+		a.emit(obj{"event": "error", "id": id, "code": "env_update_failed", "error": "environment update failed: " + msg}, nil)
+		return exitError{1}
+	}
+	fmt.Fprintf(a.errw, "boat: environment update for %s failed (%s); the VM is still running with its previous environment\n", id, msg)
+	return exitError{1}
+}
+
+// failEnvStart reports a no_env cold start that failed closed: the API stopped
+// the VM and discarded its previous memory snapshot.
+func (a *app) failEnvStart(id, msg string) error {
+	if a.json {
+		a.emit(obj{"event": "error", "id": id, "code": "env_start_failed", "state": "stopped", "error": "start failed: " + msg + " (VM stopped; previous session memory discarded)"}, nil)
+		return exitError{1}
+	}
+	fmt.Fprintf(a.errw, "boat: start of %s failed (%s); the VM was stopped (no_env start failed closed; previous session memory discarded)\n", id, msg)
+	return exitError{1}
+}
+
+// forkStartFailure reports a no_env fork/clone whose fresh boot failed closed:
+// the child exists but is stopped. Other errors pass through unchanged.
+func (a *app) forkStartFailure(err error) error {
+	var ae *apiError
+	if !errors.As(err, &ae) || ae.Code != "env_start_failed" {
+		return err
+	}
+	child := s(obj(ae.VM), "id")
+	if child == "" {
+		return err
+	}
+	if a.json {
+		a.emit(obj{"event": "error", "id": child, "child": child, "code": "env_start_failed", "state": "stopped", "error": "no_env fresh boot failed: " + ae.Message + " (child " + child + " was stopped)"}, nil)
+		return exitError{1}
+	}
+	fmt.Fprintf(a.errw, "boat: child %s was stopped (no_env fresh boot failed: %s)\n", child, ae.Message)
+	return exitError{1}
+}
+
+// createStartFailure reports a create (new/run/batch) whose fresh boot failed
+// closed: the API kept the VM(s) it names in vm/vms, stopped or still running.
+// Other errors pass through unchanged.
+func (a *app) createStartFailure(err error) error {
+	var ae *apiError
+	if !errors.As(err, &ae) || ae.Code != "env_start_failed" {
+		return err
+	}
+	vms := make([]map[string]any, 0, len(ae.VMs)+1)
+	seen := map[string]bool{}
+	for _, v := range append([]map[string]any{ae.VM}, ae.VMs...) {
+		if v == nil {
+			continue
+		}
+		if id := s(obj(v), "id"); id != "" {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+		}
+		vms = append(vms, v)
+	}
+	if len(vms) == 0 {
+		return err
+	}
+	type entry struct{ id, state string }
+	var es []entry
+	evs := make([]any, 0, len(vms))
+	for _, v := range vms {
+		st := s(obj(v), "state")
+		if st == "" {
+			st = "unknown"
+		}
+		es = append(es, entry{s(obj(v), "id"), st})
+		evs = append(evs, obj{"id": s(obj(v), "id"), "state": st})
+	}
+	if a.json {
+		a.emit(obj{"event": "error", "id": es[0].id, "code": "env_start_failed", "status": ae.Status, "state": es[0].state, "vms": evs, "error": "fresh boot env push failed: " + ae.Message}, nil)
+		return exitError{1}
+	}
+	for _, e := range es {
+		fmt.Fprintf(a.errw, "boat: %s %s (fresh boot env push failed: %s)\n", e.id, e.state, ae.Message)
+	}
+	return exitError{1}
+}
+
 // readyEvent is boat.dev's last `boat new --json` line: the VM with "event".
 func readyEvent(vm obj) obj {
 	ev := obj{"event": "ready"}
@@ -249,7 +383,29 @@ func cmdList(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.emitList(l, vmCols...)
+	return a.emitList(markEnvFailed(l, a.json), vmCols...)
+}
+
+// markEnvFailed annotates the state column of VMs whose environment was not
+// delivered ("running (env failed)"). JSON output is returned untouched.
+func markEnvFailed(l []obj, json bool) []obj {
+	if json {
+		return l
+	}
+	out := make([]obj, len(l))
+	for i, vm := range l {
+		out[i] = vm
+		if strings.TrimSpace(s(vm, "env_error")) == "" {
+			continue
+		}
+		cp := make(obj, len(vm))
+		for k, v := range vm {
+			cp[k] = v
+		}
+		cp["state"] = s(vm, "state") + " (env failed)"
+		out[i] = cp
+	}
+	return out
 }
 
 func oneVM(a *app, args []string) (obj, error) {
@@ -290,15 +446,26 @@ func cmdStop(a *app, args []string) error {
 
 func cmdRm(a *app, args []string) error {
 	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
-	// boat.dev's scripts pass --yes; this CLI never asks.
-	fs.Bool("yes", false, "accepted for boat.dev scripts; delete never asks here")
-	fs.Bool("y", false, "same as --yes")
-	pos, _, err := parse(fs, args)
+	yes := fs.Bool("yes", false, "confirm deletion (required with --json or without a terminal)")
+	fs.BoolVar(yes, "y", false, "same as --yes")
+	pos, after, err := parse(fs, args)
 	if err != nil {
+		return err
+	}
+	if len(after) > 0 {
+		return fmt.Errorf("unexpected arguments after --: %w", errUsage)
+	}
+	if err := need(pos, 1, "<vm>"); err != nil {
+		return err
+	}
+	if err := a.requireConfirmFlag(*yes); err != nil {
 		return err
 	}
 	vm, err := oneVM(a, pos)
 	if err != nil {
+		return err
+	}
+	if err := a.confirmDestroy(*yes, s(vm, "id")); err != nil {
 		return err
 	}
 	if err := a.c.call("DELETE", vmPath(s(vm, "id")), nil, nil); err != nil {
@@ -307,20 +474,48 @@ func cmdRm(a *app, args []string) error {
 	return a.emit(obj{"ok": true, "id": s(vm, "id")}, func() { fmt.Fprintln(a.out, "deleted", s(vm, "id")) })
 }
 
+func (a *app) requireConfirmFlag(yes bool) error {
+	if !yes && (a.json || a.isTerminal == nil || !a.isTerminal()) {
+		return errors.New("deletion requires --yes (-y) with --json or without a terminal")
+	}
+	return nil
+}
+
+func (a *app) confirmDestroy(yes bool, target string) error {
+	if yes {
+		return nil
+	}
+	if err := a.requireConfirmFlag(yes); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.errw, "Permanently delete %s? [y/N] ", target)
+	answer, err := bufio.NewReader(io.LimitReader(a.in, 128)).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("deletion not confirmed (use --yes to confirm): %w", err)
+	}
+	answer = strings.TrimSpace(answer)
+	if !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") {
+		return errors.New("deletion cancelled")
+	}
+	return nil
+}
+
 func cmdFork(a *app, args []string) error {
 	fs := flag.NewFlagSet("fork", flag.ContinueOnError)
 	name := fs.String("name", "", "")
+	typ := fs.String("type", "", "resize fork to this size (cold boot)")
+	fs.StringVar(typ, "size", "", "same as --type")
 	failFast := fs.Bool("fail-fast", false, "fail at once with no_ready_machine when the host is full")
 	var ttl secsFlag
-	fs.Var(&ttl, "ttl", "seconds until the fork auto-stops")
+	fs.Var(&ttl, "ttl", "seconds until the fork auto-stops (0 or infinite = never)")
 	never := fs.Bool("no-auto-stop", false, "the fork never auto-stops")
+	noEnv := fs.Bool("no-env", false, "do not inject team secrets or inherited environment")
 	envv := labels{}
-	fs.Var(envv, "e", "KEY=VALUE for the fork (repeatable)")
-	fs.Var(envv, "env", "same as -e")
+	envName := fs.String("environment", "", "apply this environment's variables and secrets to the fork (refused on a no_env VM: no_env is sticky)")
+	fs.Var(envVarFlag{envv}, "e", "KEY=VALUE for the fork (repeatable); --environment NAME picks an environment")
+	fs.Var(envVarFlag{envv}, "env", "same as -e")
 	fs.Bool("wait", false, "accepted: fork answers once the fork is up")
 	var hit string
-	refuse(fs, &hit, "a fork keeps its parent's size here; fork, stop, then boat resume --type", "type=")
-	refuse(fs, &hit, "a fork keeps its parent's environment and secret selection", "environment=", "no-env")
 	refuse(fs, &hit, "this server always snapshots on stop", "no-snapshots")
 	refuse(fs, &hit, "this server keeps command output and process samples", "no-monitoring")
 	pos, _, err := parse(fs, args)
@@ -333,9 +528,26 @@ func cmdFork(a *app, args []string) error {
 	if err := ttlConflict(ttl, *never); err != nil {
 		return err
 	}
+	if *noEnv && *envName != "" {
+		return fmt.Errorf("--no-env and --environment conflict: %w", errUsage)
+	}
 	vm, err := oneVM(a, pos)
 	if err != nil {
 		return err
+	}
+	if *typ != "" {
+		// Before the fork exists: a no_env parent is sticky, and an unknown
+		// environment or size must fail with no state-changing call.
+		parentNoEnv, _ := vm["no_env_run"].(bool)
+		if err := refuseStickyEnv(s(vm, "id"), "fork", *envName, parentNoEnv); err != nil {
+			return err
+		}
+		if err := a.checkEnvironment(*envName); err != nil {
+			return err
+		}
+		if err := a.checkSize(*typ); err != nil {
+			return err
+		}
 	}
 	body := obj{"name": *name}
 	if *failFast {
@@ -344,14 +556,74 @@ func cmdFork(a *app, args []string) error {
 	if len(envv) > 0 {
 		body["env"] = envv
 	}
+	if *noEnv {
+		body["no_env"] = true
+	}
+	if *envName != "" {
+		body["environment"] = *envName
+	}
+	if *never {
+		body["ttl_s"] = int64(0)
+	} else if ttl.set {
+		body["ttl_s"] = ttl.v
+	}
 	var out obj
 	if err := a.c.call("POST", vmPath(s(vm, "id"), "fork"), body, &out); err != nil {
-		return err
+		return a.forkStartFailure(stickyErr(err))
 	}
-	a.setCurrent(s(out, "id"))
-	if err := a.setTTL(s(out, "id"), ttl, *never); err != nil {
-		return fmt.Errorf("fork %s made; setting its auto-stop: %w", s(out, "id"), err)
+	forkID := s(out, "id")
+	if *typ != "" && s(out, "size") != *typ {
+		retype := func() error {
+			if s(out, "state") != "stopped" {
+				if err := a.c.call("POST", vmPath(forkID, "stop"), nil, nil); err != nil {
+					return err
+				}
+			}
+			if err := a.c.call("POST", vmPath(forkID, "resize"), obj{"size": *typ, "discard_memory": true}, nil); err != nil {
+				return err
+			}
+			startBody := obj{}
+			if *failFast {
+				startBody["fail_fast"] = true
+			}
+			if len(envv) > 0 {
+				startBody["env"] = envv
+			}
+			if *noEnv {
+				startBody["no_env"] = true
+			}
+			if *envName != "" {
+				// A named environment ends the no_env run; never force no_env.
+				startBody["environment"] = *envName
+			} else if runNoEnv, _ := out["no_env_run"].(bool); runNoEnv {
+				startBody["no_env"] = true // the fork continues a run that held no team secrets
+			} else if parentNoEnv, _ := vm["no_env_run"].(bool); parentNoEnv {
+				startBody["no_env"] = true
+			}
+			if *never {
+				startBody["ttl_s"] = int64(0)
+			} else if ttl.set {
+				startBody["ttl_s"] = ttl.v
+			}
+			var send any
+			if len(startBody) > 0 {
+				send = startBody
+			}
+			return stickyErr(a.c.call("POST", vmPath(forkID, "start"), send, &out))
+		}
+		if err := retype(); err != nil {
+			// Every failure in the --type phase deletes the child, like compat
+			// fork-with-type; only the fork call itself keeps a stopped child.
+			if derr := a.c.call("DELETE", vmPath(forkID), nil, nil); derr != nil {
+				return fmt.Errorf("%w (cleanup delete %s also failed: %v)", err, forkID, derr)
+			}
+			return fmt.Errorf("%w (child %s was deleted)", err, forkID)
+		}
 	}
+	if ee := strings.TrimSpace(s(out, "env_error")); ee != "" {
+		return a.failEnv(out, ee)
+	}
+	a.setCurrent(forkID)
 	return a.emitVM(out)
 }
 
@@ -370,11 +642,44 @@ func cmdExec(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
-	if pid := *status + *attach + *kill; pid != "" {
-		if len(pos) > 1 {
-			pos = pos[:1] // boat exec <vm> --attach "$pid": nothing else to run
+	visited := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+	var modeFlags []string
+	var op, pid string
+	if visited["status"] {
+		if *status == "" {
+			return fmt.Errorf("--status requires a command id: %w", errUsage)
 		}
-		op := map[bool]string{*status != "": "status", *attach != "": "logs", *kill != "": "stop"}[true]
+		modeFlags = append(modeFlags, "--status")
+		op, pid = "status", *status
+	}
+	if visited["attach"] {
+		if *attach == "" {
+			return fmt.Errorf("--attach requires a command id: %w", errUsage)
+		}
+		modeFlags = append(modeFlags, "--attach")
+		op, pid = "logs", *attach
+	}
+	if visited["kill"] {
+		if *kill == "" {
+			return fmt.Errorf("--kill requires a command id: %w", errUsage)
+		}
+		modeFlags = append(modeFlags, "--kill")
+		op, pid = "stop", *kill
+	}
+	if len(modeFlags) > 1 {
+		return fmt.Errorf("%s cannot be combined: %w", strings.Join(modeFlags, " and "), errUsage)
+	}
+	if len(modeFlags) == 1 {
+		if *detach {
+			return fmt.Errorf("%s cannot be combined with --detach: %w", modeFlags[0], errUsage)
+		}
+		if len(pos) > 1 {
+			return fmt.Errorf("unexpected arguments %v with %s: %w", pos[1:], modeFlags[0], errUsage)
+		}
+		if len(cmd) > 0 {
+			return fmt.Errorf("unexpected command %v with %s: %w", cmd, modeFlags[0], errUsage)
+		}
 		rest := []string{op, orStr(firstOr(pos, ""), "current"), pid}
 		if op == "logs" {
 			rest = append(rest, "-f")
@@ -389,6 +694,8 @@ func cmdExec(a *app, args []string) error {
 	}
 	if len(pos) == 2 && len(cmd) == 0 { // boat exec vm "cmd string"
 		cmd, pos = []string{"bash", "-lc", pos[1]}, pos[:1]
+	} else if len(pos) > 2 && len(cmd) == 0 {
+		return fmt.Errorf("unexpected arguments %v (use -- before the command): %w", pos[1:], errUsage)
 	}
 	if len(cmd) == 0 {
 		return fmt.Errorf("usage: boat exec <vm> -- cmd: %w", errUsage)
@@ -464,7 +771,7 @@ func cmdPrompt(a *app, args []string) error {
 // otherwise output is decoded to stdout/stderr. Returns the remote exit code.
 func (a *app) stream(path string, body obj) error {
 	b, _ := json.Marshal(body)
-	resp, err := a.c.request("POST", path, bytes.NewReader(b), "application/json")
+	resp, err := a.c.requestCtx(a.context(), "POST", path, bytes.NewReader(b), "application/json")
 	if err != nil {
 		return err
 	}
@@ -561,7 +868,11 @@ func cmdSSH(a *app, args []string) error {
 	if *tty {
 		opts = []string{"-t"}
 	}
-	argv := append(sshArgv(s(vm, "id"), info, opts...), extra...)
+	base, err := sshArgv(s(vm, "id"), info, opts...)
+	if err != nil {
+		return err
+	}
+	argv := append(base, extra...)
 	if a.json {
 		info["argv"] = argv
 		return a.emit(info, nil)
@@ -569,12 +880,14 @@ func cmdSSH(a *app, args []string) error {
 	return a.execProg(argv)
 }
 
-// sshJumpArgs turns user@host:port into "-p port user@host".
-func sshJumpArgs(j string) string {
-	if i := strings.LastIndex(j, ":"); i > 0 && !strings.Contains(j[i:], "]") {
-		return "-p " + j[i+1:] + " " + j[:i]
+// sshJumpArgs turns user@host[:port] (including bracketed or bare IPv6 literals)
+// into "-p <port> -- <user>@<bare-host>" so no shell glob characters reach ProxyCommand.
+func sshJumpArgs(j string) (string, error) {
+	user, host, port, ok := parseSSHJump(j)
+	if !ok {
+		return "", fmt.Errorf("server returned an invalid ssh jump host %q", j)
 	}
-	return j
+	return "-p " + port + " -- " + user + "@" + host, nil
 }
 
 func cmdDesktop(a *app, args []string) error {
@@ -597,17 +910,21 @@ func cmdDesktop(a *app, args []string) error {
 	if err := a.c.call("GET", vmPath(s(vm, "id"), "desktop"), nil, &d); err != nil {
 		return err
 	}
-	if a.json || *noOpen {
-		return a.emit(d, func() { fmt.Fprintln(a.out, s(d, "url")) })
+	raw := s(d, "url")
+	if err := validateOpenURL(raw); err != nil {
+		return err
 	}
-	fmt.Fprintln(a.out, s(d, "url"))
-	return a.open(s(d, "url"))
+	if a.json || *noOpen {
+		return a.emit(d, func() { fmt.Fprintln(a.out, raw) })
+	}
+	fmt.Fprintln(a.out, raw)
+	return a.open(raw)
 }
 
 // ---- ports / snapshots ----
 
 func cmdPorts(a *app, args []string) error {
-	op, args := sub(args, "ls", "ls", "add", "rm", "url")
+	op, args := sub(args, "ls", "ls", "add", "rm", "url", "revoke")
 	fs := flag.NewFlagSet("ports", flag.ContinueOnError)
 	public := fs.Bool("public", false, "open route + raw TCP port (same as --auth public)")
 	auth := fs.String("auth", "", "private (default: gateway route needs a token from `boat ports url`) or public")
@@ -617,7 +934,7 @@ func cmdPorts(a *app, args []string) error {
 		return err
 	}
 	want := 2
-	if op == "ls" {
+	if op == "ls" || op == "revoke" {
 		want = 1
 	}
 	if err := need(pos, want, "<vm> [port]"); err != nil {
@@ -670,6 +987,18 @@ func cmdPorts(a *app, args []string) error {
 				fmt.Fprintf(a.errw, "private route, valid until %s; for scripts: curl -H 'X-Boat-Route-Token: %s' …\n", s(out, "expires_at"), t)
 			}
 		})
+	case "revoke":
+		var out obj
+		if err := a.c.call("POST", vmPath(id, "port-tokens", "revoke"), nil, &out); err != nil {
+			return err
+		}
+		return a.emit(out, func() {
+			if g := numStr(out, "generation"); g != "" {
+				fmt.Fprintf(a.out, "revoked port tokens for %s (generation %s)\n", id, g)
+				return
+			}
+			fmt.Fprintf(a.out, "revoked port tokens for %s\n", id)
+		})
 	default:
 		if err := a.c.call("DELETE", vmPath(id, "ports", url.PathEscape(pos[1])), nil, nil); err != nil {
 			return err
@@ -715,13 +1044,13 @@ func cmdSnapshots(a *app, args []string) error {
 		if *limit > 0 && len(l) > *limit {
 			l = l[len(l)-*limit:]
 		}
-		return a.emitList(l, "id", "name", "created", "size_bytes")
+		return a.emitSnapshots(l)
 	case "create":
 		var out obj
 		if err := a.c.call("POST", vmPath(id, "snapshots"), obj{"name": *name}, &out); err != nil {
 			return err
 		}
-		return a.emitList([]obj{out}, "id", "name", "created")
+		return a.emitSnapshots([]obj{out})
 	default:
 		if err := need(pos, 1, "<snapshot-id>"); err != nil {
 			return err
@@ -731,6 +1060,55 @@ func cmdSnapshots(a *app, args []string) error {
 		}
 		return a.emit(obj{"ok": true, "id": pos[0]}, func() { fmt.Fprintln(a.out, "deleted snapshot", pos[0]) })
 	}
+}
+
+func numStr(m obj, k string) string {
+	switch v := m[k].(type) {
+	case float64:
+		if float64(int64(v)) == v {
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	default:
+		return s(m, k)
+	}
+}
+
+func snapshotSize(it obj) string {
+	if sb := numStr(it, "size_bytes"); sb != "" {
+		return sb
+	}
+	disk, mem := numStr(it, "disk_gib"), numStr(it, "mem_mib")
+	switch {
+	case disk != "" && mem != "":
+		return disk + " GiB / " + mem + " MiB"
+	case disk != "":
+		return disk + " GiB"
+	case mem != "":
+		return mem + " MiB"
+	default:
+		return s(it, "size")
+	}
+}
+
+func (a *app) emitSnapshots(items []obj) error {
+	if a.json {
+		return a.emitList(items)
+	}
+	rows := make([]obj, len(items))
+	for i, it := range items {
+		rows[i] = obj{
+			"id":         s(it, "id"),
+			"name":       s(it, "name"),
+			"created_at": orStr(s(it, "created_at"), s(it, "created")),
+			"size":       snapshotSize(it),
+		}
+	}
+	return a.emitList(rows, "id", "name", "created_at", "size")
 }
 
 // ---- secrets / keys / teams / webhooks ----
@@ -815,6 +1193,40 @@ func overlapBody(d time.Duration) obj {
 	return obj{"overlap_s": int64(d.Seconds())}
 }
 
+const maxKeyTTLS = 365 * 24 * 3600
+
+// parseKeyTTL parses a key lifetime like 24h, 7d, 90d, 365d, integer seconds,
+// or "never" into expires_in_s (0 means omit / never expires).
+func parseKeyTTL(raw string) (int64, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" || v == "never" {
+		return 0, nil
+	}
+	bad := fmt.Errorf("ttl must be a duration such as 24h, 7d, 90d, 365d or seconds (up to 365d), or never: %w", errUsage)
+	if daysStr, ok := strings.CutSuffix(v, "d"); ok {
+		n, err := strconv.ParseInt(daysStr, 10, 64)
+		if err != nil || n <= 0 || n > maxKeyTTLS/86400 {
+			return 0, bad
+		}
+		return n * 86400, nil
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n <= 0 || n > maxKeyTTLS {
+			return 0, bad
+		}
+		return n, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 || d%time.Second != 0 {
+		return 0, bad
+	}
+	secs := int64(d / time.Second)
+	if secs <= 0 || secs > maxKeyTTLS {
+		return 0, bad
+	}
+	return secs, nil
+}
+
 func cmdKeys(a *app, args []string) error {
 	op, args := sub(args, "ls", "ls", "create", "rm", "rotate", "usage")
 	fs := flag.NewFlagSet("keys", flag.ContinueOnError)
@@ -822,6 +1234,7 @@ func cmdKeys(a *app, args []string) error {
 	name := fs.String("name", "", "")
 	scopes := fs.String("scopes", "", "")
 	team := fs.String("team", "", "")
+	ttl := fs.String("ttl", "", "key lifetime: 24h|7d|90d|365d|never (up to 365d)")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -857,12 +1270,23 @@ func cmdKeys(a *app, args []string) error {
 		}
 		return a.show(out, "id", "requests", "last_used")
 	case "create":
+		expiresInS, err := parseKeyTTL(*ttl)
+		if err != nil {
+			return err
+		}
+		body := omitNil(obj{"name": *name, "scopes": splitList(*scopes), "team_id": *team})
+		if expiresInS > 0 {
+			body["expires_in_s"] = expiresInS
+		}
 		var out obj
-		if err := a.c.call("POST", "/v1/keys", omitNil(obj{"name": *name, "scopes": splitList(*scopes), "team_id": *team}), &out); err != nil {
+		if err := a.c.call("POST", "/v1/keys", body, &out); err != nil {
 			return err
 		}
 		return a.emit(out, func() {
 			fmt.Fprintf(a.out, "%s\n(key %s; shown once, store it now)\n", s(out, "token"), s(out, "id"))
+			if exp := s(out, "expires"); exp != "" {
+				fmt.Fprintf(a.errw, "expires at %s\n", exp)
+			}
 		})
 	default:
 		if err := need(pos, 1, "KEY_ID"); err != nil {

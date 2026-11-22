@@ -18,7 +18,7 @@ func fileEntry(dir string, e map[string]any) map[string]any {
 	size, _ := e["size"].(float64)
 	mtime, _ := e["mtime"].(float64)
 	return map[string]any{"name": name, "path": path.Join(dir, name), "isDir": str(e, "type") == "dir",
-		"isSymlink": str(e, "type") == "link", "size": int64(size), "mode": str(e, "mode"),
+		"isSymlink": str(e, "type") == "symlink" || str(e, "type") == "link", "size": int64(size), "mode": str(e, "mode"),
 		"modifiedAt": time.Unix(int64(mtime), 0).UTC()}
 }
 

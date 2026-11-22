@@ -208,7 +208,16 @@ func (s *server) emitVMEvent(ctx context.Context, typ, team, vmID, state string)
 		log.Printf("team %s telemetry: %v", team, err)
 		return
 	}
+	release := func() {}
+	if s.teamOTel != nil {
+		var ok bool
+		release, ok = s.teamOTel.acquire(team)
+		if !ok {
+			return
+		}
+	}
 	go func() {
+		defer release()
 		sctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		// The webhook client refuses private targets (SSRF) and redirects.
@@ -284,7 +293,13 @@ func (s *server) putTelemetry(w http.ResponseWriter, r *http.Request, p *princip
 		}
 		tt.SealedHeaders = sealed
 	}
-	if err := s.store.Update(func(st *State) error { st.Telemetry[p.Team.ID] = tt; return nil }); err != nil {
+	if err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
+		st.Telemetry[p.Team.ID] = tt
+		return nil
+	}); err != nil {
 		s.storeErr(w, r, err)
 		return
 	}
@@ -292,7 +307,13 @@ func (s *server) putTelemetry(w http.ResponseWriter, r *http.Request, p *princip
 }
 
 func (s *server) deleteTelemetry(w http.ResponseWriter, r *http.Request, p *principal) {
-	if err := s.store.Update(func(st *State) error { delete(st.Telemetry, p.Team.ID); return nil }); err != nil {
+	if err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
+		delete(st.Telemetry, p.Team.ID)
+		return nil
+	}); err != nil {
 		s.storeErr(w, r, err)
 		return
 	}

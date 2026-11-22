@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -14,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Detached commands and file operations, passed through boatd's
@@ -89,7 +94,24 @@ func validEnv(env map[string]string) string {
 	return ""
 }
 
-func validCwd(c string) bool { return c == "" || validFilePath(c) }
+// validCwd accepts empty (unset), absolute ("/x"), home-relative ("~" or "~/x"),
+// or plain relative ("subdir") paths; the guest resolves non-absolute forms
+// against the target user's home. Reject NUL, control characters, and overly
+// long or invalid UTF-8 strings.
+func validCwd(c string) bool {
+	if c == "" {
+		return true
+	}
+	if len(c) >= 4096 || !utf8.ValidString(c) {
+		return false
+	}
+	for _, r := range c {
+		if r == 0 || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
 
 type startCmd struct {
 	Cmd []string          `json:"cmd"`
@@ -97,8 +119,9 @@ type startCmd struct {
 	Cwd string            `json:"cwd"`
 }
 
-// startDetached starts argv on the VM and records it in the history.
-func (s *server) startDetached(r *http.Request, p *principal, vmID, kind string, cmd []string, env map[string]string, cwd string) (string, error) {
+// startDetached starts argv on the VM, records it in the history, and returns
+// the command id and guest pid (0 if an older guest omitted pid).
+func (s *server) startDetached(r *http.Request, p *principal, vmID, kind string, cmd []string, env map[string]string, cwd string) (string, int, error) {
 	args := map[string]any{"argv": cmd}
 	if len(env) > 0 {
 		args["env"] = env
@@ -108,11 +131,15 @@ func (s *server) startDetached(r *http.Request, p *principal, vmID, kind string,
 	}
 	out, err := s.agentOp(r, vmID, "cmd_start", args)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	id := str(out, "cmd_id")
 	if id == "" {
-		return "", fmt.Errorf("agent cmd_start returned no cmd_id")
+		return "", 0, fmt.Errorf("agent cmd_start returned no cmd_id")
+	}
+	pid := 0
+	if f, ok := out["pid"].(float64); ok && f > 0 {
+		pid = int(f)
 	}
 	// Prompts hold secrets in argv only as the user's text; env is never stored.
 	rec := CommandRecord{ID: id, Cmd: capArgv(cmd), Cwd: preview(cwd), Kind: kind, StartedAt: time.Now().UTC(), State: "running"}
@@ -122,11 +149,21 @@ func (s *server) startDetached(r *http.Request, p *principal, vmID, kind string,
 	if err := s.recordCommand(vmID, rec); err != nil {
 		log.Printf("record command %s: %v", id, err)
 	}
-	return id, nil
+	return id, pid, nil
 }
 
+// recordCommand appends rec to the VM's capped command history. The history is
+// display-only bookkeeping (the command itself already runs on the guest), so
+// it is written lazily like idempotency records: readers see it at once, and
+// writes in the idemPersistDelay window share one disk write instead of each
+// command waiting on a seal and two fsyncs. Only this VM's history is copied
+// under the store's writer mutex. Crash tradeoff: a crash inside that window
+// loses the newest history rows (the commands still ran; the guest agent still
+// lists them by id).
+// Graceful shutdown and any durable Update in between persist them.
 func (s *server) recordCommand(vmID string, rec CommandRecord) error {
-	return s.store.Update(func(st *State) error {
+	rec = cloneCommandRecord(rec)
+	return s.store.applyCommandHistoryLazy(vmID, func(st *State) error {
 		st.CommandSeq[vmID]++
 		rec.ProcessID = st.CommandSeq[vmID]
 		list := append(st.Commands[vmID], rec)
@@ -135,7 +172,7 @@ func (s *server) recordCommand(vmID string, rec CommandRecord) error {
 		}
 		st.Commands[vmID] = list
 		return nil
-	})
+	}, idemPersistDelay)
 }
 
 func (s *server) startCommand(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -148,7 +185,7 @@ func (s *server) startCommand(w http.ResponseWriter, r *http.Request, p *princip
 	case len(c.Cmd) == 0 || c.Cmd[0] == "":
 		msg = "cmd is required"
 	case !validCwd(c.Cwd):
-		msg = "cwd must be absolute"
+		msg = "invalid cwd"
 	}
 	if msg != "" {
 		writeErr(w, r, 400, "invalid_request", msg)
@@ -157,12 +194,16 @@ func (s *server) startCommand(w http.ResponseWriter, r *http.Request, p *princip
 	if _, ok := s.ownVM(w, r, p); !ok {
 		return
 	}
-	id, err := s.startDetached(r, p, r.PathValue("id"), "command", c.Cmd, c.Env, c.Cwd)
+	id, pid, err := s.startDetached(r, p, r.PathValue("id"), "command", c.Cmd, c.Env, c.Cwd)
 	if err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
-	writeJSON(w, 201, map[string]any{"id": id, "cmd": c.Cmd, "state": "running"})
+	resp := map[string]any{"id": id, "cmd": c.Cmd, "state": "running"}
+	if pid > 0 {
+		resp["pid"] = pid
+	}
+	writeJSON(w, 201, resp)
 }
 
 func (s *server) listCommands(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -247,7 +288,8 @@ func (s *server) refreshHistory(vmID string, list map[string]any) {
 	if !changed {
 		return
 	}
-	err := s.store.Update(func(st *State) error {
+	// Lazy: the states are re-derived from the guest on the next history read.
+	err := s.store.applyCommandHistoryLazy(vmID, func(st *State) error {
 		for i := range st.Commands[vmID] {
 			rec := &st.Commands[vmID][i]
 			v := live[rec.ID]
@@ -265,7 +307,7 @@ func (s *server) refreshHistory(vmID string, list map[string]any) {
 			}
 		}
 		return nil
-	})
+	}, idemPersistDelay)
 	if err != nil {
 		log.Printf("refresh command history: %v", err)
 	}
@@ -310,8 +352,13 @@ func (s *server) readLogs(r *http.Request, vmID, cid string, offset int64, limit
 		return nil, err
 	}
 	out = agentReply(out)
-	out["exit"] = nil
-	if out["running"] != true { // cmd_logs has no exit status; cmd_status does
+	if out["running"] == true {
+		out["exit"] = nil
+		return out, nil
+	}
+	// Current guests answer cmd_logs with exit and signal (null when not
+	// applicable). An older guest omits the keys; only then ask cmd_status.
+	if _, ok := out["exit"]; !ok {
 		st, err := s.agentOp(r, vmID, "cmd_status", map[string]any{"cmd_id": cid})
 		if err != nil {
 			return nil, err
@@ -351,19 +398,18 @@ func (s *server) followLogs(w http.ResponseWriter, r *http.Request, vmID, cid st
 			}
 			return
 		}
-		next, _ := out["next_offset"].(float64)
+		if next, ok := out["next_offset"].(float64); ok && next >= 0 {
+			offset = int64(next)
+		}
 		data := str(out, "data_b64")
 		if data != "" {
 			stream := str(out, "stream")
 			if stream == "" {
 				stream = "stdout"
 			}
-			if !emit(map[string]any{"stream": stream, "data_b64": data, "next_offset": int64(next)}) {
+			if !emit(map[string]any{"stream": stream, "data_b64": data, "next_offset": offset}) {
 				return
 			}
-		}
-		if next > 0 {
-			offset = int64(next)
 		}
 		if out["running"] != true && data == "" {
 			last := map[string]any{"exit": out["exit"]}
@@ -647,13 +693,7 @@ func (s *server) fileInfo(w http.ResponseWriter, r *http.Request, p *principal) 
 		writeErr(w, r, 404, "not_found", "file not found")
 		return
 	}
-	typ := "file"
-	switch {
-	case strings.Contains(f[0], "directory"):
-		typ = "dir"
-	case strings.Contains(f[0], "link"):
-		typ = "link"
-	}
+	typ := statFileType(f[0])
 	size, _ := strconv.ParseInt(f[1], 10, 64)
 	mtime, _ := strconv.ParseInt(f[3], 10, 64)
 	writeJSON(w, 200, map[string]any{"path": path, "type": typ, "size": size, "mode": f[2], "mtime": mtime})
@@ -708,33 +748,137 @@ func (s *server) resizeVM(w http.ResponseWriter, r *http.Request, p *principal) 
 		writeErr(w, r, 400, "invalid_request", "give a size and/or disk_gib")
 		return
 	}
+	if s.refuseSelfLifetime(w, r, p) {
+		return
+	}
 	if _, ok := s.ownVM(w, r, p); ok {
+		if s.revalidatePrincipal(w, r, p, "vms:write") == nil {
+			return
+		}
 		s.vmAction(w, r, "resize", map[string]any{"size": body.Size, "disk_gib": body.DiskGiB, "discard_memory": body.DiscardMemory})
 	}
 }
 
-// vmUsage narrows boatd's usage report to one VM.
+// parseUsageBound reads a usage bound: RFC 3339 or unix seconds.
+func parseUsageBound(v string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t.UTC(), nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 || n > 253402300799 {
+		return time.Time{}, errors.New("bad time")
+	}
+	return time.Unix(n, 0).UTC(), nil
+}
+
+// vmUsage reads one exact team+VM interval snapshot instead of subtracting two
+// rounded fleet reports. Each interval retains the size used during that run.
 func (s *server) vmUsage(w http.ResponseWriter, r *http.Request, p *principal) {
-	if _, ok := s.ownVM(w, r, p); !ok {
+	vm, ok := s.ownVM(w, r, p)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
-	var rep struct {
-		VMs []map[string]any `json:"vms"`
+	var since, until time.Time
+	for _, b := range []struct {
+		name string
+		dst  *time.Time
+	}{{"since", &since}, {"until", &until}} {
+		if v := r.URL.Query().Get(b.name); v != "" {
+			t, err := parseUsageBound(v)
+			if err != nil {
+				writeErr(w, r, 400, "invalid_request", b.name+" must be RFC 3339 or unix seconds")
+				return
+			}
+			*b.dst = t
+		}
 	}
-	q := url.Values{"team": {p.Team.ID}}
+	if !since.IsZero() && !until.IsZero() && !until.After(since) {
+		writeErr(w, r, 400, "invalid_request", "until must be after since")
+		return
+	}
+	q := url.Values{"team": {p.Team.ID}, "vm_id": {id}}
+	if !since.IsZero() {
+		q.Set("since", since.Format(time.RFC3339Nano))
+	}
+	if !until.IsZero() {
+		q.Set("until", until.Format(time.RFC3339Nano))
+	}
+	var rep struct {
+		Exact     bool      `json:"exact"`
+		Since     time.Time `json:"since"`
+		Until     time.Time `json:"until"`
+		Intervals []struct {
+			ID    string    `json:"id"`
+			Team  string    `json:"team"`
+			Size  string    `json:"size"`
+			Start time.Time `json:"start"`
+			End   time.Time `json:"end"`
+		} `json:"intervals"`
+	}
 	if err := s.boatd.call(r.Context(), "GET", "/v1/usage?"+q.Encode(), nil, &rep); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
-	var seconds float64
-	for _, u := range rep.VMs {
-		if str(u, "id") == id {
-			f, _ := u["vm_seconds"].(float64)
-			seconds += f
+	if !rep.Exact {
+		writeErr(w, r, 501, "not_supported", "exact per-VM usage requires a boatd with usage-window support")
+		return
+	}
+	state := s.store.Snapshot()
+	cutoff := state.EnvErrorCutoffs[id]
+	if cutoff.Before(state.EnvErrorLegacyBefore) {
+		cutoff = state.EnvErrorLegacyBefore
+	}
+	spans := append([]EnvErrorSpan(nil), state.EnvErrorSpans[id]...)
+	look := func(_ context.Context, _ string) (VM, bool) { return vm, true }
+	for i := range spans {
+		if spans[i].End.IsZero() {
+			spans[i].End = s.openSpanEnd(r.Context(), look, id, spans[i].Start, rep.Until)
 		}
 	}
-	writeJSON(w, 200, map[string]any{"id": id, "vm_seconds": seconds})
+	seconds := 0.0
+	bySize := map[string]float64{}
+	for _, interval := range rep.Intervals {
+		if interval.ID != id || interval.Team != p.Team.ID {
+			continue
+		}
+		start, end := interval.Start, interval.End
+		if start.Before(since) {
+			start = since
+		}
+		if end.After(rep.Until) {
+			end = rep.Until
+		}
+		if !end.After(start) {
+			continue
+		}
+		if start.Before(cutoff) {
+			writeErr(w, r, 501, "not_supported", "exact per-VM usage is unavailable for incomplete environment-error history")
+			return
+		}
+		billable := end.Sub(start).Seconds()
+		for _, span := range spans {
+			lo, hi := span.Start, span.End
+			if lo.Before(start) {
+				lo = start
+			}
+			if hi.After(end) {
+				hi = end
+			}
+			if hi.After(lo) {
+				billable -= hi.Sub(lo).Seconds()
+			}
+		}
+		billable = math.Max(0, billable)
+		seconds += billable
+		bySize[interval.Size] += billable
+	}
+	out := map[string]any{"id": id, "vm_seconds": seconds, "vm_seconds_by_size": bySize, "until": rep.Until}
+	if !since.IsZero() {
+		out["since"] = since
+	}
+
+	writeJSON(w, 200, out)
 }
 
 // streamEvents relays boatd's SSE lifecycle events, filtered to the caller's team.
@@ -780,4 +924,16 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, p *princip
 			return
 		}
 	}
+}
+
+// statFileType maps `stat -c %F` ("regular file", "directory", "symbolic link")
+// onto the FileEntry type enum (file, dir, symlink).
+func statFileType(f string) string {
+	switch {
+	case strings.Contains(f, "directory"):
+		return "dir"
+	case strings.Contains(f, "link"):
+		return "symlink"
+	}
+	return "file"
 }

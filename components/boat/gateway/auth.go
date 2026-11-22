@@ -45,9 +45,18 @@ func purposeKey(master []byte, purpose string) []byte {
 	return m.Sum(nil)
 }
 
-// legacyWindow: how long after start a gateway accepts tokens signed with
-// the master key: the longest token boat-api mints (a 7-day port URL) plus a day.
-const legacyWindow = 8 * 24 * time.Hour
+// legacyCutoff maps -legacy-hmac-until to the instant until which master-key
+// (pre-split) tokens still verify. Only an explicit absolute unix time opens the
+// window; 0 and -1 (the default) leave it closed. A start-relative default
+// re-armed on every restart, so a restarted gateway kept accepting tokens signed
+// with the master key indefinitely. For a migration, pass now + 8 days (the
+// longest token boat-api mints, a 7-day port URL, plus a day) once.
+func legacyCutoff(flagValue int64) time.Time {
+	if flagValue > 0 {
+		return time.Unix(flagValue, 0)
+	}
+	return time.Time{}
+}
 
 func mac(key []byte, payload string) string {
 	m := hmac.New(sha256.New, key)
@@ -138,12 +147,30 @@ func anyCookie(r *http.Request, name string, check func(string) error) error {
 	return err
 }
 
+// safeRedirectTarget normalizes a post-login redirect target to a same-origin
+// path starting with exactly one "/" that is never followed by "/" or "\".
+func safeRedirectTarget(target string) string {
+	target = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, target)
+	path, query, hasQuery := strings.Cut(target, "?")
+	path = "/" + strings.TrimLeft(path, "/\\")
+	if hasQuery {
+		return path + "?" + query
+	}
+	return path
+}
+
 // setSession sets a host-only cookie and moves on to target. Normally a 302.
 // But a navigation that began on another origin keeps that context across its
 // redirects: a Strict cookie would be withheld (cross-site), and checkOrigin
 // would refuse it (same-site). So there a same-origin page starts a fresh
 // navigation.
 func setSession(w http.ResponseWriter, r *http.Request, name, value string, exp time.Time, same http.SameSite, target string) {
+	target = safeRedirectTarget(target)
 	http.SetCookie(w, &http.Cookie{
 		Name: name, Value: value, Path: "/", Expires: exp,
 		HttpOnly: true, Secure: true, SameSite: same,
@@ -193,7 +220,7 @@ func checkOrigin(r *http.Request, sameTenant func(host string) bool) error {
 			return errors.New("bad Origin")
 		case s == scheme(r) && h == canonHost(s, r.Host):
 			return nil
-		case sameTenant != nil && sameTenant(hostOnly(h)):
+		case s == scheme(r) && sameTenant != nil && sameTenant(hostOnly(h)):
 			return nil
 		}
 		return errors.New("request from another origin")

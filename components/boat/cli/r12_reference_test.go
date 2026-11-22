@@ -46,14 +46,19 @@ func (api *refAPI) handler(w http.ResponseWriter, r *http.Request) {
 		w.Write(api.tgz)
 	case r.Method == "GET" && path == "/v1/vms/vm1/prompts":
 		io.WriteString(w, `{"prompts":[{"id":"p1","state":"running","conversation_id":"conv_0123456789abcdef"}]}`)
+	case r.Method == "POST" && strings.HasSuffix(path, "/ssh"):
+		io.WriteString(w, `{"user":"ubuntu","host":"10.0.0.5","port":22}`)
 	case r.Method == "POST" && strings.HasSuffix(path, "/fork"):
 		io.WriteString(w, `{"id":"vm2","name":"fork","state":"running"}`)
 	case r.Method == "GET" && strings.HasPrefix(path, "/v1/vms/") && strings.Count(path, "/") == 3:
 		io.WriteString(w, `{"id":"vm1","name":"dev","state":"running"}`)
 	case strings.Contains(path, "/accounts/"):
 		io.WriteString(w, `{"accounts":[{"id":"anthropic-api-key","label":"…abcd","active":true}]}`)
+	case r.Method == "GET" && strings.Contains(path, "/stops/"):
+		stopID := path[strings.LastIndex(path, "/")+1:]
+		io.WriteString(w, `{"ok":true,"type":"stop.status","id":"`+stopID+`","stop":{"id":"`+stopID+`","status":"completed","requestedAt":"2026-01-01T00:00:00Z","endedAt":"2026-01-01T00:00:01Z"}}`)
 	default:
-		io.WriteString(w, `{"ok":true,"id":"vm1","name":"dev","state":"running","url":"https://8080-vm1.vm.example/","operation":{"id":"stop_1","status":"completed"}}`)
+		io.WriteString(w, `{"ok":true,"id":"vm1","name":"dev","state":"running","url":"https://8080-vm1.vm.example/"}`)
 	}
 }
 
@@ -115,6 +120,9 @@ func TestBoatDevReference(t *testing.T) {
 	}{
 		{[]string{"new", "--no-auto-stop"}, 0, `POST /v1/vms {"image":"","name":"","size":"","ttl_s":0}`},
 		{[]string{"new", "--ttl", "600"}, 0, `"ttl_s":600`},
+		{[]string{"new", "--ttl", "infinite"}, 0, `"ttl_s":0`},
+		{[]string{"new", "--ttl", "0"}, 0, `"ttl_s":0`},
+		{[]string{"new"}, 0, `POST /v1/vms {"image":"","name":"","size":""}`},
 		{[]string{"new", "--ttl", "600", "--no-auto-stop"}, 2, "!conflict"},
 		{[]string{"new", "--env", "KEY=VALUE", "--env", "OTHER=V"}, 0, `"env":{"KEY":"VALUE","OTHER":"V"}`},
 		{[]string{"new", "--environment", "users"}, 0, `"environment":"users"`},
@@ -127,25 +135,34 @@ func TestBoatDevReference(t *testing.T) {
 		{[]string{"new", "--setup-file", setup}, 0, `POST /v1/vms/vm1/commands {"cmd":["bash","-lc","echo hi"]}`},
 		{[]string{"new", "--name", "api worker"}, 0, `"name":"api worker"`},
 		{[]string{"new", "extra", "args"}, 2, "!unexpected arguments"},
-		{[]string{"fork", "--ttl", "600", "vm1"}, 0, `PATCH /v1/vms/vm2 {"ttl_s":600}`},
-		{[]string{"fork", "--no-auto-stop", "vm1"}, 0, `PATCH /v1/vms/vm2 {"ttl_s":0}`},
+		{[]string{"fork", "--ttl", "600", "vm1"}, 0, `POST /v1/vms/vm1/fork {"name":"","ttl_s":600}`},
+		{[]string{"fork", "--no-auto-stop", "vm1"}, 0, `POST /v1/vms/vm1/fork {"name":"","ttl_s":0}`},
 		{[]string{"fork", "vm1"}, 0, "POST /v1/vms/vm1/fork"},
+		{[]string{"fork", "--name", "api worker 2", "vm1"}, 0, `"name":"api worker 2"`},
+		{[]string{"rename", "vm1", "api worker"}, 0, `"name":"api worker"`},
 		{[]string{"fork", "-e", "TENANT_ID=acme", "vm1"}, 0, `"env":{"TENANT_ID":"acme"}`},
 		{[]string{"fork", "--fail-fast", "vm1"}, 0, `"fail_fast":true`},
-		{[]string{"fork", "--type", "small", "vm1"}, 1, "!--type is not supported"},
-		{[]string{"fork", "--no-env", "vm1"}, 1, "!--no-env is not supported"},
-		{[]string{"resume", "--ttl", "7200", "vm1"}, 0, `PATCH /v1/vms/vm1 {"ttl_s":7200}`},
-		{[]string{"resume", "--no-auto-stop", "vm1"}, 0, `PATCH /v1/vms/vm1 {"ttl_s":0}`},
+		{[]string{"fork", "--type", "small", "vm1"}, 0, `POST /v1/vms/vm2/resize {"discard_memory":true,"size":"small"}`},
+		{[]string{"fork", "--no-env", "vm1"}, 0, `POST /v1/vms/vm1/fork {"name":"","no_env":true}`},
+		{[]string{"fork", "--environment", "base", "vm1"}, 0, `POST /v1/vms/vm1/fork {"environment":"base","name":""}`},
+		{[]string{"fork", "-e", "base", "vm1"}, 2, "!--environment base"},
+		{[]string{"fork", "--env", "base", "vm1"}, 2, "!--environment base"},
+		{[]string{"resume", "--environment", "base", "vm1"}, 0, `POST /v1/vms/vm1/start {"environment":"base"}`},
+		{[]string{"resume", "-e", "base", "-e", "K=V", "vm1"}, 2, "!--environment base"},
+		{[]string{"resume", "--environment", "base", "-e", "K=V", "vm1"}, 0, `"environment":"base"`},
+		{[]string{"resume", "--ttl", "7200", "vm1"}, 0, `POST /v1/vms/vm1/start {"ttl_s":7200}`},
+		{[]string{"resume", "--no-auto-stop", "vm1"}, 0, `POST /v1/vms/vm1/start {"ttl_s":0}`},
+		{[]string{"resume", "--ttl", "infinite", "vm1"}, 0, `POST /v1/vms/vm1/start {"ttl_s":0}`},
 		{[]string{"resume", "-e", "KEY=VALUE", "vm1"}, 0, `POST /v1/vms/vm1/start {"env":{"KEY":"VALUE"}}`},
 		{[]string{"resume", "--no-wait", "vm1"}, 0, "POST /v1/vms/vm1/start"},
-		{[]string{"resume", "--no-env", "vm1"}, 1, "!--no-env is not supported"},
+		{[]string{"resume", "--no-env", "vm1"}, 0, `POST /v1/vms/vm1/start {"no_env":true}`},
 		{[]string{"extend", "vm1", "--no-auto-stop"}, 0, `PATCH /v1/vms/vm1 {"ttl_s":0}`},
 		{[]string{"stop", "vm1", "--status", "stop_1"}, 0, "GET /api/v1/sandboxes/vm1/stops/stop_1"},
 		{[]string{"stop", "vm1", "--yes"}, 0, "POST /v1/vms/vm1/stop"},
 		{[]string{"exec", "vm1", "--status", "p1"}, 0, "GET /v1/vms/vm1/commands/p1"},
 		{[]string{"exec", "vm1", "--kill", "p1"}, 0, "DELETE /v1/vms/vm1/commands/p1"},
 		{[]string{"exec", "vm1", "--stream", "--timeout", "600", "npm test"}, 0, `"cmd":["bash","-lc","npm test"]`},
-		{[]string{"history", "vm1", "--mode", "commands"}, 0, "GET /v1/vms/vm1/command-history"},
+		{[]string{"history", "vm1", "--mode", "commands"}, 0, "GET /api/v1/sandboxes/vm1/command-history?limit=20&mode=commands"},
 		{[]string{"history", "vm1", "c1", "--stderr"}, 1, "!--stderr is not supported"},
 		{[]string{"host", "vm1", "3000", "--title", "Login preview"}, 0, `POST /v1/vms/vm1/ports {"auth":"private","port":3000}`},
 		{[]string{"host", "vm1", "3000", "--public"}, 0, `"auth":"public"`},
@@ -164,18 +181,19 @@ func TestBoatDevReference(t *testing.T) {
 		{[]string{"snapshot", "tree", "s1"}, 0, "GET /api/v1/snapshots/s1/tree"},
 		{[]string{"snapshot", "pull", "s1", "-o", down, "--path", "/x"}, 1, "!--path is not supported"},
 		{[]string{"snapshot", "delete", "s1", "s2", "--yes"}, 0, "DELETE /api/v1/snapshots/s2"},
-		{[]string{"snapshot", "delete", "--all", "vm1"}, 0, "DELETE /api/v1/sandboxes/vm1/snapshots"},
+		{[]string{"snapshot", "delete", "--all", "vm1", "--yes"}, 0, "DELETE /api/v1/sandboxes/vm1/snapshots"},
 		{[]string{"snapshot", "share", "web-stack"}, 0, "POST /api/v1/saved-snapshots/web-stack/shares"},
 		{[]string{"snapshot", "shares", "web-stack"}, 0, "GET /api/v1/saved-snapshots/web-stack/shares"},
 		{[]string{"snapshot", "unshare", "web-stack", "shr_1"}, 0, "DELETE /api/v1/saved-snapshots/web-stack/shares/shr_1"},
 		{[]string{"snapshot", "vm1", "web-stack"}, 0, `POST /api/v1/saved-snapshots {"name":"web-stack","sandboxId":"vm1"}`},
 		{[]string{"snapshots", "vm1", "--limit", "50"}, 0, "GET /v1/vms/vm1/snapshots"},
 		{[]string{"snapshots", "--all"}, 0, "GET /v1/snapshots"},
+		{[]string{"snapshots", "team", "--visibility", "shared"}, 0, "GET /v1/snapshots?visibility=shared"},
 		{[]string{"ai", "profiles"}, 0, "GET /api/v1/credential-profiles"},
 		{[]string{"ai", "profile", "default", "work"}, 0, `PUT /api/v1/credential-profiles/work {"isDefault":true}`},
 		{[]string{"ai", "accounts", "anthropic-api-key"}, 0, "GET /api/v1/credential-profiles/default/accounts/anthropic-api-key"},
 		{[]string{"ai", "switch", "anthropic-api-key", "1"}, 0, "PUT /api/v1/credential-profiles/default/accounts/anthropic-api-key/anthropic-api-key/active"},
-		{[]string{"ai", "usage", "vm1", "--days", "7"}, 0, "GET /v1/vms/vm1/ai-usage"},
+		{[]string{"ai", "usage", "vm1", "--days", "7"}, 0, "GET /api/v1/sandboxes/vm1/ai-usage?days=7"},
 		{[]string{"env", "list"}, 0, "GET /v1/environments"},
 		{[]string{"env", "info", "base"}, 0, "GET /v1/environments/base"},
 		{[]string{"env", "rename", "staging", "prod"}, 0, `PUT /api/v1/environments/staging {"name":"prod"}`},
@@ -184,7 +202,7 @@ func TestBoatDevReference(t *testing.T) {
 		{[]string{"env", "add-repo", "base", "octocat/hello-world", "--branch", "develop"}, 0, "POST /api/v1/environments/base/repos"},
 		{[]string{"env", "set-file", "base", "backend/.env", "--from", local}, 0, "PUT /api/v1/environments/base/secret-files"},
 		{[]string{"env", "upgrade", "base"}, 0, "POST /api/v1/environments/base/upgrade"},
-		{[]string{"env", "set", "base", "--secrets", "false"}, 0, `PUT /api/v1/environments/base {"passSecrets":false}`},
+		{[]string{"env", "set", "base", "--secrets", "false"}, 0, `PUT /v1/environments/base {"secrets":[]}`},
 		{[]string{"env", "set", "base", "--github", "true"}, 1, "!--github is not supported"},
 		{[]string{"env", "list", "--org", "acme"}, 1, "!organizations"},
 		{[]string{"status"}, 0, "GET /v1/me"},
@@ -228,6 +246,59 @@ func TestBoatDevReference(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "evil")); err == nil {
 		t.Error("an archive entry escaped the target")
+	}
+
+	// Verify stop --status human table and --json outputs against real boat-api stop.status envelope.
+	env := map[string]string{"BOAT_URL": srv.URL, "BOAT_API_KEY": "boat_k", "BOAT_CONFIG": filepath.Join(tmp, "c.json"), "HOME": home}
+	a, out, errw := acctApp(env, "")
+	if code := a.run([]string{"stop", "vm1", "--status", "stop_1"}); code != 0 {
+		t.Fatalf("stop --status table exit %d: %s", code, errw.String())
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stop --status table lines = %d (%q), want 2", len(lines), out.String())
+	}
+	for _, wantHeader := range []string{"ID", "STATUS", "SANDBOXID", "REQUESTEDAT"} {
+		if !strings.Contains(lines[0], wantHeader) {
+			t.Errorf("stop --status header %q missing %q", lines[0], wantHeader)
+		}
+	}
+	fields := strings.Fields(lines[1])
+	if len(fields) != 4 || fields[0] != "stop_1" || fields[1] != "completed" || fields[2] != "vm1" || fields[3] != "2026-01-01T00:00:00Z" {
+		t.Errorf("stop --status row = %q (fields %q), want [stop_1 completed vm1 2026-01-01T00:00:00Z]", lines[1], fields)
+	}
+
+	aJSON, outJSON, errJSON := acctApp(env, "")
+	if code := aJSON.run([]string{"--json", "stop", "vm1", "--status", "stop_1"}); code != 0 {
+		t.Fatalf("stop --status --json exit %d: %s", code, errJSON.String())
+	}
+	var stopObj map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(outJSON.String())), &stopObj); err != nil || stopObj == nil {
+		t.Fatalf("stop --status --json unmarshal %q: %v (obj=%v)", outJSON.String(), err, stopObj)
+	}
+	if stopObj["id"] != "stop_1" || stopObj["status"] != "completed" || stopObj["sandboxId"] != "vm1" ||
+		stopObj["requestedAt"] != "2026-01-01T00:00:00Z" || stopObj["endedAt"] != "2026-01-01T00:00:01Z" {
+		t.Errorf("stop --status --json = %v", stopObj)
+	}
+
+	// Legacy operation/createdAt fallback also populates id, sandboxId, and requestedAt cleanly.
+	legSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/vms/vm1" {
+			io.WriteString(w, `{"id":"vm1","name":"dev","state":"stopped"}`)
+			return
+		}
+		io.WriteString(w, `{"ok":true,"id":"stop_leg","operation":{"status":"completed","createdAt":"2026-01-02T00:00:00Z"}}`)
+	}))
+	defer legSrv.Close()
+	legEnv := map[string]string{"BOAT_URL": legSrv.URL, "BOAT_API_KEY": "boat_k", "BOAT_CONFIG": filepath.Join(tmp, "c2.json"), "HOME": home}
+	aLeg, outLeg, errLeg := acctApp(legEnv, "")
+	if code := aLeg.run([]string{"stop", "vm1", "--status", "stop_leg"}); code != 0 {
+		t.Fatalf("legacy stop --status exit %d: %s", code, errLeg.String())
+	}
+	legLines := strings.Split(strings.TrimSpace(outLeg.String()), "\n")
+	if len(legLines) != 2 || strings.Join(strings.Fields(legLines[1]), " ") != "stop_leg completed vm1 2026-01-02T00:00:00Z" {
+		t.Errorf("legacy stop --status output = %q", outLeg.String())
 	}
 }
 

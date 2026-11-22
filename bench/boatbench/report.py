@@ -1,5 +1,6 @@
 """Stats, cost and the markdown report for boatbench result files."""
 import json
+import math
 import os
 import re
 import statistics
@@ -11,7 +12,7 @@ SIDES = ("pandaos", "boatdev")
 
 # key, label, unit, higher_is_better
 METRICS = [
-    ("node_runs_s", "(a) Node.js build/test loop: PTS node-web-tooling", "runs/s", True),
+    ("node_runs_s", "(a) Node.js web-tooling geometric-mean index", "index units", True),
     ("api_rtt_p50_ms", "(b) API round-trip baseline: authenticated GET of the VM, p50 of 25", "ms", False),
     ("create_ready_s", "(b) create -> exec-ready", "s", False),
     ("exec_rtt_p50_ms", "(b) exec round trip `true`, p50 of 50", "ms", False),
@@ -42,26 +43,43 @@ METRICS = [
 ]
 
 # Lifecycle metrics also reported net of the API round trip (boatbench.add_net).
-NET_KEYS = ("exec_rtt_p50_ms", "create_ready_s", "fork_ready_s", "stop_s", "resume_ready_s", "snapshot_s",
-            "from_snapshot_ready_s", "concurrent10_wall_s", "concurrent8_wall_s")
+NET_KEYS = ("exec_rtt_p50_ms", "exec_rtt_p95_ms", "create_ready_s", "fork_ready_s", "stop_s", "resume_ready_s",
+            "snapshot_s", "from_snapshot_ready_s", "concurrent10_wall_s", "concurrent8_wall_s")
+DEFAULT_ROUND_TRIPS = {"create_ready_s": 2, "fork_ready_s": 2, "resume_ready_s": 2, "from_snapshot_ready_s": 2,
+                       "stop_s": 1, "snapshot_s": 1, "concurrent10_wall_s": 2, "concurrent8_wall_s": 2,
+                       "exec_rtt_p50_ms": 1, "exec_rtt_p95_ms": 1}
+DRIVER_ROUND_TRIPS = {
+    "pandaos": DEFAULT_ROUND_TRIPS,
+    "boatdev": {**DEFAULT_ROUND_TRIPS, "stop_s": 2, "snapshot_s": 2},
+}
 _BASE = {k: (label, unit, hib) for k, label, unit, hib in METRICS}
 METRICS = METRICS + [(k + "_net", _BASE[k][0] + ", NET of API round trips (raw - k x baseline p50)", _BASE[k][1],
                       _BASE[k][2]) for k in NET_KEYS]
+NET_KEY_ALIASES = {
+    "exec_rtt_p50_net_ms": "exec_rtt_p50_ms_net",
+    "exec_rtt_p95_net_ms": "exec_rtt_p95_ms_net",
+}
 
 RUNNER_CPU = "EPYC 7763"  # GitHub's ubuntu-latest runners; published.json cpu_scaling.runner_cpu
 
 COMMON_CAVEATS = [
+    "The Node.js web-tooling geometric-mean index is the geometric mean of subtest rates (subtest runs/s), not completed Node jobs or full suites per second. host_runs_s sums VM indices; node_runs_s and *_runs_s are legacy JSON keys. Cost per 1000 index units is an index-normalized price, not a bill for 1000 completed jobs. Completed-suite rates, where available, use successful pass counts divided by the density level wall time, including synchronization and harness overhead; no vendor completed-suite rate is available.",
     "Lifecycle verbs differ in meaning: PandaOS stop/resume and fork keep guest memory (Firecracker snapshots); "
     "boat.dev stop archives the disk and resume/fork restore it in the background after `ready` "
     "(docs.boat.dev/readiness.md). Both are measured to the first successful `true` exec.",
     "Snapshot: PandaOS `POST /v1/vms/{id}/snapshots` vs boat.dev saved snapshot (`POST /saved-snapshots`, polled "
     "to `ready`). New-from-snapshot uses each one's create-from-snapshot.",
+    "Exec round-trip (`run_true`) asymmetry: native PandaOS (`/v1/vms/{id}/exec`) runs `[\"true\"]` directly via "
+    "`execve`, whereas boat.dev and compat (`/api/v1/sandboxes/{id}/commands`) run `bash -lc true` and record a "
+    "command. Use `--driver pandaos --compat` for the like-for-like mode.",
     "Network numbers mix the VM's egress path with the distance from each provider's region to the CDN edge.",
 ]
 NET_CAVEAT = ("Raw lifecycle latencies include the API round trip from the harness host to the provider: {where}. "
-              "The NET rows subtract k x that side's measured API round-trip p50, k = the fewest sequential API calls "
-              "the timing contains (drivers.py ROUND_TRIPS: 2 for create/fork/resume/from-snapshot, stop and snapshot "
-              "1 on PandaOS and 2 on boat.dev, which polls them).")
+              "The NET rows subtract k x that side's measured API round-trip p50 (clamped at >= 0), where k is the "
+              "recorded serial critical-path HTTP call count (`api_calls`, excluding intermediate async polls that "
+              "overlap server-side work) per operation when present, falling back to `drivers.py` `ROUND_TRIPS` "
+              "for older artifacts (2 for create/fork/resume/from-snapshot, stop and snapshot 1 on PandaOS and 2 on "
+              "boat.dev).")
 SAMPLE_CAVEAT = ("Small samples (default 5 fresh VMs per side). The table shows median and IQR; overlapping IQRs mean "
                  "no clear winner.")
 RUNNER_CAVEATS = [
@@ -116,8 +134,39 @@ WARM_POOL_CAVEAT = ("`warmPool` is ON in this run, and it is off by default. VMs
 
 def unsafe_cache(res):
     """The PandaOS side's Firecracker cache_type, if it ignores guest flushes."""
-    c = str((res.get("pandaos") or {}).get("fc_cache_type", ""))
-    return c if c.startswith("Unsafe") else None
+    pan = res.get("pandaos")
+    if not isinstance(pan, dict):
+        return None
+    c = str(pan.get("fc_cache_type") or "").strip()
+    cl = c.lower()
+    host = pan.get("host") if isinstance(pan.get("host"), dict) else {}
+    preset = str(pan.get("preset") or "").strip()
+    pl = preset.lower()
+    if cl.startswith("writeback") or host.get("unsafe_cache") is False:
+        return None
+    raw_opts = pan.get("boatd_options")
+    if isinstance(raw_opts, str) and raw_opts.strip() not in ("", "-"):
+        try:
+            parsed_opts = json.loads(raw_opts)
+            if isinstance(parsed_opts, dict):
+                if str(parsed_opts.get("diskCache") or "").strip().lower() == "writeback":
+                    return None
+                if parsed_opts.get("unsafeCache") is False:
+                    return None
+        except ValueError:
+            pass
+    if cl.startswith("unsafe"):
+        return c
+    if host.get("unsafe_cache") is True:
+        return c if c and c != "-" else "Unsafe (host metadata)"
+    if pl in ("writeback", "trusted-writeback"):
+        return None
+    if cl.startswith("unknown"):
+        label = preset if preset and preset != "-" else "boatd"
+        return f"Unsafe (default for {label}; raw artifact recorded {c})"
+    if preset and preset != "-":
+        return f"Unsafe (default for {preset}; raw artifact recorded {c or 'unknown'})"
+    return None
 
 
 def unsafe_note(cache):
@@ -149,13 +198,52 @@ def summarize(values):
             "min": min(v), "max": max(v)}
 
 
+def _target_rtt_ms(result):
+    rtts = [rep.get("metrics", {}).get("api_rtt_p50_ms") for rep in result.get("repeats", [])]
+    valid = [float(x) for x in rtts if x is not None]
+    return statistics.median(valid) if valid else None
+
+
 def samples(result, key):
-    """Pool one metric across repeats; a repeat may hold a scalar or a list (passes)."""
+    """Pool one metric across repeats; intra-VM pass lists are aggregated per-VM via median first."""
+    orig_key = key
+    key = NET_KEY_ALIASES.get(key, key)
     out = []
+    if key.endswith("_net") and key[:-4] in NET_KEYS:
+        base = key[:-4]
+        shared_rtt = _target_rtt_ms(result)
+        default_rt = DRIVER_ROUND_TRIPS.get(result.get("driver"), DEFAULT_ROUND_TRIPS).get(base, 1)
+        for rep in result.get("repeats", []):
+            m = rep.get("metrics", {})
+            calls_map = rep.get("api_calls") if isinstance(rep.get("api_calls"), dict) else {}
+            sample_calls = calls_map.get(base)
+            if sample_calls is None:
+                sample_calls = m.get(f"{base}_calls", rep.get(f"{base}_calls"))
+            rtt = m.get("api_rtt_p50_ms")
+            if rtt is None:
+                rtt = shared_rtt
+            val = None
+            if sample_calls is not None and m.get(base) is not None and rtt is not None:
+                val = m[base] - sample_calls * (rtt if base.endswith("_ms") else rtt / 1000)
+            elif m.get(key) is not None:
+                val = m[key]
+            elif m.get(orig_key) is not None:
+                val = m[orig_key]
+            elif m.get(base) is not None and rtt is not None and default_rt is not None:
+                val = m[base] - default_rt * (rtt if base.endswith("_ms") else rtt / 1000)
+            if val is not None:
+                out.append(max(0.0, float(val)))
+        return out
+
     for rep in result.get("repeats", []):
         v = rep.get("metrics", {}).get(key)
-        out.extend(v if isinstance(v, list) else [v])
-    return [x for x in out if x is not None]
+        if isinstance(v, list):
+            vals = [x for x in v if x is not None]
+            if vals:
+                out.append(statistics.median(vals))
+        elif v is not None:
+            out.append(v)
+    return out
 
 
 def server_price(raw, key):
@@ -190,13 +278,35 @@ def load_prices(path, server=None):
         if isinstance(p, dict) and isinstance(p.get("usd_per_hour"), (int, float)) and p["usd_per_hour"] >= 0:
             prices[side] = {"usd_per_hour": float(p["usd_per_hour"]), "source": p.get("source", ""),
                             "cpu": p.get("cpu", "")}
+            if isinstance(p.get("sizes"), dict):
+                prices[side]["sizes"] = p["sizes"]
             if isinstance(p.get("density_model"), dict):
                 prices[side]["density_model"] = p["density_model"]
     return prices or None
 
 
+def shape_price(side, price, result):
+    """Use the recorded shape. PandaOS admission counts model only `default`."""
+    if not price or not result:
+        return None
+    size = result.get("size")
+    if not isinstance(size, str) or not size:
+        return None
+    if side == "pandaos" and size != "default":
+        return None
+    selected = dict(price, size=size)
+    if side == "boatdev":
+        rates = price.get("sizes", {})
+        rate = rates.get(size, price.get("usd_per_hour") if size == "default" else None)
+        if (not isinstance(rate, (int, float)) or isinstance(rate, bool)
+                or not math.isfinite(rate) or rate < 0):
+            return None
+        selected["usd_per_hour"] = rate
+    return selected
+
+
 def cost_rows(summaries, prices):
-    """USD per 1000 Node loop runs and per cold npm ci, from price x measured time."""
+    """USD per 1000 index units and per cold npm ci, from price x measured time."""
     rows = []
     for side in SIDES:
         p = (prices or {}).get(side)
@@ -212,16 +322,20 @@ def cost_rows(summaries, prices):
 
 def cost_section(summ, prices, res, published):
     out = ["", "## Cost", ""]
-    rows = cost_rows(summ, prices)
+    selected = {side: shape_price(side, (prices or {}).get(side), r) for side, r in res.items()}
+    for side, r in res.items():
+        if (prices or {}).get(side) and not selected[side]:
+            out += [f"{side}: cost suppressed for recorded size `{r.get('size')}`: no supported shape price/admission model.", ""]
+    rows = cost_rows(summ, selected)
     if not rows:
-        return out + ["No `prices.json` with `usd_per_hour` per side: cost not computed, runs/s only."]
+        return out + ["No supported shape price: cost not computed, index units only."]
     out += ["**These rows use ONE uncontended VM's speed**, while the PandaOS price assumes a fully packed host. "
             "Workload (g) measures the packed case; where it ran, its projection above is the fairer PandaOS "
             "figure.", "",
-            "Cost = side's price per hour (prices.json) x time. A per-run cost only means something when the "
+            "Index-normalized USD per 1000 index units = hourly price / 3.6 / index; npm cost = hourly price × seconds / 3600. An index-normalized cost only means something when the "
             "price and the speed come from the same CPU. **Rows marked MIXED CPUs are arithmetic, not a cost "
             "of any real machine.**", "",
-            "| Side | USD/hour | The price buys | Speed measured on | USD per 1000 Node loop runs | USD per cold npm ci |",
+            "| Side | USD/hour | The price buys | Speed measured on | USD per 1000 index units | USD per cold npm ci |",
             "|---|---|---|---|---|---|"]
     for side, p, per_k, per_npm in rows:
         measured = cpu_of(res[side]) if side in res else "-"
@@ -229,15 +343,15 @@ def cost_section(summ, prices, res, published):
         if side in res and side == "pandaos":
             measured += f" (guest); harness host {res[side].get('client', {}).get('cpu_model', '-')}"
         tag = " (MIXED CPUs)" if mixed else ""
-        out.append(f"| {side} | {p['usd_per_hour']:.4f} | {p.get('cpu') or '-'} | {measured} | "
+        out.append(f"| {side} | {p['usd_per_hour']:.4f} | {p.get('cpu') or '-'}; `{p['size']}` VM | {measured} | "
                    f"{'-' if per_k is None else f'{per_k:.6f}{tag}'} | {'-' if per_npm is None else f'{per_npm:.6f}{tag}'} |")
     bd = (prices or {}).get("boatdev")
     if bd and published:
         v = published["metrics"]["node_runs_s"]["value"]
-        out += ["", f"CPU-consistent figure: boat.dev's price with boat.dev's own published speed on the CPU it "
-                f"sells ({v} runs/s, vendor-measured, {published['rows'][0]['cpu']}): "
-                f"**{bd['usd_per_hour'] / 3600 * 1000 / v:.6f} USD per 1000 runs**. PandaOS's price here is "
-                f"{(prices.get('pandaos') or {}).get('cpu') or '-'}: its per-run cost is CPU-consistent only where "
+        out += ["", f"CPU-consistent figure: boat.dev's `default` VM price with boat.dev's own published speed on the CPU it "
+                f"sells ({v} index units, vendor-measured, {published['rows'][0]['cpu']}): "
+                f"**{bd['usd_per_hour'] / 3600 * 1000 / v:.6f} USD per 1000 index units**. PandaOS's price here is "
+                f"{(prices.get('pandaos') or {}).get('cpu') or '-'}: its index-normalized cost is CPU-consistent only where "
                 "the speed above was measured on that CPU (the density section says which)."]
     return out
 
@@ -283,6 +397,144 @@ def ratio(pan, bd):
     return f"{pan['median'] / bd['median']:.2f}x"
 
 
+POOL_IGNORED_KEYS = frozenset({"repeats", "run_id", "started", "run_url", "parts"})
+POOL_CHECKED_KEYS = (
+    "fc_cache_type",
+    "driver",
+    "size",
+    "preset",
+    "boatd_options",
+    "host",
+    "client",
+    "source_commit",
+)
+
+
+def _canonical_json(value):
+    try:
+        return ("json", json.dumps(value, sort_keys=True, separators=(",", ":")))
+    except TypeError:
+        return ("repr", type(value).__qualname__, repr(value))
+
+
+def _norm_fc_cache_type(res):
+    raw = res.get("fc_cache_type", "-")
+    if raw is None:
+        return ("none", None, False)
+    if not isinstance(raw, str):
+        return ("other", _canonical_json(raw), False)
+    s = raw.strip()
+    mode = s.split(" (", 1)[0].strip() if " (" in s and s.endswith(")") else s
+    return ("str", mode, bool(unsafe_cache({"pandaos": {"fc_cache_type": raw}})))
+
+
+def _norm_boatd_options(res):
+    raw = res.get("boatd_options", "-")
+    if raw is None:
+        return ("none", None)
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s or s == "-":
+            return ("empty", "-")
+        try:
+            parsed = json.loads(s)
+        except ValueError:
+            return ("raw", s)
+        return ("json", _canonical_json(parsed))
+    return ("json", _canonical_json(raw))
+
+
+def _norm_pool_field(res, key):
+    if key == "fc_cache_type":
+        return _norm_fc_cache_type(res)
+    if key == "boatd_options":
+        return _norm_boatd_options(res)
+    if key in ("size", "preset"):
+        return _canonical_json(res.get(key, "-"))
+    if key in ("driver", "host", "client", "source_commit"):
+        return _canonical_json(res.get(key))
+    return ("present", _canonical_json(res[key])) if key in res else ("missing",)
+
+
+WARM_CREATE_THRESHOLD_S = 0.65
+
+
+def _warm_pool_on(res):
+    raw = res.get("boatd_options", "")
+    explicit = None
+    if isinstance(raw, dict):
+        if "warmPool" in raw:
+            wp = raw["warmPool"]
+            explicit = wp is True or (isinstance(wp, (int, float)) and not isinstance(wp, bool) and wp > 0)
+    elif isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            compact = re.sub(r"\s+", "", raw)
+            if '"warmPool":true' in compact:
+                explicit = True
+            elif '"warmPool":false' in compact or '"warmPool":0' in compact:
+                explicit = False
+        else:
+            if isinstance(parsed, dict) and "warmPool" in parsed:
+                wp = parsed["warmPool"]
+                explicit = wp is True or (isinstance(wp, (int, float)) and not isinstance(wp, bool) and wp > 0)
+    if explicit is not None:
+        return explicit
+
+    host = res.get("host") if isinstance(res.get("host"), dict) else {}
+    if "warm_pool" in host and host["warm_pool"] is not None:
+        wp = host["warm_pool"]
+        if isinstance(wp, bool):
+            return wp
+        if isinstance(wp, (int, float)):
+            return wp > 0
+
+    preset = str(res.get("preset") or "").strip()
+    if preset in ("trusted", "trusted-warm", "pandaos-install"):
+        creates = samples(res, "create_ready_s")
+        if creates and statistics.median(creates) < WARM_CREATE_THRESHOLD_S:
+            return True
+    return False
+
+
+_WORKLOAD_METRICS = {
+    "a": ("node_runs_s",),
+    "b": ("exec_rtt_p50_ms", "fork_ready_s", "stop_s", "resume_ready_s", "snapshot_s", "from_snapshot_ready_s"),
+    "d": ("seq_write_mbps", "seq_read_mbps", "rand_write_iops", "rand_read_iops", "pts_rand_read_iops",
+          "fsync_rand_write_iops"),
+    "e": ("dl_go_tarball_googlecdn_mbit", "dl_nodejs_tarball_mbit",
+          "tcp_connect_cloudflare_1.1.1.1_ms", "tcp_connect_github.com_ms"),
+    "f": ("npm_ci_s",),
+}
+
+
+def repeat_count_str(result):
+    """Per-workload repeat count across workloads (a..g) so disjoint split runs do not sum repeats."""
+    reps = result.get("repeats", [])
+    counts = {}
+    for rep in reps:
+        m = rep.get("metrics") or {}
+        for part, keys in _WORKLOAD_METRICS.items():
+            for k in keys:
+                v = m.get(k)
+                if isinstance(v, list):
+                    if any(x is not None for x in v):
+                        counts[part] = counts.get(part, 0) + 1
+                        break
+                elif v is not None:
+                    counts[part] = counts.get(part, 0) + 1
+                    break
+        if any(k.startswith("concurrent") and k.endswith("_wall_s") and m.get(k) is not None for k in m):
+            counts["c"] = counts.get("c", 0) + 1
+        if rep.get("density"):
+            counts["g"] = counts.get("g", 0) + 1
+    if not counts:
+        return str(len(reps))
+    lo, hi = min(counts.values()), max(counts.values())
+    return str(lo) if lo == hi else f"{lo}-{hi}"
+
+
 def by_side(results):
     out = {}
     for r in results:
@@ -292,16 +544,31 @@ def by_side(results):
 
 def merged(results):
     """Several result files of one side are pooled as more repeats."""
+    if not results:
+        raise ValueError("cannot merge empty results")
+    first = results[0]
+    for other in results[1:]:
+        extra = sorted((set(first) | set(other)) - POOL_IGNORED_KEYS - set(POOL_CHECKED_KEYS))
+        diffs = [k for k in (*POOL_CHECKED_KEYS, *extra)
+                 if _norm_pool_field(first, k) != _norm_pool_field(other, k)]
+        if diffs:
+            detail = ", ".join(f"{k}: {first.get(k)!r} vs {other.get(k)!r}" for k in diffs)
+            msg = f"cannot pool incompatible benchmark results ({detail})".replace("\n", "\\n").replace("\r", "\\r")
+            raise ValueError(msg)
     if len(results) == 1:
-        return results[0]
-    m = dict(results[0])
+        return first
+    m = dict(first)
     m["repeats"] = [rep for r in results for rep in r.get("repeats", [])]
     return m
 
 
 def auto_caveats(res):
     out = []
-    if any('"warmPool":true' in str(r.get("boatd_options", "")).replace(" ", "") for r in res.values()):
+    cache = unsafe_cache(res)
+    if cache:
+        out.append(f"Firecracker drive `cache_type` was `{cache}`: guest flushes (`fsync` / `O_DIRECT`) stop at the "
+                   "host page cache and are not durable-write numbers (`diskCache: Writeback` enables durable flushes).")
+    if any(_warm_pool_on(r) for r in res.values()):
         out.append(WARM_POOL_CAVEAT)
     probes = {s: [rep.get("probe") or {} for rep in r.get("repeats", [])] for s, r in res.items()}
     for side, ps in probes.items():
@@ -309,13 +576,26 @@ def auto_caveats(res):
             if p and (p.get("nproc") != 4 or not p.get("mem_mib") or abs(p["mem_mib"] - 8192) > 0.1 * 8192):
                 out.append(f"{side}: a VM reported {p.get('nproc')} vCPU / {p.get('mem_mib')} MiB, not 4 / ~8192.")
                 break
-    tools = {s: sorted({(rep.get("disk_tool") or "-") for rep in r.get("repeats", [])}) for s, r in res.items()}
+    tools = {
+        s: sorted({t for rep in r.get("repeats", []) for t in [rep.get("disk_tool")] if t and t != "-"})
+        for s, r in res.items()
+    }
     if len({t for ts in tools.values() for t in ts}) > 1:
         out.append(f"Disk tool differs between sides: {tools}. dd numbers are not comparable with fio.")
     for side, r in res.items():
+        for rep in r.get("repeats", []):
+            for kind in ("concurrent_cleanup", "density_cleanup"):
+                cleanup = rep.get(kind) or {}
+                if cleanup.get("errors"):
+                    out.append(f"{side}: r{rep.get('index')}: {kind}: unresolved VM cleanup: {cleanup['errors']}.")
         errs = [f"r{rep.get('index')}:{k}" for rep in r.get("repeats", []) for k in (rep.get("errors") or {})]
         if errs:
             out.append(f"{side}: failed steps (see raw JSON): {', '.join(errs[:20])}.")
+        skipped = [f"r{rep.get('index')}:{k} ({reason})"
+                   for rep in r.get("repeats", [])
+                   for k, reason in (rep.get("skipped") or {}).items()]
+        if skipped:
+            out.append(f"{side}: skipped steps (not passed): {', '.join(skipped[:20])}.")
     return out + density_caveats(res)
 
 
@@ -324,6 +604,9 @@ def density_caveats(res):
     for side, r in res.items():
         for rep in r.get("repeats", []):
             trial = rep.get("density") or {}
+            cleanup = trial.get("cleanup_errors") or {}
+            if cleanup:
+                out.append(f"{side}: r{rep.get('index')}: unresolved VM cleanup: {cleanup}.")
             rejected = [str(lv.get("n")) for lv in trial.get("levels", []) if not density_trial_complete(lv, trial)]
             if rejected:
                 out.append(f"{side}: r{rep.get('index')}: incomplete density excluded at n={', n='.join(rejected)} "
@@ -358,7 +641,7 @@ def side_table(res):
         ("Node (benchmark / image default)", lambda r: "{} / {}".format(
             next((rep.get("node") for rep in r.get("repeats", []) if rep.get("node")), "-"),
             first_probe(r).get("system_node"))),
-        ("Repeats (fresh VMs)", lambda r: str(len(r.get("repeats", [])))),
+        ("Repeats (fresh VMs)", repeat_count_str),
         ("Run started (UTC)", lambda r: r.get("started", "-")),
         ("Run URL", lambda r: r.get("run_url") or "-"),
         ("Source commit (boat / PandaOS)", lambda r: r.get("source_commit") or "not recorded"),
@@ -385,12 +668,12 @@ def host_vs_vm(host, vm, runner=True):
 
 
 def projections(host_node, overhead, runner_cpu, published):
-    """(method, runs/s) estimates of PandaOS on the vendor's CPU. Each one is an ESTIMATE."""
+    """(method, index units) estimates of PandaOS on the vendor's CPU. Each one is an ESTIMATE."""
     sc = published["cpu_scaling"]
     ob, pm = sc["same_benchmark"], sc["passmark_single_thread"]
     vendor = published["metrics"]["node_runs_s"]["value"]
     rows = [(f"vendor's VM score x our VM/host: {vendor} x {overhead:.3f}. A floor if the vendor's VM also "
-             "has overhead, because its host then scores above 27.67", vendor * overhead),
+             f"has overhead, because its host then scores above {vendor}", vendor * overhead),
             (f"public host average x our VM/host: {ob['reference']} x {overhead:.3f}", ob["reference"] * overhead)]
     if sc["runner_cpu"] in (runner_cpu or ""):  # the CPU ratios only hold for this runner CPU
         for name, s in (("same benchmark, public averages", ob), ("PassMark single-thread", pm)):
@@ -418,8 +701,8 @@ def normalization(host_results, vm, published, runner=True):
     vals = [v for _, v in rows]
     out += ["", f"## PROJECTION of PandaOS on {sc['reference_cpu']} (NOT A MEASUREMENT)", "",
             "**Nobody ran PandaOS on this CPU. These numbers are arithmetic, not benchmark results.** "
-            f"Estimated Node loop range: **{min(vals):.1f}-{max(vals):.1f} runs/s**.", "",
-            "| Method | Projected runs/s (not measured) |", "|---|---|"]
+            f"Estimated Node loop range: **{min(vals):.1f}-{max(vals):.1f} index units**.", "",
+            "| Method | Projected index units (not measured) |", "|---|---|"]
     out += [f"| {m} | {v:.1f} |" for m, v in rows]
     where = ("a shared, nested Azure VM (a GitHub runner), and it may not transfer to a dedicated host" if runner
              else "this host (see the Host line above)")
@@ -430,11 +713,36 @@ def normalization(host_results, vm, published, runner=True):
     return out
 
 
-PRESET_METRICS = ("node_runs_s", "api_rtt_p50_ms", "create_ready_s", "exec_rtt_p50_ms", "fork_ready_s", "stop_s", "resume_ready_s",
-                  "snapshot_s", "from_snapshot_ready_s", "concurrent10_wall_s", "concurrent8_wall_s", "seq_write_mbps", "seq_read_mbps",
-                  "rand_write_iops", "rand_read_iops", "pts_rand_write_iops", "pts_rand_read_iops",
-                  "fsync_rand_write_iops", "seq_write_endfsync_mbps",
-                  "dl_go_tarball_googlecdn_mbit", "npm_ci_s")
+PRESET_METRICS = (
+    "node_runs_s", "api_rtt_p50_ms", "create_ready_s", "exec_rtt_p50_ms", "exec_rtt_p95_ms",
+    "fork_ready_s", "stop_s", "resume_ready_s", "snapshot_s", "from_snapshot_ready_s",
+    "concurrent10_wall_s", "concurrent8_wall_s", "seq_write_mbps", "seq_read_mbps",
+    "rand_write_iops", "rand_read_iops", "rand_read_irq_cpu_iops", "rand_read_other_cpu_iops",
+    "pts_rand_write_iops", "pts_seq_write_mibps", "pts_rand_read_iops",
+    "fsync_rand_write_iops", "seq_write_endfsync_mbps",
+    "dl_go_tarball_googlecdn_mbit", "npm_ci_s",
+)
+
+
+def _metrics_for(res):
+    """METRICS plus any dynamic concurrent{N}_wall_s / _net keys present in res."""
+    known = {k for k, *_ in METRICS}
+    extra_base = []
+    extra_net = []
+    seen = set()
+    for r in res.values():
+        for rep in r.get("repeats", []):
+            for k in (rep.get("metrics") or {}):
+                m = re.fullmatch(r"concurrent(\d+)_wall_s", k)
+                if m and k not in known and k not in seen:
+                    seen.add(k)
+                    n = int(m.group(1))
+                    label = f"(c) {n} concurrent creates, wall to all exec-ready"
+                    extra_base.append((k, label, "s", False))
+                    extra_net.append((k + "_net", label + ", NET of API round trips (raw - k x baseline p50)", "s", False))
+    if not extra_base:
+        return METRICS
+    return list(METRICS) + extra_base + extra_net
 
 
 def render_presets(results):
@@ -444,37 +752,71 @@ def render_presets(results):
         if r["driver"] == "pandaos":
             groups.setdefault(r.get("preset", "-"), []).append(r)
     res = {k: merged(v) for k, v in sorted(groups.items())}
-    labels = {k: (label, unit, hib) for k, label, unit, hib in METRICS}
+    preset_caches = {k: unsafe_cache({"pandaos": r}) for k, r in res.items()}
+    all_metrics = _metrics_for(res)
+    labels = {k: (label, unit, hib) for k, label, unit, hib in all_metrics}
+    extra_preset_keys = [k for k, *_ in all_metrics if k not in PRESET_METRICS and k.startswith("concurrent") and k.endswith("_wall_s")]
     where = ("Each column ran on its own GitHub runner (shared, nested KVM, not a dedicated server), so runner-to-"
              "runner variance is in the differences too." if on_runner(results) else
              "Each column is a separate run on the harness-declared host(s) below, so run-to-run variance is in the "
              "differences too.")
     out = ["# boatbench: PandaOS by boatd preset (MEASURED)", "", where + " median [IQR] n=samples.", "",
            "| Metric | Unit | Better | " + " | ".join(res) + " |", "|---|---|---|" + "---|" * len(res)]
-    for key in PRESET_METRICS:
-        cells = [cell(summarize(samples(r, key))) for r in res.values()]
-        if all(c == "-" for c in cells):
+    marked_unsafe = False
+    for key in (*PRESET_METRICS, *extra_preset_keys):
+        raw_cells = [(p, cell(summarize(samples(r, key)))) for p, r in res.items()]
+        if all(c == "-" for _, c in raw_cells):
             continue
         label, unit, hib = labels[key]
+        if key in WRITE_METRICS:
+            cells = []
+            row_marked = False
+            for p, c in raw_cells:
+                if c != "-" and preset_caches.get(p):
+                    cells.append(c + " †")
+                    row_marked = True
+                else:
+                    cells.append(c)
+            if row_marked:
+                label = label + " †"
+                marked_unsafe = True
+        else:
+            cells = [c for _, c in raw_cells]
         out.append(f"| {label} | {unit} | {'higher' if hib else 'lower'} | " + " | ".join(cells) + " |")
+    unsafe_presets = [(p, c) for p, c in preset_caches.items() if c]
+    if unsafe_presets and (marked_unsafe or len(unsafe_presets) > 0):
+        unique_modes = list(dict.fromkeys(c for _, c in unsafe_presets))
+        names = ", ".join(p for p, _ in unsafe_presets if p != "-")
+        cache_desc = unique_modes[0] if len(unique_modes) == 1 else "; ".join(f"{p}: {c}" for p, c in unsafe_presets)
+        if names and len(unsafe_presets) < len(res):
+            cache_desc = f"{cache_desc} (presets: {names})"
+        out += ["", unsafe_note(cache_desc)]
     out += ["", "| | " + " | ".join(res) + " |", "|---|" + "---|" * len(res)]
-    for name, f in (("boatd options", lambda r: r.get("boatd_options", "-")),
-                    ("Firecracker cache_type", lambda r: r.get("fc_cache_type", "-")),
-                    ("VM vCPU seen", lambda r: next((str(rep["probe"].get("nproc")) for rep in r.get("repeats", [])
-                                                     if rep.get("probe")), "-")),
-                    ("Failed steps", lambda r: ", ".join(f"r{rep.get('index')}:{k}" for rep in r.get("repeats", [])
-                                                         for k in (rep.get("errors") or {}))[:300] or "none"),
-                    ("Host (harness-declared)", lambda r: r.get("host", {}).get("desc", "-")),
-                    ("Run URL", lambda r: r.get("run_url") or "-")):
-        out.append(f"| {name} | " + " | ".join(str(f(r)).replace("|", "/") for r in res.values()) + " |")
+    for name, f in (("boatd options", lambda _p, r: r.get("boatd_options", "-")),
+                    ("Firecracker cache_type", lambda p, r: (
+                        preset_caches[p]
+                        if preset_caches.get(p) and str(r.get("fc_cache_type") or "-").strip().lower() in ("-", "unknown")
+                        or (preset_caches.get(p) and str(r.get("fc_cache_type") or "").strip().lower().startswith("unknown"))
+                        else r.get("fc_cache_type", "-")
+                    )),
+                    ("VM vCPU seen", lambda _p, r: next((str(rep["probe"].get("nproc")) for rep in r.get("repeats", [])
+                                                         if rep.get("probe")), "-")),
+                    ("Failed steps", lambda _p, r: ", ".join(f"r{rep.get('index')}:{k}" for rep in r.get("repeats", [])
+                                                             for k in (rep.get("errors") or {}))[:300] or "none"),
+                    ("Host (harness-declared)", lambda _p, r: r.get("host", {}).get("desc", "-")),
+                    ("Run URL", lambda _p, r: r.get("run_url") or "-")):
+        out.append(f"| {name} | " + " | ".join(str(f(p, r)).replace("|", "/") for p, r in res.items()) + " |")
     return "\n".join(out) + "\n"
 
 
 def render(results, prices=None, published=None):
     host_results = [r for r in results if r["driver"] == "host"]
     results = [r for r in results if r["driver"] != "host"]
+    if host_results:
+        merged(host_results)
     res = {s: merged(rs) for s, rs in by_side(results).items()}
-    summ = {s: {k: summarize(samples(r, k)) for k, *_ in METRICS} for s, r in res.items()}
+    all_metrics = _metrics_for(res)
+    summ = {s: {k: summarize(samples(r, k)) for k, *_ in all_metrics} for s, r in res.items()}
     out = ["# boatbench: PandaOS boat vs boat.dev", "",
            "Measured numbers below come from this harness (`bench/boatbench`). Published numbers are "
            "boat.dev's own claims and are labelled as such. Method: `bench/boatbench/README.md`.", "",
@@ -483,14 +825,15 @@ def render(results, prices=None, published=None):
     out += ["", "## Measured results", "",
             "median [IQR q1-q3] n=samples; the verdict compares medians and notes overlapping IQRs.", ""]
     if "boatdev" not in res:
+        vendor_speed = f"{published['metrics']['node_runs_s']['value']} index units" if published else "published index units"
         out += ["**boat.dev was not measured by this harness (no `BOATDEV_API_KEY`), so no row has a measured-vs-"
                 "measured verdict.** The only boat.dev numbers are the vendor's published claims (next section), and "
-                "its 27.67 runs/s is one solo VM, not a fully packed server.", ""]
+                f"its {vendor_speed} is one solo VM, not a fully packed server.", ""]
     out += [
             "| Metric | Unit | Better | PandaOS (measured) | boat.dev (measured) | PandaOS / boat.dev | Verdict |",
             "|---|---|---|---|---|---|---|"]
     cache = unsafe_cache(res)
-    for key, label, unit, hib in METRICS:
+    for key, label, unit, hib in all_metrics:
         pan, bd = summ.get("pandaos", {}).get(key), summ.get("boatdev", {}).get(key)
         if not pan and not bd:
             continue
@@ -511,9 +854,9 @@ def render(results, prices=None, published=None):
             out.append(f"| {key} ({units.get(key, '')}) | {fmt(p['value'])} | {cell(pan)} | {cell(bd)} | "
                        f"{p.get('note', '')} |")
         if published.get("rows"):
-            out += ["", "The vendor's whole table (VENDOR-MEASURED, not by this harness). The CPU is what each "
-                    "guest reported in the vendor's run.json, so these rows differ in hardware as well as software.", "",
-                    "| Provider | runs/s | CPU the guest reported |", "|---|---|---|"]
+            out += ["", "The vendor's whole table (VENDOR-MEASURED, not by this harness). The CPU column is what the "
+                    "vendor's page or run reported, so these rows differ in hardware as well as software.", "",
+                    "| Provider | index units | CPU |", "|---|---|---|"]
             out += [f"| {r['provider']} | {r['runs_s']} | {r['cpu']} |" for r in published["rows"]]
     if host_results and "pandaos" in res:
         out += normalization(host_results, res["pandaos"], published, on_runner(host_results + results))
@@ -552,6 +895,13 @@ def density_levels(result):
         for lv in levels:
             if not density_trial_complete(lv, trial):
                 continue
+            counts = lv.get("pass_counts")
+            required = lv.get("passes_required", trial.get("passes"))
+            wall = lv.get("wall_s")
+            if (isinstance(required, int) and not isinstance(required, bool) and required > 0
+                    and (counts == [required] * lv["n"] or counts is None and trial.get("passes") == required)
+                    and density.positive_finite(wall)):
+                by_n.setdefault(lv["n"], {}).setdefault("completed_suites_s", []).append(lv["n"] * required / wall)
             for f in DENSITY_FIELDS:
                 if f in ("efficiency", "loops_per_cpu") and not solo_ok:
                     continue
@@ -582,7 +932,7 @@ def density_projection(levels, model):
     if not cpu or not pts:
         return None
     load = model["vms"] * cpu / model["cpus"]
-    # Interpolate host throughput per CPU, not per-VM efficiency: a straight line through
+    # Interpolate aggregate host index per CPU, not per-VM efficiency: a straight line through
     # efficiency overshoots the measured plateau. Past the last point the plateau holds.
     per_cpu, inside = interpolate([(x, x * e) for x, e in pts], load)
     eff = min(pts)[1] if load <= min(pts)[0] else per_cpu / load
@@ -599,20 +949,20 @@ def density_section(res, prices, published=None):
         out += ["", f"## (g) Density under load: {side} (MEASURED)", "",
                 "N VMs run the Node loop at the same time from one barrier, "
                 f"{'all on this one host' if pan else 'placed by the provider (per-VM numbers only)'}. "
-                "Efficiency = per-VM runs/s at N / at N=1. CPU per loop = (user+sys)/real of node in the guest. "
-                "median [IQR] n=samples.", "",
-                "| N | per-VM runs/s | host runs/s (sum) | efficiency | CPU per loop | loops per host CPU | host CPUs |",
-                "|---|---|---|---|---|---|---|"]
+                "Efficiency = per-VM index units at N / at N=1. CPU per loop = (user+sys)/real of node in the guest. "
+                "median [IQR] n=samples. The index is not completed-job throughput. Completed suites/s is total successful full-suite passes divided by level wall time, including harness overhead; no vendor counterpart is published.", "",
+                "| N | per-VM index units | host index units (sum) | efficiency | CPU per loop | loops per host CPU | host CPUs | completed suites/s (measured) |",
+                "|---|---|---|---|---|---|---|---|"]
         for n, f in lv.items():
             host = cell(f.get("host_runs_s")) if pan else "n/a (fleet)"
             out.append(f"| {n} | {cell(f.get('per_vm_runs_s'))} | {host} | {cell(f.get('efficiency'))} | "
                        f"{cell(f.get('cpu_per_loop'))} | {cell(f.get('loops_per_cpu'))} | "
-                       f"{fmt((f.get('host_cpus') or {}).get('median'))} |")
-        p = (prices or {}).get(side)
+                       f"{fmt((f.get('host_cpus') or {}).get('median'))} | {cell(f.get('completed_suites_s'))} |")
+        p = shape_price(side, (prices or {}).get(side), r)
         if p and not pan:
             v = (lv[max(lv)].get("per_vm_runs_s") or {}).get("median")
             if v:
-                out += ["", f"Cost per 1000 Node runs at N={max(lv)} concurrent sandboxes (what each one delivers "
+                out += ["", f"Cost per 1000 index units at N={max(lv)} concurrent sandboxes (what each one delivers "
                         f"under load, price ${p['usd_per_hour']}/h per sandbox): "
                         f"**{p['usd_per_hour'] / 3600 * 1000 / v:.6f} USD** (MIXED CPUs unless measured on "
                         f"{p.get('cpu') or '-'})."]
@@ -626,21 +976,21 @@ def density_section(res, prices, published=None):
 
 
 def boatdev_ref(prices, published):
-    """boat.dev's USD per 1000 runs at its price and its published solo speed (the CPU-consistent figure)."""
+    """boat.dev's USD per 1000 index units at its price and its published solo speed (the CPU-consistent figure)."""
     bd = (prices or {}).get("boatdev")
     return bd["usd_per_hour"] / 3.6 / published["metrics"]["node_runs_s"]["value"] if bd and published else None
 
 
 def measured_cost_lines(lv, model, mode, prices, published):
-    """Cost per run from the measured host throughput at each N, when the price is this CPU's."""
+    """Cost per index unit from the measured aggregate host index at each N, when the price is this CPU's."""
     host, op, ref = model["host_usd_per_hour"], model.get("host_usd_per_hour_operator"), boatdev_ref(prices, published)
-    out = ["", f"### Cost per run on {model['name']}, MEASURED (price and speed from the same CPU)", "",
-           f"USD per 1000 runs = ${host:.4f}/h / 3.6 / measured host runs/s, at 100% busy, no retention"
+    out = ["", f"### Cost per index unit on {model['name']}, MEASURED (price and speed from the same CPU)", "",
+           f"USD per 1000 index units = ${host:.4f}/h / 3.6 / measured host index units, at 100% busy, no retention"
            + (f"; + operator time: ${op:.4f}/h" if op else "") + ". "
            f"boatd admits {model[mode]['vms']} `default` VMs on it in {mode} mode (prices.json). "
            + (f"boat.dev reference: ${ref:.6f} (its price at its PUBLISHED solo speed; its speed under load is "
               "unmeasured)." if ref else ""), "",
-           "| N VMs | host runs/s (measured) | USD per 1000 runs | + operator time | vs boat.dev reference |",
+           "| N VMs | host index units (measured) | USD per 1000 index units | + operator time | vs boat.dev reference |",
            "|---|---|---|---|---|"]
     for n, f in lv.items():
         h = (f.get("host_runs_s") or {}).get("median")
@@ -653,22 +1003,42 @@ def measured_cost_lines(lv, model, mode, prices, published):
 
 
 def host_density_lines(host_results, vm_result):
-    """N Node loops directly on the host vs N VMs: separates CPU saturation from virtualization overhead."""
-    hl = density_levels(merged(host_results)) if host_results else {}
+    """Compare density curves only when recorded host and CPU layouts agree."""
+    host_result = merged(host_results) if host_results else None
+    hl = density_levels(host_result) if host_result else {}
     if not hl:
         return []
     vl = density_levels(vm_result) if vm_result else {}
-    out = ["", "## (g) Host-native density baseline vs VMs (MEASURED, same host)", "",
-           "N copies of the Node loop directly on the host (no VM), against N VMs each running one. "
-           "Both lose speed as the CPUs fill; the VM / host ratio at each N is what virtualization adds.", "",
-           "| N | host loops: per-loop / total runs/s | efficiency | VMs: per-VM / total runs/s | efficiency | "
+    def known(value):
+        return value not in (None, "", "-", "unknown")
+    reasons = []
+    for key, field in (("host", "desc"), ("client", "cpu_model"), ("client", "os")):
+        h = (host_result.get(key) or {}).get(field)
+        v = ((vm_result or {}).get(key) or {}).get(field)
+        if not known(h) or not known(v) or h != v:
+            reasons.append(f"{key}.{field} differs or is missing")
+    def cpu_counts(result):
+        return [lv.get("host_cpus") for rep in (result or {}).get("repeats", [])
+                for lv in (rep.get("density") or {}).get("levels", []) if density.level_complete(lv)]
+    hc, vc = cpu_counts(host_result), cpu_counts(vm_result)
+    if (not hc or not vc or not all(density.positive_finite(x) for x in hc + vc)
+            or len(set(hc + vc)) != 1):
+        reasons.append("recorded density host CPU counts differ or are missing")
+    matched = not reasons
+    label = "MEASURED, same host" if matched else "UNMATCHED host/layout evidence"
+    note = ("Recorded host descriptions, client CPUs/OS and density CPU counts match. The ratio includes guest, "
+            "VMM and policy effects; these runs do not isolate an individual source of overhead." if matched else
+            "VM / host overhead is not attributable: " + "; ".join(reasons) + ". Ratios are suppressed.")
+    out = ["", f"## (g) Host-native density baseline vs VMs ({label})", "",
+           "N copies of the Node loop directly on the host (no VM), against N VMs each running one. " + note, "",
+           "| N | host loops: per-loop / total index units | efficiency | VMs: per-VM / total index units | efficiency | "
            "VM / host at this N |", "|---|---|---|---|---|---|"]
     med = lambda lv, n, k: ((lv.get(n) or {}).get(k) or {}).get("median")  # noqa: E731
     for n in sorted(set(hl) | set(vl)):
         h, v = med(hl, n, "per_vm_runs_s"), med(vl, n, "per_vm_runs_s")
         out.append(f"| {n} | {fmt(h)} / {fmt(med(hl, n, 'host_runs_s'))} | {fmt(med(hl, n, 'efficiency'))} | "
                    f"{fmt(v)} / {fmt(med(vl, n, 'host_runs_s'))} | {fmt(med(vl, n, 'efficiency'))} | "
-                   f"{fmt(v / h) if h and v else '-'} |")
+                   f"{fmt(v / h) if matched and h and v else '-'} |")
     return out
 
 
@@ -682,7 +1052,7 @@ def density_projection_lines(lv, model, mode):
     host_usd = model["host_usd_per_hour"]
     top = max(f["loops_per_cpu"]["median"] for f in lv.values() if f.get("loops_per_cpu"))
     rng = ("inside the measured range" if inside else
-           "ABOVE the measured range: host throughput per CPU is held flat at the highest measured load's, "
+           "ABOVE the measured range: aggregate host index per CPU is held flat at the highest measured load's, "
            "so efficiency = that / this load" if load > top else
            "BELOW the measured range: the lowest measured load's efficiency is used")
     short = lv[1].get("host_cpus", {}).get("median", GUEST_VCPUS) < GUEST_VCPUS
@@ -692,9 +1062,9 @@ def density_projection_lines(lv, model, mode):
     return ["", f"### PROJECTION: {model['name']}, {mode} ({vms} VMs on {cpus} CPUs), NOT A MEASUREMENT", "",
             f"Load = {vms} VMs x {lv[1]['cpu_per_loop']['median']:.2f} CPU per loop / {cpus} CPUs = "
             f"**{load:.2f} loops per CPU** ({rng}). {'Measured' if inside else 'Projected'} efficiency there: **{eff:.3f}**, so a packed host "
-            f"delivers {vms} x {eff:.3f} = {vms * eff:.1f} solo-VM equivalents, and cost per run is "
+            f"delivers {vms} x {eff:.3f} = {vms * eff:.1f} solo-VM equivalents, and cost per index unit is "
             f"**{1 / eff:.2f}x** the uncontended figure.",
-            f"With the measured solo speed ({solo:.2f} runs/s, a different CPU) as the per-VM speed: "
-            f"${host_usd:.4f}/h / ({vms} x {solo:.2f} x {eff:.3f}) = **{per_k:.6f} USD per 1000 runs (MIXED CPUs)**. "
+            f"With the measured solo speed ({solo:.2f} index units, a different CPU) as the per-VM speed: "
+            f"${host_usd:.4f}/h / ({vms} x {solo:.2f} x {eff:.3f}) = **{per_k:.6f} USD per 1000 index units (MIXED CPUs)**. "
             "Nobody ran PandaOS on that server; the efficiency curve comes from the measured host, whose CPU, SMT "
             "layout and memory bandwidth differ."] + warn

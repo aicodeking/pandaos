@@ -215,10 +215,12 @@ func TestReconcile(t *testing.T) {
 	os.WriteFile(filepath.Join(m.root(b.ID), memNew), []byte("x"), 0o600)
 	h.Kill(b.PID)
 
+	m.closeWatches()
 	m2, err := newManager(m.cfg, h.run, h)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(m2.closeWatches)
 	if v, _ := m2.get(a.ID); v.State != Running || v.PID != a.PID {
 		t.Fatalf("running vm not adopted: %+v", v)
 	}
@@ -681,10 +683,12 @@ func TestSnapshotDurability(t *testing.T) {
 	})
 	// As if the host died before b's fsync finished.
 	m.update(b.ID, "", func(x *VM) { x.SnapSynced = false })
+	m.closeWatches()
 	m2, err := newManager(m.cfg, h.run, h)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(m2.closeWatches)
 	if v, _ := m2.get(a.ID); !v.HasSnapshot {
 		t.Fatal("durable snapshot discarded")
 	}

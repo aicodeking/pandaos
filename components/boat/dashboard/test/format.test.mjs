@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createVMSpec, fmtBytes, fmtCmd, fmtDuration, fmtIP, fmtSize, fmtTTL, parseKV, parseList, parseOptionalInt, safeHttpUrl, shellQuote, sinceISO, sshCommand, topRows, usageView, vmActions } from "../web/src/format.js";
+import { aiUsageTotals, createVMSpec, fmtBytes, fmtCmd, fmtDuration, fmtIP, fmtSize, fmtTTL, parseKV, parseList, parseOptionalInt, resizeVMSpec, safeHttpUrl, shellQuote, shouldDeferPoll, sinceISO, sshCommand, topRows, updateVMSpec, usageView, vmActions } from "../web/src/format.js";
 
 test("fmtBytes", () => {
   assert.equal(fmtBytes(0), "0 B");
@@ -40,10 +40,10 @@ test("fmtCmd", () => {
 });
 
 test("vmActions follows the state machine", () => {
-  assert.deepEqual(vmActions("running"), { start: false, stop: true, fork: true, remove: true });
-  assert.deepEqual(vmActions("stopped"), { start: true, stop: false, fork: true, remove: true });
-  assert.deepEqual(vmActions("creating"), { start: false, stop: false, fork: false, remove: false });
-  assert.deepEqual(vmActions("error"), { start: false, stop: false, fork: false, remove: true });
+  assert.deepEqual(vmActions("running"), { start: false, stop: true, fork: true, resize: true, remove: true });
+  assert.deepEqual(vmActions("stopped"), { start: true, stop: false, fork: true, resize: true, remove: true });
+  assert.deepEqual(vmActions("creating"), { start: false, stop: false, fork: false, resize: false, remove: false });
+  assert.deepEqual(vmActions("error"), { start: true, stop: false, fork: false, resize: false, remove: true });
 });
 
 test("sshCommand covers the direct, custom port and jump cases", () => {
@@ -85,6 +85,14 @@ test("parseOptionalInt: blank is unset, garbage throws", () => {
   assert.throws(() => parseOptionalInt("-1", "TTL"), /TTL must/);
 });
 
+test("createVMSpec keeps explicit TTL 0, allows idle_stop_s -1, and omits blank fields", () => {
+  assert.equal(createVMSpec({ ttl_s: "0" }).ttl_s, 0);
+  assert.equal("ttl_s" in createVMSpec({ ttl_s: " " }), false);
+  assert.equal(createVMSpec({ idle_stop_s: "-1" }).idle_stop_s, -1);
+  assert.equal(createVMSpec({ idle_stop_s: "0" }).idle_stop_s, 0);
+  assert.throws(() => createVMSpec({ idle_stop_s: "-2" }), /Idle stop/);
+});
+
 test("createVMSpec drops blanks, so server defaults apply", () => {
   assert.deepEqual(createVMSpec({ name: " ", size: "", image: "", snapshot: "", ttl_s: "", idle_stop_s: "", labels: "", env: "" }), {});
 });
@@ -97,6 +105,10 @@ test("createVMSpec distinguishes all secrets (absent) from none ([])", () => {
 
 test("sinceISO", () => {
   assert.equal(sinceISO(1, Date.parse("2026-01-02T00:00:00Z")), "2026-01-01T00:00:00.000Z");
+  // Anchored to UTC midnight: any time within a day yields the same window.
+  const a = sinceISO(7, Date.parse("2026-01-10T01:02:03Z")), b = sinceISO(7, Date.parse("2026-01-10T23:59:59Z"));
+  assert.equal(a, "2026-01-03T00:00:00.000Z");
+  assert.equal(a, b);
 });
 
 test("topRows sorts and folds the tail into Other", () => {
@@ -120,4 +132,60 @@ test("usageView reads boatd's report and tolerates an empty one", () => {
   const empty = usageView({});
   assert.equal(empty.vmHours, 0);
   assert.deepEqual(empty.bySize, []);
+});
+
+test("shouldDeferPoll waits for a dialog or fresh focus, but not forever", () => {
+  const base = { focusInside: true, lastFocusAt: 1000, now: 2000 };
+  assert.equal(shouldDeferPoll(base), true);
+  assert.equal(shouldDeferPoll({ ...base, now: 1000 + 30000 }), false);
+  assert.equal(shouldDeferPoll({ ...base, focusInside: false }), false);
+  assert.equal(shouldDeferPoll({ focusInside: false, dialogOpen: true }), true);
+  assert.equal(shouldDeferPoll({ focusInside: false }), false);
+});
+
+test("vmActions enables Start on a running VM only when env_error is set (Retry environment)", () => {
+  assert.equal(vmActions("running").start, false);
+  assert.equal(vmActions("running", "  ").start, false);
+  assert.equal(vmActions("running", "push failed").start, true);
+  assert.equal(vmActions("stopping", "push failed").start, false);
+});
+
+test("createVMSpec: no_env drops secrets and environment; unchanged secrets stay omitted", () => {
+  assert.deepEqual(createVMSpec({ environment: "base", secrets: undefined }), { environment: "base" });
+  assert.deepEqual(createVMSpec({ environment: "env_123" }), { environment: "env_123" });
+  assert.deepEqual(createVMSpec({ environment: "" }), {});
+  assert.deepEqual(createVMSpec({ environment: "base", secrets: ["A"], no_env: true }), { secrets: [], no_env: true });
+  assert.deepEqual(createVMSpec({ no_env: true }), { secrets: [], no_env: true });
+  assert.deepEqual(createVMSpec({ secrets: [] }), { secrets: [] });
+});
+
+test("resizeVMSpec validates size/disk_gib and omits unset fields", () => {
+  assert.deepEqual(resizeVMSpec({ size: "large", disk_gib: "", discard_memory: false }), { size: "large" });
+  assert.deepEqual(resizeVMSpec({ size: "xlarge", disk_gib: "80", discard_memory: true }), { size: "xlarge", disk_gib: 80, discard_memory: true });
+  assert.deepEqual(resizeVMSpec({ size: "  ", disk_gib: "40" }), { disk_gib: 40 });
+  assert.throws(() => resizeVMSpec({ size: "", disk_gib: "" }), /Give a size/);
+  assert.throws(() => resizeVMSpec({ disk_gib: "0" }), /Disk \(GiB\)/);
+});
+
+test("updateVMSpec validates name, TTL and idle stop", () => {
+  assert.deepEqual(updateVMSpec({ name: "web", ttl_s: "0", idle_stop_s: "-1" }), { name: "web", ttl_s: 0, idle_stop_s: -1 });
+  assert.deepEqual(updateVMSpec({ name: "renamed", ttl_s: "", idle_stop_s: "" }), { name: "renamed" });
+  assert.throws(() => updateVMSpec({ name: " ", ttl_s: "", idle_stop_s: "" }), /Set a name/);
+  assert.throws(() => updateVMSpec({ idle_stop_s: "-2" }), /Idle stop/);
+});
+
+test("aiUsageTotals uses server totals or sums rows safely", () => {
+  const fromTotals = aiUsageTotals({
+    usage: [{ vm_id: "v1", requests: 2, input_tokens: 10, output_tokens: 5 }],
+    totals: { requests: 9, input_tokens: 100, output_tokens: 50 },
+  });
+  assert.deepEqual(fromTotals.totals, { requests: 9, input_tokens: 100, output_tokens: 50 });
+  const summed = aiUsageTotals({
+    usage: [
+      { vm_id: "v1", requests: 2, input_tokens: 10, output_tokens: 5 },
+      { vm_id: "v2", requests: 3, input_tokens: 20, output_tokens: 15 },
+    ],
+  });
+  assert.deepEqual(summed.totals, { requests: 5, input_tokens: 30, output_tokens: 20 });
+  assert.deepEqual(aiUsageTotals({}).totals, { requests: 0, input_tokens: 0, output_tokens: 0 });
 });

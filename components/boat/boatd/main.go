@@ -30,7 +30,9 @@ func main() {
 	cfgPath := flag.String("config", "/etc/boat/boatd.json", "config file")
 	showVersion := flag.Bool("version", false, "print version")
 	measure := flag.Bool("measure-disk", false, "measure stateDir's disk once for ioCost, write stateDir/"+ioCostModelFile+" and exit")
+	retention := flag.Int("usage-retention-days", 0, "fold usage.jsonl intervals older than this many days into daily aggregates (0 = the config's usageRetentionDays, default 400; negative = never)")
 	flag.Parse()
+	usageRetentionOverride = *retention
 	if *showVersion {
 		fmt.Println(version)
 		return
@@ -60,10 +62,16 @@ var errBadConfig = errors.New("config refused")
 
 const exConfig = 78
 
+// usageRetentionOverride is the -usage-retention-days flag; 0 = unset.
+var usageRetentionOverride int
+
 func serve(cfgPath string) error {
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errBadConfig, err)
+	}
+	if usageRetentionOverride != 0 {
+		cfg.UsageRetentionDays = usageRetentionOverride
 	}
 	log.Printf("boatd %s starting: bridge %s, stateDir %s", version, cfg.Bridge, cfg.StateDir)
 	if cfg.UntrustedTenants {
@@ -107,6 +115,20 @@ func serve(cfgPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go m.cpuTrace(ctx.Done())
+	go m.usage.buildIndex()
+	go func() {
+		m.compactUsage()
+		t := time.NewTicker(ledgerCompactEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				m.compactUsage()
+			}
+		}
+	}()
 	go func() {
 		t := time.NewTicker(time.Duration(cfg.ReapS) * time.Second)
 		defer t.Stop()
@@ -154,14 +176,22 @@ func serve(cfgPath string) error {
 	return nil
 }
 
-// cgroupRoot is a variable for the tests.
-var cgroupRoot = "/sys/fs/cgroup"
+// cgroupRoot and stateDiskFn are variables for the tests.
+var (
+	cgroupRoot  = "/sys/fs/cgroup"
+	stateDiskFn = stateDisk
+)
 
 // setupCgroups enables memory/pids/cpu/io for the per-VM children of cgroupParent (or
 // a legacy --parent-cgroup in jailerArgs). A VM without them can take the host's
 // memory, so this fails boatd's start unless cgroupsOptional says limits may be absent.
+// Under untrustedTenants, +io, a resolvable stateDisk, and any configured ioCostModel
+// are mandatory (fail-closed).
 func setupCgroups(c *Config) error {
 	if c.Jailer == "" {
+		if c.UntrustedTenants {
+			return errors.New("cgroups: untrustedTenants requires jailer")
+		}
 		return nil
 	}
 	if i := slices.Index(c.JailerArgs, "--parent-cgroup"); i >= 0 && i+1 < len(c.JailerArgs) {
@@ -169,18 +199,27 @@ func setupCgroups(c *Config) error {
 		c.JailerArgs = slices.Delete(slices.Clone(c.JailerArgs), i, i+2)
 	}
 	if err := delegateCgroups(c); err != nil {
-		if !c.CgroupsOptional {
+		if !c.CgroupsOptional || c.UntrustedTenants {
 			return fmt.Errorf("cgroups: %w (VMs would run without limits; cgroupsOptional allows that)", err)
 		}
 		log.Printf("cgroups: %v; VMs run without limits", err)
 		return nil
 	}
 	c.cgroupLimits = true
-	c.stateDisk = stateDisk(c.StateDir)
+	if err := setParentMemCeiling(c); err != nil {
+		return fmt.Errorf("cgroups: %w", err)
+	}
+	c.stateDisk = stateDiskFn(c.StateDir)
+	if c.UntrustedTenants && c.stateDisk == "" {
+		return errors.New("cgroups: untrustedTenants requires a resolvable block device for stateDir")
+	}
 	if c.IOCost && c.IOCostModel == "" {
 		log.Printf("cgroups: ioCost: no ioCostModel, iocost left off (the kernel's default model throttles a fast disk); run `%s`", measureCmd)
 	} else if c.IOCost {
 		if err := enableIOCost(cgroupRoot, c.stateDisk, c.IOCostModel, c.IOCostQoS); err != nil {
+			if c.UntrustedTenants && c.IOCostModel != "" {
+				return fmt.Errorf("cgroups: ioCost: %w", err)
+			}
 			log.Printf("cgroups: ioCost: %v (VMs share the disk first come, first served; io.max still applies)", err)
 		}
 	}
@@ -196,7 +235,7 @@ func enableIOCost(root, dev, model, qos string) error {
 		return errors.New("stateDir's disk unknown")
 	}
 	if model != "" {
-		if err := os.WriteFile(filepath.Join(root, "io.cost.model"), []byte(dev+" ctrl=user model=linear "+model), 0); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "io.cost.model"), []byte(dev+" ctrl=user model=linear "+model), 0o600); err != nil {
 			return fmt.Errorf("io.cost.model: %w", err)
 		}
 	}
@@ -204,7 +243,7 @@ func enableIOCost(root, dev, model, qos string) error {
 	if qos != "" {
 		q += " ctrl=user " + qos
 	}
-	return os.WriteFile(filepath.Join(root, "io.cost.qos"), []byte(q), 0)
+	return os.WriteFile(filepath.Join(root, "io.cost.qos"), []byte(q), 0o600)
 }
 
 func delegateCgroups(c *Config) error {
@@ -216,7 +255,7 @@ func delegateCgroups(c *Config) error {
 	// the next boatd re-adopts them. Every ancestor must enable the controllers.
 	dir := cgroupRoot
 	for _, part := range strings.Split(strings.Trim(c.CgroupParent, "/"), "/") {
-		if err := enableControllers(dir); err != nil {
+		if err := enableControllers(dir, c.UntrustedTenants); err != nil {
 			return fmt.Errorf("%s: %w", dir, err)
 		}
 		dir = filepath.Join(dir, part)
@@ -224,28 +263,53 @@ func delegateCgroups(c *Config) error {
 			return err
 		}
 	}
-	if err := enableControllers(dir); err != nil {
+	if err := enableControllers(dir, c.UntrustedTenants); err != nil {
 		return fmt.Errorf("%s: %w", dir, err)
 	}
 	return nil
 }
 
-// enableControllers: io is optional (only io.max needs it), the others are not.
-func enableControllers(dir string) error {
+// enableControllers: io is optional unless requireIO (untrustedTenants) is set;
+// memory/pids/cpu are always required.
+func enableControllers(dir string, requireIO bool) error {
 	ctl := filepath.Join(dir, "cgroup.subtree_control")
-	if err := os.WriteFile(ctl, []byte("+memory +pids +cpu"), 0); err != nil {
+	if err := os.WriteFile(ctl, []byte("+memory +pids +cpu"), 0o600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(ctl, []byte("+io"), 0); err != nil {
+	if err := os.WriteFile(ctl, []byte("+io"), 0o600); err != nil {
+		if requireIO {
+			return fmt.Errorf("io controller: %w", err)
+		}
 		log.Printf("cgroups: %s: no io controller: %v", dir, err)
+		return nil
+	}
+	if requireIO {
+		b, err := os.ReadFile(ctl)
+		if err != nil {
+			return fmt.Errorf("io controller verify: %w", err)
+		}
+		hasIO := false
+		for _, f := range strings.Fields(string(b)) {
+			if f == "io" || f == "+io" {
+				hasIO = true
+				break
+			}
+		}
+		if !hasIO {
+			return errors.New("io controller not active in cgroup.subtree_control")
+		}
 	}
 	return nil
 }
 
-// stateDisk returns "major:minor" of the whole disk under dir, as io.max wants
-// it ("" if unknown): btrfs's st_dev is anonymous, so go through the mount source.
-func stateDisk(dir string) string {
-	b, err := os.ReadFile("/proc/self/mountinfo")
+func linuxDevID(dev uint64) string {
+	maj := ((dev >> 8) & 0xfff) | ((dev >> 32) &^ 0xfff)
+	min := (dev & 0xff) | ((dev >> 12) & 0xffffff00)
+	return fmt.Sprintf("%d:%d", maj, min)
+}
+
+func mountSource(mountinfoPath, dir string) string {
+	b, err := os.ReadFile(mountinfoPath)
 	if err != nil {
 		return ""
 	}
@@ -257,22 +321,139 @@ func stateDisk(dir string) string {
 			continue
 		}
 		if mp := f[4]; (dir == mp || mp == "/" || strings.HasPrefix(dir, mp+"/")) && len(mp) >= len(best) {
-			best, source = mp, g[1]
+			src := g[1]
+			if i := strings.IndexByte(src, '['); i > 0 {
+				src = src[:i]
+			}
+			best, source = mp, src
 		}
 	}
+	return source
+}
+
+// resolveBlockDisk resolves a block device ("major:minor") under sysBlockRoot
+// (typically "/sys/dev/block") up to depth 8 through partitions, loop backing
+// files (via statFn returning the backing file's block device "major:minor"),
+// and single-disk device-mapper/LVM slaves to the physical whole disk's "major:minor".
+func resolveBlockDisk(sysBlockRoot, devID string, statFn func(string) (string, error)) string {
+	return resolveBlockDiskDepth(sysBlockRoot, devID, statFn, 0)
+}
+
+func resolveBlockDiskDepth(sysBlockRoot, devID string, statFn func(string) (string, error), depth int) string {
+	for depth < 8 {
+		id := strings.TrimSpace(devID)
+		if id == "" {
+			return ""
+		}
+		sys := filepath.Join(sysBlockRoot, id)
+		real, err := filepath.EvalSymlinks(sys)
+		if err != nil {
+			if _, serr := os.Stat(sys); serr != nil {
+				return ""
+			}
+			real = sys
+		}
+		if _, err := os.Stat(filepath.Join(real, "partition")); err == nil { // io.max takes whole disks only
+			p, err := os.ReadFile(filepath.Join(filepath.Dir(real), "dev"))
+			if err != nil {
+				p, err = os.ReadFile(filepath.Join(sys, "..", "dev"))
+			}
+			if err != nil || strings.TrimSpace(string(p)) == "" {
+				return ""
+			}
+			devID = strings.TrimSpace(string(p))
+			depth++
+			continue
+		}
+		if b, err := os.ReadFile(filepath.Join(real, "loop", "backing_file")); err == nil {
+			backing := strings.TrimRight(string(b), "\r\n")
+			if backing == "" {
+				return ""
+			}
+			// Buffered loop mounts (dio == 0) execute writes on root-cgroup loopX kthreads,
+			// bypassing physical-disk io.max; throttle the loop device itself unless dio == 1.
+			dio, derr := os.ReadFile(filepath.Join(real, "loop", "dio"))
+			if derr != nil || strings.TrimSpace(string(dio)) != "1" {
+				return id
+			}
+			if statFn == nil {
+				return ""
+			}
+			nextID, err := statFn(backing)
+			if err != nil || strings.TrimSpace(nextID) == "" {
+				return ""
+			}
+			devID = strings.TrimSpace(nextID)
+			depth++
+			continue
+		}
+		if entries, err := os.ReadDir(filepath.Join(real, "slaves")); err == nil && len(entries) > 0 {
+			if len(entries) == 1 {
+				sb, err := os.ReadFile(filepath.Join(real, "slaves", entries[0].Name(), "dev"))
+				if err != nil || strings.TrimSpace(string(sb)) == "" {
+					return ""
+				}
+				devID = strings.TrimSpace(string(sb))
+				depth++
+				continue
+			}
+			whole := ""
+			for _, e := range entries {
+				sb, err := os.ReadFile(filepath.Join(real, "slaves", e.Name(), "dev"))
+				if err != nil {
+					return ""
+				}
+				resolved := resolveBlockDiskDepth(sysBlockRoot, strings.TrimSpace(string(sb)), statFn, depth+1)
+				if resolved == "" || (whole != "" && resolved != whole) {
+					return ""
+				}
+				whole = resolved
+			}
+			return whole
+		}
+		if _, err := os.Stat(filepath.Join(real, "device")); err == nil {
+			return id
+		}
+		if _, err := os.Stat(filepath.Join(real, "loop")); err == nil {
+			return "" // unattached loop device without backing_file
+		}
+		if _, err := os.Stat(filepath.Join(real, "dm")); err == nil {
+			return "" // virtual dm device without slaves
+		}
+		return id
+	}
+	return ""
+}
+
+// stateDisk returns "major:minor" of the whole disk under dir, as io.max wants
+// it ("" if unknown): btrfs's st_dev is anonymous, so go through the mount source,
+// then unwrap partitions, loop backing files, and single-disk dm/LVM slaves.
+func stateDisk(dir string) string {
+	const (
+		mountinfoPath = "/proc/self/mountinfo"
+		sysBlockRoot  = "/sys/dev/block"
+	)
+	source := mountSource(mountinfoPath, dir)
 	var st syscall.Stat_t
 	if source == "" || syscall.Stat(source, &st) != nil {
 		return ""
 	}
-	dev := uint64(st.Rdev)
-	id := fmt.Sprintf("%d:%d", (dev>>8)&0xfff, (dev&0xff)|((dev>>12)&0xfff00))
-	sys := "/sys/dev/block/" + id
-	if _, err := os.Stat(sys + "/partition"); err == nil { // io.max takes whole disks only
-		if p, err := os.ReadFile(sys + "/../dev"); err == nil {
-			return strings.TrimSpace(string(p))
+	id := linuxDevID(uint64(st.Rdev))
+	return resolveBlockDisk(sysBlockRoot, id, func(backing string) (string, error) {
+		var bst syscall.Stat_t
+		if err := syscall.Stat(backing, &bst); err != nil {
+			return "", err
 		}
-	}
-	return id
+		devID := linuxDevID(uint64(bst.Dev))
+		if _, err := os.Stat(filepath.Join(sysBlockRoot, devID)); err == nil {
+			return devID, nil
+		}
+		// Anonymous virtual superblock (e.g. loop file stored on btrfs): check mount source.
+		if src := mountSource(mountinfoPath, backing); src != "" && syscall.Stat(src, &bst) == nil {
+			return linuxDevID(uint64(bst.Rdev)), nil
+		}
+		return devID, nil
+	})
 }
 
 // hostHardened checks what only the kernel command line and sysctls can give. SMT

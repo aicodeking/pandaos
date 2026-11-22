@@ -2,12 +2,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +26,7 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
 
   boat login --url URL [KEY | --key KEY | --key-stdin]   save credentials (~/.config/boat/config.json);
                                        KEY may be the JSON boat-api admin init prints     boat logout
-  boat whoami | images | usage
+  boat whoami | images | usage [--from DATE] [--to DATE]   DATE: YYYY-MM-DD or RFC3339; a date-only --to is the whole UTC day (inclusive)
   boat new [--name N] [--size|--type S] [--image I] [--ttl SECS|2h | --no-auto-stop] [--idle-stop 30m|never] [--snapshot SID] [--label k=v]
                 [-e|--env K=V] [--secrets A,B | --no-secrets] [--environment NAME | --no-env] [--from SNAPSHOT|CODE] [--count N] [--fail-fast]
                 [--wait-setup] [--setup-file F] [--file VM_PATH=LOCAL] [--host PORT[:public]]
@@ -41,30 +43,30 @@ const usage = `boat - persistent Ubuntu VMs for AI agents
   boat prompts ls|status|logs [-f] <vm> [id]    boat conversations|convos <vm>
   boat steer [<vm>] "text" [--convo ID|current]   boat interrupt <vm> [--convo ID|current]   (also --prompt-id ID)
   boat env ls|list | new NAME | show|info E | set E | default E | build E | rm E   [--image I] [--size S] [--setup TEXT|--setup-file F] [--var K=V] [--secrets A,B|true|false]
-  boat env rename E NEW | set-var E K=V | rm-var E K | set-file E PATH [--from F] | rm-file | add-repo | rm-repo | upgrade E
-  boat rename <vm> NAME                boat api-key create NAME [--preset read-only|full-sandbox|ci|admin | --actions a,b] | list | usage ID | rotate ID | revoke ID
-  boat fork <vm> [--name N] [--fail-fast] [--ttl SECS | --no-auto-stop] [-e K=V]   boat stop <vm> [--force] [--status STOP_ID]   boat rm|delete <vm> [--yes]
+  boat env rename E NEW | set-var E K=V | rm-var E K | set-file E PATH [--from F] | rm-file | add-repo | rm-repo | upgrade E [VM...]
+  boat rename <vm> NAME                boat api-key create NAME [--ttl 90d|24h|365d|never] [--preset read-only|full-sandbox|ci|admin | --actions a,b] | list | usage ID | rotate ID | revoke ID
+  boat fork|clone <vm> [--name N] [--type S] [--fail-fast] [--ttl SECS | --no-auto-stop] [-e K=V] [--environment NAME | --no-env]   boat stop <vm> [--force] [--status STOP_ID]   boat rm|delete <vm> [--yes]
   boat extend <vm> --hours N | --ttl SECS | --no-auto-stop | --by 2h   auto-stop: set the time left, or push it out
   boat limits                          sandboxes active and whether one can start
-  boat history <vm> [command-id] [-f] [--limit N]    commands of a VM, newest first, or one's output
+  boat history <vm> [command-id] [-f] [--limit N] [--mode sync|stream|detached|process|commands] [--q TEXT] [--cursor C]   commands of a VM, newest first, or one's output
   boat snapshot <vm> NAME | snapshot rm NAME          save (replaces NAME) or remove a named snapshot
   boat snapshot latest <vm> | tree SID | pull SID [-o DIR] | delete SID... | delete --all <vm> | share|shares NAME | unshare NAME SHARE
   boat webhook create URL [--name N] [--event ready|error|archived|...] | list | rotate ID | remove ID   (boat.dev events)
-  boat start|resume <vm> [--type S] [--fail-fast] [--ttl SECS | --no-auto-stop] [-e K=V]
+  boat start|resume <vm> [--type S] [--fail-fast] [--ttl SECS | --no-auto-stop] [-e K=V] [--environment NAME | --no-env]
   boat resize <vm> [SIZE] [--disk GIB] [--discard-memory]
   boat desktop|browser <vm> [--no-open]
   boat ssh-keys ls <vm> | ssh-keys rm <vm> FINGERPRINT   keys granted by boat ssh (rm: own grants; admins: any)
-  boat ports ls|add|rm|url <vm> [port] [--auth private|public] [--public] [--ttl 1h]
+  boat ports ls|add|rm|url|revoke <vm> [port] [--auth private|public] [--public] [--ttl 1h]
   boat host <vm> <port> [--public|--private]   expose a port and print its URL
   boat snapshots <vm> [ls | create [--name N] | rm <id> | download <id> [-o F] | share <id> [--team T] [--ttl 24h] | shares <id> | unshare <id> <share>]
-  boat snapshots team | shared | import FILE [--name N] [--image I] [--size S] | take --share ID | take --code CODE | delete <id>
+  boat snapshots team [--visibility shared|all] | shared | import FILE [--name N] [--image I] [--size S] | take --share ID | take --code CODE | delete <id>
   boat ai credentials [ls | set PROVIDER [KEY|-] | rm PROVIDER] | proxy [on|off] | usage [vm] | block <vm> | unblock <vm>
   boat ai profiles | profile default|rename|rm|set-key|rm-key P ... | accounts CRED | switch CRED N | add-account CRED [KEY|-]
   boat telemetry [show | set ENDPOINT [-H k=v] | unset]
   boat secrets ls | set NAME [VALUE|-] [--no-inject] | rotate NAME [VALUE|-] | rm NAME
-  boat keys [ls | create [--name N] [--scopes a,b] [--team T] | rm ID | rotate ID [--overlap 24h] | usage ID]
+  boat keys [ls | create [--name N] [--scopes a,b] [--team T] [--ttl 24h|7d|90d|365d|never] | rm ID | rotate ID [--overlap 24h] | usage ID]
   boat teams [ls | create NAME [--owner U] | show ID | rm ID | add-member TEAM NAME [--role R] | rm-member TEAM USER]
-  boat status [--check] | status <vm> | events <vm> [--limit N] [-f] [--convo ID] | recover <vm> | share <vm> | unshare <vm> (not supported here)
+  boat status [--check] | status <vm> | events <vm> [--limit N] [-f] [--convo ID] | recover <vm> | share <vm> | unshare <vm>
   boat dashboard [--no-open]           boat deletion status <operation id>     boat feedback   where to file issues
   boat help [verb] | boat <verb> --help   (no login needed)
   boat upgrade|self-update [--version vX.Y.Z]   replace this binary with a release build (checksum-verified)
@@ -79,24 +81,33 @@ Global: --json (JSON lines on stdout; new ends with {"event":"ready",...}; an er
 Env: BOAT_URL (or BOAT_API_URL), BOAT_API_KEY, BOAT_CONFIG. boat.dev cloud-only verbs (org, billing, repos, ci, credentials, retention, data-retention, wallet, onboard) are not supported here.`
 
 type app struct {
-	out, errw io.Writer
-	in        io.Reader
-	getenv    func(string) string
-	json      bool
-	apiURL    string // global --api-url (boat.dev's flag): overrides the saved URL and BOAT_URL
-	org       string // global --org (boat.dev's): only "personal" means anything here
-	cfg       Config
-	c         *client
-	execProg  func(argv []string) error // replaces the process (ssh)
-	runProg   func(argv []string) error // runs and waits (forward)
-	shellID   int                       // parent process: scopes the current VM
-	open      func(url string) error
-	exe       func() (string, error) // os.Executable; replaced in tests
+	ctx        context.Context
+	out, errw  io.Writer
+	in         io.Reader
+	getenv     func(string) string
+	json       bool
+	apiURL     string // global --api-url (boat.dev's flag): overrides the saved URL and BOAT_URL
+	org        string // global --org (boat.dev's): only "personal" means anything here
+	cfg        Config
+	c          *client
+	execProg   func(argv []string) error // replaces the process (ssh)
+	runProg    func(argv []string) error // runs and waits (forward)
+	shellID    int                       // parent process: scopes the current VM
+	open       func(url string) error
+	exe        func() (string, error) // os.Executable; replaced in tests
+	isTerminal func() bool            // whether stdin is a terminal
+}
+
+func (a *app) context() context.Context {
+	if a.ctx != nil {
+		return a.ctx
+	}
+	return context.Background()
 }
 
 func main() {
 	a := &app{out: os.Stdout, errw: os.Stderr, in: os.Stdin, getenv: os.Getenv, execProg: execReplace,
-		runProg: runForeground, shellID: os.Getppid(), open: openURL}
+		runProg: runForeground, shellID: os.Getppid(), open: openURL, isTerminal: stdinIsTerminal}
 	args := os.Args[1:]
 	if filepath.Base(os.Args[0]) == "host" { // the symlink in the guest image
 		args = hostArgs(args)
@@ -112,8 +123,22 @@ func runForeground(argv []string) error {
 	return cmd.Run()
 }
 
-func openURL(u string) error {
-	name, args := openerArgs(u)
+func validateOpenURL(raw string) error {
+	if strings.HasPrefix(raw, "-") {
+		return fmt.Errorf("refusing to open unsafe URL %q: must be http or https", raw)
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("refusing to open unsafe URL %q: must be http or https", raw)
+	}
+	return nil
+}
+
+func openURL(raw string) error {
+	if err := validateOpenURL(raw); err != nil {
+		return err
+	}
+	name, args := openerArgs(raw)
 	return exec.Command(name, args...).Start()
 }
 
@@ -240,22 +265,31 @@ func (a *app) dispatch(cmd string, args []string) error {
 	if !ok {
 		return fmt.Errorf("unknown command %q (see boat help): %w", cmd, errUsage)
 	}
-	cfg, err := loadConfig(a.getenv)
+	cfg, err := a.loadCfg()
 	if err != nil {
 		return err
 	}
 	if cfg.URL == "" || cfg.Key == "" {
+		if cmd == "status" && onlyFlags(args) { // signed-out status reports state
+			return cmdHealth(a, slices.Contains(args, "--check") || slices.Contains(args, "-check"))
+		}
 		if a.inGuest() {
 			return errors.New("this VM has no API key: boat-api injects BOAT_URL and a key for this VM only when the operator sets -vm-api-url (or -public-url); otherwise, on your computer, store a key as team secrets (boat keys create --scopes vms:read,vms:write,exec; boat secrets set BOAT_API_KEY; boat secrets set BOAT_URL) and restart the VM")
 		}
 		return errors.New("not logged in: run boat login --url URL --key KEY")
 	}
-	if a.apiURL != "" {
-		cfg.URL = apiOrigin(a.apiURL)
-	}
 	a.cfg = cfg
 	a.c = &client{base: cfg.URL, key: cfg.Key, hc: &http.Client{}, alias: a.vmAlias}
 	return h(a, args)
+}
+
+func onlyFlags(args []string) bool {
+	for _, x := range args {
+		if !strings.HasPrefix(x, "-") {
+			return false
+		}
+	}
+	return true
 }
 
 // parse handles flags interspersed with positional args. Everything after the

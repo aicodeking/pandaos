@@ -52,11 +52,13 @@ export function fmtCmd(cmd) {
 }
 
 // Which lifecycle actions a state allows. Everything else is greyed out while a transition runs.
-export function vmActions(state) {
+// A running VM whose environment push failed (envError set) can be started again: that retries the push.
+export function vmActions(state, envError = "") {
   return {
-    start: state === "stopped",
+    start: state === "stopped" || state === "error" || (state === "running" && Boolean(String(envError ?? "").trim())),
     stop: state === "running",
     fork: state === "running" || state === "stopped",
+    resize: state === "running" || state === "stopped",
     remove: !["creating", "stopping", "starting", "forking"].includes(state),
   };
 }
@@ -117,23 +119,56 @@ export function parseOptionalInt(text, label, { min = 0, max = Number.MAX_SAFE_I
 export function createVMSpec(form) {
   const labels = parseKV(form.labels);
   const env = parseKV(form.env);
+  const noEnv = form.no_env === true;
   const spec = {
     name: form.name?.trim() || undefined,
     size: form.size?.trim() || undefined,
     image: form.image || undefined,
     snapshot: form.snapshot?.trim() || undefined,
-    environment: form.environment || undefined,
+    environment: noEnv ? undefined : form.environment || undefined,
     ttl_s: parseOptionalInt(form.ttl_s, "TTL"),
-    idle_stop_s: parseOptionalInt(form.idle_stop_s, "Idle stop"),
+    idle_stop_s: parseOptionalInt(form.idle_stop_s, "Idle stop", { min: -1 }),
     labels: Object.keys(labels).length ? labels : undefined,
     env: Object.keys(env).length ? env : undefined,
-    secrets: form.secrets,
+    secrets: noEnv ? [] : form.secrets,
+    no_env: noEnv ? true : undefined,
   };
   return Object.fromEntries(Object.entries(spec).filter(([, v]) => v !== undefined));
 }
 
+export function resizeVMSpec(form) {
+  const size = form.size?.trim() || undefined;
+  const disk_gib = parseOptionalInt(form.disk_gib, "Disk (GiB)", { min: 1 });
+  const discard_memory = form.discard_memory === true ? true : undefined;
+  if (!size && disk_gib === undefined) throw new Error("Give a size and/or Disk (GiB)");
+  const spec = { size, disk_gib, discard_memory };
+  return Object.fromEntries(Object.entries(spec).filter(([, v]) => v !== undefined));
+}
+
+export function updateVMSpec(form) {
+  const name = form.name?.trim() || undefined;
+  const ttl_s = parseOptionalInt(form.ttl_s, "TTL", { min: 0, max: 2592000 });
+  const idle_stop_s = parseOptionalInt(form.idle_stop_s, "Idle stop", { min: -1, max: 2592000 });
+  const spec = { name, ttl_s, idle_stop_s };
+  const cleaned = Object.fromEntries(Object.entries(spec).filter(([, v]) => v !== undefined));
+  if (!Object.keys(cleaned).length) throw new Error("Set a name, TTL or idle stop");
+  return cleaned;
+}
+
+export function aiUsageTotals(report) {
+  const rows = Array.isArray(report?.usage) ? report.usage : [];
+  const totals = report?.totals ?? {
+    requests: rows.reduce((s, r) => s + (r.requests ?? 0), 0),
+    input_tokens: rows.reduce((s, r) => s + (r.input_tokens ?? 0), 0),
+    output_tokens: rows.reduce((s, r) => s + (r.output_tokens ?? 0), 0),
+  };
+  return { rows, totals };
+}
+
 export function sinceISO(days, now = Date.now()) {
-  return new Date(now - days * 86400000).toISOString();
+  // Anchored to UTC midnight so repeated loads within a day send the same `since`.
+  const dayStart = Math.floor(now / 86400000) * 86400000;
+  return new Date(dayStart - days * 86400000).toISOString();
 }
 
 // Largest first. Anything past `limit` folds into a single "Other" row.
@@ -156,4 +191,13 @@ export function usageView(report, namesById = {}) {
     byVM: topRows((report.vms ?? []).map((v) => ({ label: namesById[v.id] || v.id, value: hours(v.vm_seconds) }))),
     bySnapshot: topRows((report.snapshots ?? []).map((s) => ({ label: s.id, value: s.snapshot_days ?? 0 }))),
   };
+}
+
+// A poll re-renders and would drop keyboard focus, so it waits while focus sits in the table/header and
+// was moved there recently; a control left focused (e.g. the Start button after a click) must not block
+// polling forever, so the wait lapses after graceMs.
+export const POLL_FOCUS_GRACE_MS = 30000;
+export function shouldDeferPoll({ focusInside, dialogOpen, lastFocusAt = 0, now = Date.now(), graceMs = POLL_FOCUS_GRACE_MS }) {
+  if (dialogOpen) return true;
+  return Boolean(focusInside) && now - lastFocusAt < graceMs;
 }

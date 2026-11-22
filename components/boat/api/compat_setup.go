@@ -43,10 +43,11 @@ type preparedFile struct {
 }
 
 func (s *server) homeDir() string {
-	if s.cfg.SSHUser == "root" {
+	user := orDefault(s.cfg.SSHUser, "dev")
+	if user == "root" {
 		return "/root"
 	}
-	return "/home/" + s.cfg.SSHUser
+	return "/home/" + user
 }
 
 // prepareCompatFiles validates files; "" on success, else the 400 message.
@@ -97,7 +98,7 @@ func (s *server) prepareCompatFiles(files []compatFile) ([]preparedFile, string)
 
 func (s *server) setCompatSetup(vmID string, cs CompatSetup) {
 	cs.At = time.Now().UTC()
-	if err := s.store.Update(func(st *State) error {
+	if err := s.store.Apply(func(st *State) error {
 		if st.CompatSetups == nil {
 			st.CompatSetups = map[string]*CompatSetup{}
 		}

@@ -16,6 +16,7 @@ var reUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 // desktop links and ssh.
 func TestCompatHostDesktopSSHKey(t *testing.T) {
 	e := setup(t)
+	e.enableSSH()
 	e.srv.cfg.VMDomain = "vm.boat.example"
 	id := e.newSandbox(nil)
 	base := "/api/v1/sandboxes/" + id
@@ -65,8 +66,9 @@ func TestCompatHostDesktopSSHKey(t *testing.T) {
 	if k["type"] != "ssh_key.configured" || k["sshUser"] == nil {
 		t.Errorf("sshkey: %v", k)
 	}
-	if !strings.Contains(string(e.boatd.files[vm+":/home/dev/.ssh/authorized_keys"]), "AAAAC3NzaC1lZDI1NTE5AAAAIK0wmN") {
-		t.Error("sshkey did not authorize the key")
+	e.assertSSH(vm, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK0wmN/Cr3JXqmLW7u+g9pTh+wyqDHpSQEIQczXkVx9q", 200)
+	if len(e.boatd.files[vm+":/home/dev/.ssh/authorized_keys"]) != 0 {
+		t.Error("sshkey wrote static keys")
 	}
 	if st, _, _ := e.compat(e.owner, "POST", base+"/sshkey", map[string]any{"key": "not a key"}, nil); st != 400 {
 		t.Errorf("bad key: %d", st)

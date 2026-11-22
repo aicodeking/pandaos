@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -171,7 +172,7 @@ func execRootOut(ctx context.Context, sock string, argv []string, timeout time.D
 			return out, fmt.Errorf("%s: %w after %s %s", argv[0], errGuestTimeout, timeout, r.Error)
 		}
 		if r.Error != "" {
-			return out, &agentErr{r.Error}
+			return out, &agentErr{msg: r.Error, code: r.Code}
 		}
 		if r.Stream == "stdout" {
 			b, _ := base64.StdEncoding.DecodeString(r.Data)
@@ -179,7 +180,7 @@ func execRootOut(ctx context.Context, sock string, argv []string, timeout time.D
 		}
 		if r.Exit != nil {
 			if *r.Exit != 0 {
-				return out, &agentErr{fmt.Sprintf("%s exited %d", argv[0], *r.Exit)}
+				return out, &agentErr{msg: fmt.Sprintf("%s exited %d", argv[0], *r.Exit)}
 			}
 			return out, nil
 		}
@@ -194,14 +195,100 @@ func execRootOut(ctx context.Context, sock string, argv []string, timeout time.D
 // ever parses it), its vmstate, memory and kernel are dropped, and the snapshot
 // cold-boots on the local image's kernel.
 type exportManifest struct {
-	Snapshot Snapshot `json:"snapshot"`
-	VMState  string   `json:"vmstate_sha256,omitempty"`
-	Mem      string   `json:"mem_sha256,omitempty"`
-	Kernel   string   `json:"kernel_sha256,omitempty"`
-	Sig      string   `json:"sig,omitempty"`
+	Snapshot  Snapshot `json:"snapshot"`
+	NoEnv     bool     `json:"no_env,omitempty"`
+	Protected bool     `json:"protected,omitempty"`
+	Disk      string   `json:"disk_sha256,omitempty"`
+	DiskSize  int64    `json:"disk_size,omitempty"`
+	VMState   string   `json:"vmstate_sha256,omitempty"`
+	Mem       string   `json:"mem_sha256,omitempty"`
+	Kernel    string   `json:"kernel_sha256,omitempty"`
+	Sig       string   `json:"sig,omitempty"`
 }
 
-const manifestFile = "export.json"
+const (
+	manifestFile             = "export.json"
+	exportRegistryFile       = "exports.json"
+	maxExportRegistryEntries = 2048
+)
+
+type exportRecord struct {
+	Team      string    `json:"team"`
+	NoEnv     bool      `json:"no_env,omitempty"`
+	Protected bool      `json:"protected,omitempty"`
+	At        time.Time `json:"at,omitempty"`
+}
+
+func (m *Manager) exportRegistryPath() string {
+	return filepath.Join(m.cfg.StateDir, exportRegistryFile)
+}
+
+func (m *Manager) loadExportRegistryLocked() {
+	if m.exportReg != nil {
+		return
+	}
+	m.exportReg = map[string]exportRecord{}
+	var onDisk map[string]exportRecord
+	if err := readJSON(m.exportRegistryPath(), &onDisk); err == nil && onDisk != nil {
+		m.exportReg = onDisk
+	}
+}
+
+func (m *Manager) recordExport(diskHash, team string, noEnv, protected bool) error {
+	if diskHash == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	if m.now != nil {
+		now = m.now()
+	}
+	m.exportMu.Lock()
+	defer m.exportMu.Unlock()
+	m.loadExportRegistryLocked()
+	rec := exportRecord{Team: team, NoEnv: noEnv, Protected: protected, At: now}
+	if prev, ok := m.exportReg[diskHash]; ok {
+		rec.NoEnv = prev.NoEnv || noEnv
+		if prev.Team == team {
+			rec.Protected = prev.Protected || protected
+		} else if prev.Team != "" {
+			// Two different teams exported identical disk bytes: keep sticky no_env
+			// but never merge cross-team protected provenance.
+			rec.Protected = false
+		}
+	}
+	m.exportReg[diskHash] = rec
+	if len(m.exportReg) > maxExportRegistryEntries {
+		type item struct {
+			hash string
+			at   time.Time
+		}
+		items := make([]item, 0, len(m.exportReg))
+		for h, r := range m.exportReg {
+			items = append(items, item{hash: h, at: r.At})
+		}
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].at.Equal(items[j].at) {
+				return items[i].hash < items[j].hash
+			}
+			return items[i].at.Before(items[j].at)
+		})
+		for _, it := range items[:len(items)-maxExportRegistryEntries] {
+			delete(m.exportReg, it.hash)
+		}
+	}
+	return writeJSONAtomic(m.exportRegistryPath(), m.exportReg, 0o600)
+}
+
+func (m *Manager) lookupExport(diskHash string) (exportRecord, bool) {
+	if diskHash == "" {
+		return exportRecord{}, false
+	}
+	m.exportMu.Lock()
+	defer m.exportMu.Unlock()
+	m.loadExportRegistryLocked()
+	rec, ok := m.exportReg[diskHash]
+	return rec, ok
+}
 
 // exportKey comes from the sealed systemd credential on a NixOS host, so a backup of
 // stateDir holds no usable key. The plain file is for a boatd outside that module.
@@ -246,21 +333,131 @@ func sha256File(p string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+var zeroChunk [64 << 10]byte
+
+func writeZeros(w io.Writer, n int64) error {
+	for n > 0 {
+		step := int64(len(zeroChunk))
+		if n < step {
+			step = n
+		}
+		if _, err := w.Write(zeroChunk[:step]); err != nil {
+			return err
+		}
+		n -= step
+	}
+	return nil
+}
+
+// sha256Disk hashes the logical byte stream of p without reading sparse holes from
+// disk when SEEK_DATA/SEEK_HOLE is supported, falling back to sequential io.Copy.
+func sha256Disk(p string) (string, int64, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	size := st.Size()
+	h := sha256.New()
+	if size == 0 {
+		return hex.EncodeToString(h.Sum(nil)), 0, nil
+	}
+	buf := make([]byte, 256<<10)
+	for pos := int64(0); pos < size; {
+		dataStart, err := f.Seek(pos, seekData)
+		if errors.Is(err, syscall.ENXIO) || (err == nil && dataStart >= size) {
+			if err := writeZeros(h, size-pos); err != nil {
+				return "", 0, err
+			}
+			break
+		}
+		if err != nil {
+			if _, err := f.Seek(pos, io.SeekStart); err != nil {
+				return "", 0, err
+			}
+			n, err := io.CopyBuffer(h, io.LimitReader(f, size-pos), buf)
+			if err != nil {
+				return "", 0, err
+			}
+			if n != size-pos {
+				return "", 0, io.ErrUnexpectedEOF
+			}
+			break
+		}
+		if dataStart < pos {
+			dataStart = pos
+		}
+		if dataStart > pos {
+			if err := writeZeros(h, dataStart-pos); err != nil {
+				return "", 0, err
+			}
+		}
+		holeStart, herr := f.Seek(dataStart, seekHole)
+		if herr != nil || holeStart > size || holeStart <= dataStart {
+			holeStart = size
+		}
+		want := holeStart - dataStart
+		n, cerr := io.CopyBuffer(h, io.NewSectionReader(f, dataStart, want), buf)
+		if cerr != nil {
+			return "", 0, cerr
+		}
+		if n != want {
+			return "", 0, io.ErrUnexpectedEOF
+		}
+		pos = holeStart
+	}
+	return hex.EncodeToString(h.Sum(nil)), size, nil
+}
+
 // exportHandler streams a snapshot as tar.zst (GNU sparse, so a 51 GiB disk with
-// little data stays cheap), its manifest first.
+// little data stays cheap), its manifest first. Handles both
+// GET /v1/vms/{id}/snapshots/{sid}/download and GET /v1/snapshots/{sid}/export?team=...&protected=1.
 func (m *Manager) exportHandler(w http.ResponseWriter, r *http.Request) {
+	sid := r.PathValue("sid")
+	vmID := r.PathValue("id")
+	q := r.URL.Query()
+	reqTeam := q.Get("team")
 	m.mu.Lock()
-	s, ok := m.snaps[r.PathValue("sid")]
+	s, ok := m.snaps[sid]
+	noEnv := s.NoEnv || s.Labels["boat.no_env"] == "1"
+	if ok && !noEnv && s.VMID != "" {
+		if vm, vok := m.vms[s.VMID]; vok && vm.Labels["boat.no_env"] == "1" {
+			noEnv = true
+		}
+	}
 	m.mu.Unlock()
-	if !ok || s.PendingCopy || s.VMID != r.PathValue("id") {
+	if !ok || s.PendingCopy {
 		writeErr(w, errf(404, "snapshot not found"))
 		return
 	}
+	if vmID != "" {
+		if s.VMID != vmID || (reqTeam != "" && s.Team != reqTeam) {
+			writeErr(w, errf(404, "snapshot not found"))
+			return
+		}
+	} else {
+		if reqTeam == "" || s.Team != reqTeam {
+			writeErr(w, errf(404, "snapshot not found"))
+			return
+		}
+	}
+	if noEnv {
+		s.NoEnv = true
+		s.Labels = map[string]string{"boat.no_env": "1"}
+	}
+	protected := s.Protected || q.Get("protected") == "1" || q.Get("protected") == "true"
 	dir := m.snapDir(s.ID)
 	files := []string{manifestFile, diskFile, kernFile}
-	mf := exportManifest{Snapshot: s}
+	mf := exportManifest{Snapshot: s, NoEnv: noEnv, Protected: protected}
 	var err error
-	if mf.Kernel, err = sha256File(filepath.Join(dir, kernFile)); err == nil && s.HasMem {
+	if mf.Disk, mf.DiskSize, err = sha256Disk(filepath.Join(dir, diskFile)); err == nil {
+		mf.Kernel, err = sha256File(filepath.Join(dir, kernFile))
+	}
+	if err == nil && s.HasMem {
 		files = append(files, vmstate, memFile)
 		if mf.VMState, err = sha256File(filepath.Join(dir, vmstate)); err == nil {
 			mf.Mem, err = sha256File(filepath.Join(dir, memFile))
@@ -275,6 +472,9 @@ func (m *Manager) exportHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil {
 		err = writeJSONAtomic(filepath.Join(dir, manifestFile), mf, 0o600)
+	}
+	if err == nil {
+		err = m.recordExport(mf.Disk, s.Team, noEnv, protected)
 	}
 	if err != nil {
 		writeErr(w, err)
@@ -412,25 +612,47 @@ func (m *Manager) importInto(ctx context.Context, body io.Reader, dir string, s 
 	}
 	var mf exportManifest
 	trusted := false
+	diskHash := ""
 	if b, rerr := os.ReadFile(filepath.Join(dir, manifestFile)); rerr == nil && json.Unmarshal(b, &mf) == nil {
-		trusted, err = m.verifyManifest(mf, dir)
+		trusted, diskHash, err = m.verifyManifestHash(mf, dir, s.Team)
 		if err != nil {
 			return s, err
 		}
 	}
 	os.Remove(filepath.Join(dir, manifestFile))
-	return m.finishImport(s, mf, trusted, dir, image, size, res)
+	return m.finishImport(s, mf, trusted, diskHash, dir, image, size, res)
 }
 
-// verifyManifest: signed by this host's key, with matching hashes.
-func (m *Manager) verifyManifest(mf exportManifest, dir string) (bool, error) {
+// verifyManifest: signed by this host's key, bound to the importing team,
+// using an image and size currently valid on this host, with matching hashes.
+func (m *Manager) verifyManifest(mf exportManifest, dir, team string) (bool, error) {
+	ok, _, err := m.verifyManifestHash(mf, dir, team)
+	return ok, err
+}
+
+func (m *Manager) verifyManifestHash(mf exportManifest, dir, team string) (bool, string, error) {
+	if team == "" || mf.Snapshot.Team != team {
+		return false, "", nil
+	}
+	o := mf.Snapshot
+	sz, ok := m.cfg.Sizes[o.Size]
+	if !reImage.MatchString(o.Image) || !ok || o.VCPU != sz.VCPU || o.MemMiB != sz.MemMiB || !exists(filepath.Join(m.imageDir(o.Image), kernFile)) {
+		return false, "", nil
+	}
 	key, err := m.exportKey()
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	want, err := manifestSig(key, mf)
 	if err != nil || mf.Sig == "" || !hmac.Equal([]byte(want), []byte(mf.Sig)) {
-		return false, err
+		return false, "", err
+	}
+	if mf.Disk == "" {
+		return false, "", nil
+	}
+	gotDisk, gotSize, err := sha256Disk(filepath.Join(dir, diskFile))
+	if err != nil || gotDisk != mf.Disk || (mf.DiskSize != 0 && gotSize != mf.DiskSize) {
+		return false, gotDisk, nil
 	}
 	for f, sum := range map[string]string{vmstate: mf.VMState, memFile: mf.Mem, kernFile: mf.Kernel} {
 		if sum == "" && f != kernFile {
@@ -438,17 +660,26 @@ func (m *Manager) verifyManifest(mf exportManifest, dir string) (bool, error) {
 		}
 		got, err := sha256File(filepath.Join(dir, f))
 		if err != nil || got != sum {
-			return false, nil
+			return false, gotDisk, nil
 		}
 	}
-	return true, nil
+	return true, gotDisk, nil
 }
 
-func (m *Manager) finishImport(s Snapshot, mf exportManifest, trusted bool, dir, image, size string, res *reservation) (Snapshot, error) {
-	st, err := os.Stat(filepath.Join(dir, diskFile))
+func (m *Manager) finishImport(s Snapshot, mf exportManifest, trusted bool, diskHash, dir, image, size string, res *reservation) (Snapshot, error) {
+	diskPath := filepath.Join(dir, diskFile)
+	st, err := os.Stat(diskPath)
 	if err != nil {
 		return s, errf(400, "archive has no %s", diskFile)
 	}
+	if diskHash == "" {
+		diskHash, _, err = sha256Disk(diskPath)
+		if err != nil {
+			return s, err
+		}
+	}
+	reg, hasReg := m.lookupExport(diskHash)
+	actualGiB := max(1, int((st.Size()+(1<<30)-1)>>30))
 	if trusted {
 		o := mf.Snapshot
 		s.Image, s.Size, s.VCPU, s.MemMiB, s.DiskGiB, s.HasMem = o.Image, o.Size, o.VCPU, o.MemMiB, o.DiskGiB, o.HasMem && mf.Mem != ""
@@ -474,8 +705,16 @@ func (m *Manager) finishImport(s Snapshot, mf exportManifest, trusted bool, dir,
 			return s, err
 		}
 		s.Image, s.Size, s.VCPU, s.MemMiB = image, size, sz.VCPU, sz.MemMiB
-		s.DiskGiB = max(sz.DiskGiB, int((st.Size()+1<<30-1)>>30))
+		s.DiskGiB = max(sz.DiskGiB, actualGiB)
 	}
+	// Protected provenance comes ONLY from a verified HMAC manifest or this host's
+	// own export registry for the same team (never from an unverified manifest or labels).
+	s.Protected = (trusted && mf.Protected) || (hasReg && reg.Protected && reg.Team == s.Team)
+	if mf.NoEnv || mf.Snapshot.NoEnv || mf.Snapshot.Labels["boat.no_env"] == "1" || (hasReg && reg.NoEnv) {
+		s.NoEnv = true
+		s.Labels = map[string]string{"boat.no_env": "1"}
+	}
+	s.DiskGiB = max(s.DiskGiB, actualGiB)
 	if err := res.set(snapCommit(s)); err != nil { // what it commits now, not what the upload declared
 		return s, err
 	}

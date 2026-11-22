@@ -353,7 +353,7 @@ if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | .wa
 grep -q 'warmPool' <<<"$out" || fail "untrustedTenants + warmPool: $out"
 if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | .ksmTeam = \"*\"" ut2)" 2>&1); then fail "untrustedTenants accepted KSM"; fi
 grep -q 'ksmTeam' <<<"$out" || fail "untrustedTenants + ksmTeam: $out"
-for kv in memOvercommit=1.5 hostDirtyRatio=50 allowSMTP=true uplinkFairQueue=false; do # one weaker key each
+for kv in memOvercommit=1.5 hostDirtyRatio=50 allowSMTP=true uplinkFairQueue=false standaloneSSH=true; do # one weaker key each
   if out=$(sudo timeout 10 "$WORK/bin/boatd" -config "$(cfg_with "$ut_filter | .${kv%%=*} = ${kv#*=}" ut4)" 2>&1); then fail "untrustedTenants accepted $kv"; fi
   grep -q "${kv%%=*}" <<<"$out" || fail "untrustedTenants + $kv: $out"
 done
@@ -372,6 +372,10 @@ p4=$(newvm '{"name":"p4","team":"lim"}')
 [ "$(vmf "$p4" public_ip)" = 192.0.2.10 ] || fail "no public address: $(bd GET "/v1/vms/$p4")"
 put_file "$p4" /tmp/srv.sh "$WORK/tmp/srv.sh"
 bx "$p4" '/tmp/srv.sh; sleep 1'
+if sudo ip netns exec e2e-ext curl -fsS --max-time 3 http://192.0.2.10:8082/ >/dev/null 2>&1; then
+  fail "unpublished port reached through public IPv4"
+fi
+bd POST "/v1/vms/$p4/ports" '{"port":8082,"public":true}' >/dev/null
 [ "$(sudo ip netns exec e2e-ext curl -fsS --max-time 8 http://192.0.2.10:8082/)" = ok ] || fail "public IPv4 inbound"
 : >"$WORK/ext.log"
 sudo ip netns exec e2e-ext python3 -u -m http.server 8001 --bind 0.0.0.0 >>"$WORK/ext.log" 2>&1 &
@@ -456,6 +460,16 @@ SMALL=/var/lib/boat-e2e-small
 # 41376747187). metadata_ratio=1 keeps metadata allocated ahead, so data is what fills.
 truncate -s 7G "$WORK/small.img" && mkfs.btrfs -q -f -m single "$WORK/small.img"
 sudo mkdir -p "$SMALL" && sudo mount -o loop,metadata_ratio=1 "$WORK/small.img" "$SMALL"
+loop_dev=$(findmnt -no SOURCE "$SMALL" | sed 's/\[.*//')
+sudo losetup --direct-io=on "$loop_dev" 2>/dev/null || true
+if [ -n "$loop_dev" ]; then
+  dio=$(cat "/sys/block/$(basename "$loop_dev")/loop/dio" 2>/dev/null || echo 0)
+else
+  dio=0
+fi
+if [ "${dio:-0}" != 1 ]; then
+  echo "WARN: loop direct-io not enabled on $loop_dev (dio=${dio:-0}); host page cache fallback active" >&2
+fi
 sudo mkdir -p "$SMALL/images/slim"
 sudo cp --sparse=always "$STATE/images/slim/vmlinux" "$STATE/images/slim/rootfs.ext4" "$SMALL/images/slim/"
 sudo sync

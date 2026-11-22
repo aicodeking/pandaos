@@ -18,7 +18,7 @@ func TestLedgerIndex(t *testing.T) {
 		return usageRec{"vm", "vm-" + string(rune('a'+i%7)), "t", "s", t0.Add(time.Duration(i) * time.Minute), t0.Add(time.Duration(i+3) * time.Minute)}
 	}
 	const n = 5000
-	const appended = 300 // each append fsyncs: the rest is written as boatd found it at start
+	const appended = 300 // appends are flushed by the ledger timer; the rest is written as boatd found it at start
 	var pre []byte
 	for i := 0; i < n-appended; i++ {
 		b, _ := json.Marshal(rec(i))

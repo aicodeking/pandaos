@@ -4,4 +4,4 @@ exit 0
 {"event":"ready","id":"vm3","image":"ubuntu-24.04","name":"new","size":"small","state":"creating"}
 --- stderr
 --- requests
-POST /v1/vms {"idle_stop_s":-1,"image":"","name":"","size":"","snapshot":"snap-1","ttl_s":0}
+POST /v1/vms {"idle_stop_s":-1,"image":"","name":"","size":"","snapshot":"snap-1"}

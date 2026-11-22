@@ -46,6 +46,14 @@ func (m *Manager) CreateBatch(ctx context.Context, r CreateReq) ([]VM, error) {
 	if err != nil {
 		return nil, p.admission(err)
 	}
+	vms, err = m.resetSSHBootBatch(vms)
+	if err == nil {
+		err = m.syncNet()
+	}
+	if err != nil {
+		m.rollback(ctx, vms)
+		return nil, err
+	}
 	allocT := time.Since(t0)
 
 	out := make([]VM, len(vms))
@@ -55,7 +63,7 @@ func (m *Manager) CreateBatch(ctx context.Context, r CreateReq) ([]VM, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			out[i], errs[i] = m.finishCreate(ctx, v, p, allocT)
+			out[i], errs[i] = m.finishCreateSync(ctx, v, p, allocT, false)
 		}()
 	}
 	wg.Wait()
@@ -65,25 +73,82 @@ func (m *Manager) CreateBatch(ctx context.Context, r CreateReq) ([]VM, error) {
 			return nil, e
 		}
 	}
+	needNft := false
+	for _, v := range out {
+		if v.SSHPolicyReady {
+			needNft = true
+			break
+		}
+	}
+	if needNft {
+		err = m.syncNet()
+	} else {
+		err = m.syncRoutes()
+	}
+	if err != nil {
+		m.rollback(ctx, vms)
+		return nil, err
+	}
 	return out, nil
 }
 
-// allocBatch allocates every base or none.
+// allocBatch allocates every base or none, running conntrack flushes concurrently
+// with a bounded worker pool instead of sequentially per VM.
 func (m *Manager) allocBatch(bases []VM) ([]VM, error) {
+	if len(bases) == 0 {
+		return nil, nil
+	}
+	reserved := make([]VM, 0, len(bases))
 	m.mu.Lock()
-	var vms []VM
 	var err error
 	for _, b := range bases {
 		var v VM
-		if v, err = m.allocLocked(b, Creating); err != nil {
+		if v, err = m.reserveVMLocked(b, Creating); err != nil {
+			for _, r := range reserved {
+				delete(m.allocating, r.ID)
+			}
 			break
 		}
-		vms = append(vms, v)
+		reserved = append(reserved, v)
 	}
 	m.mu.Unlock()
 	if err != nil {
-		m.rollback(context.Background(), vms)
 		return nil, err
+	}
+	made := make([]VM, 0, len(reserved))
+	for _, v := range reserved {
+		if err = m.makeVMDir(v); err != nil {
+			madeIDs := map[string]bool{}
+			for _, md := range made {
+				madeIDs[md.ID] = true
+			}
+			for _, r := range reserved {
+				removeDir := ""
+				if madeIDs[r.ID] {
+					removeDir = r.ID
+				}
+				m.dropReservation(r.ID, removeDir)
+			}
+			return nil, err
+		}
+		made = append(made, v)
+	}
+	m.flushConntrackBatch(reserved)
+	vms := make([]VM, 0, len(reserved))
+	for i, v := range reserved {
+		m.mu.Lock()
+		delete(m.allocating, v.ID)
+		if err = m.commitLocked(VM{}, v, "created"); err != nil {
+			m.allocating[v.ID] = v
+			m.mu.Unlock()
+			for _, rem := range reserved[i:] {
+				m.dropReservation(rem.ID, rem.ID)
+			}
+			m.rollback(context.Background(), vms)
+			return nil, err
+		}
+		m.mu.Unlock()
+		vms = append(vms, v)
 	}
 	return vms, nil
 }
@@ -91,8 +156,13 @@ func (m *Manager) allocBatch(bases []VM) ([]VM, error) {
 func (m *Manager) rollback(ctx context.Context, vms []VM) {
 	ctx = context.WithoutCancel(ctx) // a client gone must not leave half a batch
 	for _, v := range vms {
-		if _, err := m.Delete(ctx, v.ID); err != nil && err != errNotFound {
+		if _, err := m.deleteVM(ctx, v.ID, false); err != nil && err != errNotFound {
 			log.Printf("%s: batch rollback: %v", v.ID, err)
+		}
+	}
+	if len(vms) > 0 {
+		if err := m.syncNet(); err != nil {
+			log.Printf("batch rollback syncNet: %v", err)
 		}
 	}
 }

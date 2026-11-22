@@ -72,6 +72,16 @@ func assignCompatIDs(st *State, team string, vms []string, draw func() string) e
 
 // compatIDs returns the bx_ id of each VM, assigning missing ones in one write.
 func (s *server) compatIDs(team string, vms []string) map[string]string {
+	return s.compatIDsMode(team, vms, false)
+}
+
+// compatIDsStage assigns missing bx_ ids in memory via Store.Stage so a
+// following Store.Update (such as Idempotency-Key finish) flushes both at once.
+func (s *server) compatIDsStage(team string, vms []string) map[string]string {
+	return s.compatIDsMode(team, vms, true)
+}
+
+func (s *server) compatIDsMode(team string, vms []string, stage bool) map[string]string {
 	out := map[string]string{}
 	var missing []string
 	st := s.store.Snapshot()
@@ -89,7 +99,11 @@ func (s *server) compatIDs(team string, vms []string) map[string]string {
 	if draw == nil {
 		draw = newCompatID
 	}
-	if err := s.store.Update(func(st *State) error { return assignCompatIDs(st, team, missing, draw) }); err != nil {
+	write := s.store.Apply
+	if stage {
+		write = s.store.Stage
+	}
+	if err := write(func(st *State) error { return assignCompatIDs(st, team, missing, draw) }); err != nil {
 		log.Printf("compat ids: %v", err) // the VM shows its native id; the SDK then refuses it
 	}
 	st = s.store.Snapshot()
@@ -100,6 +114,10 @@ func (s *server) compatIDs(team string, vms []string) map[string]string {
 }
 
 func (s *server) compatID(team, vm string) string { return s.compatIDs(team, []string{vm})[vm] }
+
+func (s *server) compatIDStage(team, vm string) string {
+	return s.compatIDsStage(team, []string{vm})[vm]
+}
 
 // compatResolve turns the bx_ id in an /api/v1 or /v1/vms/{id} path into the VM id the native
 // handlers use. Another team's id and an unknown one are both 404. A native

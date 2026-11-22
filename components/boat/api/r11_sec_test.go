@@ -40,6 +40,7 @@ func (e *env) selfTokenOf(vm string) string {
 // A VM's own token cannot open public ports or add ssh keys unless the team allows it.
 func TestSelfTokenPublicPortAndSSH(t *testing.T) {
 	e := setup(t)
+	e.enableSSH()
 	e.srv.cfg.VMAPIURL = "https://boat.example/"
 	vm := e.createVM()
 	self := e.selfTokenOf(vm)

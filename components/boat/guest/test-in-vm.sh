@@ -120,6 +120,11 @@ t0=$(date +%s)
 for _ in $(seq 180); do boat '{"op":"health"}' >/dev/null 2>&1 && break; sleep 1; done
 boat '{"op":"health"}' > "$W/health.json" && grep -q '"ok": true' "$W/health.json" || fail "health"
 pass "health after $(( $(date +%s) - t0 ))s: $(cat "$W/health.json")"
+vexec 30 root sh -c 'systemctl is-active --quiet boat-managed-env.service &&
+  test "$(readlink /etc/boat/env)" = /run/boat/env &&
+  test "$(findmnt -n -o FSTYPE -T /run/boat)" = tmpfs &&
+  test ! -e /etc/boat/env && test ! -e /etc/boat/env.boat-tmp' || fail "volatile env at boot"
+pass "managed env starts empty on tmpfs"
 
 # ---- 2. exec: stdout, exit code, timeout
 [[ $(vexec 30 dev whoami 2>/dev/null) == dev ]] || fail "exec whoami"
@@ -142,19 +147,34 @@ pass "put_file/get_file 3 MiB round trip, owner dev, mode 640"
 
 # ---- 5. ssh with a key (no password)
 ssh-keygen -q -t ed25519 -N '' -f "$W/id"
-boat put "$W/id.pub" /home/dev/.ssh/authorized_keys 0600 >/dev/null
+# This is explicit tenant enrollment, independent of managed grants.
+boat put "$W/id.pub" /home/dev/.ssh/authorized_keys.tenant 0600 >/dev/null
 SSH=(ssh -i "$W/id" -o StrictHostKeyChecking=no -o UserKnownHostsFile="$W/known" -o ConnectTimeout=10 -o BatchMode=yes)
 for _ in $(seq 30); do "${SSH[@]}" "dev@$GUEST_IP" true 2>/dev/null && break; sleep 1; done
 [[ $("${SSH[@]}" "dev@$GUEST_IP" 'sudo -n whoami') == root ]] || fail "ssh + passwordless sudo"
 sshd_cfg=$(vexec 30 root sshd -T 2>/dev/null)
 grep -qx 'passwordauthentication no' <<<"$sshd_cfg" || fail "password login allowed"
 grep -qx 'permitrootlogin no' <<<"$sshd_cfg" || fail "root login allowed"
-pass "ssh key login + sudo; password login refused"
+grep -qx 'authorizedkeysfile .ssh/authorized_keys.tenant' <<<"$sshd_cfg" || fail "legacy key file enabled"
+grep -qx 'trustedusercakeys none' <<<"$sshd_cfg" || fail "CA bypass enabled"
+grep -qx 'authorizedkeyscommanduser boat-ssh' <<<"$sshd_cfg" || fail "helper user"
+pass "explicit tenant key login + sudo; password/legacy/CA login disabled"
+# A newly written legacy key must not authorize a fresh connection.
+ssh-keygen -q -t ed25519 -N '' -f "$W/legacy"
+boat put "$W/legacy.pub" /home/dev/.ssh/authorized_keys 0600 >/dev/null
+ssh -i "$W/legacy" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile="$W/known" -o ConnectTimeout=5 -o BatchMode=yes \
+  "dev@$GUEST_IP" true 2>/dev/null && fail "legacy authorized_keys bypass"
+pass "legacy key rejected while explicitly enrolled tenant key works"
 
 # ---- 6. set_env
 boat '{"op":"set_env","vars":{"BOAT_TEST":"a b"}}' >/dev/null || fail "set_env"
 [[ $(vexec 30 dev sh -c 'printf %s "$BOAT_TEST"') == "a b" ]] || fail "set_env in exec"
 [[ $("${SSH[@]}" "dev@$GUEST_IP" 'bash -lc "printf %s \"\$BOAT_TEST\""') == "a b" ]] || fail "set_env in login shell"
+vexec 30 root sh -c 'test "$(readlink /etc/boat/env)" = /run/boat/env &&
+  test "$(stat -c %a:%U /run/boat/env)" = 600:dev &&
+  systemctl restart boat-managed-env.service &&
+  test -r /etc/boat/env' || fail "volatile env mode/owner/restart"
 pass "set_env (exec + login shell)"
 
 # ---- 7. reseed + set_identity (as after a fork: same IP here, new name/mac/ids)
@@ -364,10 +384,36 @@ else
   pass "slim: desktop start refused"
 fi
 
-# ---- 11. shutdown -> firecracker exits
+# ---- 11. cold boot: a normal managed value plus a legacy migration fixture.
+# Only fixed test data is written; the boot helper must never evaluate it.
+vexec 30 root sh -c 'test -s /run/boat/env &&
+  rm /etc/boat/env && printf "%s\n" "export BOAT_TEST=legacy" > /etc/boat/env &&
+  printf "%s\n" "export BOAT_TEST=partial" > /etc/boat/env.boat-tmp' || fail "legacy env fixture"
+identity_before_cold=$(vexec 30 root cat /etc/boat/identity.json)
 boat '{"op":"shutdown"}' >/dev/null
 for _ in $(seq 60); do kill -0 "$FC_PID" 2>/dev/null || break; sleep 1; done
 kill -0 "$FC_PID" 2>/dev/null && fail "firecracker still running after shutdown"
 FC_PID=
 pass "shutdown"
+
+# Restart Firecracker with the same disk, without restoring guest memory.
+rm -f "$W"/vsock.sock*
+"$FIRECRACKER" --no-api --config-file "$W/vm.json" >> "$W/serial.log" 2>&1 &
+FC_PID=$!
+for _ in $(seq 180); do boat '{"op":"health"}' >/dev/null 2>&1 && break; sleep 1; done
+boat '{"op":"health"}' >/dev/null || fail "cold boot health"
+vexec 30 root sh -c 'systemctl is-active --quiet boat-managed-env.service &&
+  test "$(readlink /etc/boat/env)" = /run/boat/env &&
+  test "$(findmnt -n -o FSTYPE -T /run/boat)" = tmpfs &&
+  test ! -e /etc/boat/env && test ! -e /etc/boat/env.boat-tmp &&
+  test -z "${BOAT_TEST:-}"' || fail "cold boot retained managed environment"
+[[ $(vexec 30 root cat /etc/boat/identity.json) == "$identity_before_cold" ]] || fail "cold boot identity changed"
+"${SSH[@]}" "dev@$GUEST_IP" 'bash -lc '\''test -z "${BOAT_TEST:-}"'\' || fail "cold boot login env"
+boat '{"op":"set_env","vars":{"BOAT_TEST":"fresh boot"}}' >/dev/null || fail "cold boot fresh set_env"
+[[ $(vexec 30 dev sh -c 'printf %s "$BOAT_TEST"') == "fresh boot" ]] || fail "cold boot fresh env"
+pass "cold boot discarded managed and legacy env, preserved identity, accepted fresh values"
+boat '{"op":"shutdown"}' >/dev/null
+for _ in $(seq 60); do kill -0 "$FC_PID" 2>/dev/null || break; sleep 1; done
+kill -0 "$FC_PID" 2>/dev/null && fail "firecracker still running after cold boot shutdown"
+FC_PID=
 echo "ALL PASSED ($VARIANT)"

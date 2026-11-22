@@ -81,10 +81,12 @@ func TestR16PreparedCopiesStayClosedUntilRelease(t *testing.T) {
 		}
 	}
 	// Reload preserves the fence, including a lost prepare response.
+	m.closeWatches()
 	m2, err := newManager(m.cfg, h.run, h)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(m2.closeWatches)
 	srv2 := httptest.NewServer(m2.routes())
 	defer srv2.Close()
 	if code := call(t, srv2, "POST", "/v1/vms/"+cid+"/start", nil, nil); code/100 == 2 {
@@ -167,7 +169,7 @@ func TestR16IncompleteCopyAndFailedReleaseRemainPending(t *testing.T) {
 	if !pending.PendingCopy || pending.CopyReady || pending.PID != 0 {
 		t.Fatalf("incomplete copy escaped: %+v", pending)
 	}
-	if _, err := m.releaseCopy(context.Background(), pending.ID, nil); err == nil {
+	if _, err := m.releaseCopy(context.Background(), pending.ID, nil, false); err == nil {
 		t.Fatal("incomplete capture released")
 	}
 	m.mu.Lock()
@@ -188,7 +190,7 @@ func TestR16IncompleteCopyAndFailedReleaseRemainPending(t *testing.T) {
 	if err := os.WriteFile(dir, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, releaseErr := m.releaseCopy(context.Background(), c.ID, nil)
+	_, releaseErr := m.releaseCopy(context.Background(), c.ID, nil, false)
 	os.Remove(dir)
 	if err := os.Rename(dir+"-saved", dir); err != nil {
 		t.Fatal(err)
@@ -203,10 +205,12 @@ func TestR16IncompleteCopyAndFailedReleaseRemainPending(t *testing.T) {
 	h.mu.Lock()
 	starts := h.starts
 	h.mu.Unlock()
+	m.closeWatches()
 	m2, err := newManager(m.cfg, h.run, h)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(m2.closeWatches)
 	m2.resumeAll(context.Background())
 	v, _ = m2.get(c.ID)
 	if !v.PendingCopy || v.PID != 0 {

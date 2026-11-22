@@ -20,6 +20,11 @@ on:
       - tests/standalone.nix
       - .github/workflows/boat-e2e.yml
   workflow_dispatch:
+    inputs:
+      calibrate_boot_cap:
+        description: 'Blocked: prepared lifecycle pilot needs reviewed execution preconditions'
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -94,15 +99,14 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Restore guest image
         id: guest
-        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             /mnt/guest-out/vmlinux
             /mnt/guest-out/rootfs-slim.ext4.zst
-            /mnt/guest-out/rootfs-full.ext4.zst
             /mnt/guest-out/size-*.txt
             /mnt/guest-out/manifest-*.txt
-          key: boat-guest-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py', 'components/boat/cli/**') }}
+          key: boat-guest-slim-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py', 'components/boat/guest/ssh-authorize.py', 'components/boat/cli/**') }}
       - name: Build the slim guest image (no cache yet for this source)
         if: steps.guest.outputs.cache-hit != 'true'
         run: |
@@ -153,15 +157,14 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Restore guest image
         id: guest
-        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             /mnt/guest-out/vmlinux
             /mnt/guest-out/rootfs-slim.ext4.zst
-            /mnt/guest-out/rootfs-full.ext4.zst
             /mnt/guest-out/size-*.txt
             /mnt/guest-out/manifest-*.txt
-          key: boat-guest-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py', 'components/boat/cli/**') }}
+          key: boat-guest-slim-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py', 'components/boat/guest/ssh-authorize.py', 'components/boat/cli/**') }}
       - name: Build the slim guest image (no cache yet for this source)
         if: steps.guest.outputs.cache-hit != 'true'
         run: |
@@ -180,6 +183,7 @@ jobs:
           sudo mkfs.btrfs -q /mnt/boat-real-data.img
           sudo mkdir -p /mnt/boat-real-data /mnt/boat-real-tmp
           sudo mount -o loop,compress=zstd:1,noatime /mnt/boat-real-data.img /mnt/boat-real-data
+          sudo losetup --direct-io=on "$(findmnt -no SOURCE /mnt/boat-real-data | sed 's/\[.*//')" 2>/dev/null || true
           findmnt /mnt/boat-real-data
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
         with:
@@ -233,6 +237,35 @@ jobs:
       OUT: /mnt/guest-out
       E2E_WORK: /mnt/boat-e2e
     steps:
+      - name: Require reviewed calibration execution preconditions
+        id: calibration_preflight
+        if: github.event_name == 'workflow_dispatch' && inputs.calibrate_boot_cap
+        run: |
+          # Preparation only: the deadline does not establish pilot feasibility.
+          echo "CALIBRATION_STOP=$(( $(date +%s) + 160 * 60 ))" >>"$GITHUB_ENV"
+          python3 - <<'PY'
+          import json, os, pathlib, tempfile
+          root = pathlib.Path(tempfile.mkdtemp(prefix='boat-boot-cap-blocked.', dir=os.environ['RUNNER_TEMP']))
+          precondition = dict(
+              status='blocked-preconditions',
+              reason='No reviewed evidence establishes runtime feasibility or run comparability; execution and candidate qualification are disabled.',
+              candidate=False,
+              pilot=[['full',150], ['full',50], ['lifecycle',150], ['lifecycle',50], ['lifecycle',50], ['lifecycle',150]],
+              confirmatory_caps=[150, 50, 50, 150, 150, 50, 50, 150],
+              prerequisites=[
+                  'Measure and review end-to-end pilot runtime including two full source validations, four fresh lifecycle samples, builds, cache hit/miss, setup, matching edge/guest gates, resets, cleanup, archive and upload within the existing 180-minute job and 160-minute experiment deadline. The four lifecycle samples contain 9 minutes of declared timed fio work alone; this is not a runtime bound.',
+                  'Review pilot topology by role (loop/backing filesystem/device), filesystem and mount configuration, ceilings, extents/allocation/CoW/compression/qgroups, debt, idle VM activity, actual dirty sizes, lead-in and sampling gaps; predeclare comparability criteria from evidence without invented tolerances. A later eight-sample confirmatory run and all normal full product gates remain required before landing.',
+                  'Validate actual positive precreate write lead-in and live source-cap/reader samples during the write/create intersection on the intended runner.',
+              ])
+          (root / 'precondition.json').write_text(json.dumps(precondition, indent=2)+'\n')
+          (root / 'status').write_text(precondition['status']+'\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'archive={root}\n')
+          print('::error::'+precondition['reason'])
+          for prerequisite in precondition['prerequisites']:
+              print(prerequisite)
+          raise SystemExit(1)
+          PY
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Free disk space, docker on /mnt
@@ -262,16 +295,25 @@ jobs:
             /mnt/guest-out/rootfs-full.ext4.zst
             /mnt/guest-out/size-*.txt
             /mnt/guest-out/manifest-*.txt
-          key: boat-guest-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py', 'components/boat/cli/**') }}
+          key: boat-guest-full-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py', 'components/boat/guest/ssh-authorize.py', 'components/boat/cli/**') }}
 
       - name: Build guest image (kernel + slim + full)
-        if: steps.guest.outputs.cache-hit != 'true'
         run: |
-          components/boat/guest/build.sh all
-          ls -l "$OUT"
+          if [ -f "$OUT/vmlinux" ] && [ -f "$OUT/rootfs-slim.ext4.zst" ] && [ -f "$OUT/rootfs-full.ext4.zst" ]; then
+            ls -l "$OUT"
+          elif [ ! -f "$OUT/vmlinux" ] && [ ! -f "$OUT/rootfs-slim.ext4.zst" ]; then
+            components/boat/guest/build.sh all
+            ls -l "$OUT"
+          else
+            [ -f "$OUT/vmlinux" ] || components/boat/guest/build.sh kernel
+            [ -f "$OUT/rootfs-slim.ext4.zst" ] || components/boat/guest/build.sh rootfs slim
+            [ -f "$OUT/rootfs-full.ext4.zst" ] || components/boat/guest/build.sh rootfs full
+            ls -l "$OUT"
+          fi
 
-      - name: Save guest image
+      - name: Save full guest image cache
         if: steps.guest.outputs.cache-hit != 'true'
+        continue-on-error: true
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
@@ -280,7 +322,7 @@ jobs:
             /mnt/guest-out/rootfs-full.ext4.zst
             /mnt/guest-out/size-*.txt
             /mnt/guest-out/manifest-*.txt
-          key: ${{ steps.guest.outputs.cache-primary-key }}
+          key: boat-guest-full-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py', 'components/boat/guest/ssh-authorize.py', 'components/boat/cli/**') }}
 
       - name: Unpack guest image
         run: |
@@ -304,22 +346,390 @@ jobs:
           node-version: 22
 
       - name: e2e
+        if: github.event_name != 'workflow_dispatch' || !inputs.calibrate_boot_cap
         run: components/boat/e2e.sh "$OUT" 2>&1 | tee e2e.log; test "${PIPESTATUS[0]}" = 0
 
+      # Prepared exploratory pilot: execution remains hard-blocked above; candidate is always false.
+      - name: Prepared pilot (full 150,50; fresh lifecycle 150,50 | 50,150)
+        id: calibration
+        env:
+          GUEST_CACHE_HIT: ${{ steps.guest.outputs.cache-hit }}
+        if: github.event_name == 'workflow_dispatch' && inputs.calibrate_boot_cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ]
+          [ -c /dev/kvm ]
+          exec 9>"$RUNNER_TEMP/boat-boot-cap.lock"
+          flock -n 9
+          archive=$(mktemp -d "$RUNNER_TEMP/boat-boot-cap.XXXXXX")
+          echo "archive=$archive" >>"$GITHUB_OUTPUT"
+          echo inconclusive >"$archive/status"
+          echo "$GUEST_CACHE_HIT" >"$archive/guest-cache-hit.txt"
+          workbase=$(sudo mktemp -d /mnt/boat-boot-cap.XXXXXX)
+          sudo chown "$(id -u):$(id -g)" "$workbase"
+          mkdir "$archive/source" "$archive/overlays" "$archive/builds"
+          git rev-parse HEAD >"$archive/source-revision"
+          cp .github/workflows/boat-e2e.yml "$archive/workflow.yml"
+          uname -a >"$archive/host.txt"
+          lscpu >>"$archive/host.txt"
+          git ls-files -z components/boat bench/boatbench | tar --null -T - -cf "$archive/source.tar"
+          tar -xf "$archive/source.tar" -C "$archive/source"
+          (cd "$archive/source"; find . -type f -print0 | sort -z | xargs -0 sha256sum) >"$archive/source.sha256"
+          chmod -R a-w "$archive/source"
+          sha256sum "$OUT/vmlinux" "$OUT/rootfs-slim.ext4" "$OUT/rootfs-full.ext4" >"$archive/guest.sha256"
+          python3 - "$archive" <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          target = root / 'source/components/boat/boatd/writeback.go'
+          original = target.read_text()
+          needle = '\tdumpWbpsWhileBooting = 64 << 20'
+          assert original.count(needle) == 1, 'unexpected boot-cap source; stop for review'
+          for cap in (150, 64, 50):
+              replacement = root / f'overlays/writeback-{cap}.go'
+              replacement.write_text(original.replace(needle, f'\tdumpWbpsWhileBooting = {cap} << 20'))
+              (root / f'overlays/{cap}.json').write_text(json.dumps({'Replace': {str(target): str(replacement)}}))
+          assert (root / 'overlays/writeback-64.go').read_text() == original
+          PY
+          sha256sum "$archive"/overlays/* >"$archive/overlays.sha256"
+          chmod -R a-w "$archive/overlays"
+          # Full validation and exploratory phase completeness are deliberately separate.
+          cat >"$archive/check.py" <<'PY'
+          import json, math, pathlib, re, sys
+          run, cap, rc, phase = pathlib.Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+          assert phase in ('full', 'lifecycle')
+          log = (run / 'e2e.log').read_text()
+          def one(pattern):
+              matches = re.findall(pattern, log, re.M)
+              assert len(matches) == 1, f'expected one {pattern}: {len(matches)}'
+              return matches[0]
+          metrics = [json.loads(line[7:]) for line in log.splitlines() if line.startswith('METRIC ')]
+          test = 'boat-perf' if phase == 'full' else 'boat-lifecycle'
+          perf = [m for m in metrics if m.get('test') == test]
+          assert len(perf) == 1, 'missing/duplicate phase metric'
+          if phase == 'full':
+              assert sum(m.get('test') == 'boat-e2e' for m in metrics) == 1, 'incomplete full harness'
+              assert not any(m.get('test') == 'boat-lifecycle' for m in metrics)
+              completion = r'^(e2e: PASS)$'
+              failure_prefix = ''
+          else:
+              assert all(m.get('test') not in ('boat-perf', 'boat-e2e') for m in metrics), 'phase claimed full completeness'
+              assert perf[0].get('complete') is False and perf[0].get('candidate') is False
+              assert not re.search(r'^e2e: PASS$', log, re.M), 'phase claimed full PASS'
+              completion = r'^(e2e lifecycle: COMPLETE \(exploratory; full gates still required\))$'
+              failure_prefix = 'lifecycle '
+          seconds = perf[0]['createDuringDumpS']
+          assert type(seconds) in (int, float) and math.isfinite(seconds) and seconds > 0
+          gate = one(r'^e2e: +perf_create_dump +([0-9.]+)s \(max 9s\)$')
+          assert float(gate) == seconds, 'unexpected or changed 9 s gate'
+          failures = re.findall(r'^e2e FAIL: (.*)$', log, re.M)
+          if rc == 0:
+              assert not failures and one(completion) and seconds <= 9
+          else:
+              assert cap == 150 and rc == 1 and seconds > 9, 'functional failure or valid 50 miss: stop'
+              assert failures == [f'{failure_prefix}timing targets: perf_create_dump took {gate}s > 9s; '], failures
+          before = set((run / 'dmesg-before.log').read_text().splitlines())
+          errors = [line for line in (run / 'dmesg-after.log').read_text().splitlines() if line not in before and re.search(r'out of memory|oom-kill|killed process|I/O error|BTRFS.*(?:error|corrupt)|EXT4-fs error', line, re.I)]
+          assert not errors, f'host I/O/OOM failure: {errors}'
+          assert not re.search(r'\boom(?:_kill|_group_kill)? [1-9][0-9]*\b', log), 'nonzero cgroup OOM counters'
+          source, reader, create, ready = one(r'^dump-trial source=(vm-\w+) reader=(vm-\w+) create_start_unix_s=([0-9.]+) firstexec_end_unix_s=([0-9.]+)$')
+          vm, generation, start, end, t, done, overlap = one(r'^dump-write vm=(vm-\w+) generation=(\d+) start_unix_ms=(\d+) end_unix_ms=(\d+) create_start_unix_ms=(\d+) firstexec_end_unix_ms=(\d+) overlap_ms=(\d+)$')
+          start, end, t, done, overlap = map(int, (start, end, t, done, overlap))
+          assert vm == source and int(generation) > 0 and 0 < start < end and t < done
+          assert abs(t-float(create)*1000) < 2 and abs(done-float(ready)*1000) < 2
+          assert overlap == min(end, done)-max(start, t) > 0, 'invalid actual write overlap'
+          assert start < t, 'no actual positive precreate write lead-in; inconclusive'
+          events = re.findall(r'^dump-event '+re.escape(source)+r': (.*)$', log, re.M)
+          assert events and not any('truncated' in event for event in events), 'missing/truncated target events'
+          caps, writes = [], []
+          for event in events:
+              if event.startswith('dump-write '):
+                  assert re.fullmatch(r'generation=\d+ phase=(?:start unix_ms=\d+|end unix_ms=\d+ error=<nil>)', event[11:]), event
+                  writes.append(event)
+                  continue
+              match = re.fullmatch(r'dump-cap dev=(\d+:\d+) requested=("[^"\n]*") actual=("[^"\n]*") write_error=<nil> read_error=<nil> capped=(true|false) booting=(\d+) dumps=(\d+) generation=(\d+)', event)
+              assert match, f'missing cap/readback or error: {event}'
+              dev, requested, actual, capped, booting, dumps, gen = match.groups()
+              requested, actual = json.loads(requested).split(), json.loads(actual).split()
+              assert requested == actual or (capped == 'false' and not actual and all(value.endswith('=max') for value in requested[1:])), f'cap readback mismatch: {event}'
+              if capped == 'true':
+                  assert gen == generation and int(booting) > 0 and int(dumps) > 0
+                  assert f'wbps={cap << 20}' in actual, event
+                  caps.append(dev)
+          assert writes == [f'dump-write generation={generation} phase=start unix_ms={start}', f'dump-write generation={generation} phase=end unix_ms={end} error=<nil>'], 'missing/inconsistent write events'
+          assert caps, 'no successful target source cap'
+          samples = [json.loads(line[10:]) for line in log.splitlines() if line.startswith('dump-diag ')]
+          live = False
+          for sample in samples:
+              if not max(start, t) <= sample.get('sample_start_unix_ms', sample['unix_ms']) <= sample['unix_ms'] <= min(end, done):
+                  continue
+              groups, processes = sample.get('cgroups', {}), sample.get('processes', {})
+              reader_live = any(label.startswith((f'candidate:{reader}:', f'boot-reader:{reader}:')) and str(info.get('pid', '')).isdigit() and (info.get('schedstat', '').split() or [''])[0].isdigit() for label, info in processes.items())
+              io = groups.get('source', {}).get('io.max', '')
+              capped = any(line.split()[0] in caps and f'wbps={cap << 20}' in line.split()[1:] for line in io.splitlines() if line.split())
+              live |= reader_live and capped
+          assert live, 'no live-reader sample with target source cap during actual write/create overlap; inconclusive'
+          result = dict(cap=cap, phase=phase, seconds=seconds, candidate=False, full_validation_pass=phase == 'full' and rc == 0, status='pass' if rc == 0 else 'failed-control', source=source, reader=reader, generation=int(generation), write_start_ms=start, write_end_ms=end, create_start_ms=t, firstexec_end_ms=done, overlap_ms=overlap, write_before_create_ms=t-start)
+          (run / 'result.json').write_text(json.dumps(result)+'\n')
+          print(json.dumps(result))
+          PY
+          # Only diagnostic files: never work directories, keys, API state or guest payloads.
+          cat >"$archive/archive-work.py" <<'PY'
+          import contextlib, os, pathlib, stat, sys, tarfile
+          work, run = map(pathlib.Path, sys.argv[1:])
+          errors = []
+          with contextlib.ExitStack() as stack:
+              base = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+              stack.callback(os.close, base)
+              with tarfile.open(run / 'work-evidence.tgz', 'w:gz') as bundle:
+                  for name in ('boatd.log', 'tmp/dump-diag.log'):
+                      parts, parent = pathlib.Path(name).parts, base
+                      try:
+                          for part in parts[:-1]:
+                              parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                              stack.callback(os.close, parent)
+                          fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                      except FileNotFoundError:
+                          continue  # Early harness failures may not produce either diagnostic.
+                      except OSError as error:
+                          errors.append(f'unsafe/unreadable evidence file: {name}: {error}')
+                          continue
+                      with os.fdopen(fd, 'rb') as data:
+                          info = os.fstat(data.fileno())
+                          if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                              errors.append(f'unsafe evidence file: {name}')
+                              continue
+                          member = tarfile.TarInfo(name)
+                          member.size, member.mode = info.st_size, 0o644
+                          bundle.addfile(member, data)
+          if errors:
+              raise SystemExit('; '.join(errors))
+          PY
+          preserve_work_evidence() {
+            local rc=$?
+            trap - EXIT
+            if [ -n "${work:-}" ] && [ -d "$work" ]; then
+              sudo python3 "$archive/archive-work.py" "$work" "$run" || rc=1
+            fi
+            exit "$rc"
+          }
+          trap preserve_work_evidence EXIT
+          clean() { # Verification only: never remove or stop unknown artifacts.
+            local mounts loops units ns tables image cg pidfile service_pid
+            if pgrep -x 'firecracker|jailer|boatd([.]next)?|boat-api|boat-gateway' >/dev/null; then return 1; else
+              [ "$?" = 1 ] || return 1
+            fi
+            if pgrep -f '[p]ython3? -m http[.]server (8000|8001|8003)' >/dev/null; then return 1; else
+              [ "$?" = 1 ] || return 1
+            fi
+            for pidfile in "$1/boatd.pid" "$1/caddy.pid" "$1/sshd/pid"; do
+              if [ -f "$pidfile" ]; then
+                service_pid=$(sudo cat "$pidfile") || return 1
+                [[ $service_pid =~ ^[1-9][0-9]*$ ]] || return 1
+                if sudo kill -0 "$service_pid" 2>/dev/null; then return 1; fi
+              fi
+            done
+            units=$(systemctl list-units --all --plain --no-legend boatd-e2e.service) || return 1
+            if [ -n "$units" ]; then
+              [ "$(systemctl show -p MainPID --value boatd-e2e.service)" = 0 ] || return 1
+              [ "$(systemctl show -p ActiveState --value boatd-e2e.service)" = inactive ] || return 1
+            fi
+            mounts=$(findmnt -rn -o TARGET) || return 1
+            if grep -E '^/var/lib/boat-(e2e(-small)?|edge)(/|$)' <<<"$mounts"; then return 1; fi
+            for cg in /sys/fs/cgroup/boat-e2e /sys/fs/cgroup/boat-edge; do
+              if [ -e "$cg/cgroup.events" ]; then grep -qx 'populated 0' "$cg/cgroup.events" || return 1; fi
+            done
+            for image in "$1/state.img" "$1/small.img"; do
+              loops=$(sudo losetup -j "$image") || return 1
+              [ -z "$loops" ] || return 1
+            done
+            if grep -F "$1" <<<"$mounts"; then return 1; fi
+            ns=$(ip netns list) || return 1
+            if grep -E '^boat[0-9]|^e2e-(ext|rogue)' <<<"$ns"; then return 1; fi
+            if ip link show boatbr0 >/dev/null 2>&1; then return 1; else [ "$?" = 1 ] || return 1; fi
+            tables=$(sudo nft list tables) || return 1
+            if grep -E '^table (inet|bridge) boat$' <<<"$tables"; then return 1; fi
+          }
+          declare -f clean >"$archive/clean.sh"
+          index=0
+          for member in full:150 full:50 lifecycle:150 lifecycle:50 lifecycle:50 lifecycle:150; do
+            phase=${member%:*}; cap=${member#*:}
+            phase_start=$(date +%s.%N)
+            index=$((index + 1)); run="$archive/$index-$phase-$cap"; work="$workbase/$index-$phase-$cap"
+            build=""
+            [ "$phase" = full ] || build="$archive/builds/$cap"
+            mkdir "$run" "$work"
+            echo preparing >"$run/status"
+            # No cleanup of unknown artifacts: refuse a prior VMM/mount instead.
+            clean "$work" || { echo cleanup-inconclusive >"$run/status"; exit 1; }
+            remaining=$((CALIBRATION_STOP - $(date +%s) - 120))
+            [ "$remaining" -gt 60 ] || { echo budget-exhausted >"$run/status"; exit 1; }
+            echo drain-inconclusive >"$run/status"
+            # A completed sync is an operation, not an invented Dirty/Writeback tolerance.
+            timeout -k 1 60 sudo sync -f "$workbase"
+            python3 - "$run/drain.log" <<'PY'
+          import pathlib, sys, time
+          fields = dict(line.split(':', 1) for line in pathlib.Path('/proc/meminfo').read_text().splitlines())
+          pathlib.Path(sys.argv[1]).write_text(f'{time.time_ns()//1000000} Dirty={fields["Dirty"].strip()} Writeback={fields["Writeback"].strip()}\n')
+          PY
+            (cd "$archive/source"; sha256sum -c "$archive/source.sha256" --quiet)
+            sha256sum -c "$archive/guest.sha256" --quiet
+            sha256sum -c "$archive/overlays.sha256" --quiet
+            # shellcheck disable=SC2024 # The destination is runner-owned.
+            sudo dmesg >"$run/dmesg-before.log"
+            remaining=$((CALIBRATION_STOP - $(date +%s) - 120))
+            [ "$remaining" -gt 0 ] || { echo budget-exhausted >"$run/status"; exit 1; }
+            echo running >"$run/status"
+            harness_start=$(date +%s.%N)
+            set +e
+            timeout -k 30 "$remaining" env E2E_WORK="$work" E2E_PHASE="$phase" E2E_PILOT=1 E2E_PILOT_BUILD="$build" GOFLAGS="-overlay=$archive/overlays/$cap.json" \
+              "$archive/source/components/boat/e2e.sh" "$OUT" >"$run/e2e.log" 2>&1
+            rc=$?
+            set -e
+            harness_end=$(date +%s.%N)
+            echo "$rc" >"$run/exit-status"
+            # shellcheck disable=SC2024 # The destination is runner-owned.
+            sudo dmesg >"$run/dmesg-after.log"
+            # The EXIT trap also preserves this allowlist if any later check fails.
+            sudo python3 "$archive/archive-work.py" "$work" "$run"
+            # shellcheck disable=SC2024 # The destination is runner-owned.
+            sudo find "$work/bin" "$work/dl" -maxdepth 1 -type f -exec sha256sum '{}' + >"$run/binaries.sha256"
+            sha256sum -c "$archive/guest.sha256" --quiet
+            jq '{stateDir,runDir,firecracker,jailer,cgroupParent,reflink,sizes,defaultTeam,ioMaxMBps,egressMbit,memOvercommit,cpuOvercommit,diskEngine,btrfsQgroups,balloon,warmPool}' "$work/boatd-perf-again.json" >"$run/config.json"
+            sha256sum "$archive/source.tar" "$archive/overlays/$cap.json" "$archive/overlays/writeback-$cap.go" "$archive/guest.sha256" >"$run/binding.sha256"
+            grep '^METRIC ' "$run/e2e.log" | tee "$run/metrics.jsonl" >>e2e.log || true
+            python3 "$archive/check.py" "$run" "$cap" "$rc" "$phase" >"$run/verdict.log" 2>&1 || { echo stopped-inconclusive-or-failed >"$run/status"; cat "$run/verdict.log"; exit 1; }
+            cat "$run/verdict.log"
+            [ "$(cat "$work/pilot-cleanup.status")" = complete ] || { echo cleanup-inconclusive >"$run/status"; exit 1; }
+            clean "$work" || { echo cleanup-inconclusive >"$run/status"; exit 1; }
+            timeout -k 1 60 sudo sync -f "$workbase" # process exit + no loops + completed backing-FS writes/deletion
+            if [ "$phase" = full ]; then
+              build="$archive/builds/$cap"; mkdir -p "$build/bin" "$build/dl"
+              for f in boatd boat-api boat-gateway boat; do cp "$work/bin/$f" "$build/bin/$f"; done
+              for f in firecracker jailer; do cp "$work/dl/$f" "$build/dl/$f"; done
+              (cd "$build"; sha256sum bin/* dl/* >binaries.sha256)
+              chmod -R a-w "$build"
+            else
+              for f in boatd boat-api boat-gateway boat; do cmp "$build/bin/$f" "$work/bin/$f"; done
+              for f in firecracker jailer; do cmp "$build/dl/$f" "$work/dl/$f"; done
+            fi
+            sudo rm -rf -- "$work" # only this run's owned, verified-unmounted artifacts
+            work=""
+            timeout -k 1 60 sudo sync -f "$workbase" # include deletion completion in this member's elapsed time
+            python3 - "$run/phase-times.json" "$phase" "$phase_start" "$harness_start" "$harness_end" "$(date +%s.%N)" <<'PY'
+          import json, pathlib, sys
+          path, phase, start, begin, end, done = sys.argv[1:]
+          start, begin, end, done = map(float, (start, begin, end, done))
+          pathlib.Path(path).write_text(json.dumps(dict(phase=phase, setup_s=begin-start, harness_s=end-begin, archive_cleanup_s=done-end, elapsed_s=done-start))+'\n')
+          PY
+            echo archived-and-unmounted >"$run/status"
+          done
+          echo pilot-complete-awaiting-runtime-comparability-review >"$archive/status"
+
       - name: guest checks in a VM (test-in-vm.sh)
-        if: ${{ !cancelled() }} # independent of e2e: every run reports all three
-        run: sudo -E components/boat/guest/test-in-vm.sh "$OUT/vmlinux" "$OUT/rootfs-full.ext4" 2>&1 | tee -a e2e.log; test "${PIPESTATUS[0]}" = 0
+        id: guest_checks
+        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || !inputs.calibrate_boot_cap || steps.calibration.outcome == 'success') }} # normal runs remain independent of e2e
+        env:
+          PILOT_ARCHIVE: ${{ steps.calibration.outputs.archive }}
+        run: |
+          if [ -n "$PILOT_ARCHIVE" ]; then
+            # Guest code/images are identical for both overlays; bind this one run to both.
+            (cd "$PILOT_ARCHIVE/source"; sha256sum -c "$PILOT_ARCHIVE/source.sha256" --quiet)
+            sha256sum -c "$PILOT_ARCHIVE/guest.sha256" --quiet
+            remaining=$((CALIBRATION_STOP - $(date +%s) - 120))
+            [ "$remaining" -gt 0 ] || exit 1
+            begin=$(date +%s.%N)
+            timeout -k 30 "$remaining" sudo -E "$PILOT_ARCHIVE/source/components/boat/guest/test-in-vm.sh" "$OUT/vmlinux" "$OUT/rootfs-full.ext4" 2>&1 | tee "$PILOT_ARCHIVE/guest-checks.log"; test "${PIPESTATUS[0]}" = 0
+            sha256sum -c "$PILOT_ARCHIVE/guest.sha256" --quiet
+            printf 'begin_unix_s=%s end_unix_s=%s\n' "$begin" "$(date +%s.%N)" >"$PILOT_ARCHIVE/guest-checks-elapsed.txt"
+            sha256sum "$PILOT_ARCHIVE/source.tar" "$PILOT_ARCHIVE/guest.sha256" "$PILOT_ARCHIVE/guest-checks.log" >"$PILOT_ARCHIVE/guest-checks-binding.sha256"
+          else
+            sudo -E components/boat/guest/test-in-vm.sh "$OUT/vmlinux" "$OUT/rootfs-full.ext4" 2>&1 | tee -a e2e.log; test "${PIPESTATUS[0]}" = 0
+          fi
 
       - name: e2e edge (Caddy TLS, private routes, desktop origins, ssh jump)
-        if: ${{ !cancelled() }}
+        id: edge_checks
+        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || !inputs.calibrate_boot_cap || steps.calibration.outcome == 'success') }}
         env:
           E2E_WORK: /mnt/boat-edge
+          PILOT_ARCHIVE: ${{ steps.calibration.outputs.archive }}
           # Optional: without them sdk/e2e-agent-from-env.sh prints SKIPPED, not a pass.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: components/boat/gateway/e2e-edge.sh "$OUT" 2>&1 | tee -a e2e.log; test "${PIPESTATUS[0]}" = 0
+        run: |
+          if [ -n "$PILOT_ARCHIVE" ]; then
+            archive=$PILOT_ARCHIVE
+            . "$archive/clean.sh"
+            preserve_edge() {
+              local rc=$?
+              trap - EXIT
+              [ -z "${work:-}" ] || sudo python3 "$archive/archive-work.py" "$work" "$run" || rc=1
+              exit "$rc"
+            }
+            trap preserve_edge EXIT
+            for cap in 150 50; do
+              run="$archive/edge-$cap"; mkdir "$run"
+              work=$(sudo mktemp -d /mnt/boat-edge-pilot.XXXXXX)
+              sudo chown "$(id -u):$(id -g)" "$work"
+              clean "$work" || { echo cleanup-inconclusive >"$run/status"; exit 1; }
+              (cd "$archive/source"; sha256sum -c "$archive/source.sha256" --quiet)
+              sha256sum -c "$archive/guest.sha256" --quiet
+              sha256sum -c "$archive/overlays.sha256" --quiet
+              remaining=$((CALIBRATION_STOP - $(date +%s) - 120))
+              [ "$remaining" -gt 0 ] || { echo budget-exhausted >"$run/status"; exit 1; }
+              begin=$(date +%s.%N)
+              # The mandatory edge gate retains its own exact build commands; compare its outputs.
+              timeout -k 30 "$remaining" env E2E_WORK="$work" GOFLAGS="-overlay=$archive/overlays/$cap.json" \
+                "$archive/source/components/boat/gateway/e2e-edge.sh" "$OUT" >"$run/e2e.log" 2>&1
+              sudo python3 "$archive/archive-work.py" "$work" "$run"
+              for f in boatd boat-api boat-gateway boat; do cmp "$archive/builds/$cap/bin/$f" "$work/bin/$f"; done
+              for f in firecracker jailer; do cmp "$archive/builds/$cap/dl/$f" "$work/dl/$f"; done
+              # shellcheck disable=SC2024 # Diagnostic hashes only, destination is runner-owned.
+              sudo find "$work/bin" "$work/dl" -maxdepth 1 -type f -exec sha256sum '{}' + >"$run/binaries.sha256"
+              sha256sum -c "$archive/guest.sha256" --quiet
+              sha256sum "$archive/source.tar" "$archive/overlays/$cap.json" "$archive/builds/$cap/binaries.sha256" "$archive/guest.sha256" "$run/e2e.log" >"$run/binding.sha256"
+              clean "$work" || { echo cleanup-inconclusive >"$run/status"; exit 1; }
+              timeout -k 1 60 sudo sync -f "$work"
+              sudo rm -rf -- "$work"
+              work=""
+              timeout -k 1 60 sudo sync -f /mnt
+              printf 'begin_unix_s=%s end_unix_s=%s\n' "$begin" "$(date +%s.%N)" >"$run/elapsed.txt"
+              echo passed-awaiting-full-product-gates >"$run/status"
+            done
+          else
+            components/boat/gateway/e2e-edge.sh "$OUT" 2>&1 | tee -a e2e.log; test "${PIPESTATUS[0]}" = 0
+          fi
 
       - name: Metrics
         if: always()
         run: |
           grep -h '^METRIC ' e2e.log | tee -a "$GITHUB_STEP_SUMMARY" || echo "no METRIC line"
+
+      - name: Calibration verdict (blocked pending reviewed preconditions)
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.calibrate_boot_cap
+        env:
+          ARCHIVE: ${{ steps.calibration.outputs.archive || steps.calibration_preflight.outputs.archive }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, shutil
+          root = pathlib.Path(os.environ['ARCHIVE']) if os.environ['ARCHIVE'] else None
+          # Timing deltas cannot qualify a candidate without reviewed comparability criteria.
+          verdict = dict(status='blocked-preconditions', complete=False, candidate=False,
+                         reason='Prepared exploratory pilot cannot qualify a candidate. Execution, measured runtime/comparability review, matching source/binary/image edge and guest evidence, all normal full gates and later confirmation remain prerequisites.')
+          if root:
+              if pathlib.Path('e2e.log').exists():
+                  shutil.copyfile('e2e.log', root / 'remaining-gates.log')
+              (root / 'verdict.json').write_text(json.dumps(verdict)+'\n')
+              (root / 'status').write_text(verdict['status']+'\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('\nBoot-cap calibration: '+json.dumps(verdict)+'\nNo production constant change is authorized by this experiment.\n')
+          PY
+
+      - name: Archive opt-in calibration evidence (including stopped/incomplete runs)
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.calibrate_boot_cap && (steps.calibration.outputs.archive != '' || steps.calibration_preflight.outputs.archive != '')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: boat-boot-cap-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.calibration.outputs.archive || steps.calibration_preflight.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 7

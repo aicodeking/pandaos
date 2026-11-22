@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -64,6 +65,10 @@ func (s *server) compatPrompt(w http.ResponseWriter, r *http.Request, p *princip
 	}
 	if !decode(w, r, &body) {
 		return
+	}
+	vm, ok := s.ownVM(w, r, p)
+	if !ok || s.refuseNotReady(w, r, vm) {
+		return // a sandbox whose environment was not applied answers like commands do
 	}
 	in := map[string]any{"prompt": body.Prompt, "agent": compatProvider(body.Provider), "model": body.Model, "new": body.New}
 	if body.ConversationID != "" {
@@ -315,18 +320,7 @@ func (s *server) compatEvents(w http.ResponseWriter, r *http.Request, p *princip
 		evs = evs[:limit]
 	}
 	running := str(vm, "state") == "running"
-	for _, e := range evs {
-		d := e["data"].(map[string]any)
-		if cid, ok := d["_cmd"].(string); ok {
-			delete(d, "_cmd")
-			if running {
-				if out, err := s.readLogs(r, id, cid, 0, compatEventText); err == nil {
-					b, _ := base64.StdEncoding.DecodeString(str(out, "data_b64"))
-					d["text"] = strings.ToValidUTF8(string(b), "�")
-				}
-			}
-		}
-	}
+	s.fillEventTexts(r, id, evs, running)
 	var next any
 	if more && len(evs) > 0 {
 		next = base64.RawURLEncoding.EncodeToString([]byte(key(evs[len(evs)-1])))
@@ -339,6 +333,44 @@ func (s *server) compatEvents(w http.ResponseWriter, r *http.Request, p *princip
 }
 
 const compatEventText = 64 << 10
+
+// fillEventTexts resolves the finished turns' output of one page: the cached
+// ones at once, the rest from the guest listRefreshParallel at a time (a cold
+// page of 200 turns would otherwise be 200 serial round trips). Each event
+// keeps its place; only its data.text is set.
+func (s *server) fillEventTexts(r *http.Request, vmID string, evs []map[string]any, running bool) {
+	type job struct {
+		d   map[string]any
+		cid string
+	}
+	var jobs []job
+	for _, e := range evs {
+		d := e["data"].(map[string]any)
+		if cid, ok := d["_cmd"].(string); ok {
+			delete(d, "_cmd")
+			if running {
+				jobs = append(jobs, job{d, cid})
+			}
+		}
+	}
+	sem := make(chan struct{}, listRefreshParallel)
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		if text, recheck, ok := eventTexts.peek(eventTextKey{s, vmID, j.cid}); ok && !recheck {
+			j.d["text"] = text
+			continue
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			if text, ok := s.eventText(r, vmID, j.cid); ok {
+				j.d["text"] = text // each job owns its own data map
+			}
+		}()
+	}
+	wg.Wait()
+}
 
 // cmpEventKey: does event key k come after the cursor key in this order?
 // Keys are "<ms>:<id>"; ms compare numerically.

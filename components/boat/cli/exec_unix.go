@@ -8,6 +8,12 @@ import (
 	"syscall"
 )
 
+func stdinIsTerminal() bool {
+	cmd := exec.Command("stty", "-a")
+	cmd.Stdin = os.Stdin
+	return cmd.Run() == nil
+}
+
 // execReplace replaces this process, so the terminal belongs to ssh.
 func execReplace(argv []string) error {
 	path, err := exec.LookPath(argv[0])

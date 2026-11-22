@@ -1,29 +1,170 @@
 {
-  "source": "https://github.com/AnicetNgrt/hpc-sandbox-benchmarks/tree/ed8ec45a1ee0f5058ca99944d9c569d49b2f8e67/docs/results/2026-08-24-cpu (leaderboard.md, README.md, run.json), linked from boat.dev's benchmark section",
-  "measured_on": "2026-08-24 (Ascii Box, Freestyle); the other rows are from the vendor's July CI run",
-  "note": "Vendor-published (boat.dev was formerly Ascii Box; its row is 'Ascii Box (bare metal)'). Despite that label, 27.67 is NOT a bare-metal host score: run.json's observedSpecs for that row report a 4 vCPU / 7.76 GiB KVM guest (virtualization kvm, manufacturer QEMU, Q35, SeaBIOS, detectedIsolation vm) with cpuModel AMD Ryzen 9 9950X, egress OVH Lille. It is a sandbox VM on a dedicated host. The host itself was not measured. boat.dev's '1,000 runs in 36 s' is 1000 / 27.67 runs/s. Their run: PTS pts/node-web-tooling-1.0.1 with DynamicRunCount, median of 21 trials on fresh machines; the Node version is not stated.",
+  "source": "https://github.com/starslingdev/hpc-sandbox-benchmarks/blob/297198a96ee827df5edcd918bd37b949526cfe20/LEADERBOARD.md (StarSling run 37073680030, commit f571eec3dc1378680f223a365d586f61a4fc6658, generated 2026-10-03T09:36:17Z), cited on https://boat.dev and https://docs.boat.dev/pricing.md (both fetched 2026-11-17)",
+  "measured_on": "2026-10-03 for node_runs_s and the rows (StarSling run 37073680030); 2026-08-24 for the three pts_* disk metrics",
+  "note": "Vendor-published, measured by StarSling, not by us. boat.dev's page says: 'every boat sandbox in this run ran on an AMD Ryzen 9 9950X host. The fleet also has AMD Ryzen 7 9700X hosts, which this run did not measure'. The leaderboard lists boat as a KVM virtual machine (declared; detected qemu-kvm, strong), so 28.06 is a sandbox VM (a 4 vCPU / 8 GiB KVM guest), not a bare-metal host score. The run is marked PARTIAL by StarSling (800 of 840 planned cells complete; the Node.js web tooling table itself has 5 sandboxes x 10 trials per provider, 95% bootstrap interval 23.27-28.22 for boat, so the median sits at the top of its interval). boat is ranked 2nd of 15 behind Brezel (30.06). Earlier figure (HISTORICAL, superseded): 27.67 index units, AnicetNgrt/hpc-sandbox-benchmarks, 2026-08-24, row 'Ascii Box (bare metal)', p50 of 21 trials, 95% CI 26.01-28.34, a 4 vCPU / 7.76 GiB KVM guest on a Ryzen 9 9950X; kept under 'historical'. The two runs use different harness repos, trial counts and provider sets, so 28.06 vs 27.67 (+1.4%) is inside both intervals and is not evidence of a speed-up. The geometric-mean subtest index is not completed jobs/s; 1000 / 27.67 or 1000 / 28.06 does not establish time to complete 1000 Node jobs. The Node version is not stated.",
   "metrics": {
-    "node_runs_s": {"value": 27.67, "note": "p50 of 21 trials, 95% CI 26.01-28.34; p95 28.72"},
-    "pts_rand_read_iops": {"value": 433500, "note": "pts/fio-2.1.0: 4KB rand read, O_DIRECT, libaio, 1 job, iodepth 64, 1 GiB, 60 s. Same job here; PandaOS's disk, filesystem and cache mode differ (see the report's caveats), so its numbers cannot speak for boat.dev's NVMe"},
-    "pts_rand_write_iops": {"value": 412500, "note": "pts/fio-2.1.0: 4KB rand write, same job. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe"},
-    "pts_seq_write_mibps": {"value": 5838.5, "note": "pts/fio-2.1.0: 1MB seq write, same job. PTS labels this MB/s, but it equals their 1MB IOPS (5837), so it is MiB/s. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe"}
+    "node_runs_s": {
+      "value": 28.06,
+      "note": "StarSling run 37073680030 (2026-10-03): median of 10 trials on 5 sandboxes, 95% bootstrap interval 23.27-28.22; Node.js web tooling geometric-mean index (V8 subtest runs/s, not completed suites/s), 4 vCPU / 8 GiB"
+    },
+    "pts_rand_read_iops": {
+      "value": 433500,
+      "note": "From the older 2026-08-24 run (not refreshed in the 2026-10-03 run, which reports different fio metrics). pts/fio-2.1.0: 4KB rand read, O_DIRECT, libaio, 1 job, iodepth 64, 1 GiB, 60 s. Same job here; PandaOS's disk, filesystem and cache mode differ (see the report's caveats), so its numbers cannot speak for boat.dev's NVMe"
+    },
+    "pts_rand_write_iops": {
+      "value": 412500,
+      "note": "From the older 2026-08-24 run (not refreshed in the 2026-10-03 run, which reports different fio metrics). pts/fio-2.1.0: 4KB rand write, same job. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe"
+    },
+    "pts_seq_write_mibps": {
+      "value": 5838.5,
+      "note": "From the older 2026-08-24 run (not refreshed in the 2026-10-03 run, which reports different fio metrics). pts/fio-2.1.0: 1MB seq write, same job. PTS labels this MB/s, but it equals their 1MB IOPS (5837), so it is MiB/s. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe"
+    }
   },
   "rows": [
-    {"provider": "Ascii Box (bare metal), now boat.dev", "runs_s": 27.67, "cpu": "AMD Ryzen 9 9950X 16-Core Processor"},
-    {"provider": "Blaxel", "runs_s": 19.8, "cpu": "AMD EPYC"},
-    {"provider": "Daytona (VM)", "runs_s": 18.6, "cpu": "AMD EPYC"},
-    {"provider": "Modal (VM)", "runs_s": 15.07, "cpu": "AMD EPYC 9654 96-Core Processor"},
-    {"provider": "Novita", "runs_s": 13.52, "cpu": "AMD EPYC"},
-    {"provider": "E2B", "runs_s": 11.24, "cpu": "Intel(R) Xeon(R) Processor @ 2.60GHz"},
-    {"provider": "Freestyle", "runs_s": 9.64, "cpu": "19/01 (no model name reported)"},
-    {"provider": "Modal (gVisor)", "runs_s": 9.56, "cpu": "unknown"},
-    {"provider": "Ascii Box (Hetzner CX33)", "runs_s": 8.88, "cpu": "AMD EPYC-Rome Processor"}
+    {
+      "provider": "boat (StarSling, 2026-10-03)",
+      "runs_s": 28.06,
+      "cpu": "AMD Ryzen 9 9950X (host, per boat.dev's page)"
+    },
+    {
+      "provider": "Brezel",
+      "runs_s": 30.06,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "Namespace",
+      "runs_s": 24.9,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "Daytona (VM)",
+      "runs_s": 21.52,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "Microsandbox Cloud",
+      "runs_s": 21.34,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "Novita",
+      "runs_s": 20.16,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "tama",
+      "runs_s": 18.69,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "Blaxel",
+      "runs_s": 18.03,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "Modal (VM)",
+      "runs_s": 15.48,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "run.cloud",
+      "runs_s": 13.89,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "Vercel Sandbox",
+      "runs_s": 12.66,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "Modal (gVisor)",
+      "runs_s": 12.6,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "E2B",
+      "runs_s": 11.08,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "Freestyle",
+      "runs_s": 10.22,
+      "cpu": "not reported in LEADERBOARD.md"
+    },
+    {
+      "provider": "Runloop",
+      "runs_s": 8.93,
+      "cpu": "not reported in LEADERBOARD.md"
+    }
   ],
+  "historical": {
+    "node_runs_s_2026_08_24": {
+      "value": 27.67,
+      "source": "https://github.com/AnicetNgrt/hpc-sandbox-benchmarks/tree/ed8ec45a1ee0f5058ca99944d9c569d49b2f8e67/docs/results/2026-08-24-cpu (leaderboard.md, README.md, run.json), linked from boat.dev's benchmark section",
+      "measured_on": "2026-08-24 (Ascii Box, Freestyle); the other rows are from the vendor's July CI run",
+      "note": "Vendor-published (boat.dev was formerly Ascii Box; its row is 'Ascii Box (bare metal)'). Despite that label, 27.67 is NOT a bare-metal host score: run.json's observedSpecs for that row report a 4 vCPU / 7.76 GiB KVM guest (virtualization kvm, manufacturer QEMU, Q35, SeaBIOS, detectedIsolation vm) with cpuModel AMD Ryzen 9 9950X, egress OVH Lille. It is a sandbox VM on a dedicated host. The host itself was not measured. This is a geometric-mean subtest index, not completed Node jobs/s; dividing 1000 by this score does not establish completed-job time. p50 of 21 trials, 95% CI 26.01-28.34 (re-fetched 2026-11-17 from the pinned leaderboard.md).",
+      "rows": [
+        {
+          "provider": "Ascii Box (bare metal), now boat.dev",
+          "runs_s": 27.67,
+          "cpu": "AMD Ryzen 9 9950X 16-Core Processor"
+        },
+        {
+          "provider": "Blaxel",
+          "runs_s": 19.8,
+          "cpu": "AMD EPYC"
+        },
+        {
+          "provider": "Daytona (VM)",
+          "runs_s": 18.6,
+          "cpu": "AMD EPYC"
+        },
+        {
+          "provider": "Modal (VM)",
+          "runs_s": 15.07,
+          "cpu": "AMD EPYC 9654 96-Core Processor"
+        },
+        {
+          "provider": "Novita",
+          "runs_s": 13.52,
+          "cpu": "AMD EPYC"
+        },
+        {
+          "provider": "E2B",
+          "runs_s": 11.24,
+          "cpu": "Intel(R) Xeon(R) Processor @ 2.60GHz"
+        },
+        {
+          "provider": "Freestyle",
+          "runs_s": 9.64,
+          "cpu": "19/01 (no model name reported)"
+        },
+        {
+          "provider": "Modal (gVisor)",
+          "runs_s": 9.56,
+          "cpu": "unknown"
+        },
+        {
+          "provider": "Ascii Box (Hetzner CX33)",
+          "runs_s": 8.88,
+          "cpu": "AMD EPYC-Rome Processor"
+        }
+      ]
+    }
+  },
   "cpu_scaling": {
     "runner_cpu": "EPYC 7763",
     "reference_cpu": "AMD Ryzen 9 9950X",
-    "same_benchmark": {"runner": 10.3, "reference": 28.8, "source": "https://openbenchmarking.org/test/pts/node-web-tooling, per-CPU runs/s averages, retrieved 2026-11-03: 'AMD EPYC 7763 64-Core' 10.3 +/- 0.4 (4 public results), 'AMD Ryzen 9 9950X 16-Core' 28.8 +/- 2.6 (30 public results)"},
-    "passmark_single_thread": {"runner": 2518, "reference": 4727, "source": "https://www.cpubenchmark.net/compare/4207vs6211/AMD-EPYC-7763-vs-AMD-Ryzen-9-9950X, retrieved 2026-11-03"},
+    "same_benchmark": {
+      "runner": 10.3,
+      "reference": 28.8,
+      "source": "https://openbenchmarking.org/test/pts/node-web-tooling, per-CPU geometric-mean index averages, retrieved 2026-11-03: 'AMD EPYC 7763 64-Core' 10.3 +/- 0.4 (4 public results), 'AMD Ryzen 9 9950X 16-Core' 28.8 +/- 2.6 (30 public results)"
+    },
+    "passmark_single_thread": {
+      "runner": 2518,
+      "reference": 4727,
+      "source": "https://www.cpubenchmark.net/compare/4207vs6211/AMD-EPYC-7763-vs-AMD-Ryzen-9-9950X, retrieved 2026-11-03"
+    },
     "cpu_ratio_limits": "the vendor's repo has no EPYC 7763 row, so the CPU ratios come from public data with mixed Node versions, setups and sample sizes (the 7763 row has 4 results).",
     "limits": "None of this says anything about memory, disk or network hardware."
   }

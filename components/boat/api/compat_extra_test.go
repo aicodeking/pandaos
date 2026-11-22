@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Council round 3: these boat.dev operations answered 404 under /api/v1.
@@ -29,11 +28,14 @@ func TestCompatTelemetryAndAI(t *testing.T) {
 	bx := e.newSandbox(nil)
 	vm := e.srv.store.Snapshot().CompatIDs[bx].VM
 	team := e.teamID()
-	e.srv.store.Update(func(st *State) error {
-		st.AIUsage[team+"/"+vm+"/anthropic/m"] = &AIUsageRow{TeamID: team, VMID: vm, Provider: "anthropic", Model: "m",
-			Requests: 3, InputTokens: 10, OutputTokens: 5, Updated: time.Now().UTC()}
-		return nil
-	})
+	for i := 0; i < 3; i++ { // 3 requests: 10 tokens in, 5 out in all
+		in, out := int64(3), int64(1)
+		if i == 0 {
+			in, out = 4, 3
+		}
+		e.srv.aiMeter.add(team, vm, "anthropic", "m", in, out)
+	}
+	e.srv.aiMeter.flush(e.srv)
 	u := e.ok("GET", "/api/v1/ai-usage?days=7", nil, 200)
 	if tot := u["totals"].(map[string]any); tot["requests"] != float64(3) || len(u["sandboxes"].([]any)) != 1 {
 		t.Errorf("ai-usage: %v", u)
@@ -132,7 +134,7 @@ func TestCompatShareRecover(t *testing.T) {
 	e := setup(t)
 	bx := e.newSandbox(nil)
 	st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes/"+bx+"/share", nil, nil)
-	if st != 200 || out["sandbox"].(map[string]any)["id"] != bx {
+	if st != 501 || errCode(out) != "not_supported" || out["ok"] != false {
 		t.Errorf("share: %d %v", st, out)
 	}
 	n := len(e.boatd.stops)

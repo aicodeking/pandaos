@@ -6,8 +6,8 @@ long exec on a fork's SOURCE VM never returned (502 after timeout_s, run
 42818758694), and forks would share page cache. For each level n, n of those VMs start DENSITY_PASSES passes of the
 Node loop together, from one barrier. Per level the result holds:
 
-  per_vm_runs_s   median of each VM's passes (geomean runs/s, as in (a))
-  host_runs_s     their sum: the throughput of the whole host (PandaOS: all
+  per_vm_runs_s   median of each VM's passes (geometric-mean index units, as in (a))
+  host_runs_s     their sum: aggregate geometric-mean index for the host (PandaOS: all
                   VMs are on one host; boat.dev: on its fleet, so only the
                   per-VM number means anything there)
   cpu_per_loop    (user + sys) / real of `node` inside the guest, median
@@ -16,10 +16,11 @@ Node loop together, from one barrier. Per level the result holds:
                   CPUs online where the harness runs: true in CI and in
                   run-on-server.sh run on the server; else set BOATBENCH_HOST_CPUS)
 
-A host's cost per run is its price per hour over host_runs_s, not over one
-uncontended VM's speed.
+host_runs_s is a sum of geometric-mean indices, not completed jobs/s.
+Completed-suite throughput requires successful pass counts / level wall_s.
 """
 import concurrent.futures
+import json
 import math
 import os
 import re
@@ -27,13 +28,92 @@ import statistics
 import threading
 import time
 
+from cleanup import cleanup_vms
 import workloads as W
 
 DEFAULT_LEVELS = (1, 2, 4, 6)
 DENSITY_PASSES = 2
+DEFAULT_WORKLOAD = "cpu"
+WORKLOADS = ("cpu", "memory")
+DEFAULT_MEM_MIB = 1024
+DEFAULT_MEM_SWEEPS = 3
 _CPU = re.compile(r"BB_CPU ([\d.]+) ([\d.]+) ([\d.]+)")
+_MEM = re.compile(r"^BB_MEM\s+(\{.*\})\s*$", re.M)
 RUN = ("TIMEFORMAT='BB_CPU %R %U %S'; { time ( " + W.NODE_RUN + " ) ; } 2>&1")
 PASS_TIMEOUT_S = 900  # one solo pass takes about 1 min on the runner; 6 on 2 CPUs about 8
+
+_MEM_PY = "\n".join([
+    "import json, sys, time",
+    "mib, sweeps = int(sys.argv[1]), int(sys.argv[2])",
+    "n = mib * 1024 * 1024",
+    "pages = (n + 4095) // 4096",
+    "t0 = time.monotonic()",
+    "buf = bytearray(n)",
+    "for s in range(sweeps):",
+    "    b = (s + 1) & 255",
+    "    buf[0:n:4096] = bytes([b]) * pages",
+    "dt = time.monotonic() - t0",
+    "rss = None",
+    "try:",
+    "    for ln in open('/proc/self/status'):",
+    "        if ln.startswith('VmRSS:'):",
+    "            rss = round(int(ln.split()[1]) / 1024.0, 2)",
+    "            break",
+    "except OSError:",
+    "    pass",
+    "rate = round((mib * sweeps) / dt, 3) if dt > 0 else 0.0",
+    "print('BB_MEM ' + json.dumps({'mem_mib': mib, 'sweeps': sweeps, 'elapsed_s': round(dt, 6), 'mib_per_s': rate, 'rss_mib': rss}))",
+])
+
+
+def workload_from_env(env=None):
+    raw = (env if env is not None else os.environ).get("BOATBENCH_DENSITY_WORKLOAD", "").strip().lower()
+    if not raw:
+        return DEFAULT_WORKLOAD
+    if raw not in WORKLOADS:
+        raise ValueError(f"BOATBENCH_DENSITY_WORKLOAD must be one of {WORKLOADS}: {raw!r}")
+    return raw
+
+
+def mem_mib_from_env(env=None):
+    raw = (env if env is not None else os.environ).get("BOATBENCH_DENSITY_MEM_MIB", "").strip()
+    if not raw:
+        return DEFAULT_MEM_MIB
+    val = int(raw)
+    if val < 1:
+        raise ValueError(f"BOATBENCH_DENSITY_MEM_MIB must be a positive integer: {raw!r}")
+    return val
+
+
+def mem_run_script(mem_mib, sweeps=DEFAULT_MEM_SWEEPS):
+    """Allocate and dirty every 4 KiB page of a mem_mib anonymous working set across sweeps."""
+    if not isinstance(mem_mib, int) or isinstance(mem_mib, bool) or mem_mib < 1:
+        raise ValueError(f"mem_mib must be a positive integer: {mem_mib!r}")
+    if not isinstance(sweeps, int) or isinstance(sweeps, bool) or sweeps < 1:
+        raise ValueError(f"sweeps must be a positive integer: {sweeps!r}")
+    py_quoted = "'" + _MEM_PY.replace("'", "'\"'\"'") + "'"
+    cmd = f"python3 -c {py_quoted} {mem_mib} {sweeps}"
+    return "TIMEFORMAT='BB_CPU %R %U %S'; { time ( " + cmd + " ) ; } 2>&1"
+
+
+def parse_mem_info(out):
+    m = _MEM.search(out or "")
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def parse_mem(out):
+    """Memory touch throughput (MiB/s) of a mem_run_script pass, or None."""
+    data = parse_mem_info(out)
+    if not data:
+        return None
+    rate = data.get("mib_per_s")
+    return float(rate) if positive_finite(rate) else None
 
 
 def levels_from_env(env=None):
@@ -109,23 +189,43 @@ def finish(levels):
     return out
 
 
-def metrics_of(levels):
+def metrics_of(levels, workload=DEFAULT_WORKLOAD):
     m = {}
     for lv in levels:
         if not level_complete(lv):
             continue
         n = lv["n"]
-        for k in ("host_runs_s", "per_vm_runs_s", "efficiency", "cpu_per_loop"):
-            if lv.get(k) is not None:
-                m[f"density_{k}_n{n}"] = lv[k]
+        if workload == "memory":
+            if lv.get("host_mib_s") is not None:
+                m[f"density_mem_host_mib_s_n{n}"] = lv["host_mib_s"]
+            if lv.get("per_vm_mib_s") is not None:
+                m[f"density_mem_per_vm_mib_s_n{n}"] = lv["per_vm_mib_s"]
+            for k in ("efficiency", "cpu_per_loop"):
+                if lv.get(k) is not None:
+                    m[f"density_mem_{k}_n{n}"] = lv[k]
+        else:
+            for k in ("host_runs_s", "per_vm_runs_s", "efficiency", "cpu_per_loop"):
+                if lv.get(k) is not None:
+                    m[f"density_{k}_n{n}"] = lv[k]
     return m
 
 
 class Density:
-    def __init__(self, d, prefix, levels, log, gexec, ready):
+    def __init__(self, d, prefix, levels, log, gexec, ready,
+                 workload=DEFAULT_WORKLOAD, mem_mib=DEFAULT_MEM_MIB, mem_sweeps=DEFAULT_MEM_SWEEPS):
+        if workload not in WORKLOADS:
+            raise ValueError(f"unsupported density workload: {workload!r} (expected one of {WORKLOADS})")
+        if not isinstance(mem_mib, int) or isinstance(mem_mib, bool) or mem_mib < 1:
+            raise ValueError(f"mem_mib must be a positive integer: {mem_mib!r}")
+        if not isinstance(mem_sweeps, int) or isinstance(mem_sweeps, bool) or mem_sweeps < 1:
+            raise ValueError(f"mem_sweeps must be a positive integer: {mem_sweeps!r}")
         self.d, self.prefix, self.levels, self.log = d, prefix, levels, log
         self.gexec, self.ready = gexec, ready
+        self.workload = workload
+        self.mem_mib = mem_mib
+        self.mem_sweeps = mem_sweeps
         self.vms, self.broken, self.errors = [], [], []
+        self.vms_made, self.cleanup_pending_vms, self.cleanup_errors = [], [], {}
 
     def one_vm(self, i):
         vm = None
@@ -137,7 +237,8 @@ class Density:
 
         try:
             vm, _ = self.ready(self.d, start)
-            self.gexec(self.d, vm, W.NODE_SETUP)
+            if self.workload == "cpu":
+                self.gexec(self.d, vm, W.NODE_SETUP)
             return vm
         except Exception as e:  # refused (capacity) or broken: measure without it
             self.errors.append(f"vm {i}: {type(e).__name__}: {e}")
@@ -145,26 +246,32 @@ class Density:
 
     def grow(self, want):
         """`want` fresh VMs at once, each set up; the provider's refusals are left out."""
-        if self.d.name == "host":  # no VMs: set Node up once, then N loops run side by side on the host
-            self.gexec(self.d, "host", W.NODE_SETUP)
+        if self.d.name == "host":  # no VMs: set Node up once (for cpu), then N loops run side by side on the host
+            if self.workload == "cpu":
+                self.gexec(self.d, "host", W.NODE_SETUP)
             self.vms = ["host"] * want
+            self.vms_made = list(self.vms)
             return
         with concurrent.futures.ThreadPoolExecutor(want) as ex:
             got = list(ex.map(self.one_vm, range(want)))
         self.vms = [v for v in got if isinstance(v, str)]
         self.broken = [v[1] for v in got if isinstance(v, tuple) and v[1]]
+        self.vms_made = list(self.vms)
+        self.cleanup_pending_vms.extend(dict.fromkeys(self.vms + self.broken))
         self.log(f"density: {len(self.vms)} of {want} VMs set up")
 
     def level(self, n, cpus):
         vms = self.vms[:n]
         barrier = threading.Barrier(n)
+        script = RUN if self.workload == "cpu" else mem_run_script(self.mem_mib, self.mem_sweeps)
+        parse_rate = W.parse_geomean if self.workload == "cpu" else parse_mem
 
         def one(vm):
             barrier.wait(timeout=600)
             out = []
             for _ in range(DENSITY_PASSES):
-                o = self.gexec(self.d, vm, RUN, PASS_TIMEOUT_S)
-                sample = (W.parse_geomean(o), parse_cpu(o))
+                o = self.gexec(self.d, vm, script, PASS_TIMEOUT_S)
+                sample = (parse_rate(o), parse_cpu(o))
                 if not all(positive_finite(x) for x in sample):
                     raise ValueError("invalid density throughput or CPU measurement")
                 out.append(sample)
@@ -182,24 +289,32 @@ class Density:
                     passes.append([])
         lv = summarize_level(n, passes, cpus)
         lv["wall_s"] = time.monotonic() - t
+        if self.workload == "memory":
+            lv["workload"] = "memory"
+            lv["mem_mib"] = self.mem_mib
+            lv["working_set_mib"] = n * self.mem_mib
+            lv["per_vm_mib_s"] = lv["per_vm_runs_s"]
+            lv["host_mib_s"] = lv["host_runs_s"]
         return lv
 
     def run(self):
-        cpus = host_cpus() if self.d.name in ("pandaos", "host") else None
+        cpus = host_cpus() if self.d.name in ("pandaos", "pandaos-compat", "host") else None
         try:
             self.grow(max(self.levels))
             done = [self.level(n, cpus) for n in self.levels if n <= len(self.vms)]
         finally:
             self.cleanup()
         levels = finish(done)
-        return {"levels": levels, "max_vms": len(self.vms_made), "requested": list(self.levels),
-                "passes": DENSITY_PASSES, "errors": self.errors}, metrics_of(levels)
+        rec = {"levels": levels, "max_vms": len(self.vms_made), "requested": list(self.levels),
+               "passes": DENSITY_PASSES, "errors": self.errors,
+               "cleanup_pending_vms": self.cleanup_pending_vms,
+               "cleanup_errors": self.cleanup_errors}
+        if self.workload != DEFAULT_WORKLOAD:
+            rec["workload"] = self.workload
+            rec["mem_mib"] = self.mem_mib
+        return rec, metrics_of(levels, workload=self.workload)
 
     def cleanup(self):
-        self.vms_made = list(self.vms)
-        for vm in [v for v in self.vms if v != "host"] + self.broken:
-            try:
-                self.d.delete(vm)
-            except Exception as e:
-                self.log(f"delete {vm}: {e}")
-        self.vms, self.broken = [], []
+        cleanup_vms(self.d, self.cleanup_pending_vms, self.cleanup_errors, self.log)
+        self.vms = [vm for vm in self.vms if vm in self.cleanup_pending_vms]
+        self.broken = [vm for vm in self.broken if vm in self.cleanup_pending_vms]

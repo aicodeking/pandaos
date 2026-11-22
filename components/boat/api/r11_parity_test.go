@@ -89,6 +89,13 @@ func TestCompatForkResumeEnvType(t *testing.T) {
 		t.Errorf("fork type: size %v", size)
 	}
 	// labels replace the parent's; its reserved boat.* labels carry over.
+	// Keep the synthetic daemon label consistent with the authoritative selection.
+	if err := e.srv.store.Update(func(st *State) error {
+		st.VMSecrets[e.nativeOf(bx)] = []string{"S"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	e.boatd.mu.Lock()
 	e.boatd.vms[e.nativeOf(bx)]["labels"] = map[string]any{"old": "1", secretsLabel: "S"}
 	e.boatd.mu.Unlock()
@@ -97,7 +104,7 @@ func TestCompatForkResumeEnvType(t *testing.T) {
 	e.boatd.mu.Lock()
 	labels := fmt.Sprint(e.boatd.vms[child]["labels"])
 	e.boatd.mu.Unlock()
-	if labels != "map[a:b boat.secrets:S]" {
+	if labels != "map[a:b boat.secrets:S boat.sel:1]" {
 		t.Errorf("fork labels: %s", labels)
 	}
 	for _, bad := range []map[string]string{{secretsLabel: "x"}, {"bad key": "x"}} {

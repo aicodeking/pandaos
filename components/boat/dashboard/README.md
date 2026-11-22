@@ -8,30 +8,33 @@ build step, no dependencies and no CDN. Everything to serve is in `web/`.
 | Route | Screen |
 |---|---|
 | sign-in | Paste an API key. It stays in this tab's `sessionStorage` and is checked with `GET /v1/me`. |
-| `#/vms` | VM list with state, size, IP and TTL; start, stop, fork, delete |
+| `#/vms` | VM list with state, size, IP and TTL; start, stop, fork, resize, delete |
 | `#/vms/new` | Create a VM: name, size, image, environment, snapshot, TTL, idle stop, labels, env, which secrets to inject |
 | `#/vms/{id}` | VM detail, in the sections below |
-| `#/environments` | Environments: list, create, build, delete. Shown only if the server has them. |
+| `#/environments` | Environments: list, create, build, upgrade pinned sandboxes, delete. Shown only if the server has them. |
 | `#/secrets` | Secret names and dates; add, rotate, delete. Values are write-only. |
-| `#/keys` | API keys: list, create (token shown once), revoke |
+| `#/ai` | AI proxy toggle, provider credentials (last 4 only; add/update/delete) and lifetime token usage. Shown only if the server has them. |
+| `#/keys` | API keys: list, create (token shown once), rotate (new token shown once with optional overlap), revoke |
 | `#/webhooks` | Webhooks: list, create (secret shown once), send a test, delete, delivery log |
 | `#/team` | Team members: list, add (first key shown once), remove |
 | `#/usage` | VM hours, snapshot days and storage, with SVG bar charts over 7, 30 or 90 days |
 
 VM detail sections: connect (signed desktop link, ssh command, add a public key), exec
 console, prompt an agent, prompt history, detached commands and logs, files (list, view,
-download, upload, delete), ports (add, remove, copy URL), snapshots (create, delete).
+download, upload, delete), ports (add, remove, copy URL), snapshots (create, delete),
+settings (rename, TTL, idle stop).
 
-These actions ask first: stop, fork, delete VM, make a port public, remove a port, delete
-a snapshot or file, stop a command, interrupt a prompt, delete a secret, revoke a key,
-delete a webhook or environment, remove a member.
+These actions ask first: stop, fork, resize, delete VM, make a port public, remove a port,
+delete a snapshot or file, stop a command, interrupt a prompt, delete a secret, delete an AI
+provider key, rotate or revoke a key, delete a webhook, upgrade or delete an environment,
+remove a member.
 
 A section hides itself when its endpoint answers 404, 405 or 501, so the dashboard runs
 against an older `boat-api`. A 403 becomes a note in that section. Any other error shows
 the message and a Retry button.
 
-Not in the dashboard yet, though `boat-api` has them: VM resize, key and webhook rotation,
-`/v1/ai/*`, telemetry, conversations, file search and move.
+Not in the dashboard yet, though `boat-api` has them: webhook rotation, telemetry,
+conversations, file search and move.
 
 ## Serving
 

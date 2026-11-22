@@ -6,7 +6,7 @@
 #   desktop.<domain>/<vmid>?sig   -> 302 to <vmid>.desktop.<domain> (nothing served or set here)
 #   <vmid>.desktop.<domain>       -> boat-gateway -> VM desktop (signed link -> host-only cookie)
 #   <port>-<vmid>.<vmDomain>      -> boat-gateway -> VM ip:port; private unless the port is public
-#   ssh -J jump@ssh.<domain>:2222 dev@<vm ip>   (permitopen per key, written by boat-api)
+#   ssh -J jump@ssh.<domain>:2222 dev@<vm ip>   (permitopen per key, authorized online by boat-api)
 #
 # Each desktop and each port route is its own origin. boat-gateway re-reads
 # routes.json on change, so Caddy is never reloaded for VM or port changes.
@@ -49,7 +49,7 @@ let
   askListen = "127.0.0.1:8743";
 
   jumpKeys = pkgs.writeShellScript "boat-jump-keys" ''
-    PATH=${lib.makeBinPath [ pkgs.gnugrep pkgs.gawk pkgs.jq pkgs.coreutils ]}
+    PATH=${lib.makeBinPath [ cfg.package pkgs.python3 pkgs.coreutils pkgs.gnugrep ]}
     ${builtins.readFile ./jump-keys.sh}
   '';
 in
@@ -158,7 +158,8 @@ in
           # route: these handlers run in this order, first match wins.
           "api.${d}".extraConfig = ''
             route {
-              handle /internal/* {
+              @internal path /internal /internal/*
+              handle @internal {
                 respond 404
               }
               ${lib.concatMapStrings (p: "handle ${p} {\n  ${apiProxy}\n}\n") apiPaths}
@@ -258,6 +259,13 @@ in
         description = "boat ssh jump host (ProxyJump into VMs)";
       };
       users.groups.jump = { };
+      users.users.boat-ssh = {
+        isSystemUser = true;
+        group = "boat-ssh";
+        shell = "${pkgs.shadow}/bin/nologin";
+        description = "boat online SSH authorization lookup";
+      };
+      users.groups.boat-ssh = { };
 
       # sshd requires a root-owned AuthorizedKeysCommand on a path with no
       # group/world-writable parent, which /nix/store (1775) is not: copy to /etc.
@@ -273,8 +281,14 @@ in
           AllowUsers jump
         Match User jump
           AuthorizedKeysFile none
-          AuthorizedKeysCommand /etc/boat/jump-keys ${boat.dataDir}/ssh/jump_authorized_keys /run/boat/routes.json
-          AuthorizedKeysCommandUser boat
+          AuthorizedPrincipalsFile none
+          AuthorizedPrincipalsCommand none
+          TrustedUserCAKeys none
+          AuthenticationMethods publickey
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          AuthorizedKeysCommand /etc/boat/jump-keys http://127.0.0.1:${toString boat.apiPort}/internal/ssh/authorize %t %k %u
+          AuthorizedKeysCommandUser boat-ssh
           AllowTcpForwarding local
           AllowAgentForwarding no
           AllowStreamLocalForwarding no
@@ -283,7 +297,69 @@ in
           PermitTunnel no
           GatewayPorts no
           ForceCommand ${pkgs.coreutils}/bin/false
+          # Session limits (r28). Authorization happens once per connection, so an
+          # open `ssh -J` would outlive revocation without these and the reaper below.
+          # Needs OpenSSH >= 9.2 (ChannelTimeout, UnusedConnectionTimeout).
+          ClientAliveInterval 15
+          ClientAliveCountMax 2
+          UnusedConnectionTimeout 120
+          ChannelTimeout direct-tcpip=30m session=30s
+          MaxSessions 2
       '';
+
+      # AuthorizedKeysCommand (boat-ssh) records which sshd connection each
+      # authorization belongs to; boat-jump-reaper (root) re-asks boat-api for
+      # every recorded key every few seconds (one lookup per distinct key per
+      # pass) and kills the connection's sshd processes on the first pass after
+      # the API answers 204 (grant revoked, key deleted, member removed, VM
+      # deleted). A granted permitopen target that is no longer offered kills
+      # only if /run/boat/routes.json (boatd, running policy-current VMs) still
+      # lists a running VM, or a quarantined one, at that address: its grant was
+      # revoked or the IP was reused. A target whose VM stopped or was deleted
+      # is in no routes.json entry and never ends a session (a teammate
+      # stopping an unrelated VM cannot kill it); neither do added targets. An
+      # unreachable or malformed API, or an unreadable routes.json when a target
+      # was removed, only kills after max-stale. Each pass stamps
+      # /run/boat-jump/reaper.alive; the helper denies authentication while it
+      # is missing or older than 30s (a dead reaper must not leave sessions
+      # that nothing can revoke), so keep -interval <= 10s. The helper also
+      # fails closed when its parent is not an identifiable sshd.
+      # See docs/security.md.
+      systemd.tmpfiles.rules = [ "d /run/boat-jump 0770 root boat-ssh -" ];
+      systemd.services.boat-jump-reaper = {
+        description = "boat ssh jump session reaper (ends sessions whose grant was revoked)";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "systemd-tmpfiles-setup.service" "boat-api.service" ];
+        serviceConfig = {
+          ExecStart = lib.escapeShellArgs [
+            (lib.getExe cfg.package)
+            "jump-reaper"
+            "-api" "http://127.0.0.1:${toString boat.apiPort}/internal/ssh/authorize"
+            "-dir" "/run/boat-jump"
+            "-routes" "/run/boat/routes.json"
+            "-interval" "3s"
+            "-max-stale" "2m"
+          ];
+          Restart = "always";
+          RestartSec = 1;
+          # Must see and signal the host's sshd processes: no PID namespace, only CAP_KILL.
+          CapabilityBoundingSet = [ "CAP_KILL" ];
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ReadWritePaths = [ "/run/boat-jump" ];
+          ProtectHome = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectControlGroups = true;
+          RestrictAddressFamilies = [ "AF_INET" ];
+          RestrictNamespaces = true;
+          LockPersonality = true;
+          MemoryDenyWriteExecute = true;
+          SystemCallArchitectures = "native";
+        };
+      };
     })
   ]);
 }

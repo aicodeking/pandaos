@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -15,41 +18,117 @@ import (
 
 // fakeBoatd implements the boatd internal contract in memory.
 type fakeBoatd struct {
-	mu            sync.Mutex
-	vms           map[string]VM
-	files         map[string][]byte // vmid + ":" + path
-	execs         []map[string]any
-	starts        []map[string]any
-	desk          []map[string]any
-	portReqs      []map[string]any
-	resizes       []map[string]any
-	envOps        []map[string]any
-	snaps         map[string]map[string]any
-	cmds          map[string]*fakeCmd
-	events        chan string
-	n             int
-	creates       []map[string]any // POST /v1/vms bodies
-	patches       []map[string]any // PATCH /v1/vms/{id} bodies
-	noPatch       bool             // answer PATCH 405, like a boatd from before it
-	noDefaultSize bool             // refuse size "default", like a host with other size names
-	stops         []map[string]any
-	forks         []map[string]any
-	deskErr       string // non-empty: the guest agent refuses desktop with this (boatd answers 502)
-	resizeTimeout bool   // the guest's resize2fs times out (boatd answers 504 resize_timeout)
-	refuse        string // non-empty: lifecycle POSTs answer 503 with this code (host full)
+	mu       sync.Mutex
+	vms      map[string]VM
+	files    map[string][]byte // vmid + ":" + path
+	execs    []map[string]any
+	starts   []map[string]any
+	desk     []map[string]any
+	portReqs []map[string]any
+	resizes  []map[string]any
+	envOps   []map[string]any
+	envFail  bool // env op answers 502 (guest agent unreachable)
+	// startEnvFail: a cold start's boot-time set_env fails like boatd's: the VM
+	// is running but agent_ready=false with an error, and the call still answers 200.
+	startEnvFail bool
+	// releaseEnvFail: a fork/clone release's set_env fails like boatd's: the child is
+	// running but agent_ready=false with an error, and the call still answers 200.
+	releaseEnvFail bool
+	// usageFn supplies cumulative aggregate seconds; usageWindowFn supplies exact VM intervals.
+	usageFn           func(since string) float64
+	usageWindowFn     func(url.Values) map[string]any
+	usageQueries      []string // raw queries of GET /v1/usage
+	snaps             map[string]map[string]any
+	cmds              map[string]*fakeCmd
+	events            chan string
+	n                 int
+	creates           []map[string]any // POST /v1/vms bodies
+	patches           []map[string]any // PATCH /v1/vms/{id} bodies
+	noPatch           bool             // answer PATCH 405, like a boatd from before it
+	noDefaultSize     bool             // refuse size "default", like a host with other size names
+	noImages          bool             // answer GET /v1/images 404, like a boatd without size discovery
+	stops             []map[string]any
+	legacyLogs        bool // cmd_logs omits exit/signal, like a guest agent from before they were added
+	legacyCmdStart    bool // cmd_start omits pid, like an older guest agent
+	execErr           map[string]any
+	downloadProtected []bool
+	forks             []map[string]any
+	deskErr           string // non-empty: the guest agent refuses desktop with this (boatd answers 502)
+	resizeTimeout     bool   // the guest's resize2fs times out (boatd answers 504 resize_timeout)
+	refuse            string // non-empty: lifecycle POSTs answer 503 with this code (host full)
 	// discardPuts counts file uploads instead of keeping them (memory tests).
-	discardPuts   bool
-	putBytes      int64
-	afterCopy     func() // inject a failure after boatd copied a disk
-	cleanupErr    bool   // refuse VM/snapshot deletion
-	noPrepare     bool
-	beforeRelease func(kind, id string)
-	copyEnvs      map[string]map[string]any
+	discardPuts         bool
+	putBytes            int64
+	afterCopy           func() // inject a failure after boatd copied a disk
+	cleanupErr          bool   // refuse VM/snapshot deletion
+	noPrepare           bool
+	beforeRelease       func(kind, id string)
+	copyEnvs            map[string]map[string]any
+	sshPolicyCalls      int
+	sshPolicyBatchCalls int
+	noSSHPolicyBatch    bool
+	snapPrepares        []map[string]any
+	// envHook/startHook run (without the lock) before the env op / a start is
+	// handled; envHook answering true makes the env op fail with 502.
+	envHook   func(vmID string) (fail bool)
+	startHook func(vmID string)
+	// logsHook runs (without the lock) before a cmd_logs reply: timing and
+	// concurrency tests of the guest's log reads.
+	logsHook func()
+	// beforeExec runs (without the lock) before an exec is handled, with the VM id:
+	// concurrency tests of the exec path.
+	beforeExec func(vmID string)
+	// snapListHook runs (without the lock) before a GET /v1/vms/{id}/snapshots reply;
+	// set it under mu, since background goroutines may be serving requests.
+	snapListHook func(vmID string)
+	// failStarts: the next this-many starts answer 500 (boatd could not boot the VM).
+	failStarts int
+	// failStartsAfterBoot: the next this-many starts boot the VM, then answer 500
+	// (boatd failed after the VM was running, or its answer was lost).
+	failStartsAfterBoot int
+	// failStop: stops answer 500 and leave the VM as it is.
+	failStop bool
+	// freshBoots: the VMs a start asked to cold-boot with "fresh_boot": true; like
+	// boatd, such a start ignores and discards the stopped VM's memory snapshot.
+	freshBoots []string
+	// releaseBodies: every release body, in order; freshReleases: the children a
+	// release asked to cold-boot with "fresh_boot": true (no parent memory).
+	releaseBodies []map[string]any
+	freshReleases []string
+	// failRelease: the next this-many releases answer 500 and leave the child pending;
+	// failReleaseAfterBoot: they boot the child first, then answer 500.
+	failRelease          int
+	failReleaseAfterBoot int
+	// freshCreates: the VMs a create made with "fresh_boot": true (the snapshot's
+	// disk only, a cold boot, never its memory).
+	freshCreates []string
+	// agentOpHook overrides or injects a guest agent reply (called under f.mu).
+	agentOpHook func(op string, in map[string]any) (int, map[string]any, bool)
+	// vmGets counts GET /v1/vms/{id} calls per VM id.
+	vmGets map[string]int
 }
 
 func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
-	f := &fakeBoatd{copyEnvs: map[string]map[string]any{}, vms: map[string]VM{}, files: map[string][]byte{}, snaps: map[string]map[string]any{}, cmds: map[string]*fakeCmd{}, events: make(chan string, 16)}
+	f := &fakeBoatd{copyEnvs: map[string]map[string]any{}, vms: map[string]VM{}, files: map[string][]byte{}, snaps: map[string]map[string]any{}, cmds: map[string]*fakeCmd{}, vmGets: map[string]int{}, events: make(chan string, 16)}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/images", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		noImg, noDef := f.noImages, f.noDefaultSize
+		f.mu.Unlock()
+		if noImg {
+			writeJSON(w, 404, map[string]string{"error": "not found"})
+			return
+		}
+		sizes := map[string]any{
+			"small":  map[string]any{"vcpu": 2, "mem_mib": 4096, "disk_gib": 51},
+			"large":  map[string]any{"vcpu": 8, "mem_mib": 16384, "disk_gib": 111},
+			"xlarge": map[string]any{"vcpu": 16, "mem_mib": 32768, "disk_gib": 251},
+		}
+		if !noDef {
+			sizes["default"] = map[string]any{"vcpu": 4, "mem_mib": 8192, "disk_gib": 51}
+		}
+		writeJSON(w, 200, map[string]any{"sizes": sizes})
+	})
 	mux.HandleFunc("POST /v1/vms", func(w http.ResponseWriter, r *http.Request) {
 		var in map[string]any
 		json.NewDecoder(r.Body).Decode(&in)
@@ -72,9 +151,16 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 					name = fmt.Sprintf("%s-%d", s, i)
 				}
 				vm := VM{"id": id, "name": name, "size": "default", "image": in["image"], "team": in["team"], "state": "running",
-					"env": in["env"], "ip": "10.0.0.5", "ports": []any{}, "labels": in["labels"]}
+					"env": in["env"], "ip": "10.0.0.5", "ports": []any{}, "labels": in["labels"], "ssh_boot_epoch": "fake-boot-" + id}
+				if ttl, _ := in["ttl_s"].(float64); ttl > 0 {
+					vm["ttl_s"] = ttl
+					vm["expires_at"] = time.Now().UTC().Add(time.Duration(ttl) * time.Second).Format(time.RFC3339)
+				}
 				f.vms[id] = vm
-				out = append(out, vm)
+				if in["fresh_boot"] == true {
+					f.freshCreates = append(f.freshCreates, id)
+				}
+				out = append(out, fakeVMMetadata(vm))
 			}
 			f.mu.Unlock()
 			writeJSON(w, 201, map[string]any{"vms": out})
@@ -110,6 +196,9 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			vm["expires_at"] = time.Now().UTC().Add(time.Duration(ttl) * time.Second).Format(time.RFC3339)
 		}
 		f.vms[id] = vm
+		if in["fresh_boot"] == true {
+			f.freshCreates = append(f.freshCreates, id)
+		}
 		f.mu.Unlock()
 		writeJSON(w, 201, vm)
 	})
@@ -134,6 +223,9 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		return vm
 	}
 	mux.HandleFunc("GET /v1/vms/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.vmGets[r.PathValue("id")]++
+		f.mu.Unlock()
 		if vm := get(w, r); vm != nil {
 			f.mu.Lock()
 			cp := fakeVMMetadata(vm)
@@ -172,6 +264,12 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		f.patches = append(f.patches, in)
 		now := time.Now().UTC()
 		if n, ok := in["name"].(string); ok {
+			for id, o := range f.vms { // like boatd: a team's hostnames are unique
+				if id != vm["id"] && o["team"] == vm["team"] && o["name"] == n && n != vm["name"] {
+					writeJSON(w, 409, map[string]string{"error": "team already has a VM named " + n})
+					return
+				}
+			}
 			vm["name"] = n
 		}
 		if t, ok := in["ttl_s"].(float64); ok {
@@ -188,7 +286,67 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			}
 			vm["expires_at"] = base.Add(time.Duration(x) * time.Second).Format(time.RFC3339)
 		}
+		if l, ok := in["labels"].(map[string]any); ok {
+			vm["labels"] = l
+		}
+		if idle, ok := in["idle_stop_s"].(float64); ok {
+			vm["idle_stop_s"] = idle
+		}
+		if rob, ok := in["resume_on_boot"].(bool); ok {
+			vm["resume_on_boot"] = rob
+		}
 		writeJSON(w, 200, vm)
+	})
+	mux.HandleFunc("POST /v1/vms/ssh-policy-batch", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.noSSHPolicyBatch {
+			http.Error(w, "not found", 404)
+			return
+		}
+		f.sshPolicyBatchCalls++
+		var req struct {
+			Items []map[string]any `json:"items"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		results := map[string]any{}
+		errs := map[string]string{}
+		for _, item := range req.Items {
+			id := fmt.Sprint(item["id"])
+			vm := f.vms[id]
+			if vm == nil {
+				errs[id] = "no such vm"
+				continue
+			}
+			config, _ := item["config"].(map[string]any)
+			epoch := vm["ssh_boot_epoch"]
+			if epoch == nil {
+				epoch = "fake-boot-" + id
+				vm["ssh_boot_epoch"] = epoch
+			}
+			if item["version"] != float64(1) || epoch == nil || item["boot_epoch"] != epoch || config["boot_epoch"] != epoch || config["vm_id"] != vm["id"] || config["team_id"] != vm["team"] || item["helper_b64"] == "" {
+				errs[id] = "SSH identity mismatch"
+				continue
+			}
+			b, _ := json.Marshal(config)
+			sum := sha256.Sum256(b)
+			digest := hex.EncodeToString(sum[:])
+			vm["ssh_policy_ready"], vm["ssh_policy_digest"] = true, digest
+			f.files[id+":/etc/boat/ssh-auth.json"] = b
+			results[id] = map[string]any{
+				"version":           1,
+				"boot_epoch":        epoch,
+				"config_digest":     digest,
+				"readiness":         true,
+				"vm_id":             id,
+				"team":              vm["team"],
+				"state":             vm["state"],
+				"pending_copy":      vm["pending_copy"] == true,
+				"ssh_policy_ready":  true,
+				"ssh_policy_digest": digest,
+			}
+		}
+		writeJSON(w, 200, map[string]any{"results": results, "errors": errs})
 	})
 	action := func(w http.ResponseWriter, r *http.Request) {
 		vm := get(w, r)
@@ -209,12 +367,59 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		}
 		switch r.PathValue("action") {
 		case "start":
+			if hk := f.startHook; hk != nil {
+				f.mu.Unlock()
+				hk(vm["id"].(string))
+				f.mu.Lock()
+			}
+			if f.failStarts > 0 {
+				f.failStarts--
+				writeJSON(w, 500, map[string]string{"error": "boot failed"})
+				return
+			}
 			f.starts = append(f.starts, in)
-			vm["state"] = "running"
+			if vm["state"] != "running" {
+				if in["fresh_boot"] == true {
+					f.freshBoots = append(f.freshBoots, vm["id"].(string))
+					vm["has_snapshot"] = false
+				}
+				vm["ssh_boot_epoch"] = randHex(16)
+				vm["ssh_policy_ready"] = false
+				delete(vm, "ssh_policy_digest")
+				vm["state"] = "running"
+				if vars, ok := in["env"]; ok {
+					vm["env"] = vars
+				}
+				if _, hasEnv := in["env"]; hasEnv && f.startEnvFail {
+					vm["agent_ready"], vm["error"] = false, "set_env: guest agent unreachable"
+				} else if hasEnv {
+					vm["agent_ready"], vm["error"] = true, ""
+				}
+			}
+			if t, ok := in["ttl_s"].(float64); ok {
+				vm["ttl_s"] = t
+				if t == 0 {
+					delete(vm, "expires_at")
+				} else {
+					vm["expires_at"] = time.Now().UTC().Add(time.Duration(t) * time.Second).Format(time.RFC3339)
+				}
+			}
+			if f.failStartsAfterBoot > 0 {
+				f.failStartsAfterBoot--
+				writeJSON(w, 500, map[string]string{"error": "boatd failed after the boot"})
+				return
+			}
 		case "stop":
+			if f.failStop {
+				writeJSON(w, 500, map[string]string{"error": "stop failed"})
+				return
+			}
 			f.stops = append(f.stops, in)
 			vm["state"] = "stopped"
 			vm["has_snapshot"] = in["force"] != true
+			delete(vm, "expires_at") // like boatd: a stopped VM has no deadline
+			delete(vm, "error")
+			vm["stopped_by"] = "boatd" // only a read of the VM after the stop shows this
 		case "delete":
 			if f.cleanupErr {
 				writeJSON(w, 500, map[string]string{"error": "deletion refused"})
@@ -232,11 +437,29 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 				if f.beforeRelease != nil {
 					f.beforeRelease("fork", vm["id"].(string))
 				}
+				f.releaseBodies = append(f.releaseBodies, in)
+				if f.failRelease > 0 {
+					f.failRelease--
+					writeJSON(w, 500, map[string]string{"error": "release failed"})
+					return
+				}
+				if in["fresh_boot"] == true {
+					f.freshReleases = append(f.freshReleases, vm["id"].(string))
+					vm["has_snapshot"] = false
+				}
 				delete(vm, "pending_copy")
 				vm["state"] = "running"
+				if f.failReleaseAfterBoot > 0 {
+					f.failReleaseAfterBoot--
+					writeJSON(w, 500, map[string]string{"error": "release failed after the boot"})
+					return
+				}
 				if vars, ok := in["env"]; ok {
 					vm["env"] = vars
 					f.envOps = append(f.envOps, map[string]any{"vm": vm["id"], "vars": vars})
+					if f.releaseEnvFail {
+						vm["agent_ready"], vm["error"] = false, "set_env: guest agent unreachable"
+					}
 				}
 			}
 		case "fork":
@@ -252,6 +475,17 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 				labels = l
 			}
 			f.vms[id] = VM{"id": id, "name": in["name"], "team": in["team"], "state": "running", "labels": labels, "env": vm["env"]}
+			if ttl, ok := vm["ttl_s"]; ok { // like boatd: forks inherit the parent's TTL
+				f.vms[id]["ttl_s"] = ttl
+			}
+			if t, ok := in["ttl_s"].(float64); ok {
+				f.vms[id]["ttl_s"] = t
+				if t == 0 {
+					delete(f.vms[id], "expires_at")
+				} else {
+					f.vms[id]["expires_at"] = time.Now().UTC().Add(time.Duration(t) * time.Second).Format(time.RFC3339)
+				}
+			}
 			f.copyEnvs[id] = fakeCopyEnv(vm)
 			if strings.HasSuffix(r.URL.Path, "/prepare") {
 				f.vms[id]["pending_copy"], f.vms[id]["state"] = true, "forking"
@@ -265,13 +499,32 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			writeJSON(w, 201, f.vms[id])
 			return
 		case "exec":
+			if hk := f.beforeExec; hk != nil {
+				f.mu.Unlock()
+				hk(vm["id"].(string))
+				f.mu.Lock()
+			}
 			f.execs = append(f.execs, in)
 			w.Header().Set("Content-Type", "application/x-ndjson")
 			enc := json.NewEncoder(w)
+			if f.execErr != nil {
+				enc.Encode(f.execErr)
+				return
+			}
+			if cwd, _ := in["cwd"].(string); strings.HasPrefix(cwd, "/no-such-") || cwd == "no-such-cwd" {
+				enc.Encode(map[string]any{"error": "guest agent: cwd does not exist: " + cwd, "code": "spawn_failed"})
+				return
+			}
 			out, exit := "hello\n", 0
 			if cmd, _ := in["cmd"].([]any); len(cmd) > 0 {
 				joined := fmt.Sprint(cmd...)
 				switch { // behave like these commands for the handlers and live scripts
+				case cmd[0] == "no-such-bin" || strings.Contains(joined, "no-such-bin"):
+					enc.Encode(map[string]any{"error": "guest agent: exec failed: no such file or directory", "code": "spawn_failed"})
+					return
+				case cmd[0] == "perm-denied" || strings.Contains(joined, "perm-denied"):
+					enc.Encode(map[string]any{"error": "guest agent: permission denied", "code": "permission_denied"})
+					return
 				case cmd[0] == "echo":
 					parts := make([]string, len(cmd)-1)
 					for i, c := range cmd[1:] {
@@ -319,7 +572,50 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		case "agent":
 			f.agentOp(w, vm, in)
 			return
+		case "ssh-policy":
+			f.sshPolicyCalls++
+			config, _ := in["config"].(map[string]any)
+			epoch := vm["ssh_boot_epoch"]
+			if epoch == nil {
+				epoch = "fake-boot-" + fmt.Sprint(vm["id"])
+				vm["ssh_boot_epoch"] = epoch
+			}
+			if in["version"] != float64(1) || epoch == nil || in["boot_epoch"] != epoch || config["boot_epoch"] != epoch || config["vm_id"] != vm["id"] || config["team_id"] != vm["team"] || in["helper_b64"] == "" {
+				writeJSON(w, 409, map[string]string{"error": "SSH identity mismatch"})
+				return
+			}
+			b, _ := json.Marshal(config)
+			sum := sha256.Sum256(b)
+			digest := hex.EncodeToString(sum[:])
+			vm["ssh_policy_ready"], vm["ssh_policy_digest"] = true, digest
+			f.files[fmt.Sprint(vm["id"])+":/etc/boat/ssh-auth.json"] = b
+			writeJSON(w, 200, map[string]any{
+				"version":           1,
+				"boot_epoch":        epoch,
+				"config_digest":     digest,
+				"readiness":         true,
+				"vm_id":             vm["id"],
+				"team":              vm["team"],
+				"state":             vm["state"],
+				"pending_copy":      vm["pending_copy"] == true,
+				"ssh_policy_ready":  true,
+				"ssh_policy_digest": digest,
+			})
+			return
 		case "env":
+			if hk := f.envHook; hk != nil {
+				f.mu.Unlock()
+				fail := hk(vm["id"].(string))
+				f.mu.Lock()
+				if fail {
+					writeJSON(w, 502, map[string]string{"error": "guest agent: unreachable"})
+					return
+				}
+			}
+			if f.envFail {
+				writeJSON(w, 502, map[string]string{"error": "guest agent: unreachable"})
+				return
+			}
 			in["vm"] = vm["id"]
 			vm["env"] = in["vars"]
 			f.envOps = append(f.envOps, in)
@@ -327,7 +623,15 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			return
 		case "desktop":
 			if f.deskErr != "" {
-				writeJSON(w, 502, map[string]string{"error": "guest agent: " + f.deskErr})
+				lower := strings.ToLower(f.deskErr)
+				switch {
+				case strings.Contains(lower, "not installed in this image"):
+					writeJSON(w, 422, map[string]string{"error": "guest agent: " + f.deskErr, "code": "unsupported"})
+				case strings.Contains(lower, "must be"):
+					writeJSON(w, 400, map[string]string{"error": "guest agent: " + f.deskErr, "code": "invalid_argument"})
+				default:
+					writeJSON(w, 502, map[string]string{"error": "guest agent: " + f.deskErr})
+				}
 				return
 			}
 			f.desk = append(f.desk, in)
@@ -344,13 +648,27 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			}
 			f.portReqs = append(f.portReqs, in)
 			ports, _ := vm["ports"].([]any)
-			vm["ports"] = append(ports, p)
+			replaced := false
+			for i, existing := range ports {
+				if em, ok := existing.(map[string]any); ok && fmt.Sprint(em["guest_port"]) == fmt.Sprint(port) {
+					ports[i] = p
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				ports = append(ports, p)
+			}
+			vm["ports"] = ports
 			writeJSON(w, 201, p)
 			return
 		case "snapshots":
-			if strings.HasSuffix(r.URL.Path, "/prepare") && f.noPrepare {
-				writeJSON(w, 404, map[string]string{"error": "no prepare route"})
-				return
+			if strings.HasSuffix(r.URL.Path, "/prepare") {
+				f.snapPrepares = append(f.snapPrepares, in)
+				if f.noPrepare {
+					writeJSON(w, 404, map[string]string{"error": "no prepare route"})
+					return
+				}
 			}
 			f.n++
 			sid := fmt.Sprintf("snap%d", f.n)
@@ -446,7 +764,13 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if sn := f.snaps[r.PathValue("sid")]; sn != nil && sn["pending_copy"] != true && sn["vm_id"] == r.PathValue("id") {
-			fmt.Fprintf(w, "ARCHIVE:%s", sn["id"])
+			prot := r.URL.Query().Get("protected") == "1"
+			f.downloadProtected = append(f.downloadProtected, prot)
+			if prot {
+				fmt.Fprintf(w, "ARCHIVE:%s:protected", sn["id"])
+			} else {
+				fmt.Fprintf(w, "ARCHIVE:%s", sn["id"])
+			}
 			return
 		}
 		writeJSON(w, 404, map[string]string{"error": "no such snapshot"})
@@ -478,10 +802,32 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 		defer f.mu.Unlock()
 		f.n++
 		id := fmt.Sprintf("snap%d", f.n)
-		f.snaps[id] = map[string]any{"id": id, "name": r.URL.Query().Get("name"), "team": r.URL.Query().Get("team"), "vm_id": ""}
+		sn := map[string]any{"id": id, "name": r.URL.Query().Get("name"), "team": r.URL.Query().Get("team"), "vm_id": ""}
+		src := strings.TrimPrefix(string(b), "ARCHIVE:")
+		if strings.HasSuffix(src, ":protected") {
+			sn["no_env"] = true
+			sn["protected"] = true
+		} else if src == "no_env" || strings.HasSuffix(src, ":no_env") {
+			sn["no_env"] = true
+		} else if strings.HasSuffix(src, ":label_no_env") {
+			sn["labels"] = map[string]any{noEnvLabel: "1"}
+		} else if orig := f.snaps[src]; orig != nil {
+			if b, _ := orig["no_env"].(bool); b {
+				sn["no_env"] = true
+			} else if origVM := f.vms[fmt.Sprint(orig["vm_id"])]; origVM != nil && labeledNoEnv(origVM) {
+				sn["no_env"] = true
+			}
+		}
+		f.snaps[id] = sn
 		writeJSON(w, 201, f.snaps[id])
 	})
 	mux.HandleFunc("GET /v1/vms/{id}/snapshots", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		hook := f.snapListHook
+		f.mu.Unlock()
+		if hook != nil {
+			hook(r.PathValue("id"))
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		out := []any{}
@@ -498,8 +844,45 @@ func newFakeBoatd(t *testing.T) (*fakeBoatd, *httptest.Server) {
 			return
 		}
 		team := r.URL.Query().Get("team")
+		f.mu.Lock()
+		f.usageQueries = append(f.usageQueries, r.URL.RawQuery)
+		secs := float64(42)
+		if f.usageFn != nil {
+			secs = f.usageFn(r.URL.Query().Get("since"))
+		}
+		if id := r.URL.Query().Get("vm_id"); id != "" {
+			if f.usageWindowFn != nil {
+				out := f.usageWindowFn(r.URL.Query())
+				f.mu.Unlock()
+				writeJSON(w, 200, out)
+				return
+			}
+			now := time.Now().UTC()
+			since, _ := time.Parse(time.RFC3339Nano, r.URL.Query().Get("since"))
+			until := now
+			if raw := r.URL.Query().Get("until"); raw != "" {
+				until, _ = time.Parse(time.RFC3339Nano, raw)
+				if until.After(now) {
+					until = now
+				}
+				if f.usageFn != nil {
+					secs -= f.usageFn(raw)
+				}
+			}
+			start := until.Add(-time.Duration(secs * float64(time.Second)))
+			if start.Before(since) {
+				start = since
+			}
+			size := str(f.vms[id], "size")
+			f.mu.Unlock()
+			writeJSON(w, 200, map[string]any{"exact": true, "since": since, "until": until, "intervals": []any{
+				map[string]any{"kind": "vm", "id": id, "team": team, "size": size, "start": start, "end": until},
+			}})
+			return
+		}
+		f.mu.Unlock()
 		writeJSON(w, 200, map[string]any{"since": r.URL.Query().Get("since"), "until": "now",
-			"vms":   []any{map[string]any{"id": "vm1", "team": team, "size": "default", "vm_seconds": 42}},
+			"vms":   []any{map[string]any{"id": "vm1", "team": team, "size": "default", "vm_seconds": secs}},
 			"teams": []any{map[string]any{"team": team, "vm_seconds": 42, "vm_seconds_by_size": map[string]int{"default": 42}}}})
 	})
 	mux.HandleFunc("GET /v1/events", func(w http.ResponseWriter, r *http.Request) {
@@ -556,18 +939,51 @@ func (c *fakeCmd) view() map[string]any {
 
 // agentOp plays the guest agent; the caller holds f.mu.
 func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
+	if f.agentOpHook != nil {
+		if status, body, handled := f.agentOpHook(fmt.Sprint(in["op"]), in); handled {
+			writeJSON(w, status, body)
+			return
+		}
+	}
 	id, _ := in["cmd_id"].(string)
 	c := f.cmds[id]
 	switch in["op"] {
 	case "cmd_start":
+		if u, _ := in["user"].(string); u != "" && u != "dev" && u != "user" && u != "root" {
+			writeJSON(w, 400, map[string]string{"error": "guest agent: no such user: " + u, "code": "invalid_user"})
+			return
+		}
+		if cwd, _ := in["cwd"].(string); strings.HasPrefix(cwd, "/no-such-") || cwd == "no-such-cwd" {
+			writeJSON(w, 400, map[string]string{"error": "guest agent: cwd does not exist: " + cwd, "code": "spawn_failed"})
+			return
+		}
+		argv, _ := in["argv"].([]any)
+		if len(argv) > 0 {
+			bin := fmt.Sprint(argv[0])
+			if bin == "no-such-bin" || strings.HasPrefix(bin, "/no-such-") {
+				writeJSON(w, 400, map[string]string{"error": "guest agent: exec failed: no such file or directory: " + bin, "code": "spawn_failed"})
+				return
+			}
+			if bin == "permission-denied" {
+				writeJSON(w, 403, map[string]string{"error": "guest agent: permission denied: " + bin, "code": "permission_denied"})
+				return
+			}
+		}
 		f.n++
 		c = &fakeCmd{id: fmt.Sprintf("c_%d", f.n), vm: vm["id"], running: false, started: "2026-11-01T00:00:00Z"}
-		c.argv, _ = in["argv"].([]any)
+		c.argv = argv
 		c.env, _ = in["env"].(map[string]any)
 		first := fmt.Sprint(c.argv[0])
 		joined := fmt.Sprint(c.argv...)
+		isLongSleep := first == "sleep" || strings.Contains(joined, "sleep-forever")
+		if !isLongSleep && first == "bash" && len(c.argv) == 3 && fmt.Sprint(c.argv[1]) == "-lc" {
+			script := strings.TrimSpace(fmt.Sprint(c.argv[2]))
+			if strings.HasPrefix(script, "sleep ") && !strings.ContainsAny(script, ";|&") {
+				isLongSleep = true
+			}
+		}
 		switch {
-		case first == "sleep" || strings.Contains(joined, "sleep-forever"):
+		case isLongSleep:
 			c.running, c.exit = true, nil
 			c.log = "started\n"
 		case first == "codex":
@@ -584,7 +1000,11 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 			c.exit, c.log = 0, "ran: "+joined+"\n"
 		}
 		f.cmds[c.id] = c
-		writeJSON(w, 200, map[string]any{"ok": true, "cmd_id": c.id})
+		reply := map[string]any{"ok": true, "cmd_id": c.id}
+		if !f.legacyCmdStart {
+			reply["pid"] = 42
+		}
+		writeJSON(w, 200, reply)
 	case "cmd_list":
 		out := []any{}
 		for _, x := range f.cmds {
@@ -595,15 +1015,20 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 		writeJSON(w, 200, map[string]any{"ok": true, "cmds": out})
 	case "cmd_status":
 		if c == nil || c.vm != vm["id"] {
-			writeJSON(w, 404, map[string]string{"error": "no such command"})
+			writeJSON(w, 404, map[string]string{"error": "guest agent: no such command: " + id, "code": "not_found"})
 			return
 		}
 		v := c.view()
 		v["ok"] = true
 		writeJSON(w, 200, v)
 	case "cmd_logs":
+		if hk := f.logsHook; hk != nil {
+			f.mu.Unlock()
+			hk()
+			f.mu.Lock()
+		}
 		if c == nil || c.vm != vm["id"] {
-			writeJSON(w, 404, map[string]string{"error": "no such command"})
+			writeJSON(w, 404, map[string]string{"error": "guest agent: no such command: " + id, "code": "not_found"})
 			return
 		}
 		off, _ := in["offset"].(float64)
@@ -611,11 +1036,23 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 		if int(off) < len(c.log) {
 			data = c.log[int(off):]
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "data_b64": base64.StdEncoding.EncodeToString([]byte(data)), "offset": off,
-			"next_offset": len(c.log), "size": len(c.log), "truncated": false, "running": c.running})
+		reply := map[string]any{"ok": true, "data_b64": base64.StdEncoding.EncodeToString([]byte(data)), "offset": off,
+			"next_offset": len(c.log), "size": len(c.log), "truncated": false, "running": c.running}
+		if !f.legacyLogs { // current guests also report exit/signal (null when not applicable)
+			if c.running {
+				reply["exit"], reply["signal"] = nil, nil
+			} else {
+				reply["exit"], reply["signal"] = c.exit, c.signal
+			}
+		}
+		writeJSON(w, 200, reply)
 	case "cmd_signal":
 		if c == nil || c.vm != vm["id"] {
-			writeJSON(w, 404, map[string]string{"error": "no such command"})
+			writeJSON(w, 404, map[string]string{"error": "guest agent: no such command: " + id, "code": "not_found"})
+			return
+		}
+		if !c.running {
+			writeJSON(w, 409, map[string]string{"error": "guest agent: command is not running: exited", "code": "not_running"})
 			return
 		}
 		c.running, c.signal = false, "SIG"+fmt.Sprint(in["signal"])
@@ -630,17 +1067,65 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "entries": out, "truncated": false})
 	case "file_delete":
-		delete(f.files, fmt.Sprint(vm["id"])+":"+fmt.Sprint(in["path"]))
+		path := fmt.Sprint(in["path"])
+		if path == "/" || path == "/etc" || path == "/usr" {
+			writeJSON(w, 400, map[string]string{"error": "guest agent: refusing to delete " + path, "code": "invalid_argument"})
+			return
+		}
+		if strings.HasPrefix(path, "/root/denied") {
+			writeJSON(w, 403, map[string]string{"error": "guest agent: permission denied: " + path, "code": "permission_denied"})
+			return
+		}
+		k := fmt.Sprint(vm["id"]) + ":"
+		dirPrefix := strings.TrimRight(path, "/") + "/"
+		hasChildren := false
+		for fk := range f.files {
+			if strings.HasPrefix(fk, k+dirPrefix) {
+				hasChildren = true
+				break
+			}
+		}
+		if hasChildren {
+			if in["recursive"] != true {
+				writeJSON(w, 409, map[string]string{"error": "guest agent: " + path + " is a non-empty directory; set recursive", "code": "not_empty"})
+				return
+			}
+			for fk := range f.files {
+				if strings.HasPrefix(fk, k+dirPrefix) {
+					delete(f.files, fk)
+				}
+			}
+		}
+		delete(f.files, k+path)
 		writeJSON(w, 200, map[string]any{"ok": true})
 	case "file_move":
 		k := fmt.Sprint(vm["id"]) + ":"
-		b, ok := f.files[k+fmt.Sprint(in["from"])]
+		from, to := fmt.Sprint(in["from"]), fmt.Sprint(in["to"])
+		b, ok := f.files[k+from]
 		if !ok {
-			writeJSON(w, 404, map[string]string{"error": "No such file"})
+			writeJSON(w, 404, map[string]string{"error": "guest agent: no such file: " + from, "code": "not_found"})
 			return
 		}
-		delete(f.files, k+fmt.Sprint(in["from"]))
-		f.files[k+fmt.Sprint(in["to"])] = b
+		toDirPrefix := strings.TrimRight(to, "/") + "/"
+		toIsDir := to == "/etc"
+		if !toIsDir {
+			for fk := range f.files {
+				if strings.HasPrefix(fk, k+toDirPrefix) {
+					toIsDir = true
+					break
+				}
+			}
+		}
+		if toIsDir {
+			writeJSON(w, 409, map[string]string{"error": "guest agent: " + to + " is a directory", "code": "is_a_directory"})
+			return
+		}
+		if _, exists := f.files[k+to]; exists && in["overwrite"] != true {
+			writeJSON(w, 409, map[string]string{"error": "guest agent: " + to + " exists; set overwrite", "code": "already_exists"})
+			return
+		}
+		delete(f.files, k+from)
+		f.files[k+to] = b
 		writeJSON(w, 200, map[string]any{"ok": true})
 	case "file_search":
 		out := []any{}
@@ -651,7 +1136,7 @@ func (f *fakeBoatd) agentOp(w http.ResponseWriter, vm VM, in map[string]any) {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "matches": out, "truncated": false})
 	default:
-		writeJSON(w, 400, map[string]string{"error": "unknown op"})
+		writeJSON(w, 400, map[string]string{"error": "guest agent: unknown op: " + fmt.Sprint(in["op"]), "code": "invalid_argument"})
 	}
 }
 
@@ -671,6 +1156,9 @@ func fakeVMMetadata(vm VM) VM {
 		if k != "env" {
 			out[k] = v
 		}
+	}
+	if out["ssh_boot_epoch"] == nil {
+		out["ssh_boot_epoch"] = "fake-boot-" + fmt.Sprint(vm["id"])
 	}
 	return out
 }

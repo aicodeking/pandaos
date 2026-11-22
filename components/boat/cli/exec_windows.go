@@ -6,7 +6,13 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"syscall"
 )
+
+func stdinIsTerminal() bool {
+	var mode uint32
+	return syscall.GetConsoleMode(syscall.Handle(os.Stdin.Fd()), &mode) == nil
+}
 
 // execReplace: Windows cannot replace a process, so run the program as a child
 // on this console and pass on its exit code.

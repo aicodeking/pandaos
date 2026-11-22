@@ -103,6 +103,11 @@ func copySparse(in, out *os.File, size int64) error { return copyData(in, out, s
 // copyData copies the data regions of in to the same offsets in out; with clone, as
 // reflinks where the filesystem can (no second write of data already on disk).
 func copyData(in, out *os.File, size int64, clone bool) error {
+	return copyDataPaced(in, out, size, clone, nil)
+}
+
+func copyDataPaced(in, out *os.File, size int64, clone bool, pace func(int64)) error {
+	const copyChunk = 4 << 20
 	for off := int64(0); off < size; {
 		data, err := in.Seek(off, seekData)
 		if errors.Is(err, syscall.ENXIO) {
@@ -120,8 +125,19 @@ func copyData(in, out *os.File, size int64, clone bool) error {
 			continue
 		}
 		clone = false // not this filesystem, or an unaligned range: copy from here on
-		if _, err := io.Copy(io.NewOffsetWriter(out, data), io.NewSectionReader(in, data, hole-data)); err != nil {
-			return err
+		for pos := data; pos < hole; {
+			n := hole - pos
+			if pace != nil && n > copyChunk {
+				n = copyChunk
+			}
+			written, err := io.Copy(io.NewOffsetWriter(out, pos), io.NewSectionReader(in, pos, n))
+			if err != nil {
+				return err
+			}
+			if pace != nil && written > 0 {
+				pace(written)
+			}
+			pos += n
 		}
 		off = hole
 	}

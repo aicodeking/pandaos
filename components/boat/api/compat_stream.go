@@ -26,9 +26,10 @@ import (
 // (or a reconnect line's offsets) continues with no gap and no repeat.
 
 var (
-	attachHeartbeat = 15 * time.Second
-	attachMaxOpen   = 10 * time.Minute
-	attachPoll      = 250 * time.Millisecond
+	attachHeartbeat   = 15 * time.Second
+	attachMaxOpen     = 10 * time.Minute
+	attachPollInitial = 10 * time.Millisecond
+	attachPoll        = 250 * time.Millisecond
 )
 
 func (s *server) compatAttach(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -63,6 +64,11 @@ func (s *server) compatAttach(w http.ResponseWriter, r *http.Request, p *princip
 	deadline := time.Now().Add(attachMaxOpen)
 	var stdout compatUTF8Stream
 	readOff := stdoutOff
+	initPoll := min(attachPollInitial, attachPoll)
+	if initPoll <= 0 {
+		initPoll = attachPoll
+	}
+	poll := initPoll
 	for {
 		out, err := s.readLogs(r, vmID, rec.ID, readOff, compatOutCap)
 		if err != nil {
@@ -73,11 +79,28 @@ func (s *server) compatAttach(w http.ResponseWriter, r *http.Request, p *princip
 			return
 		}
 		b, _ := base64.StdEncoding.DecodeString(str(out, "data_b64"))
+		start := readOff
+		if offset, ok := out["offset"].(float64); ok {
+			start = int64(offset)
+		}
+		if start != readOff {
+			// Rotation ends the old byte sequence; pending UTF-8 cannot cross the gap.
+			if text := stdout.text(nil, true); text != "" {
+				stdoutOff = readOff
+				if !a.emit(map[string]any{"type": "stdout", "data": text, "nextOffset": stdoutOff}) {
+					return
+				}
+			}
+		}
+		readOff = start + int64(len(b))
+		if next, ok := out["next_offset"].(float64); ok {
+			readOff = int64(next)
+		}
+		text := stdout.text(b, false)
+		// Public offsets acknowledge emitted bytes; pending bytes must be replayed on reconnect.
+		stdoutOff = readOff - int64(len(stdout.pending))
 		if len(b) > 0 {
-			readOff += int64(len(b))
-			text := stdout.text(b, false)
-			// Public offsets acknowledge emitted bytes; pending bytes must be replayed on reconnect.
-			stdoutOff = readOff - int64(len(stdout.pending))
+			poll = initPoll
 			if text != "" && !a.emit(map[string]any{"type": "stdout", "data": text, "nextOffset": stdoutOff}) {
 				return
 			}
@@ -103,7 +126,8 @@ func (s *server) compatAttach(w http.ResponseWriter, r *http.Request, p *princip
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(attachPoll):
+		case <-time.After(poll):
+			poll = min(poll*2, attachPoll)
 		}
 	}
 }

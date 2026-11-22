@@ -15,7 +15,11 @@ func TestR16RejectedResumePreservesRunningVM(t *testing.T) {
 			bx := e.newSandbox(nil)
 			id := e.nativeOf(bx)
 			st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes/"+bx+"/resume", map[string]any{"type": typ}, nil)
-			if st != 400 {
+			want := 400
+			if typ == "missing-size" {
+				want = 409 // r46: a running sandbox is not retyped by resume, whatever the type
+			}
+			if st != want {
 				t.Fatalf("resume: %d %v", st, out)
 			}
 			e.boatd.mu.Lock()
@@ -115,12 +119,18 @@ func TestR16ResumeDeniedResizeHasNoStop(t *testing.T) {
 func TestR16ResumeReportsRestorationFailure(t *testing.T) {
 	e := setup(t)
 	bx := e.newSandbox(nil)
+	id := e.nativeOf(bx)
 	e.boatd.mu.Lock()
+	e.boatd.noImages = true
 	e.boatd.refuse = "host_full"
 	e.boatd.mu.Unlock()
+	// r46: a running sandbox is never stopped by a resume with a type: 409, no side effects.
 	st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes/"+bx+"/resume", map[string]any{"type": "missing-size"}, nil)
-	if st != 500 || errCode(out) != "restore_failed" {
-		t.Fatalf("restoration failure hidden: %d %v", st, out)
+	if st != 409 || errCode(out) != "sandbox_running_stop_first" {
+		t.Fatalf("running resume with a type: %d %v, want 409 sandbox_running_stop_first", st, out)
+	}
+	if e.boatdState(id) != "running" {
+		t.Fatal("the refused resume stopped the VM")
 	}
 }
 
@@ -129,6 +139,11 @@ func TestR16ResumeValidRunningResize(t *testing.T) {
 	bx := e.newSandbox(nil)
 	id := e.nativeOf(bx)
 	for _, typ := range []string{"large", "default"} {
+		// r46: the type changes while the sandbox is stopped; a running one is refused.
+		if st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes/"+bx+"/resume", map[string]any{"type": typ}, nil); st != 409 {
+			t.Fatalf("running resume with a type: %d %v, want 409", st, out)
+		}
+		e.do(e.owner, "POST", "/v1/vms/"+id+"/stop", nil)
 		st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes/"+bx+"/resume", map[string]any{"type": typ}, nil)
 		if st != 202 {
 			t.Fatalf("resume: %d %v", st, out)

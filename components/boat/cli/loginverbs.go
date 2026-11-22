@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -85,7 +86,7 @@ func (a *app) login(args []string) error {
 		return err
 	}
 	if *u == "" {
-		cfg, _ := loadConfig(a.getenv)
+		cfg, _ := a.loadCfg()
 		*u = cfg.URL
 	}
 	if *u == "" || key == "" {
@@ -153,8 +154,8 @@ func cmdRename(a *app, args []string) error {
 	return a.emit(out, func() { fmt.Fprintf(a.out, "%s is now %q\n", s(out, "id"), s(out, "name")) })
 }
 
-// cmdAPIKey is boat.dev's api-key: create goes through /api/v1 (presets and
-// boat.dev's refusals of --ttl/--sandbox/--env), the rest is boat keys.
+// cmdAPIKey is boat.dev's api-key: create goes through /api/v1 (presets, TTLs,
+// and boat.dev's refusals of --sandbox/--env), the rest is boat keys.
 func cmdAPIKey(a *app, args []string) error {
 	op, args := sub(args, "", "create", "list", "ls", "usage", "rotate", "revoke")
 	if op == "list" || op == "ls" || op == "usage" { // boat.dev's --all / --verbose: everything is shown here
@@ -173,7 +174,7 @@ func cmdAPIKey(a *app, args []string) error {
 		return fmt.Errorf("api-key create|list|usage|rotate|revoke: %w", errUsage)
 	}
 	fs := flag.NewFlagSet("api-key create", flag.ContinueOnError)
-	ttl := fs.String("ttl", "", "keys never expire here: omit, or never")
+	ttl := fs.String("ttl", "", "key lifetime: 90d|24h|365d|never (up to 365d)")
 	preset := fs.String("preset", "", "read-only, full-sandbox, ci or admin")
 	actions := fs.String("actions", "", "comma-separated scopes (not with --preset)")
 	var sandboxes, envs multi
@@ -206,15 +207,20 @@ func cmdAPIKey(a *app, args []string) error {
 	})
 }
 
-// cmdCompleteVMs prints VM ids and names for the completion scripts.
+var completionTokenRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// cmdCompleteVMs prints VM ids and shell-safe single-token names for the completion scripts.
 func cmdCompleteVMs(a *app, args []string) error {
 	var list struct{ VMs []obj }
 	if err := a.c.call("GET", "/v1/vms", nil, &list); err != nil {
 		return err
 	}
 	for _, v := range list.VMs {
-		fmt.Fprintln(a.out, s(v, "id"))
-		if n := s(v, "name"); n != "" {
+		id := s(v, "id")
+		if completionTokenRe.MatchString(id) {
+			fmt.Fprintln(a.out, id)
+		}
+		if n := s(v, "name"); n != "" && n != id && completionTokenRe.MatchString(n) {
 			fmt.Fprintln(a.out, n)
 		}
 	}

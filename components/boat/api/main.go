@@ -180,6 +180,8 @@ func serve(args []string) int {
 	rate := fs.Float64("rate", 10, "requests/second per API key (0 = unlimited)")
 	burst := fs.Float64("burst", 40, "rate limit burst per API key")
 	auditPath := fs.String("audit-log", "", "audit JSON-lines file (default <data>/audit.jsonl, - = stderr)")
+	sshPolicyUsers := fs.String("ssh-policy-users", "", "comma-separated installed OS users for managed SSH (default ssh-user)")
+	sshPolicyHelper := fs.String("ssh-policy-helper-file", "", "guest SSH policy helper artifact")
 	sshUser := fs.String("ssh-user", "dev", "VM login user (the guest image's user)")
 	sshJump := fs.String("ssh-jump", "", "ssh jump host (user@host:port) returned to clients")
 	desktopURL := fs.String("desktop-url", "", "desktop gateway base URL, e.g. https://boat.example/desktop")
@@ -187,7 +189,7 @@ func serve(args []string) int {
 	desktopTTL := fs.Duration("desktop-ttl", 5*time.Minute, "desktop URL lifetime")
 	images := fs.String("images", "ubuntu-24.04", "comma-separated image ids; first is the default")
 	allowPrivate := fs.Bool("allow-private-webhooks", false, "allow http:// and private-network webhook targets (dev only)")
-	jumpKeys := fs.String("ssh-jump-keys-file", "", "authorized_keys file for the jump host user, rewritten on ssh grants (e.g. /var/lib/boat/ssh/jump_authorized_keys)")
+	jumpKeys := fs.String("ssh-jump-keys-file", "", "legacy jump authorized_keys file to clear (never populated)")
 	auditMax := fs.Int64("audit-max-bytes", 100<<20, "rotate the audit log at this size (0 = never)")
 	auditKeep := fs.Int("audit-keep", 20, "rotated audit files to keep (0 = unlimited)")
 	auditAge := fs.Duration("audit-max-age", 90*24*time.Hour, "delete rotated audit files older than this (0 = never)")
@@ -224,7 +226,7 @@ func serve(args []string) int {
 		log.Printf("boat-api: %v", err)
 		return 1
 	}
-	cfg := Config{SSHUser: *sshUser, SSHJump: *sshJump, DesktopURL: *desktopURL, DesktopTTL: *desktopTTL,
+	cfg := Config{SSHPolicyUsers: strings.FieldsFunc(*sshPolicyUsers, func(r rune) bool { return r == ',' }), SSHPolicyHelperFile: *sshPolicyHelper, SSHUser: *sshUser, SSHJump: *sshJump, DesktopURL: *desktopURL, DesktopTTL: *desktopTTL,
 		AllowPrivateHook: *allowPrivate, MaxFileBytes: *maxFile, JumpKeysFile: *jumpKeys,
 		MaxKeysPerTeam: *maxKeys, MaxHooksPerTeam: *maxHooks, VMDomain: *vmDomain, PortURLTTL: *portTTL, AIProxyURL: *aiURL, PublicURL: *publicURL, VMAPIURL: *vmAPIURL, MaxImportBytes: *maxImport,
 		BodyTimeout: *bodyTimeout, HookDeny: hookDeny}
@@ -294,6 +296,7 @@ func serve(args []string) int {
 	}()
 	log.Printf("boat-api listening on %s (boatd %s)", *listen, *boatd)
 	err = srv.ListenAndServe()
+	s.flushAIUsageFinal()                   // before Close, so the last AI usage batch reaches disk
 	if ferr := store.Close(); ferr != nil { // what Apply left in memory
 		log.Printf("boat-api: write state: %v", ferr)
 	}
@@ -317,7 +320,8 @@ func newServer(store *Store, kr *Keyring, bd *boatdClient, cfg Config, lim *limi
 	s := &server{store: store, keys: kr, boatd: bd, limiter: lim, audit: audit, cfg: cfg, mux: http.NewServeMux(),
 		aiMeter: newAIMeter(), aiClient: newAIClient(),
 		streams: newInflight(defaultTeamStreams), uploads: newInflight(defaultTeamUploads), aiInflight: newInflight(defaultAIVMInflight),
-		teamAll: newInflight(defaultTeamInflight)}
+		teamAll: newInflight(defaultTeamInflight), teamOTel: newInflight(8),
+		attestedEpoch: map[string]string{}, inFlightPolicy: map[string]int{}}
 	s.hooks = newDispatcher(s, cfg.AllowPrivateHook)
 	s.idem.store, s.deletions.store, s.stops.store = store, store, store
 	s.routes()
@@ -341,6 +345,8 @@ func (s *server) routes() {
 		})
 	}
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { writeErr(w, r, 404, "not_found", "no such endpoint") })
+	s.mux.HandleFunc("POST /internal/ssh/authorize", s.authorizeJumpSSH)
+	s.handle("POST /v1/vms/{id}/ssh/authorize", s.authorizeGuestSSH)
 	s.mux.HandleFunc("GET /internal/route-gens", s.routeGens) // boat-gateway; Caddy never publishes /internal/
 
 	s.route("GET /v1/me", "", s.me)
@@ -355,6 +361,7 @@ func (s *server) routes() {
 	s.route("POST /v1/vms/{id}/start", "vms:write", s.startVM)
 	s.route("POST /v1/vms/{id}/stop", "vms:write", s.stopVM)
 	s.route("POST /v1/vms/{id}/fork", "vms:write", s.forkVM)
+	s.route("POST /v1/vms/{id}/clone", "vms:write", s.forkVM)
 	s.route("POST /v1/vms/{id}/exec", "exec", s.execVM)
 	s.route("POST /v1/vms/{id}/prompt", "exec", s.promptVM)
 	s.route("GET /v1/vms/{id}/files", "exec", s.getFile)
@@ -413,6 +420,7 @@ func (s *server) routes() {
 	s.route("PUT /v1/environments/{id}", "admin", s.updateEnv)
 	s.route("DELETE /v1/environments/{id}", "admin", s.deleteEnv)
 	s.route("POST /v1/environments/{id}/build", "admin", s.buildEnv)
+	s.route("POST /v1/environments/{id}/upgrade", "admin", s.upgradeEnv)
 
 	s.route("GET /v1/ai/credentials", "admin", s.listAICreds)
 	s.route("PUT /v1/ai/credentials/{provider}", "admin", s.putAICred)

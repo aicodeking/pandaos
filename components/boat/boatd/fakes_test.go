@@ -53,8 +53,31 @@ func newFakeHost() *fakeHost { return &fakeHost{next: 1000, vms: map[int]*fakeFC
 func (h *fakeHost) run(stdin, name string, args ...string) error {
 	h.mu.Lock()
 	h.cmds = append(h.cmds, name+" "+strings.Join(args, " "))
+	if stdin != "" && (name == "ip" || name == "bridge") {
+		prefix := name
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-n" {
+				prefix += " -n " + args[i+1]
+				break
+			}
+		}
+		for _, line := range strings.Split(stdin, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			h.cmds = append(h.cmds, prefix+" "+line)
+			if name == "ip" && strings.HasPrefix(line, "neigh ") {
+				if f := strings.Fields(line); len(f) >= 3 && strings.Contains(f[2], ":") {
+					h.cmds = append(h.cmds, prefix+" -6 "+line)
+				}
+			}
+		}
+	}
 	if name == "nft" {
-		h.nft = stdin
+		if stdin != "" {
+			h.nft = stdin
+		}
 		if h.nftErr != nil {
 			defer h.mu.Unlock()
 			return h.nftErr
@@ -98,31 +121,33 @@ func (h *fakeHost) ran(prefix string) bool {
 }
 
 type fakeFC struct {
-	h        *fakeHost
-	id, root string
-	pid      int
-	mu       sync.Mutex
-	calls    []string
-	paused   bool
-	tap      string
-	idents   []map[string]any
-	env      map[string]any
-	clockSet bool
-	lns      []net.Listener
-	apiConns int // open API connections, capped like Firecracker's server
-	epoch    int // vsock resets so far: one per snapshot, like Firecracker
-	sessions map[string]*fakeSession
-	done     chan struct{}
-	once     sync.Once
+	h         *fakeHost
+	id, root  string
+	pid       int
+	mu        sync.Mutex
+	calls     []string
+	paused    bool
+	tap       string
+	idents    []map[string]any
+	env       map[string]any
+	clockSet  bool
+	lns       []net.Listener
+	apiConns  int // open API connections, capped like Firecracker's server
+	epoch     int // vsock resets so far: one per snapshot, like Firecracker
+	sessions  map[string]*fakeSession
+	snapSyncs []bool // sync_snapshot_files values passed to PUT /snapshot/create
+	done      chan struct{}
+	once      sync.Once
 }
 
 func (h *fakeHost) Start(v VM, root string, uid, gid int) (int, <-chan struct{}, error) {
 	f := &fakeFC{h: h, id: v.ID, root: root, done: make(chan struct{})}
 	h.mu.Lock()
 	h.starts++
-	if h.starts == h.failStart {
+	starts := h.starts
+	if starts == h.failStart {
 		h.mu.Unlock()
-		return 0, nil, fmt.Errorf("fake: start %d fails", h.starts)
+		return 0, nil, fmt.Errorf("fake: start %d fails", starts)
 	}
 	if h.nftAtStart == nil {
 		h.nftAtStart = map[string]string{}
@@ -250,6 +275,10 @@ func (f *fakeFC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	str := func(k string) string { s, _ := body[k].(string); return s }
 	if r.URL.Path == "/snapshot/create" {
 		f.record("snapshot " + str("snapshot_type"))
+		syncFiles, _ := body["sync_snapshot_files"].(bool)
+		f.mu.Lock()
+		f.snapSyncs = append(f.snapSyncs, syncFiles)
+		f.mu.Unlock()
 	}
 	if r.URL.Path == "/snapshot/load" && body["track_dirty_pages"] == true {
 		f.record("load tracking")
@@ -621,6 +650,7 @@ func newTestManager(t *testing.T, mod func(*Config)) (*Manager, *fakeHost) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(m.closeWatches)
 	return m, h
 }
 

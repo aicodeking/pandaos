@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -180,24 +181,130 @@ func (s *server) images(w http.ResponseWriter, r *http.Request, p *principal) {
 	writeJSON(w, 200, map[string]any{"images": out})
 }
 
+// parseUsageTime reads a usage window bound: RFC 3339, or a date-only
+// YYYY-MM-DD taken as UTC midnight. dateOnly reports the second form.
+func parseUsageTime(v string) (t time.Time, dateOnly bool, err error) {
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, false, nil
+	}
+	t, err = time.Parse(time.DateOnly, v)
+	return t, err == nil, err
+}
+
 func (s *server) usage(w http.ResponseWriter, r *http.Request, p *principal) {
-	// boatd counts from ?since= up to now; `from` is accepted as an alias.
+	// boatd counts from ?since= up to now; `from` is accepted as an alias and `to`
+	// closes the window.
 	q := url.Values{"team": {p.Team.ID}}
+	var since, to time.Time
 	for _, k := range []string{"since", "from"} {
 		if v := r.URL.Query().Get(k); v != "" {
-			if _, err := time.Parse(time.RFC3339, v); err != nil {
-				writeErr(w, r, 400, "invalid_request", k+" must be RFC 3339")
+			t, _, err := parseUsageTime(v)
+			if err != nil {
+				writeErr(w, r, 400, "invalid_request", k+" must be RFC 3339 or YYYY-MM-DD")
 				return
 			}
-			q.Set("since", v)
+			since = t
+			q.Set("since", t.UTC().Format(time.RFC3339))
 		}
 	}
-	var out any
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, dateOnly, err := parseUsageTime(v)
+		if err != nil {
+			writeErr(w, r, 400, "invalid_request", "to must be RFC 3339 or YYYY-MM-DD")
+			return
+		}
+		if dateOnly {
+			// A date-only `to` names a whole UTC day: the window ends at the next
+			// midnight (exclusive), so from==to is that one day.
+			t = t.AddDate(0, 0, 1)
+		}
+		if !since.IsZero() && !t.After(since) {
+			writeErr(w, r, 400, "invalid_request", "to must be after from")
+			return
+		}
+		to = t
+	}
+	var out map[string]any
 	if err := s.boatd.call(r.Context(), "GET", "/v1/usage?"+q.Encode(), nil, &out); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
-	writeJSON(w, 200, out)
+	if !to.IsZero() && to.Before(time.Now()) {
+		// boatd's report always runs to now. Usage is additive over time, so the
+		// window [from, to] is the report since from minus the report since to.
+		tail := url.Values{"team": {p.Team.ID}, "since": {to.UTC().Format(time.RFC3339)}}
+		var after map[string]any
+		if err := s.boatd.call(r.Context(), "GET", "/v1/usage?"+tail.Encode(), nil, &after); err != nil {
+			writeUpstream(w, r, err)
+			return
+		}
+		out = usageWindow(out, after, to)
+	}
+	// A sandbox in the env-error state is not billed: take those intervals out.
+	writeJSON(w, 200, s.withoutEnvErrorSeconds(r.Context(), out, since, to))
+}
+
+// usageWindow returns full (usage since A until now) with after (usage since B
+// until now) taken out, so it covers A..B. Neither input is modified.
+func usageWindow(full, after map[string]any, until time.Time) map[string]any {
+	out := make(map[string]any, len(full))
+	for k, v := range full {
+		out[k] = v
+	}
+	out["until"] = until.UTC()
+	minus := func(list, tail any, key string, idOf func(map[string]any) string) []any {
+		sub := map[string]float64{}
+		if rows, ok := tail.([]any); ok {
+			for _, row := range rows {
+				if m, ok := row.(map[string]any); ok {
+					f, _ := m[key].(float64)
+					sub[idOf(m)] += f
+				}
+			}
+		}
+		res := []any{}
+		rows, _ := list.([]any)
+		for _, row := range rows {
+			m, ok := row.(map[string]any)
+			if !ok {
+				continue
+			}
+			c := make(map[string]any, len(m))
+			for k, v := range m {
+				c[k] = v
+			}
+			f, _ := m[key].(float64)
+			c[key] = math.Max(0, f-sub[idOf(m)])
+			res = append(res, c)
+		}
+		return res
+	}
+	byID := func(m map[string]any) string { s, _ := m["id"].(string); return s }
+	byTeam := func(m map[string]any) string { s, _ := m["team"].(string); return s }
+	out["vms"] = minus(full["vms"], after["vms"], "vm_seconds", byID)
+	out["snapshots"] = minus(full["snapshots"], after["snapshots"], "snapshot_days", byID)
+	teams := minus(full["teams"], after["teams"], "vm_seconds", byTeam)
+	teams = minus(teams, after["teams"], "snapshot_days", byTeam)
+	for _, row := range teams {
+		m := row.(map[string]any)
+		sizes, _ := m["vm_seconds_by_size"].(map[string]any)
+		var tail map[string]any
+		afterTeams, _ := after["teams"].([]any)
+		for _, t := range afterTeams {
+			if tm, ok := t.(map[string]any); ok && byTeam(tm) == byTeam(m) {
+				tail, _ = tm["vm_seconds_by_size"].(map[string]any)
+			}
+		}
+		by := make(map[string]any, len(sizes))
+		for size, v := range sizes {
+			f, _ := v.(float64)
+			g, _ := tail[size].(float64)
+			by[size] = math.Max(0, f-g)
+		}
+		m["vm_seconds_by_size"] = by
+	}
+	out["teams"] = teams
+	return out
 }
 
 // ---- teams ----
@@ -215,7 +322,11 @@ type teamView struct {
 
 func (s *server) listTeams(w http.ResponseWriter, r *http.Request, p *principal) {
 	out := []teamView{}
+	canCrossTeam := p.Operator && p.has("admin")
 	for _, t := range s.store.Snapshot().Teams {
+		if t.ID != p.Team.ID && !canCrossTeam {
+			continue
+		}
 		if role := t.role(p.User.ID); role != "" {
 			out = append(out, teamView{ID: t.ID, Name: t.Name, Role: role, Created: t.Created})
 		}
@@ -226,11 +337,39 @@ func (s *server) listTeams(w http.ResponseWriter, r *http.Request, p *principal)
 
 func (s *server) getTeam(w http.ResponseWriter, r *http.Request, p *principal) {
 	t := s.store.Snapshot().Teams[r.PathValue("id")]
-	if t == nil || t.role(p.User.ID) == "" {
+	if t == nil || (t.ID != p.Team.ID && !(p.Operator && p.has("admin"))) || t.role(p.User.ID) == "" {
 		writeErr(w, r, 404, "not_found", "team not found")
 		return
 	}
-	writeJSON(w, 200, teamView{ID: t.ID, Name: t.Name, Role: t.role(p.User.ID), Members: t.Members, Created: t.Created, AcceptSharesFrom: t.AcceptSharesFrom, SelfToken: &t.SelfToken})
+	v := teamView{ID: t.ID, Name: t.Name, Role: t.role(p.User.ID), Created: t.Created}
+	if p.has("admin") {
+		v.Members = t.Members
+		v.AcceptSharesFrom = t.AcceptSharesFrom
+		v.SelfToken = &t.SelfToken
+	}
+	writeJSON(w, 200, v)
+}
+
+func currentTeamAdmin(st *State, p *principal, teamID string, now time.Time) (*Team, int, string, string) {
+	current := currentKeyPrincipal(st, p, now)
+	if current == nil {
+		return nil, 401, "unauthorized", "missing or invalid API key"
+	}
+	if !current.has("admin") {
+		return nil, 403, "forbidden", "team admin role required"
+	}
+	team := st.Teams[teamID]
+	if team == nil || (team.ID != current.Team.ID && !current.Operator) || team.role(current.User.ID) == "" {
+		return nil, 404, "not_found", "team not found"
+	}
+	role := team.role(current.User.ID)
+	if team.ID == p.Team.ID && roleRank(p.Role) < roleRank(role) {
+		role = p.Role
+	}
+	if role != "owner" && role != "admin" {
+		return nil, 403, "forbidden", "team admin role required"
+	}
+	return team, 0, "", ""
 }
 
 // setSelfTokenPolicy: PUT /v1/teams/{id}/self-token. Lets VM tokens open
@@ -240,22 +379,26 @@ func (s *server) setSelfTokenPolicy(w http.ResponseWriter, r *http.Request, p *p
 	if !decode(w, r, &body) {
 		return
 	}
-	t, _, ok := s.teamAdmin(w, r, p)
-	if !ok {
-		return
-	}
+	id := r.PathValue("id")
+	errRefused := errors.New("self-token policy refused")
+	status, code, message := 0, "", ""
 	err := s.store.Update(func(st *State) error {
-		team := st.Teams[t.ID]
+		team, n, c, m := currentTeamAdmin(st, p, id, time.Now().UTC())
 		if team == nil {
-			return errConflict
+			status, code, message = n, c, m
+			return errRefused
 		}
 		nt := *team
 		nt.SelfToken = body
-		st.Teams[t.ID] = &nt
+		st.Teams[team.ID] = &nt
 		return nil
 	})
 	if err != nil {
-		s.storeErr(w, r, err)
+		if errors.Is(err, errRefused) {
+			writeErr(w, r, status, code, message)
+		} else {
+			s.storeErr(w, r, err)
+		}
 		return
 	}
 	writeJSON(w, 200, body)
@@ -283,23 +426,27 @@ func (s *server) setShareAllowlist(w http.ResponseWriter, r *http.Request, p *pr
 			return
 		}
 	}
-	t, _, ok := s.teamAdmin(w, r, p)
-	if !ok {
-		return
-	}
+	id := r.PathValue("id")
 	allow := slices.Clone(body.Teams)
 	slices.Sort(allow)
 	allow = slices.Compact(allow)
+	errRefused := errors.New("share allowlist refused")
+	status, code, message := 0, "", ""
 	err := s.store.Update(func(st *State) error {
-		team := st.Teams[t.ID]
+		team, n, c, m := currentTeamAdmin(st, p, id, time.Now().UTC())
 		if team == nil {
-			return errConflict
+			status, code, message = n, c, m
+			return errRefused
 		}
 		team.AcceptSharesFrom = allow
 		return nil
 	})
 	if err != nil {
-		s.storeErr(w, r, err)
+		if errors.Is(err, errRefused) {
+			writeErr(w, r, status, code, message)
+		} else {
+			s.storeErr(w, r, err)
+		}
 		return
 	}
 	if allow == nil {
@@ -330,14 +477,30 @@ func (s *server) createTeam(w http.ResponseWriter, r *http.Request, p *principal
 	now := time.Now().UTC()
 	t := &Team{ID: "team_" + randHex(6), Name: body.Name, Created: now}
 	out := map[string]any{}
+	errRefused := errors.New("team mint refused")
+	status, code, message := 0, "", ""
+	refuse := func(n int, c, m string) error { status, code, message = n, c, m; return errRefused }
 	err := s.store.Update(func(st *State) error {
-		ownerID := p.User.ID
+		current := currentKeyPrincipal(st, p, time.Now().UTC())
+		if current == nil {
+			return refuse(401, "unauthorized", "missing or invalid API key")
+		}
+		if !current.Operator {
+			return refuse(403, "forbidden", "only the instance operator can create teams")
+		}
+		if !current.has("admin") {
+			return refuse(403, "forbidden", "admin scope required")
+		}
+		ownerID := current.User.ID
 		if body.Owner != "" {
 			u := &User{ID: "usr_" + randHex(6), Name: body.Owner, Created: now}
 			st.Users[u.ID] = u
 			ownerID = u.ID
-			k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", ownerKeyScopes(p))
-			k.Expires = inheritedExpiry(p)
+			k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", ownerKeyScopes(current))
+			k.Expires = inheritedExpiry(current)
+			if p.Key.Expires != nil && (k.Expires == nil || p.Key.Expires.Before(*k.Expires)) {
+				k.Expires = inheritedExpiry(p)
+			}
 			out["owner"] = map[string]any{"user": u, "key": viewKey(k, tok)}
 		}
 		t.Members = []Member{{UserID: ownerID, Role: "owner"}}
@@ -345,7 +508,11 @@ func (s *server) createTeam(w http.ResponseWriter, r *http.Request, p *principal
 		return nil
 	})
 	if err != nil {
-		s.storeErr(w, r, err)
+		if errors.Is(err, errRefused) {
+			writeErr(w, r, status, code, message)
+		} else {
+			s.storeErr(w, r, err)
+		}
 		return
 	}
 	role := "owner"
@@ -356,11 +523,31 @@ func (s *server) createTeam(w http.ResponseWriter, r *http.Request, p *principal
 	writeJSON(w, 201, out)
 }
 
+func (s *server) checkOperatorAdmin(w http.ResponseWriter, r *http.Request, st *State, p *principal) bool {
+	cur := currentKeyPrincipal(st, p, time.Now().UTC())
+	if cur == nil {
+		writeErr(w, r, 401, "unauthorized", "missing or invalid API key")
+		return false
+	}
+	if !cur.Operator {
+		writeErr(w, r, 403, "forbidden", "only the instance operator can delete teams")
+		return false
+	}
+	if !cur.has("admin") {
+		writeErr(w, r, 403, "forbidden", "admin scope required")
+		return false
+	}
+	return true
+}
+
 // deleteTeam is operator-only and refuses while the team still has VMs.
 func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request, p *principal) {
 	id := r.PathValue("id")
 	if !p.Operator {
 		writeErr(w, r, 403, "forbidden", "only the instance operator can delete teams")
+		return
+	}
+	if !s.checkOperatorAdmin(w, r, s.store.Snapshot(), p) {
 		return
 	}
 	if s.store.Snapshot().Teams[id] == nil {
@@ -384,12 +571,29 @@ func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request, p *principal
 			return
 		}
 	}
+	if !s.checkOperatorAdmin(w, r, s.store.Snapshot(), p) {
+		return
+	}
 	// Imported snapshots belong to no VM, so nothing else would ever delete them.
 	if err := s.deleteSnapshotsOf(r, id); err != nil {
 		writeUpstream(w, r, err)
 		return
 	}
 	err := s.store.Update(func(st *State) error {
+		now := time.Now().UTC()
+		cur := currentKeyPrincipal(st, p, now)
+		if cur == nil {
+			return &authError{status: 401, code: "unauthorized", msg: "missing or invalid API key"}
+		}
+		if !cur.Operator {
+			return &authError{status: 403, code: "forbidden", msg: "only the instance operator can delete teams"}
+		}
+		if !cur.has("admin") {
+			return &authError{status: 403, code: "forbidden", msg: "admin scope required"}
+		}
+		if st.Teams[id] == nil {
+			return &authError{status: 404, code: "not_found", msg: "team not found"}
+		}
 		delete(st.Teams, id)
 		for k, v := range st.Keys {
 			if v.TeamID == id {
@@ -437,8 +641,21 @@ func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request, p *principal
 				delete(st.SnapShares, k)
 			}
 		}
+		deleteTeamIdem(st, id)
+		for k, op := range st.DeletionOps {
+			if str(op, "_team") == id {
+				delete(st.DeletionOps, k)
+			}
+		}
+		for k, op := range st.StopOps {
+			if str(op, "_team") == id {
+				delete(st.StopOps, k)
+			}
+		}
+		revokeDeadPortMinters(st, now)
 		delete(st.AIProxyOff, id)
 		delete(st.Telemetry, id)
+		deleteTeamAIUsage(st, id)
 		pruneOrphanUsers(st)
 		return nil
 	})
@@ -446,6 +663,7 @@ func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request, p *principal
 		s.storeErr(w, r, err)
 		return
 	}
+	s.aiMeter.dropTeam(id) // counts not flushed yet would resurrect rows of the gone team
 	// An import racing the first pass finished while the team's keys still worked.
 	if err := s.deleteSnapshotsOf(r, id); err != nil {
 		log.Printf("%s: snapshots of deleted team %s: %v", info(r).id, id, err)
@@ -493,7 +711,7 @@ func pruneOrphanUsers(st *State) {
 // ownerKeyScopes: a new team owner's first key is no wider than the operator's
 // minting key (nil = full scopes, only when the minting key has them all).
 func ownerKeyScopes(p *principal) []string {
-	if len(p.Scopes) == len(allScopes) {
+	if !slices.ContainsFunc(allScopes, func(sc string) bool { return !p.has(sc) }) {
 		return nil
 	}
 	return slices.Clone(p.Scopes)
@@ -534,42 +752,60 @@ func (s *server) addMember(w http.ResponseWriter, r *http.Request, p *principal)
 		writeErr(w, r, 400, "invalid_request", "name and role (owner|admin|member) required")
 		return
 	}
-	t, role, ok := s.teamAdmin(w, r, p)
-	if !ok {
-		return
-	}
-	if body.Role == "owner" && role != "owner" {
-		writeErr(w, r, 403, "forbidden", "only owners can add owners")
-		return
-	}
-	// The first key is never wider than the minting key: p.Scopes ∩ role.
-	scopes := effectiveScopes(p.Scopes, body.Role)
-	if len(scopes) == 0 { // stored empty, it would mean the role's full scopes
-		writeErr(w, r, 403, "forbidden", "this key has no scopes to grant for role "+body.Role)
-		return
-	}
-	if len(scopes) == len(roleScopes(body.Role)) {
-		scopes = nil // the role's full scopes, as before
-	}
 	u := &User{ID: "usr_" + randHex(6), Name: body.Name, Created: time.Now().UTC()}
 	var kv keyView
+	errRefused := errors.New("member mint refused")
+	status, code, message := 0, "", ""
+	refuse := func(n int, c, m string) error { status, code, message = n, c, m; return errRefused }
 	err := s.store.Update(func(st *State) error {
-		team := st.Teams[t.ID]
-		if team == nil {
-			return errConflict
+		current := currentKeyPrincipal(st, p, time.Now().UTC())
+		if current == nil {
+			return refuse(401, "unauthorized", "missing or invalid API key")
 		}
-		if !underLimit(teamKeyCount(st, t.ID), s.cfg.MaxKeysPerTeam) {
+		if !current.has("admin") {
+			return refuse(403, "forbidden", "team admin role required")
+		}
+		team := st.Teams[r.PathValue("id")]
+		if team == nil || (team.ID != current.Team.ID && !current.Operator) || team.role(current.User.ID) == "" {
+			return refuse(404, "not_found", "team not found")
+		}
+		role := team.role(current.User.ID)
+		if team.ID == p.Team.ID && roleRank(p.Role) < roleRank(role) {
+			role = p.Role
+		}
+		if role != "owner" && role != "admin" {
+			return refuse(403, "forbidden", "team admin role required")
+		}
+		if body.Role == "owner" && role != "owner" {
+			return refuse(403, "forbidden", "only owners can add owners")
+		}
+		// Empty stored scopes mean the role's full authority, not no authority.
+		scopes := effectiveScopes(current.Scopes, body.Role)
+		if len(scopes) == 0 {
+			return refuse(403, "forbidden", "this key has no scopes to grant for role "+body.Role)
+		}
+		if !slices.ContainsFunc(roleScopes(body.Role), func(sc string) bool { return !current.has(sc) }) {
+			scopes = nil
+		}
+		if !underLimit(teamKeyCount(st, team.ID), s.cfg.MaxKeysPerTeam) {
 			return errLimit
 		}
 		st.Users[u.ID] = u
 		team.Members = append(slices.Clone(team.Members), Member{UserID: u.ID, Role: body.Role})
-		k, tok := mintKey(s.keys, st, u.ID, t.ID, "initial", scopes)
-		k.Expires = inheritedExpiry(p)
+		k, tok := mintKey(s.keys, st, u.ID, team.ID, "initial", scopes)
+		k.Expires = inheritedExpiry(current)
+		if p.Key.Expires != nil && (k.Expires == nil || p.Key.Expires.Before(*k.Expires)) {
+			k.Expires = inheritedExpiry(p)
+		}
 		kv = viewKey(k, tok)
 		return nil
 	})
 	if err != nil {
-		s.storeErr(w, r, err)
+		if errors.Is(err, errRefused) {
+			writeErr(w, r, status, code, message)
+		} else {
+			s.storeErr(w, r, err)
+		}
 		return
 	}
 	writeJSON(w, 201, map[string]any{"user": u, "role": body.Role, "key": kv})
@@ -591,7 +827,22 @@ func (s *server) removeMember(w http.ResponseWriter, r *http.Request, p *princip
 		return
 	}
 	err := s.store.Update(func(st *State) error {
-		team := st.Teams[t.ID]
+		now := time.Now().UTC()
+		team, n, c, m := currentTeamAdmin(st, p, t.ID, now)
+		if team == nil {
+			return &authError{status: n, code: c, msg: m}
+		}
+		curRole := team.role(p.User.ID)
+		if team.ID == p.Team.ID && roleRank(p.Role) < roleRank(curRole) {
+			curRole = p.Role
+		}
+		curTarget := team.role(uid)
+		if curTarget == "" {
+			return &authError{status: 404, code: "not_found", msg: "member not found"}
+		}
+		if curTarget == "owner" && curRole != "owner" {
+			return &authError{status: 403, code: "forbidden", msg: "only owners can remove owners"}
+		}
 		var kept []Member
 		owners := 0
 		for _, m := range team.Members {
@@ -614,18 +865,29 @@ func (s *server) removeMember(w http.ResponseWriter, r *http.Request, p *princip
 			}
 		}
 		revokeLinksOf(st, func(k string) bool { return gone[k] })
+		revokeDeadPortMinters(st, now)
 		pruneOrphanUsers(st)
 		return nil
 	})
 	if err != nil {
+		var ae *authError
+		if errors.As(err, &ae) {
+			writeErr(w, r, ae.status, ae.code, ae.msg)
+			return
+		}
 		writeErr(w, r, 409, "conflict", err.Error())
 		return
 	}
-	s.syncJumpKeys(r.Context()) // drops the member's ssh grants
+	s.syncJumpKeysForTeam(r.Context(), t.ID) // drops the member's ssh grants
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (s *server) storeErr(w http.ResponseWriter, r *http.Request, err error) {
+	var ae *authError
+	if errors.As(err, &ae) {
+		writeErr(w, r, ae.status, ae.code, ae.msg)
+		return
+	}
 	if errors.Is(err, errLimit) {
 		writeErr(w, r, 403, "limit_reached", "team limit reached (keys, webhooks, secrets, shares, environments or ssh keys); delete unused ones or ask the operator")
 		return
@@ -677,52 +939,66 @@ func (s *server) createKey(w http.ResponseWriter, r *http.Request, p *principal)
 	if body.TeamID == "" {
 		body.TeamID = p.Team.ID
 	}
-	t := s.store.Snapshot().Teams[body.TeamID]
-	if t == nil || t.role(p.User.ID) == "" {
-		writeErr(w, r, 404, "not_found", "team not found")
-		return
-	}
-	// A key reaches only its own team; only the operator mints across teams.
-	if t.ID != p.Team.ID && !p.Operator {
-		writeErr(w, r, 403, "forbidden", "this key can only mint keys for its own team")
-		return
-	}
-	expires, ok := childExpiry(p.Key, body.ExpiresInS, time.Now().UTC())
-	if !ok {
-		writeErr(w, r, 400, "invalid_request", "this key expires, so the keys it mints must expire too: set expires_in_s")
-		return
-	}
-	scopes := body.Scopes
-	if len(scopes) == 0 {
-		scopes = p.Scopes // never broader than the minting key
-	}
-	if len(scopes) == 0 { // stored empty, it would mean the role's full scopes
-		writeErr(w, r, 403, "forbidden", "this key has no scopes to grant")
-		return
-	}
-	allowed := effectiveScopes(nil, t.role(p.User.ID))
-	for _, sc := range scopes {
-		if !slices.Contains(allScopes, sc) {
-			writeErr(w, r, 400, "invalid_request", "unknown scope "+sc)
-			return
-		}
-		if !p.has(sc) || !slices.Contains(allowed, sc) {
-			writeErr(w, r, 403, "forbidden", "cannot grant scope "+sc)
-			return
-		}
-	}
 	var kv keyView
+	// Refusals are returned from the callback, never written before persistence.
+	errRefused := errors.New("key mint refused")
+	status, code, message := 0, "", ""
+	refuse := func(n int, c, m string) error { status, code, message = n, c, m; return errRefused }
 	err := s.store.Update(func(st *State) error {
+		now := time.Now().UTC()
+		current := currentKeyPrincipal(st, p, now)
+		if current == nil {
+			return refuse(401, "unauthorized", "missing or invalid API key")
+		}
+		t := st.Teams[body.TeamID]
+		if t == nil || t.role(current.User.ID) == "" {
+			return refuse(404, "not_found", "team not found")
+		}
+		if t.ID != current.Team.ID && !current.Operator {
+			return refuse(403, "forbidden", "this key can only mint keys for its own team")
+		}
+		expires, ok := childExpiry(current.Key, body.ExpiresInS, now)
+		if !ok {
+			return refuse(400, "invalid_request", "this key expires, so the keys it mints must expire too: set expires_in_s")
+		}
+		// An in-flight request cannot outlive its original parent expiry either.
+		if p.Key.Expires != nil && (expires == nil || p.Key.Expires.Before(*expires)) {
+			original, ok := childExpiry(p.Key, body.ExpiresInS, now)
+			if !ok {
+				return refuse(400, "invalid_request", "this key expires, so the keys it mints must expire too: set expires_in_s")
+			}
+			expires = original
+		}
+		scopes := body.Scopes
+		if len(scopes) == 0 {
+			scopes = current.Scopes
+		}
+		if len(scopes) == 0 {
+			return refuse(403, "forbidden", "this key has no scopes to grant")
+		}
+		allowed := effectiveScopes(nil, t.role(current.User.ID))
+		for _, sc := range scopes {
+			if !slices.Contains(allScopes, sc) {
+				return refuse(400, "invalid_request", "unknown scope "+sc)
+			}
+			if !current.has(sc) || !slices.Contains(allowed, sc) {
+				return refuse(403, "forbidden", "cannot grant scope "+sc)
+			}
+		}
 		if !underLimit(teamKeyCount(st, t.ID), s.cfg.MaxKeysPerTeam) {
 			return errLimit
 		}
-		k, tok := mintKey(s.keys, st, p.User.ID, t.ID, body.Name, slices.Clone(scopes))
+		k, tok := mintKey(s.keys, st, current.User.ID, t.ID, body.Name, slices.Clone(scopes))
 		k.Expires = expires
 		kv = viewKey(k, tok)
 		return nil
 	})
 	if err != nil {
-		s.storeErr(w, r, err)
+		if errors.Is(err, errRefused) {
+			writeErr(w, r, status, code, message)
+		} else {
+			s.storeErr(w, r, err)
+		}
 		return
 	}
 	writeJSON(w, 201, kv)
@@ -743,19 +1019,30 @@ func (s *server) rotateKey(w http.ResponseWriter, r *http.Request, p *principal)
 		return
 	}
 	id := r.PathValue("id")
-	st := s.store.Snapshot()
-	if !canManageKey(st, p, st.Keys[id]) {
-		writeErr(w, r, 404, "not_found", "key not found")
-		return
-	}
 	secret := randHex(32)
 	var kv keyView
+	errRefused := errors.New("key rotation refused")
+	status := 0
+	displacedPrev := false
+	targetTeam := ""
 	err := s.store.Update(func(st *State) error {
-		cur := st.Keys[id]
-		if cur == nil {
-			return errConflict
-		}
 		now := time.Now().UTC()
+		current := currentKeyPrincipal(st, p, now)
+		if current == nil {
+			status = 401
+			return errRefused
+		}
+		if roleRank(p.Role) < roleRank(current.Role) {
+			current.Role = p.Role
+		}
+		cur := st.Keys[id]
+		if !canManageKey(st, current, cur) {
+			status = 404
+			return errRefused
+		}
+		targetTeam = cur.TeamID
+		displacedPrev = cur.PrevHash != ""
+		cur.Gen++
 		cur.Rotated = &now
 		cur.PrevSalt, cur.PrevHash, cur.PrevUntil = "", "", nil
 		if overlap > 0 {
@@ -764,12 +1051,22 @@ func (s *server) rotateKey(w http.ResponseWriter, r *http.Request, p *principal)
 		}
 		cur.Salt = randHex(16)
 		cur.Hash = s.keys.HashSecret(cur.Salt, secret)
+		revokeDeadPortMinters(st, now)
 		kv = viewKey(cur, tokenPrefix+id+"_"+secret)
 		return nil
 	})
 	if err != nil {
-		s.storeErr(w, r, err)
+		if errors.Is(err, errRefused) && status == 401 {
+			writeErr(w, r, 401, "unauthorized", "missing or invalid API key")
+		} else if errors.Is(err, errRefused) {
+			writeErr(w, r, 404, "not_found", "key not found")
+		} else {
+			s.storeErr(w, r, err)
+		}
 		return
+	}
+	if overlap == 0 || displacedPrev {
+		s.syncJumpKeysForTeam(r.Context(), targetTeam)
 	}
 	writeJSON(w, 200, kv)
 }
@@ -805,15 +1102,29 @@ func (s *server) deleteKey(w http.ResponseWriter, r *http.Request, p *principal)
 		writeErr(w, r, 404, "not_found", "key not found")
 		return
 	}
+	targetTeam := ""
 	if err := s.store.Update(func(st *State) error {
+		now := time.Now().UTC()
+		current := currentKeyPrincipal(st, p, now)
+		if current == nil {
+			return &authError{status: 401, code: "unauthorized", msg: "missing or invalid API key"}
+		}
+		if roleRank(p.Role) < roleRank(current.Role) {
+			current.Role = p.Role
+		}
+		if !canManageKey(st, current, st.Keys[id]) {
+			return &authError{status: 404, code: "not_found", msg: "key not found"}
+		}
+		targetTeam = st.Keys[id].TeamID
 		delete(st.Keys, id)
 		revokeLinksOf(st, func(k string) bool { return k == id })
+		revokeDeadPortMinters(st, now)
 		return nil
 	}); err != nil {
 		s.storeErr(w, r, err)
 		return
 	}
-	s.syncJumpKeys(r.Context()) // drops the key's ssh grants
+	s.syncJumpKeysForTeam(r.Context(), targetTeam) // drops the key's ssh grants
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -856,6 +1167,9 @@ func (s *server) putSecret(w http.ResponseWriter, r *http.Request, p *principal)
 	existed := s.store.Snapshot().Secrets[secretKey(p.Team.ID, name)] != nil
 	inject := false
 	err = s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
 		k := secretKey(p.Team.ID, name)
 		if !secretFits(st, p.Team.ID, k, len(sealed)) {
 			return errLimit
@@ -900,7 +1214,13 @@ func (s *server) deleteSecret(w http.ResponseWriter, r *http.Request, p *princip
 		writeErr(w, r, 404, "not_found", "secret not found")
 		return
 	}
-	if err := s.store.Update(func(st *State) error { delete(st.Secrets, k); return nil }); err != nil {
+	if err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
+		delete(st.Secrets, k)
+		return nil
+	}); err != nil {
 		s.storeErr(w, r, err)
 		return
 	}

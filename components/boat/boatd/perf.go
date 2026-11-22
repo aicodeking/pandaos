@@ -7,6 +7,8 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -224,9 +226,72 @@ func (m *Manager) convertImages() {
 
 // ---- cgroup memory limits ----
 
+const maxConcurrentDumps = 2
+
+var hostMemFn = hostMemMiB // variable for tests
+
 func (c Config) memLimits(v VM) (high, hard int64) {
 	high = int64(v.MemMiB+c.VMOverheadMiB) << 20
 	return high, high + int64(c.VMPageCacheMiB)<<20
+}
+
+// parentMemCeiling returns the aggregate memory.high and memory.max ceiling
+// for the parent cgroup (MemTotal - HostReserveMiB) so concurrent dumps or
+// aggregate VM page cache cannot exhaust host memory on untrusted hosts.
+func (c Config) parentMemCeiling() (high, hard int64, ok bool) {
+	total := c.HostMemMiB
+	if total == 0 {
+		total = hostMemFn()
+	}
+	avail := total - c.HostReserveMiB
+	if avail <= 0 {
+		return 0, 0, false
+	}
+	hard = int64(avail) << 20
+	margin := min(int64(512)<<20, hard/10)
+	return hard - margin, hard, true
+}
+
+// setParentMemCeiling applies the aggregate memory.high and memory.max ceiling
+// on c.CgroupParent when cgroup v2 memory limits are active.
+func setParentMemCeiling(c *Config) error {
+	if !c.cgroupLimits || c.CgroupParent == "" {
+		return nil
+	}
+	high, hard, ok := c.parentMemCeiling()
+	if !ok {
+		return nil
+	}
+	dir := filepath.Join(cgroupRoot, c.CgroupParent)
+	if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte(strconv.FormatInt(hard, 10)), 0o600); err != nil {
+		if c.UntrustedTenants {
+			return fmt.Errorf("parent memory.max: %w", err)
+		}
+		log.Printf("cgroups: parent memory.max: %v", err)
+		return nil
+	}
+	if err := os.WriteFile(filepath.Join(dir, "memory.high"), []byte(strconv.FormatInt(high, 10)), 0o600); err != nil {
+		if c.UntrustedTenants {
+			return fmt.Errorf("parent memory.high: %w", err)
+		}
+		log.Printf("cgroups: parent memory.high: %v", err)
+	}
+	return nil
+}
+
+// acquireDumpSlot bounds concurrent Firecracker memory dumps across the host
+// so aggregate lifted page cache stays bounded.
+func (m *Manager) acquireDumpSlot(ctx context.Context) (func(), error) {
+	if m.dumpSlots == nil {
+		return func() {}, nil
+	}
+	select {
+	case m.dumpSlots <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-m.dumpSlots }) }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (m *Manager) writeCgroup(v VM, file, val string) {
@@ -252,16 +317,21 @@ func (m *Manager) liftMemLimits(v VM) uint64 {
 	return generation
 }
 
-// memMaxWait bounds how long setMemLimits waits for a VM's usage to fit under memory.max.
-var memMaxWait = 30 * time.Second
+// memMaxWait bounds how long setMemLimits waits synchronously for a VM's usage
+// to fit under memory.max before handing off to a bounded background retry loop.
+var (
+	memMaxWait          = 30 * time.Second
+	memMaxRetryInterval = 5 * time.Second
+	memMaxRetryAttempts = 24
+)
 
 // setMemLimits requires the VM lock and gives its limits back after a dump.
 // memory.high first: it reclaims and throttles, never kills. memory.max only once
 // usage fits under it: over a higher memory.current, the kernel OOM-kills the VMM as soon as reclaim stalls
 // (the dump's page cache in writeback), which is how a VM died right after a refused
 // fork (boat-e2e 43224143615: firecracker gone without a word, no guest panic).
-// memory.reclaim pushes the usage down meanwhile. Past memMaxWait the max stays lifted
-// (by at most the VM's RAM, see liftMemLimits) and memory.high still bounds the VM.
+// memory.reclaim pushes the usage down meanwhile. Past memMaxWait a bounded background
+// retry loop keeps checking until page cache drains and restores memory.max.
 func (m *Manager) setMemLimits(v VM) {
 	m.dumpDone(v.ID)
 	if !m.cfg.cgroupLimits {
@@ -276,12 +346,71 @@ func (m *Manager) setMemLimits(v VM) {
 			break // no memory.current: deleted meanwhile, or no memory controller to wait for
 		}
 		if time.Now().After(deadline) {
-			log.Printf("%s: memory.max stays lifted: %d MiB in use over its %d MiB", v.ID, cur>>20, hard>>20)
+			log.Printf("%s: memory.max stays lifted: %d MiB in use over its %d MiB (scheduling background restore)", v.ID, cur>>20, hard>>20)
+			m.scheduleMemMaxRetry(v, cg, hard)
 			return
 		}
 		os.WriteFile(filepath.Join(cg, "memory.reclaim"), []byte(strconv.FormatInt(cur-hard, 10)), 0) // EAGAIN when short
 	}
 	m.writeCgroup(v, "memory.max", strconv.FormatInt(hard, 10))
+}
+
+func (m *Manager) scheduleMemMaxRetry(v VM, cg string, hard int64) {
+	m.mu.Lock()
+	if m.memMaxRetries == nil {
+		m.memMaxRetries = map[string]bool{}
+	}
+	if m.memMaxRetries[v.ID] {
+		m.mu.Unlock()
+		return
+	}
+	m.memMaxRetries[v.ID] = true
+	m.mu.Unlock()
+
+	interval := memMaxRetryInterval
+	attempts := memMaxRetryAttempts
+	if interval <= 0 {
+		interval = time.Second
+	}
+	if attempts <= 0 {
+		attempts = 1
+	}
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			delete(m.memMaxRetries, v.ID)
+			m.mu.Unlock()
+		}()
+		for i := 0; i < attempts; i++ {
+			timer := time.NewTimer(interval)
+			select {
+			case <-m.watchStop:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			unlock := m.lock(v.ID)
+			if m.dumpGeneration(v.ID) != 0 {
+				unlock()
+				return // a newer dump lifted limits; its setMemLimits owns restore
+			}
+			cur, err := readInt(filepath.Join(cg, "memory.current"))
+			if err != nil {
+				unlock()
+				return // cgroup removed
+			}
+			if cur <= hard {
+				if werr := os.WriteFile(filepath.Join(cg, "memory.max"), []byte(strconv.FormatInt(hard, 10)), 0); werr != nil && !errors.Is(werr, fs.ErrNotExist) {
+					log.Printf("%s: background memory.max restore: %v", v.ID, werr)
+				}
+				unlock()
+				return
+			}
+			os.WriteFile(filepath.Join(cg, "memory.reclaim"), []byte(strconv.FormatInt(cur-hard, 10)), 0)
+			unlock()
+		}
+		log.Printf("%s: background memory.max restore exhausted %d attempts", v.ID, attempts)
+	}()
 }
 
 func readInt(path string) (int64, error) {
@@ -347,6 +476,25 @@ func (m *Manager) realMemCheck(s Size) error {
 	return nil
 }
 
+type balloonSockKey struct{}
+
+// balloonFC returns a single shared http.Client + http.Transport for balloon
+// PATCH calls, routing each request to the VM's Unix socket from ctx while
+// keeping DisableKeepAlives:true so Firecracker never accumulates open conns.
+func (m *Manager) balloonFC() *http.Client {
+	m.balloonOnce.Do(func() {
+		tr := &http.Transport{
+			DisableKeepAlives: true,
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				sock, _ := ctx.Value(balloonSockKey{}).(string)
+				return dialJail(ctx, sock)
+			},
+		}
+		m.balloonClient = &http.Client{Transport: tr, Timeout: balloonCallTimeout}
+	})
+	return m.balloonClient
+}
+
 // memoryPressure inflates balloons when the host runs short, so guests give back
 // page cache before the host OOM killer has to pick a VM. Each tick asks for a
 // further balloonStepPct of RAM, and lets them deflate once memory is back.
@@ -368,31 +516,52 @@ func (m *Manager) memoryPressure(ctx context.Context) {
 	if !low {
 		m.balloonPct = 0
 	}
-	log.Printf("memory: %d MiB available, reserve %d MiB: balloons at %d%%", avail, m.cfg.HostReserveMiB, m.balloonPct)
-	var wg sync.WaitGroup
+	pct := m.balloonPct
+	log.Printf("memory: %d MiB available, reserve %d MiB: balloons at %d%%", avail, m.cfg.HostReserveMiB, pct)
+	var running []VM
 	for _, v := range m.list("") {
 		if v.State == Running {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			running = append(running, v)
+		}
+	}
+	if len(running) == 0 {
+		return
+	}
+	fc := &fcClient{hc: m.balloonFC()}
+	limit := min(balloonParallel, len(running))
+	jobs := make(chan VM, len(running))
+	for _, v := range running {
+		jobs <- v
+	}
+	close(jobs)
+	var wg sync.WaitGroup
+	for range limit {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for v := range jobs {
 				// This ticker also rotates the logs: a hung VMM must not stop that.
-				ctx, cancel := context.WithTimeout(ctx, balloonCallTimeout)
-				defer cancel()
-				err := newFC(filepath.Join(m.root(v.ID), apiSock)).call(ctx, "PATCH", "/balloon",
-					map[string]int{"amount_mib": v.MemMiB * m.balloonPct / 100})
+				callCtx, cancel := context.WithTimeout(
+					context.WithValue(ctx, balloonSockKey{}, filepath.Join(m.root(v.ID), apiSock)),
+					balloonCallTimeout,
+				)
+				err := fc.call(callCtx, "PATCH", "/balloon",
+					map[string]int{"amount_mib": v.MemMiB * pct / 100})
+				cancel()
 				if err != nil {
 					log.Printf("%s: balloon: %v", v.ID, err) // VM restored from a snapshot without one
 				}
-			}()
-		}
+			}
+		}()
 	}
 	wg.Wait()
 }
 
 const (
-	balloonStepPct = 10
-	balloonMaxPct  = 50
-	pressureEvery  = 5 // log-rotation ticks (seconds) between memoryPressure checks
+	balloonStepPct  = 10
+	balloonMaxPct   = 50
+	pressureEvery   = 5 // log-rotation ticks (seconds) between memoryPressure checks
+	balloonParallel = 8 // max concurrent balloon PATCH calls under memory pressure
 
 	balloonCallTimeout = 3 * time.Second
 )
@@ -536,7 +705,7 @@ func (m *Manager) buildWarm(ctx context.Context, image, size string) error {
 	dst := m.warmDir(image, size)
 	tmp := dst + ".tmp"
 	os.RemoveAll(tmp)
-	withMem, err := m.freeze(ctx, v, tmp)
+	withMem, err := m.freeze(ctx, v, tmp, false)
 	if err == nil && !withMem {
 		err = fmt.Errorf("no memory snapshot")
 	}

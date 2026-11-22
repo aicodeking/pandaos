@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // boatdClient talks to boatd's internal API, over a unix socket by default.
@@ -21,13 +22,23 @@ type boatdClient struct {
 
 func newBoatd(addr string) *boatdClient {
 	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
-		return &boatdClient{base: strings.TrimRight(addr, "/"), hc: &http.Client{}}
+		tr := &http.Transport{
+			MaxIdleConns:        128,
+			MaxIdleConnsPerHost: 64,
+			IdleConnTimeout:     90 * time.Second,
+		}
+		return &boatdClient{base: strings.TrimRight(addr, "/"), hc: &http.Client{Transport: tr}}
 	}
 	sock := strings.TrimPrefix(addr, "unix:")
-	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "unix", sock)
-	}}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", sock)
+		},
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 64,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	return &boatdClient{base: "http://boatd", hc: &http.Client{Transport: tr}}
 }
 

@@ -30,6 +30,9 @@ func TestLiveScripts(t *testing.T) {
 	for _, script := range []string{"./e2e-auth.sh", "../sdk/e2e-live.sh", "../sdk/e2e-agent-from-env.sh"} {
 		t.Run(script, func(t *testing.T) {
 			e := setup(t)
+			if script == "../sdk/e2e-live.sh" {
+				e.enableSSH()
+			}
 			e.srv.cfg.VMDomain = "vm.boat.example"
 			cmd := exec.Command("bash", script)
 			cmd.Env = append(os.Environ(), "BOAT_URL="+e.api.URL, "BOAT_KEY="+e.owner, "BOAT_API_KEY=", "BOAT_LIVE_FAKE=1",
@@ -68,6 +71,7 @@ func TestOfficialSDKDrivers(t *testing.T) {
 				t.Skipf("%s not set", c.env)
 			}
 			e := setup(t)
+			e.enableSSH()
 			e.srv.cfg.VMDomain = "vm.boat.example" // for host_port
 			bin, extra := c.bin, []string{}
 			if bin == "" {

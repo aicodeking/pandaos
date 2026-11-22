@@ -26,10 +26,11 @@ readonly HASH_RE='^[$][A-Za-z0-9./$=]+$'
 readonly KEY_RE='^(ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[A-Za-z0-9@.-]+) [A-Za-z0-9+/=]+( [^"\\$]*)?$'
 readonly TZ_RE='^[A-Za-z0-9_+/-]+$'
 # No quotes, '$' or spaces: the URL also goes into a Nix string.
-# Server profile. All three also go into Nix strings: no quotes, '$' or spaces.
+# Server profile. All go into Nix strings: no quotes or '$'.
 readonly DOMAIN_RE='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.])+[a-z]{2,63}$'
 readonly EMAIL_RE='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+[.][A-Za-z]{2,}$'
 readonly IPV6_PREFIX_RE='^[0-9a-fA-F:]{2,39}/([1-9][0-9]?|1[01][0-9]|12[0-8])$'
+readonly DNS_PROVIDER_RE='^[A-Za-z0-9_.:/@{}-]+( [A-Za-z0-9_.:/@{}-]+)*$'
 readonly RELAY_RE='^(https?)://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
 
 die() {
@@ -73,6 +74,10 @@ $UEFI_NOTE
 
  server profile (boat VMs, see docs/boat.md):
   --domain D              base domain: api.D, desktop.D, *.desktop.D, ssh.D, *.vm.D
+  --vm-domain D           separate domain for VM port routes (*.D; default: vm.<domain>)
+  --desktop-domain D      separate domain for VM desktops (D, *.D; default: desktop.<domain>)
+  --dns-provider P        Caddy DNS-01 provider, e.g. 'cloudflare {env.CF_API_TOKEN}'
+  --untrusted-tenants B   multi-tenant isolation assertions (true or false)
   --acme-email E          optional Let's Encrypt account e-mail (none: ACME without one)
   --ipv6-prefix P         routed IPv6 prefix for VMs, e.g. 2a01:4f8:1:2:b0a7::/80
   --data-disk DEV         second disk for VM data (/var/lib/boat), ERASED, btrfs
@@ -170,6 +175,16 @@ check_ipv6_prefix() {
   [[ -z $1 || $1 =~ $IPV6_PREFIX_RE ]] || bad "bad IPv6 prefix '$1': like 2a01:4f8:1:2:b0a7::/80"
 }
 
+check_dns_provider() {
+  [[ $1 =~ $DNS_PROVIDER_RE ]] ||
+    bad "bad --dns-provider '$1': e.g. 'cloudflare {env.CF_API_TOKEN}' (no quotes, '\$' or newlines)"
+}
+
+check_untrusted_tenants() {
+  [[ $1 == true || $1 == false ]] ||
+    bad "bad --untrusted-tenants '$1': expected 'true' or 'false'"
+}
+
 check_data_disk() {
   [[ -z $1 ]] && return
   check_disk "$1" || return
@@ -224,7 +239,8 @@ parse_args() {
         shift
         ;;
       --disk | --profile | --hostname | --user | --password-hash | --ssh-key | --timezone | --relay | \
-        --domain | --acme-email | --ipv6-prefix | --data-disk | --extra-config)
+        --domain | --vm-domain | --desktop-domain | --dns-provider | --untrusted-tenants | \
+        --acme-email | --ipv6-prefix | --data-disk | --extra-config)
         (($# >= 2)) || die "$1 needs a value"
         case $1 in
           --disk) disk=$2 ;;
@@ -242,6 +258,22 @@ parse_args() {
             relay_set=1
             ;;
           --domain) domain=$2 ;;
+          --vm-domain)
+            vm_domain=$2
+            vm_domain_set=1
+            ;;
+          --desktop-domain)
+            desktop_domain=$2
+            desktop_domain_set=1
+            ;;
+          --dns-provider)
+            dns_provider=$2
+            dns_provider_set=1
+            ;;
+          --untrusted-tenants)
+            untrusted_tenants=$2
+            untrusted_tenants_set=1
+            ;;
           --acme-email) acme_email=$2 ;;
           --ipv6-prefix) ipv6_prefix=$2 ;;
           --data-disk) data_disk=$2 ;;
@@ -325,14 +357,28 @@ gather() {
 # Server-only settings; refused for other profiles so nothing is silently ignored.
 gather_server() {
   if [[ $profile != server ]]; then
-    [[ -z $domain$acme_email$ipv6_prefix$data_disk ]] ||
-      die "--domain, --acme-email, --ipv6-prefix and --data-disk need --profile server"
+    if [[ -n $domain${vm_domain:-}${desktop_domain:-}${dns_provider:-}${untrusted_tenants:-}$acme_email$ipv6_prefix$data_disk ]] ||
+      ((${vm_domain_set:-0} || ${desktop_domain_set:-0} || ${dns_provider_set:-0} || ${untrusted_tenants_set:-0})); then
+      die "--domain, --vm-domain, --desktop-domain, --dns-provider, --untrusted-tenants, --acme-email, --ipv6-prefix and --data-disk need --profile server"
+    fi
     return
   fi
   if [[ -n $domain ]]; then check_domain "$domain" || exit 1; elif ((yes)); then
     die "--domain is required with --profile server --yes"
   else
     ask_valid domain check_domain "Base domain for boat (api.D, *.vm.D ...)"
+  fi
+  if ((${vm_domain_set:-0})) || [[ -n ${vm_domain:-} ]]; then
+    check_domain "${vm_domain:-}" || exit 1
+  fi
+  if ((${desktop_domain_set:-0})) || [[ -n ${desktop_domain:-} ]]; then
+    check_domain "${desktop_domain:-}" || exit 1
+  fi
+  if ((${dns_provider_set:-0})) || [[ -n ${dns_provider:-} ]]; then
+    check_dns_provider "${dns_provider:-}" || exit 1
+  fi
+  if ((${untrusted_tenants_set:-0})) || [[ -n ${untrusted_tenants:-} ]]; then
+    check_untrusted_tenants "${untrusted_tenants:-}" || exit 1
   fi
   if [[ -n $acme_email ]] || ((yes)); then check_email "$acme_email" || exit 1; else
     ask_valid acme_email check_email "ACME (Let's Encrypt) e-mail (optional, Enter to skip)"
@@ -456,14 +502,34 @@ write_local_nix() {
 "
   fi
   if [[ $profile == server ]]; then
+    local effective_untrusted=${untrusted_tenants:-}
+    if [[ -z $effective_untrusted && -n ${dns_provider:-} && -n ${vm_domain:-} && -n ${desktop_domain:-} ]]; then
+      effective_untrusted=true
+    fi
     boat="  services.boat.domain = \"$domain\";
-  # No DNS API yet: per-host certificates, which a tenant can exhaust. Before
+"
+    [[ -z ${vm_domain:-} ]] || boat+="  services.boat.vmDomain = \"$vm_domain\";
+"
+    [[ -z ${desktop_domain:-} ]] || boat+="  services.boat.desktopDomain = \"$desktop_domain\";
+"
+    if [[ -n ${dns_provider:-} ]]; then
+      boat+="  services.boat.gateway.dnsProvider = \"$dns_provider\";
+"
+    else
+      boat+="  # No DNS API yet: per-host certificates, which a tenant can exhaust. Before
   # untrusted tenants, set gateway.dnsProvider and remove this (docs/boat.md).
   services.boat.gateway.allowOnDemandTLS = true;
-  # The server profile hardens for untrusted tenants by default (needs nothing
+"
+    fi
+    if [[ -n $effective_untrusted ]]; then
+      boat+="  services.boat.untrustedTenants = $effective_untrusted;
+"
+    else
+      boat+="  # The server profile hardens for untrusted tenants by default (needs nothing
   # here). All tenants trusted: untrustedTenants = false. Strangers: set
   # dnsProvider and separate vmDomain/desktopDomain, then untrustedTenants = true.
 "
+    fi
     [[ -z $acme_email ]] || boat+="  services.boat.acmeEmail = \"$acme_email\";
 "
     [[ -z $ipv6_prefix ]] || boat+="  services.boat.ipv6Prefix = \"$ipv6_prefix\";
@@ -582,9 +648,11 @@ personalise() {
 
 main() {
   disk="" profile="" hostname="" user="" password_hash="" timezone="" relay=""
-  domain="" acme_email="" ipv6_prefix="" data_disk="" extra_config=""
+  domain="" vm_domain="" desktop_domain="" dns_provider="" untrusted_tenants=""
+  acme_email="" ipv6_prefix="" data_disk="" extra_config=""
   ssh_keys=()
   yes=0 build=0 sudo_nopasswd=0 ssh_key_set=0 relay_set=0 allow_insecure_relay=0 boot_dev="" root_dev=""
+  vm_domain_set=0 desktop_domain_set=0 dns_provider_set=0 untrusted_tenants_set=0
   [[ -d ${PANDA_SYSTEMS:-} && -n ${PANDA_FLAKE_URL:-} && -n ${PANDA_DEFAULT_PROFILE:-} ]] ||
     die "PANDA_SYSTEMS/PANDA_FLAKE_URL/PANDA_DEFAULT_PROFILE unset; run the packaged panda-install"
   PANDA_FLAKE_LOCK=${PANDA_FLAKE_LOCK:-}

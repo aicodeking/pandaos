@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -35,12 +34,13 @@ const (
 )
 
 type fileGrant struct {
-	Team string `json:"t"`
-	VM   string `json:"v"`
-	Path string `json:"p"`
-	Exp  int64  `json:"e"`
-	Op   string `json:"o,omitempty"` // "put": an upload URL (compat_extra.go); "snap": a snapshot chunk
-	Key  string `json:"k"`           // the minting API key: the URL dies with it (keyAlive)
+	Team   string `json:"t"`
+	VM     string `json:"v"`
+	Path   string `json:"p"`
+	Exp    int64  `json:"e"`
+	Op     string `json:"o,omitempty"` // "put": an upload URL (compat_extra.go); "snap": a snapshot chunk
+	Key    string `json:"k"`           // the minting API key: the URL dies with it (keyAlive)
+	KeyGen int64  `json:"g,omitempty"` // secret generation of Key when minted
 	// Scope the minting route required; the key must still hold it at use
 	// ("" on older URLs: exec, what every minting route requires).
 	Scope string `json:"s,omitempty"`
@@ -48,8 +48,43 @@ type fileGrant struct {
 
 // mintGrant signs g for p as minted by r's route (its key and scope).
 func (s *server) mintGrant(r *http.Request, p *principal, g fileGrant) string {
-	g.Team, g.Key, g.Scope = p.Team.ID, p.Key.ID, s.routeScopes[info(r).pattern]
+	g.Team, g.Key, g.KeyGen, g.Scope = p.Team.ID, p.Key.ID, p.KeyGen, s.routeScopes[info(r).pattern]
 	return s.signFileGrant(g)
+}
+
+// mintFileURL rechecks authority after body reads and upstream work against the
+// current snapshot; no persistent state is needed for a file grant.
+// Keep mintGrant's snapshot-chunk contract separate from these file routes.
+func (s *server) mintFileURL(w http.ResponseWriter, r *http.Request, p *principal, g *fileGrant) string {
+	vm, err := s.vmOf(r, g.VM)
+	if err != nil || p == nil || p.Team == nil || str(vm, "team") != p.Team.ID {
+		writeErr(w, r, 404, "not_found", "vm not found")
+		return ""
+	}
+	// The recheck reads one immutable snapshot and takes no store lock: the writer
+	// mutex is held across Update's fsync, and a read-only check must not queue
+	// behind it. A later revocation is enforced when the link is used
+	// (openFileGrant) and by watchAlive on open transfers.
+	st, now := s.store.Snapshot(), time.Now()
+	scope := orDefault(s.routeScopes[info(r).pattern], "exec")
+	current := currentKeyPrincipal(st, p, now)
+	if p.VMID != "" && p.VMID == g.VM && p.Key != nil && p.has(scope) && keyAliveIn(st, p.Key.ID, p.Team.ID, scope, now) {
+		current = p
+	}
+	if current == nil || !current.has(scope) || !p.has(scope) {
+		writeErr(w, r, 403, "forbidden", "credential no longer permits file URL issuance")
+		return ""
+	}
+	for _, key := range []*APIKey{p.Key, current.Key} {
+		if key.Expires != nil && key.Expires.Unix() < g.Exp {
+			g.Exp = key.Expires.Unix()
+		}
+	}
+	if !now.Before(time.Unix(g.Exp, 0)) {
+		writeErr(w, r, 403, "forbidden", "credential no longer permits file URL issuance")
+		return ""
+	}
+	return s.mintGrant(r, current, *g)
 }
 
 func (s *server) signFileGrant(g fileGrant) string {
@@ -68,7 +103,7 @@ func (s *server) openFileGrant(token string, now time.Time) (fileGrant, bool) {
 	if err != nil || json.Unmarshal(b, &g) != nil || !now.Before(time.Unix(g.Exp, 0)) {
 		return g, false
 	}
-	return g, s.keyAlive(g.Key, g.Team, orDefault(g.Scope, "exec"), now)
+	return g, keyAliveGenIn(s.store.Snapshot(), g.Key, g.KeyGen, g.Team, orDefault(g.Scope, "exec"), now)
 }
 
 // publicBase is this API's public base URL: -public-url, else what the request
@@ -108,7 +143,12 @@ func (s *server) compatDownloadURL(w http.ResponseWriter, r *http.Request, p *pr
 		return
 	}
 	exp := time.Now().Add(time.Duration(ttl) * time.Second).Truncate(time.Second)
-	tok := s.mintGrant(r, p, fileGrant{VM: r.PathValue("id"), Path: file, Exp: exp.Unix()})
+	grant := fileGrant{VM: r.PathValue("id"), Path: file, Exp: exp.Unix()}
+	tok := s.mintFileURL(w, r, p, &grant)
+	if tok == "" {
+		return
+	}
+	exp = time.Unix(grant.Exp, 0)
 	writeCompat(w, 200, "file.download_url", map[string]any{"url": s.publicBase(r) + fileDownloadPath + tok,
 		"method": "GET", "path": file, "expiresAt": exp.UTC()})
 }
@@ -116,10 +156,7 @@ func (s *server) compatDownloadURL(w http.ResponseWriter, r *http.Request, p *pr
 // compatFileDownload serves a download URL: no API key, the token is the grant.
 func (s *server) compatFileDownload(w http.ResponseWriter, r *http.Request) {
 	info(r).audit = true
-	ip := r.Header.Get("X-Forwarded-For") // Caddy sets it; the listener is loopback
-	if ip == "" {
-		ip, _, _ = net.SplitHostPort(r.RemoteAddr)
-	}
+	ip := trustedClientIP(r)
 	if ok, _ := s.limiter.allow("filedl:" + ip); !ok {
 		writeErr(w, r, 429, "rate_limited", "rate limit exceeded")
 		return
@@ -139,7 +176,15 @@ func (s *server) compatFileDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	// The link's minting key must stay alive for the whole transfer.
+	r, stop := s.watchAlive(r, func(st *State, now time.Time) bool {
+		return keyAliveGenIn(st, g.Key, g.KeyGen, g.Team, orDefault(g.Scope, "exec"), now)
+	})
+	defer stop()
 	if g.Op == "snap" { // a snapshot chunk URL (compatSnapshotDownload); Path is the snapshot id
+		if !s.grantMaySnapshot(w, r, g) {
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		s.relayDownload(w, r, g.VM, g.Path)
 		return
@@ -196,4 +241,33 @@ func (s *server) compatFindInFiles(w http.ResponseWriter, r *http.Request, p *pr
 		matches = append(matches, map[string]any{"file": m.Path, "line": m.Line, "content": m.Text})
 	}
 	writeCompat(w, 200, "file.find", map[string]any{"success": true, "matches": matches, "truncated": out.Truncated})
+}
+
+// grantMaySnapshot re-checks the builder gate when a snapshot chunk URL is used:
+// the snapshot may have become an environment's build snapshot, or its VM a
+// builder, since the URL was minted. It answers (and reports false) when not.
+func (s *server) grantMaySnapshot(w http.ResponseWriter, r *http.Request, g fileGrant) bool {
+	st := s.store.Snapshot()
+	k := st.Keys[g.Key]
+	team := st.Teams[g.Team]
+	if k == nil || team == nil || team.role(k.UserID) == "" {
+		writeErr(w, r, 404, "not_found", "download URL not found or expired")
+		return false
+	}
+	role := team.role(k.UserID)
+	p := &principal{Key: k, User: st.Users[k.UserID], Team: team, Role: role, Scopes: effectiveScopes(k.Scopes, role)}
+	var list struct {
+		Snapshots []map[string]any `json:"snapshots"`
+	}
+	if err := s.boatd.call(r.Context(), "GET", "/v1/snapshots?team="+url.QueryEscape(g.Team), nil, &list); err != nil {
+		writeUpstream(w, r, err)
+		return false
+	}
+	for _, sn := range list.Snapshots {
+		if str(sn, "id") == g.Path && str(sn, "team") == g.Team {
+			return !s.refuseBuilderSnapshot(w, r, p, sn)
+		}
+	}
+	writeErr(w, r, 404, "not_found", "download URL not found or expired")
+	return false
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"maps"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -92,17 +91,14 @@ func compatSince(w http.ResponseWriter, r *http.Request) (time.Time, bool) {
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1-days), true
 }
 
-// compatAIRows renders native usage rows (one per VM, provider and model,
-// dated by their last use) as boat.dev's per-day rows and totals.
-func compatAIRows(rows []*AIUsageRow, since time.Time) ([]map[string]any, map[string]any) {
+// compatAIRows renders per-day usage rows (State.AIUsageDays: one per UTC day,
+// provider and model) as boat.dev's rows and their totals.
+func compatAIRows(rows []*AIUsageRow) ([]map[string]any, map[string]any) {
 	out := []map[string]any{}
 	var req, in, outTok int64
 	for _, u := range rows {
-		if u.Updated.Before(since) {
-			continue
-		}
 		req, in, outTok = req+u.Requests, in+u.InputTokens, outTok+u.OutputTokens
-		out = append(out, map[string]any{"day": u.Updated.UTC().Format(time.DateOnly), "credential": u.Provider,
+		out = append(out, map[string]any{"day": u.Day, "credential": u.Provider,
 			"model": u.Model, "requests": u.Requests, "errors": 0, "inputTokens": u.InputTokens,
 			"outputTokens": u.OutputTokens, "cacheReadTokens": 0, "cacheWriteTokens": 0})
 	}
@@ -110,23 +106,37 @@ func compatAIRows(rows []*AIUsageRow, since time.Time) ([]map[string]any, map[st
 		"cacheReadTokens": 0, "cacheWriteTokens": 0}
 }
 
+// aiUsageGate stands in for teamAIUsage when only the gate matters (scopes, the
+// self-token check): it renders nothing.
+func aiUsageGate(w http.ResponseWriter, r *http.Request, p *principal) {
+	writeJSON(w, 200, map[string]any{})
+}
+
+// vmAIUsageGate is vmAIUsage without the usage: the VM must be the team's.
+func (s *server) vmAIUsageGate(w http.ResponseWriter, r *http.Request, p *principal) {
+	if _, ok := s.ownVM(w, r, p); ok {
+		writeJSON(w, 200, map[string]any{})
+	}
+}
+
 func (s *server) compatAIUsage(w http.ResponseWriter, r *http.Request, p *principal) {
 	since, ok := compatSince(w, r)
 	if !ok {
 		return
 	}
-	res := s.callNative(r, p, "GET /v1/ai/usage", s.teamAIUsage, "", nil)
-	if !res.ok() {
+	// The native call is the scope gate; the numbers come from the per-day rows,
+	// so its own (lifetime) answer is not rendered.
+	if res := s.callNative(r, p, "GET /v1/ai/usage", aiUsageGate, "", nil); !res.ok() {
 		res.relay(w)
 		return
 	}
-	var all struct {
-		Usage []*AIUsageRow `json:"usage"`
-	}
-	json.Unmarshal(res.body.Bytes(), &all)
+	all := s.aiUsageDays(p.Team.ID, "", since)
 	byVM := map[string][]*AIUsageRow{}
 	var vms []string
-	for _, u := range all.Usage {
+	for _, u := range all {
+		if u.VMID == aiDeletedVM {
+			continue // deleted VMs: in the team rows and totals below, not a sandbox
+		}
 		if byVM[u.VMID] == nil {
 			vms = append(vms, u.VMID)
 		}
@@ -136,14 +146,11 @@ func (s *server) compatAIUsage(w http.ResponseWriter, r *http.Request, p *princi
 	st := s.store.Snapshot()
 	sandboxes := []map[string]any{}
 	for _, vm := range vms {
-		rows, totals := compatAIRows(byVM[vm], since)
-		if len(rows) == 0 {
-			continue
-		}
+		rows, totals := compatAIRows(mergeAIUsageDays(byVM[vm]))
 		sandboxes = append(sandboxes, map[string]any{"sandboxId": nullIfEmpty(ids[vm]), "name": nil,
 			"blocked": st.AIVMs[vm] != nil && st.AIVMs[vm].Blocked, "usage": rows, "totals": totals, "dollars": 0})
 	}
-	rows, totals := compatAIRows(all.Usage, since)
+	rows, totals := compatAIRows(mergeAIUsageDays(all))
 	writeCompat(w, 200, "ai.usage", map[string]any{"accountId": p.Team.ID, "profileId": nil,
 		"since": since.Format(time.DateOnly), "sandboxes": sandboxes, "usage": rows, "totals": totals, "dollars": 0})
 }
@@ -154,16 +161,11 @@ func (s *server) compatSandboxAIUsage(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 	id := r.PathValue("id")
-	res := s.callNative(r, p, "GET /v1/vms/{id}/ai-usage", s.vmAIUsage, id, nil)
-	if !res.ok() {
+	if res := s.callNative(r, p, "GET /v1/vms/{id}/ai-usage", s.vmAIUsageGate, id, nil); !res.ok() {
 		res.relay(w)
 		return
 	}
-	var v struct {
-		Usage []*AIUsageRow `json:"usage"`
-	}
-	json.Unmarshal(res.body.Bytes(), &v)
-	rows, totals := compatAIRows(v.Usage, since)
+	rows, totals := compatAIRows(mergeAIUsageDays(s.aiUsageDays(p.Team.ID, id, since)))
 	ai := s.store.Snapshot().AIVMs[id]
 	writeCompat(w, 200, "sandbox.ai_usage", map[string]any{"sandboxId": s.compatID(p.Team.ID, id),
 		"blocked": ai != nil && ai.Blocked, "proxied": s.cfg.AIProxyURL != "" && !s.store.Snapshot().AIProxyOff[p.Team.ID],
@@ -192,38 +194,74 @@ func (s *server) compatSetAIAccess(w http.ResponseWriter, r *http.Request, p *pr
 
 // ---- environment vars (environments.go) ----
 
-// compatEnvVar sets (value != nil) or removes one var through the native PUT,
-// which validates names and sizes.
-// ponytail: read-modify-write of the whole map; two concurrent var writes to
-// one environment can lose one. Add a per-var native route if that matters.
+// compatEnvVar atomically sets (value != nil) or removes one var inside Store.Update.
 func (s *server) compatEnvVar(w http.ResponseWriter, r *http.Request, p *principal, value *string) {
 	e, ok := s.pathEnv(w, r, p)
 	if !ok {
 		return
 	}
 	key := r.PathValue("key")
-	vars := maps.Clone(e.Env)
-	if vars == nil {
-		vars = map[string]string{}
-	}
 	if value != nil {
-		vars[key] = *value
-	} else if _, had := vars[key]; !had {
+		if strings.ContainsAny(*value, "\r\n\x00") {
+			writeErr(w, r, 400, "invalid_request", "env variable value cannot contain CR, LF, or NUL")
+			return
+		}
+		if msg := validEnv(map[string]string{key: *value}); msg != "" {
+			writeErr(w, r, 400, "invalid_request", msg)
+			return
+		}
+	}
+	var (
+		ver        int
+		notFound   bool
+		invalidMsg string
+	)
+	err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
+		env := st.Environments[e.ID]
+		if env == nil || env.TeamID != p.Team.ID {
+			return errConflict
+		}
+		vars := maps.Clone(env.Env)
+		if vars == nil {
+			vars = map[string]string{}
+		}
+		if value != nil {
+			vars[key] = *value
+			if msg := validEnv(vars); msg != "" {
+				invalidMsg = msg
+				return errors.New(msg)
+			}
+		} else if _, had := vars[key]; !had {
+			notFound = true
+			return errors.New("variable not found")
+		} else {
+			delete(vars, key)
+		}
+		env.Env = vars
+		if teamEnvBytes(st, p.Team.ID) > maxEnvBytesPerTeam {
+			return errLimit
+		}
+		env.Version++
+		env.Updated = time.Now().UTC()
+		ver = env.Version
+		return nil
+	})
+	if invalidMsg != "" {
+		writeErr(w, r, 400, "invalid_request", invalidMsg)
+		return
+	}
+	if notFound {
 		writeErr(w, r, 404, "not_found", "variable not found")
 		return
-	} else {
-		delete(vars, key)
 	}
-	res := s.callNative(r, p, "PUT /v1/environments/{id}", s.updateEnv, e.ID, map[string]any{"env": vars})
-	if !res.ok() {
-		res.relay(w)
+	if err != nil {
+		s.storeErr(w, r, err)
 		return
 	}
-	var cur struct {
-		Version int `json:"version"`
-	}
-	json.Unmarshal(res.body.Bytes(), &cur)
-	writeJSON(w, 200, map[string]any{"success": true, "versionId": envUUID(e.ID, cur.Version), "versionNumber": cur.Version})
+	writeJSON(w, 200, map[string]any{"success": true, "versionId": envUUID(e.ID, ver), "versionNumber": ver})
 }
 
 func (s *server) compatSetEnvVar(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -280,6 +318,9 @@ func (s *server) compatReplace(w http.ResponseWriter, r *http.Request, p *princi
 		return
 	}
 	if _, ok := s.ownVM(w, r, p); !ok {
+		return
+	}
+	if s.revalidatePrincipal(w, r, p, "exec") == nil {
 		return
 	}
 	id, pat, nv := r.PathValue("id"), []byte(body.Pattern), []byte(*body.NewValue)
@@ -339,7 +380,12 @@ func (s *server) compatUploadURL(w http.ResponseWriter, r *http.Request, p *prin
 		return
 	}
 	exp := time.Now().Add(time.Duration(ttl) * time.Second).Truncate(time.Second)
-	tok := s.mintGrant(r, p, fileGrant{VM: r.PathValue("id"), Path: file, Exp: exp.Unix(), Op: "put"})
+	grant := fileGrant{VM: r.PathValue("id"), Path: file, Exp: exp.Unix(), Op: "put"}
+	tok := s.mintFileURL(w, r, p, &grant)
+	if tok == "" {
+		return
+	}
+	exp = time.Unix(grant.Exp, 0)
 	writeCompat(w, 200, "file.upload_url", map[string]any{"url": s.publicBase(r) + fileUploadPath + tok,
 		"method": "PUT", "path": file, "expiresAt": exp.UTC()})
 }
@@ -347,10 +393,7 @@ func (s *server) compatUploadURL(w http.ResponseWriter, r *http.Request, p *prin
 // compatFileUpload takes an upload URL's PUT: no API key, the token is the grant.
 func (s *server) compatFileUpload(w http.ResponseWriter, r *http.Request) {
 	info(r).audit = true
-	ip := r.Header.Get("X-Forwarded-For") // Caddy sets it; the listener is loopback
-	if ip == "" {
-		ip, _, _ = net.SplitHostPort(r.RemoteAddr)
-	}
+	ip := trustedClientIP(r)
 	if ok, _ := s.limiter.allow("fileul:" + ip); !ok {
 		writeErr(w, r, 429, "rate_limited", "rate limit exceeded")
 		return
@@ -375,6 +418,15 @@ func (s *server) compatFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer spool.Close()
+	if reg, valid := s.openFileGrant(r.PathValue("token"), time.Now()); !valid || reg.Op != "put" {
+		writeErr(w, r, 404, "not_found", "upload URL not found or expired")
+		return
+	}
+	// The link's minting key must stay alive for the whole transfer.
+	r, stop := s.watchAlive(r, func(st *State, now time.Time) bool {
+		return keyAliveGenIn(st, g.Key, g.KeyGen, g.Team, orDefault(g.Scope, "exec"), now)
+	})
+	defer stop()
 	if err := s.putVMFile(r, g.VM, g.Path, spool); err != nil {
 		writeUpstream(w, r, err)
 		return
@@ -416,24 +468,22 @@ func (s *server) compatArtifact(w http.ResponseWriter, r *http.Request, p *princ
 
 // ---- share and recover ----
 
-// compatShare: every sandbox here is already usable by all of its team, so
-// sharing with the organization is a no-op that answers the sandbox. Making
-// one private (unshare) has no equivalent: compatUnshare refuses it.
+// compatShare cannot model creator-authority sharing: native sandboxes are
+// already accessible to their whole team. Refuse without changing access.
 func (s *server) compatShare(w http.ResponseWriter, r *http.Request, p *principal) {
-	vm, ok := s.ownVM(w, r, p)
-	if !ok {
+	if _, ok := s.ownVM(w, r, p); !ok {
 		return
 	}
-	writeJSON(w, 200, map[string]any{"sandbox": s.sandbox(vm)})
+	writeErr(w, r, 501, "not_supported", "creator-authority sandbox sharing is not supported: sandboxes remain accessible to their team; no access settings were changed")
 }
 
-// compatUnshare: there are no private sandboxes on a self-hosted server, so
-// unshare answers 501 not_supported (after the usual 404 for a foreign id).
+// compatUnshare cannot enforce boat.dev's creator-only API and SSH access:
+// native sandboxes belong to a team. Refuse without changing ports or tokens.
 func (s *server) compatUnshare(w http.ResponseWriter, r *http.Request, p *principal) {
-	if _, ok := s.ownVM(w, r, p); ok {
-		writeErr(w, r, http.StatusNotImplemented, "not_supported",
-			"unshare is not supported on self-hosted boat: every sandbox is usable by its whole team")
+	if _, ok := s.ownVM(w, r, p); !ok {
+		return
 	}
+	writeErr(w, r, 501, "not_supported", "creator-only sandbox privacy is not supported: sandboxes remain accessible to their team; use native private-port and port-token revoke operations to restrict port access")
 }
 
 // compatRecover power-cycles a running VM: a forced stop (no snapshot; the
@@ -447,12 +497,24 @@ func (s *server) compatRecover(w http.ResponseWriter, r *http.Request, p *princi
 		writeErr(w, r, 409, "no_machine", "the sandbox is not running; resume it instead")
 		return
 	}
+	// A VM's own token never starts its VM (startVM refuses it): refuse before the
+	// stop so the call has no side effects.
+	if msg := compatSelfStartRefusal(p); msg != "" {
+		writeErr(w, r, 403, "forbidden", msg)
+		return
+	}
 	id := r.PathValue("id")
-	if res := s.callNative(r, p, "POST /v1/vms/{id}/stop", s.stopVM, id, map[string]any{"force": true}); !res.ok() {
+	// A power cycle never ends a no_env run: read before the stop, carried by the
+	// start (which also keeps the mark by being a managed restart).
+	var startBody map[string]any
+	if s.noEnvRun(id) {
+		startBody = map[string]any{"no_env": true}
+	}
+	if res := s.callNative(withManagedStop(r), p, "POST /v1/vms/{id}/stop", s.stopVM, id, map[string]any{"force": true}); !res.ok() {
 		res.relay(w)
 		return
 	}
-	if res := s.callNative(r, p, "POST /v1/vms/{id}/start", s.startVM, id, nil); !res.ok() {
+	if res := s.callNative(withManagedRestart(r), p, "POST /v1/vms/{id}/start", s.startVM, id, startBody); !res.ok() {
 		res.relay(w)
 		return
 	}

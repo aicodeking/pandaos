@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func init() {
@@ -26,8 +27,10 @@ func init() {
 }
 
 var (
-	cmdCols    = []string{"id", "state", "exit", "started_at", "cmd"}
-	promptCols = []string{"id", "state", "agent", "conversation_id", "prompt"}
+	cmdCols          = []string{"id", "state", "exit", "started_at", "cmd"}
+	promptCols       = []string{"id", "state", "agent", "conversation_id", "prompt"}
+	followBackoffMin = 100 * time.Millisecond
+	followBackoffMax = time.Second
 )
 
 func vmArg(a *app, ref string) (string, error) {
@@ -48,13 +51,18 @@ func (a *app) okLine(v obj, text string) error {
 // followLogs streams a command's output to the end, reconnecting from the last
 // offset when the stream asks for it, and returns the remote exit status.
 func (a *app) followLogs(base string) error {
-	var offset int64
+	return a.followLogsFrom(base, 0)
+}
+
+func (a *app) followLogsFrom(base string, offset int64) error {
+	ctx := a.context()
+	backoff := followBackoffMin
 	for {
-		resp, err := a.c.request("GET", base+"?follow=1&offset="+strconv.FormatInt(offset, 10), nil, "")
+		resp, err := a.c.requestCtx(ctx, "GET", base+"?follow=1&offset="+strconv.FormatInt(offset, 10), nil, "")
 		if err != nil {
 			return err
 		}
-		done, code, err := a.readFollow(resp.Body, &offset)
+		done, progressed, code, err := a.readFollow(resp.Body, &offset)
 		resp.Body.Close()
 		if err != nil {
 			return err
@@ -65,17 +73,30 @@ func (a *app) followLogs(base string) error {
 			}
 			return nil
 		}
+		if progressed {
+			backoff = followBackoffMin
+		}
+		if backoff > 0 {
+			timer := time.NewTimer(backoff)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			}
+		}
+		backoff = min(backoff*2, followBackoffMax)
 	}
 }
 
-func (a *app) readFollow(body io.Reader, offset *int64) (done bool, code int, err error) {
+func (a *app) readFollow(body io.Reader, offset *int64) (done, progressed bool, code int, err error) {
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 64<<10), 16<<20)
 	for sc.Scan() {
 		var ev struct {
 			Stream     string `json:"stream"`
 			DataB64    string `json:"data_b64"`
-			NextOffset int64  `json:"next_offset"`
+			NextOffset *int64 `json:"next_offset"`
 			Exit       *int   `json:"exit"`
 			Signal     string `json:"signal"`
 			Reconnect  bool   `json:"reconnect"`
@@ -83,30 +104,36 @@ func (a *app) readFollow(body io.Reader, offset *int64) (done bool, code int, er
 		if json.Unmarshal(sc.Bytes(), &ev) != nil {
 			continue
 		}
+		var data []byte
+		if ev.DataB64 != "" {
+			data, _ = base64.StdEncoding.DecodeString(ev.DataB64)
+			if len(data) > 0 {
+				progressed = true
+			}
+		}
 		if a.json {
 			fmt.Fprintln(a.out, sc.Text())
-		} else if ev.DataB64 != "" {
-			data, _ := base64.StdEncoding.DecodeString(ev.DataB64)
+		} else if len(data) > 0 {
 			a.out.Write(data)
 		}
-		if ev.NextOffset > *offset {
-			*offset = ev.NextOffset
+		if ev.NextOffset != nil && *ev.NextOffset >= 0 {
+			*offset = *ev.NextOffset
 		}
 		switch {
 		case ev.Reconnect:
-			return false, 0, errors.New("the VM stopped answering; output so far is shown")
+			return false, progressed, 0, nil
 		case ev.Exit != nil:
-			return true, *ev.Exit, nil
+			return true, progressed, *ev.Exit, nil
 		case ev.Signal != "":
 			fmt.Fprintln(a.errw, "boat: the command was killed by", ev.Signal)
-			return true, 128, nil
+			return true, progressed, 128, nil
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return false, 0, err
+		return false, progressed, 0, err
 	}
 	fmt.Fprintln(a.errw, "boat: the command ended with no exit status (lost)")
-	return true, 1, nil
+	return true, progressed, 1, nil
 }
 
 // ---- detached commands ----
@@ -204,7 +231,7 @@ func cmdCommands(a *app, args []string) error {
 // readLogs prints output once, or follows it.
 func (a *app) readLogs(base string, follow bool, offset int64) error {
 	if follow {
-		return a.followLogs(base)
+		return a.followLogsFrom(base, offset)
 	}
 	var out obj
 	if err := a.c.call("GET", base+"?offset="+strconv.FormatInt(offset, 10), nil, &out); err != nil {
@@ -506,16 +533,6 @@ func cmdEnv(a *app, args []string) error {
 	if err := refusedErr(hit); err != nil {
 		return err
 	}
-	if op == "set" && (*secrets == "true" || *secrets == "false") { // boat.dev's toggle
-		if err := need(pos, 1, "ENV"); err != nil {
-			return err
-		}
-		var out obj
-		if err := a.c.call("PUT", "/api/v1/environments/"+url.PathEscape(pos[0]), obj{"passSecrets": *secrets == "true"}, &out); err != nil {
-			return err
-		}
-		return a.okLine(out, "secrets "+map[string]string{"true": "on", "false": "off"}[*secrets]+" for "+pos[0])
-	}
 	cols := []string{"id", "name", "image", "size", "version", "is_default"}
 	body := obj{}
 	if *image != "" {
@@ -537,7 +554,13 @@ func cmdEnv(a *app, args []string) error {
 		}
 		body["setup_script"] = string(b)
 	}
-	if *secrets != "" {
+	switch *secrets {
+	case "", "true":
+		// On "new", omit body["secrets"] (all-secrets default).
+		// On "set", "true" sets body["reset_secrets"] = true below alongside all other flags.
+	case "false":
+		body["secrets"] = []string{}
+	default:
 		body["secrets"] = splitList(*secrets)
 	}
 	if len(vars) > 0 {
@@ -575,6 +598,9 @@ func cmdEnv(a *app, args []string) error {
 			fmt.Fprintln(a.out, string(b))
 		})
 	case "set":
+		if *secrets == "true" {
+			body["reset_secrets"] = true
+		}
 		if err := a.c.call("PUT", p, body, &out); err != nil {
 			return err
 		}
@@ -649,16 +675,18 @@ func cmdVMUsage(a *app, args []string) error {
 func cmdResume(a *app, args []string) error {
 	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
 	typ := fs.String("type", "", "resize first (drops a stop snapshot's memory)")
+	fs.StringVar(typ, "size", "", "same as --type")
 	failFast := fs.Bool("fail-fast", false, "fail at once with no_ready_machine when the host is full")
 	var ttl secsFlag
-	fs.Var(&ttl, "ttl", "seconds until auto-stop")
+	fs.Var(&ttl, "ttl", "seconds until auto-stop (0 or infinite = never)")
 	never := fs.Bool("no-auto-stop", false, "never auto-stop")
+	noEnv := fs.Bool("no-env", false, "skip secret and environment injection for this run")
 	fs.Bool("no-wait", false, "accepted: resume answers once the VM is up")
 	envv := labels{}
-	fs.Var(envv, "e", "KEY=VALUE for this run (repeatable)")
-	fs.Var(envv, "env", "same as -e")
+	envName := fs.String("environment", "", "apply this environment's variables and secrets for this run (refused on a no_env VM: no_env is sticky)")
+	fs.Var(envVarFlag{envv}, "e", "KEY=VALUE for this run (repeatable); --environment NAME picks an environment")
+	fs.Var(envVarFlag{envv}, "env", "same as -e")
 	var hit string
-	refuse(fs, &hit, "the VM keeps its create-time environment and secret selection", "environment=", "no-env")
 	pos, _, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -669,15 +697,14 @@ func cmdResume(a *app, args []string) error {
 	if err := ttlConflict(ttl, *never); err != nil {
 		return err
 	}
+	if *noEnv && *envName != "" {
+		return fmt.Errorf("--no-env and --environment conflict: %w", errUsage)
+	}
 	vm, err := oneVM(a, pos)
 	if err != nil {
 		return err
 	}
-	if *typ != "" {
-		if err := a.c.call("POST", vmPath(s(vm, "id"), "resize"), obj{"size": *typ, "discard_memory": true}, nil); err != nil {
-			return err
-		}
-	}
+	id := s(vm, "id")
 	body := obj{}
 	if *failFast {
 		body["fail_fast"] = true
@@ -685,18 +712,215 @@ func cmdResume(a *app, args []string) error {
 	if len(envv) > 0 {
 		body["env"] = envv
 	}
+	if *noEnv {
+		body["no_env"] = true
+	}
+	if *envName != "" {
+		body["environment"] = *envName
+	}
+	if *never {
+		body["ttl_s"] = int64(0)
+	} else if ttl.set {
+		body["ttl_s"] = ttl.v
+	}
+	noEnvRun, _ := vm["no_env_run"].(bool)
+	if *typ != "" && s(vm, "size") != *typ {
+		// Refuse before any stop or resize: a no_env run is sticky, and an
+		// unknown environment must not take a running VM down.
+		if err := refuseStickyEnv(id, "resume", *envName, noEnvRun); err != nil {
+			return err
+		}
+		if err := a.checkEnvironment(*envName); err != nil {
+			return err
+		}
+	}
+	prevSize := s(vm, "size")
+	retyped := false
+	retypedWasRunning := false
+	if *typ != "" && prevSize != *typ {
+		wasRunning := s(vm, "state") == "running"
+		retypedWasRunning = wasRunning
+		if wasRunning {
+			// Validate the size before stopping: an unknown size must not
+			// take a running VM down. A listing failure is not fatal (the
+			// resize still validates and the run is restored).
+			if err := a.checkSize(*typ); err != nil {
+				return err
+			}
+			if err := a.c.call("POST", vmPath(id, "stop"), nil, nil); err != nil {
+				return err
+			}
+		}
+		if err := a.c.call("POST", vmPath(id, "resize"), obj{"size": *typ, "discard_memory": true}, nil); err != nil {
+			if wasRunning {
+				// Restore the previous run, not the requested one: previous
+				// ttl, no_env only when that run held no secrets, no new env
+				// and no fail_fast.
+				if _, rerr := a.restoreAfterRetypeStart(id, vm, noEnvRun); rerr != nil {
+					return fmt.Errorf("%w (also failed to restart VM: %v)", err, rerr)
+				}
+			}
+			return err
+		}
+		retyped = true
+		if wasRunning && noEnvRun && !*noEnv && *envName == "" {
+			// The retyped run continues one that held no team secrets.
+			next := obj{"no_env": true}
+			for k, v := range body {
+				next[k] = v
+			}
+			body = next
+		}
+	}
 	var out obj
 	var send any // no body when there is nothing to say (as before)
 	if len(body) > 0 {
 		send = body
 	}
-	if err := a.c.call("POST", vmPath(s(vm, "id"), "start"), send, &out); err != nil {
-		return err
+	if err := a.c.call("POST", vmPath(id, "start"), send, &out); err != nil {
+		if retyped {
+			var rbErr error
+			if prevSize != "" {
+				rbErr = a.c.call("POST", vmPath(id, "resize"), obj{"size": prevSize, "discard_memory": true}, nil)
+			}
+			if retypedWasRunning {
+				restored, rerr := a.restoreAfterRetypeStart(id, vm, noEnvRun)
+				if rbErr != nil && rerr != nil {
+					return fmt.Errorf("%w (also failed to roll back size to %s: %v; also failed to restore VM: %v)", a.legacyEnvFailure(id, err), prevSize, rbErr, rerr)
+				}
+				if rerr != nil {
+					return fmt.Errorf("%w (also failed to restore VM: %v)", a.legacyEnvFailure(id, err), rerr)
+				}
+				if rbErr != nil {
+					return fmt.Errorf("%w (also failed to roll back size to %s: %v; previous run restarted)", a.legacyEnvFailure(id, err), prevSize, rbErr)
+				}
+				var ae *apiError
+				if errors.As(err, &ae) && ae.Code == "env_start_failed" {
+					return a.failRetypeRestored(id, ae.Message, noEnvRun, restored)
+				}
+			} else if rbErr != nil {
+				return fmt.Errorf("%w (also failed to roll back size to %s: %v)", a.legacyEnvFailure(id, stickyErr(err)), prevSize, rbErr)
+			}
+		}
+		return a.legacyEnvFailure(id, stickyErr(err))
 	}
-	if err := a.setTTL(s(vm, "id"), ttl, *never); err != nil {
-		return fmt.Errorf("resumed; setting auto-stop: %w", err)
+	if ee := strings.TrimSpace(s(out, "env_error")); ee != "" {
+		return a.failEnv(out, ee)
 	}
 	return a.emitVM(out)
+}
+
+// refuseStickyEnv refuses locally, before any state-changing call, to apply an
+// environment to a VM whose run is no_env: no_env is sticky on the server.
+func refuseStickyEnv(id, verb, envName string, noEnvRun bool) error {
+	if envName == "" || !noEnvRun {
+		return nil
+	}
+	return fmt.Errorf("%s of %s refused: --environment %q cannot be applied; the VM ran with no_env (sticky) and stays without team secrets; drop --environment (nothing was changed)", verb, id, envName)
+}
+
+// stickyErr maps the API's no_env_sticky error to a clear message.
+func stickyErr(err error) error {
+	var ae *apiError
+	if errors.As(err, &ae) && ae.Code == "no_env_sticky" {
+		return fmt.Errorf("refused: this VM ran with no_env and no_env is sticky; it cannot take an environment or no_env:false (%s)", ae.Message)
+	}
+	return err
+}
+
+// restoreAfterRetypeStart makes one best-effort restore start after a retype's
+// post-resize start failed: previous ttl, no new env, and no_env when the
+// run being restored held no team secrets. Called only when the VM was
+// running before the retype; the caller reports both errors on failure.
+func (a *app) restoreAfterRetypeStart(id string, vm obj, noEnvRun bool) (obj, error) {
+	restore := obj{}
+	if noEnvRun {
+		restore["no_env"] = true
+	}
+	if ttl, ok := vm["ttl_s"].(float64); ok {
+		restore["ttl_s"] = int64(ttl)
+	} else {
+		// boatd omits ttl_s when it is 0 (never auto-stop): say so explicitly.
+		restore["ttl_s"] = int64(0)
+	}
+	var out obj
+	err := a.c.call("POST", vmPath(id, "start"), restore, &out)
+	return out, err
+}
+
+// failRetypeRestored reports a retype whose post-resize start failed closed
+// but whose previous run was then restarted: the VM is running again.
+func (a *app) failRetypeRestored(id, msg string, noEnvRun bool, restored obj) error {
+	envNote := "with team secrets"
+	if noEnvRun {
+		envNote = "without team secrets (no_env)"
+	}
+	ee := strings.TrimSpace(s(restored, "env_error"))
+	if a.json {
+		ev := obj{"event": "error", "id": id, "code": "env_start_failed", "state": "running", "restored": true, "error": "start failed: " + msg + " (previous run restarted " + envNote + ")"}
+		if ee != "" {
+			ev["env_error"] = ee
+		}
+		a.emit(ev, nil)
+		return exitError{1}
+	}
+	fmt.Fprintf(a.errw, "boat: start of %s after the resize failed (%s); the previous run was restarted %s\n", id, msg, envNote)
+	if ee != "" {
+		fmt.Fprintf(a.errw, "boat: the restarted VM reported an environment error: %s\n", ee)
+	}
+	return exitError{1}
+}
+
+// checkEnvironment fails with a clear error when /v1/environments lists
+// environments and name matches none by id or exact name. Empty (the default)
+// and the literal "base" are always valid. A listing failure is not fatal:
+// the server still validates the name.
+func (a *app) checkEnvironment(name string) error {
+	if name == "" || name == "base" {
+		return nil
+	}
+	list, err := listCall(a, "/v1/environments", "environments")
+	if err != nil {
+		return nil
+	}
+	for _, e := range list {
+		if s(e, "id") == name || s(e, "name") == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown environment %q", name)
+}
+
+// checkSize fails with a clear error when /v1/images lists sizes and size is
+// not one of them. "default" and an unavailable listing pass.
+func (a *app) checkSize(size string) error {
+	if size == "default" {
+		return nil
+	}
+	var imgs struct {
+		Sizes map[string]json.RawMessage `json:"sizes"`
+	}
+	if err := a.c.call("GET", "/v1/images", nil, &imgs); err != nil || len(imgs.Sizes) == 0 {
+		return nil
+	}
+	if _, ok := imgs.Sizes[size]; !ok {
+		return fmt.Errorf("unknown size %q", size)
+	}
+	return nil
+}
+
+// legacyEnvFailure maps a 502 env_update_failed (an env update to an already
+// running VM failed; the VM stays healthy with its previous environment) onto
+// failEnvUpdate; any other error passes through unchanged.
+func (a *app) legacyEnvFailure(id string, err error) error {
+	var ae *apiError
+	if errors.As(err, &ae) && ae.Code == "env_update_failed" {
+		return a.failEnvUpdate(id, ae.Message)
+	}
+	if errors.As(err, &ae) && ae.Code == "env_start_failed" {
+		return a.failEnvStart(id, ae.Message)
+	}
+	return err
 }
 
 // ---- snapshots: team-level ops, then per-VM ones ----
@@ -709,6 +933,7 @@ func cmdSnapshotsTeam(a *app, op string, args []string) error {
 	shareID := fs.String("share", "", "")
 	code := fs.String("code", "", "")
 	limit := fs.Int("limit", 0, "at most this many (team list)")
+	visibility := fs.String("visibility", "", "filter team snapshots: shared or all")
 	fs.Bool("all", false, "accepted: every snapshot is listed")
 	pos, _, err := parse(fs, args)
 	if err != nil {
@@ -717,7 +942,15 @@ func cmdSnapshotsTeam(a *app, op string, args []string) error {
 	var out obj
 	switch op {
 	case "team":
-		l, err := listCall(a, "/v1/snapshots", "snapshots")
+		path := "/v1/snapshots"
+		switch *visibility {
+		case "":
+		case "shared", "all":
+			path += "?visibility=" + url.QueryEscape(*visibility)
+		default:
+			return fmt.Errorf("--visibility is shared or all: %w", errUsage)
+		}
+		l, err := listCall(a, path, "snapshots")
 		if err != nil {
 			return err
 		}
@@ -925,25 +1158,47 @@ func cmdAI(a *app, args []string) error {
 		if err != nil {
 			return err
 		}
-		p := "/v1/ai/usage"
 		if len(pos) > 1 {
 			return fmt.Errorf("boat ai usage [vm] [--days N]: %w", errUsage)
 		}
+		if *days < 1 || *days > 365 {
+			return fmt.Errorf("--days must be 1-365: %w", errUsage)
+		}
+		// Every value (the default too) goes through the compat route that filters by day.
+		q := "?days=" + strconv.Itoa(*days)
+		p, vmID := "/api/v1/ai-usage"+q, ""
 		if len(pos) == 1 {
 			id, err := vmArg(a, pos[0])
 			if err != nil {
 				return err
 			}
-			p = vmPath(id, "ai-usage")
+			p, vmID = "/api/v1/sandboxes/"+url.PathEscape(id)+"/ai-usage"+q, id
 		}
-		if *days != 30 {
-			fmt.Fprintln(a.errw, "boat: note: usage here is the running total; --days does not narrow it")
+		var res struct {
+			Usage     []obj `json:"usage"`
+			Sandboxes []struct {
+				SandboxID string `json:"sandboxId"`
+				Usage     []obj  `json:"usage"`
+			} `json:"sandboxes"`
 		}
-		l, err := listCall(a, p, "usage")
-		if err != nil {
+		if err := a.c.call("GET", p, nil, &res); err != nil {
 			return err
 		}
-		return a.emitList(l, "vm_id", "provider", "model", "requests", "input_tokens", "output_tokens")
+		var l []obj
+		flat := func(vm string, rows []obj) {
+			for _, r := range rows {
+				l = append(l, obj{"vm_id": vm, "day": r["day"], "provider": r["credential"], "model": r["model"],
+					"requests": r["requests"], "input_tokens": r["inputTokens"], "output_tokens": r["outputTokens"]})
+			}
+		}
+		if vmID != "" {
+			flat(vmID, res.Usage)
+		} else {
+			for _, sb := range res.Sandboxes {
+				flat(sb.SandboxID, sb.Usage)
+			}
+		}
+		return a.emitList(l, "vm_id", "day", "provider", "model", "requests", "input_tokens", "output_tokens")
 	case "block", "unblock":
 		if err := need(args[1:], 1, "<vm>"); err != nil {
 			return err

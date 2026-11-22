@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,10 +23,11 @@ func boatdevAPI(t *testing.T) (*httptest.Server, *[]string) {
 		case "POST /api/v1/sandboxes/vm1/recover":
 			io.WriteString(w, `{"ok":true,"message":"power-cycled"}`)
 		case "POST /api/v1/sandboxes/vm1/share":
-			io.WriteString(w, `{"sandbox":{"id":"bx_23456789"}}`)
+			w.WriteHeader(501)
+			io.WriteString(w, `{"error":{"code":"not_supported","message":"creator-authority sandbox sharing is not supported: sandboxes remain accessible to their team; no access settings were changed"}}`)
 		case "POST /api/v1/sandboxes/vm1/unshare":
 			w.WriteHeader(501)
-			io.WriteString(w, `{"error":{"code":"not_supported","message":"unshare is not supported on self-hosted boat"}}`)
+			io.WriteString(w, `{"error":{"code":"not_supported","message":"creator-only sandbox privacy is not supported: sandboxes remain accessible to their team; use native private-port and port-token revoke operations to restrict port access"}}`)
 		case "GET /api/v1/deletion-operations/bdop_1":
 			io.WriteString(w, `{"ok":true,"operation":{"id":"bdop_1","targetId":"bx_23456789","status":"completed"}}`)
 		default:
@@ -48,8 +50,9 @@ func TestBoatDevVerbs(t *testing.T) {
 		{[]string{"--api-url", srv.URL, "status", "bx_23456789"}, 0, "vm1\tdev\trunning"},
 		{[]string{"--api-url=" + srv.URL, "events", "vm1"}, 0, "prompt\thi"},
 		{[]string{"--api-url", srv.URL, "recover", "vm1"}, 0, "power-cycled"},
-		{[]string{"--api-url", srv.URL, "share", "vm1"}, 0, "shared"},
-		{[]string{"--api-url", srv.URL, "unshare", "vm1"}, 1, "not supported on self-hosted"},
+		{[]string{"--api-url", srv.URL, "share", "vm1"}, 1, "HTTP 501"},
+		{[]string{"--api-url", srv.URL, "unshare", "vm1"}, 1, "HTTP 501"},
+		{[]string{"help", "unshare"}, 0, "unshare <vm>"},
 		{[]string{"--api-url", srv.URL, "deletion", "status", "bdop_1"}, 0, "bdop_1\tbx_23456789\tcompleted"},
 		{[]string{"--api-url", srv.URL, "dashboard", "--no-open"}, 0, srv.URL + "/"},
 		{[]string{"orgs", "list"}, 1, "not supported on self-hosted"},
@@ -62,6 +65,23 @@ func TestBoatDevVerbs(t *testing.T) {
 	}
 	if (*got)[0] != "GET /v1/vms/bx_23456789" {
 		t.Errorf("--api-url not used: %v", *got)
+	}
+	aJSON, outJSON, errJSON := acctApp(env, "")
+	if code := aJSON.run([]string{"--json", "--api-url", srv.URL, "unshare", "vm1"}); code != 1 {
+		t.Fatalf("unshare --json exit %d: %s", code, errJSON.String())
+	}
+	var unshareEv map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(outJSON.String())), &unshareEv); err != nil {
+		t.Fatalf("unshare --json unmarshal %q: %v", outJSON.String(), err)
+	}
+	if unshareEv["event"] != "error" || unshareEv["code"] != "not_supported" || unshareEv["status"] != float64(501) ||
+		!strings.Contains(s(unshareEv, "message"), "port-token revoke") {
+		t.Errorf("unshare --json = %v", unshareEv)
+	}
+	a, helpOut, _ := acctApp(env, "")
+	a.run([]string{"help", "unshare"})
+	if strings.Contains(helpOut.String(), "(not supported here)") {
+		t.Errorf("help still marks unshare unsupported: %q", helpOut.String())
 	}
 }
 

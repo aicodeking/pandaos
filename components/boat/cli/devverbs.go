@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -100,11 +101,14 @@ func cmdLimits(a *app, args []string) error {
 // a name in use replaces it); boat snapshot rm NAME removes it. Other forms
 // are boat snapshots'.
 func cmdSnapshot(a *app, args []string) error {
-	if len(args) > 0 {
-		switch args[0] {
-		case "latest", "tree", "pull", "delete", "share", "shares", "unshare":
-			return cmdSnapshotMore(a, args[0], args[1:])
-		}
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return cmdSnapshots(a, args)
+	}
+	switch args[0] {
+	case "latest", "tree", "pull", "delete", "share", "shares", "unshare":
+		return cmdSnapshotMore(a, args[0], args[1:])
+	case "team", "shared", "import", "take":
+		return cmdSnapshots(a, args)
 	}
 	if len(args) > 0 && (args[0] == "rm" || args[0] == "remove") {
 		pos, _, err := parse(flag.NewFlagSet("snapshot", flag.ContinueOnError), args[1:])
@@ -140,14 +144,35 @@ func cmdSnapshot(a *app, args []string) error {
 	return a.show(out.Snapshot, "name", "snapshotId", "status", "createdAt")
 }
 
+func parseHistoryMode(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		m := strings.TrimSpace(p)
+		switch m {
+		case "sync", "stream", "detached", "process", "commands":
+			out = append(out, m)
+		default:
+			return "", fmt.Errorf("--mode must be sync, stream, detached, process, or commands (comma-separated): %w", errUsage)
+		}
+	}
+	return strings.Join(out, ","), nil
+}
+
 // cmdHistory: boat history <vm> [command-id] [-f]: the commands of a VM, or
 // one command's output.
 func cmdHistory(a *app, args []string) error {
 	fs := flag.NewFlagSet("history", flag.ContinueOnError)
 	follow := fs.Bool("f", false, "")
 	fs.BoolVar(follow, "follow", false, "")
-	limit := fs.Int("limit", 20, "")
-	mode := fs.String("mode", "", "commands: only what you ran (the only split kept here)")
+	limit := fs.Int("limit", 20, "maximum entries to return (1-100)")
+	mode := fs.String("mode", "", "filter by mode: sync, stream, detached, process, or commands (comma-separated)")
+	query := fs.String("q", "", "filter commands by substring")
+	fs.StringVar(query, "query", "", "same as --q")
+	cursor := fs.String("cursor", "", "pagination cursor from previous response")
 	stderr := fs.Bool("stderr", false, "")
 	pos, _, err := parse(fs, args)
 	if err != nil {
@@ -156,8 +181,12 @@ func cmdHistory(a *app, args []string) error {
 	if *stderr {
 		return errors.New("--stderr is not supported on self-hosted boat: a command keeps one combined log of stdout and stderr; omit --stderr")
 	}
-	if *mode != "" && *mode != "commands" {
-		return errors.New("--mode " + *mode + " is not supported on self-hosted boat: the history keeps commands you ran (--mode commands), prompts and setup runs, with no process/sync/stream/detached split")
+	modeVal, err := parseHistoryMode(*mode)
+	if err != nil {
+		return err
+	}
+	if *limit < 1 || *limit > 100 {
+		return fmt.Errorf("--limit must be 1-100: %w", errUsage)
 	}
 	if len(pos) == 2 {
 		rest := []string{"logs", pos[0], pos[1]}
@@ -170,18 +199,51 @@ func cmdHistory(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
-	l, err := listCall(a, vmPath(s(vm, "id"), "command-history"), "commands")
-	if err != nil {
+	q := url.Values{"limit": {strconv.Itoa(*limit)}}
+	if modeVal != "" {
+		q.Set("mode", modeVal)
+	}
+	if *query != "" {
+		q.Set("q", *query)
+	}
+	if *cursor != "" {
+		q.Set("cursor", *cursor)
+	}
+	var resp struct {
+		Commands   []obj  `json:"commands"`
+		NextCursor string `json:"nextCursor"`
+	}
+	if err := a.c.call("GET", compatVMPath(s(vm, "id"), "command-history")+"?"+q.Encode(), nil, &resp); err != nil {
 		return err
 	}
-	// newest first, at most --limit, as boat.dev's
-	out := make([]obj, 0, len(l))
-	for i := len(l) - 1; i >= 0 && len(out) < *limit; i-- {
-		if *mode == "" || s(l[i], "kind") == "command" {
-			out = append(out, l[i])
+	if a.json {
+		for _, it := range resp.Commands {
+			if s(it, "id") == "" {
+				if cid := s(it, "commandId"); cid != "" {
+					it["id"] = cid
+				}
+			}
+		}
+		return a.emitList(resp.Commands)
+	}
+	rows := make([]obj, len(resp.Commands))
+	for i, it := range resp.Commands {
+		rows[i] = obj{
+			"id":         orStr(s(it, "commandId"), s(it, "id")),
+			"mode":       orStr(s(it, "mode"), s(it, "kind")),
+			"status":     orStr(s(it, "status"), s(it, "state")),
+			"exit":       orStr(numStr(it, "exitCode"), numStr(it, "exit")),
+			"started_at": orStr(s(it, "startedAt"), s(it, "started_at")),
+			"command":    orStr(s(it, "command"), s(it, "cmd")),
 		}
 	}
-	return a.emitList(out, "id", "kind", "state", "exit", "started_at", "cmd")
+	if err := a.emitList(rows, "id", "mode", "status", "exit", "started_at", "command"); err != nil {
+		return err
+	}
+	if resp.NextCursor != "" {
+		fmt.Fprintf(a.errw, "more results: --cursor %s\n", resp.NextCursor)
+	}
+	return nil
 }
 
 // cmdWebhook: boat webhook create URL [--name N] [--event ready ...] | list |

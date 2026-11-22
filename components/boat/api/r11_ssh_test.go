@@ -21,6 +21,7 @@ func (e *env) addMember(role string) (tok, userID string) {
 }
 
 func (e *env) jumpSetup() (string, string) {
+	e.enableSSH()
 	jf := filepath.Join(e.t.TempDir(), "jump")
 	e.srv.cfg.JumpKeysFile = jf
 	return jf, e.createVM()
@@ -38,7 +39,11 @@ func (e *env) sshRevoked(jf, vm string) {
 	if strings.Contains(ak, "AAAAC3NzaC1lZDI1NTE5AAAAIOMqq") {
 		e.t.Errorf("vm authorized_keys still has the key: %q", ak)
 	}
-	if n := len(e.srv.store.Snapshot().SSHGrants); n != 0 {
+	e.assertSSH(vm, r11Pub, 204)
+	if code, _ := e.jumpSSH(r11Pub); code != 204 {
+		e.t.Errorf("jump lookup=%d", code)
+	}
+	if n := len(liveSSHGrants(e.srv.store.Snapshot())); n != 0 {
 		e.t.Errorf("grants left: %d", n)
 	}
 }
@@ -55,8 +60,9 @@ func TestSSHGrantDiesWithMember(t *testing.T) {
 	jf, vm := e.jumpSetup()
 	tok, uid := e.addMember("member")
 	e.grantSSH(tok, vm)
-	if b, _ := os.ReadFile(jf); !strings.Contains(string(b), "AAAAC3NzaC1lZDI1NTE5AAAAIOMqq") {
-		t.Fatalf("grant not in jump file: %s", b)
+	e.assertSSH(vm, r11Pub, 200)
+	if code, lines := e.jumpSSH(r11Pub); code != 200 || len(lines) != 1 {
+		t.Fatalf("jump lookup=%d %v", code, lines)
 	}
 	if st, out := e.do(e.owner, "DELETE", "/v1/teams/"+e.teamID()+"/members/"+uid, nil); st != 200 {
 		t.Fatalf("remove member: %d %v", st, out)
@@ -113,8 +119,8 @@ func TestSSHGrantListRevoke(t *testing.T) {
 	bob, _ := e.addMember("member")
 	e.grantSSH(alice, vm)
 	e.grantSSH(bob, vm) // same key, second owner: one jump line
-	if b, _ := os.ReadFile(jf); strings.Count(string(b), "\n") != 1 {
-		t.Errorf("one key must render one line: %q", b)
+	if code, lines := e.jumpSSH(r11Pub); code != 200 || len(lines) != 1 {
+		t.Errorf("one key must render one lookup line: %d %v", code, lines)
 	}
 	// a pre-ownership grant: listed unowned, only an admin revokes it
 	e.srv.store.Update(func(st *State) error {

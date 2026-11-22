@@ -74,6 +74,13 @@ func (s *server) compatHost(w http.ResponseWriter, r *http.Request, p *principal
 		writeErr(w, r, 400, "invalid_request", msg)
 		return
 	}
+	if _, ok := s.ownVM(w, r, p); !ok {
+		return
+	}
+	if msg := s.nativeRefusal(p, hostPortRoutes...); msg != "" {
+		writeErr(w, r, http.StatusForbidden, "forbidden", msg)
+		return
+	}
 	out, fail := s.hostPort(r, p, r.PathValue("id"), c)
 	if fail != nil {
 		fail.relay(w)

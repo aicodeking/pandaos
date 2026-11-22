@@ -4,6 +4,7 @@
 import config from "../config.js";
 import { createClient, createSession, errorText, isMissing, validKey } from "./api.js";
 import { environmentsScreen, keysScreen, secretsScreen, teamScreen, webhooksScreen } from "./account.js";
+import { aiScreen } from "./ai.js";
 import { button, field, h } from "./ui.js";
 import { usageScreen } from "./usage.js";
 import { vmDetailScreen } from "./vm-detail.js";
@@ -15,6 +16,7 @@ const NAV = [
   { href: "#/vms", label: "VMs" },
   { href: "#/environments", label: "Environments", probe: "listEnvironments" },
   { href: "#/secrets", label: "Secrets" },
+  { href: "#/ai", label: "AI", probe: "aiUsage" },
   { href: "#/keys", label: "API keys" },
   { href: "#/webhooks", label: "Webhooks" },
   { href: "#/team", label: "Team" },
@@ -90,7 +92,7 @@ function showSignIn(message) {
 function shell(content) {
   const links = NAV.map((item) => {
     const link = h("a", { href: item.href, hidden: Boolean(item.probe) }, item.label);
-    if (item.probe) api[item.probe]().then(() => { link.hidden = false; }).catch(() => {});
+    if (item.probe) api[item.probe]().then(() => { link.hidden = false; }).catch((err) => { if (!isMissing(err)) link.hidden = false; });
     return link;
   });
   const syncCurrent = () => {
@@ -130,6 +132,7 @@ const SCREENS = {
   new: { title: "Create VM", render: createVMScreen },
   environments: { title: "Environments", render: environmentsScreen },
   secrets: { title: "Secrets", render: secretsScreen },
+  ai: { title: "AI", render: aiScreen },
   keys: { title: "API keys", render: keysScreen },
   webhooks: { title: "Webhooks", render: webhooksScreen },
   team: { title: "Team", render: teamScreen },
@@ -148,6 +151,7 @@ async function render() {
   const ctx = {
     api,
     me,
+    setKey: (k) => session.set(k),
     signOut,
     navigate: (hash) => { location.hash = hash; },
     onCleanup: (fn) => cleanups.push(fn),

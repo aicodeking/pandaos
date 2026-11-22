@@ -6,8 +6,15 @@ All notable changes to PandaOS are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
 ### Added
 
+- [Agent setup runbook](AGENT_SETUP.md) for a coding agent to install PandaOS, pair it with
+  PandaCode, and set up a self-hosted boat server, with confirmation gates for disk writes
+  and human-only steps.
+- **boat dashboard** on the API origin for managing VMs, inspecting usage, and opening SSH
+  and desktop access.
 - **boat (server profile):** self-hosted persistent Firecracker microVMs for agents, a boat.dev
   alternative. `boatd` (VM manager: jailer, tap/bridge NAT, nftables tenant isolation, stop = memory
   snapshot, forks, snapshots, TTL/idle stop, quotas, metering), `boat-api` (keys, scopes, teams,
@@ -91,7 +98,7 @@ All notable changes to PandaOS are documented here. The format follows
 - VM tests `panda-ckpt`, `agent-env` and `panda-sys`; the install test checks checkpoints on the
   installed btrfs disk. CI runs `go vet` and `go test -race` for every Go component.
 - **PandaCode Connect:** `services.pandacode-host` (on by default) runs PandaCode's headless host
-  (`pandacode serve`, pinned release AppImage, under `xvfb-run`) as `panda`, so the box shows up as a
+  (`pandacode serve`, pinned release AppImage, under `xvfb-run`) as `agent`, so the box shows up as a
   computer in the PandaCode app. `panda-connect sign-in|sign-out|status [--json]|full-access on|off|logs`
   manages it; Full access is off by default. Until signed in the service is skipped and the health check
   ignores it. First boot offers `panda-connect sign-in` when a network is up. Desktop: a *PandaCode*
@@ -132,12 +139,21 @@ All notable changes to PandaOS are documented here. The format follows
 - `flake.lock` is committed, and CI fails without it. A `lock` workflow regenerates it.
 - VM tests: `install` (installs to an empty disk, then boots it), `security`, `browser`, job cancel,
   desktop scripts, and snapshots; `closures` and `mem-security` are being added.
-- Release workflow: tagged `v*` builds publish both ISOs, `SHA256SUMS` and build provenance, then
-  move the `release` branch. Optional Cachix push in CI and release.
+- **v0.2.0 release assets:** `pandaos-v0.2.0-{headless,desktop,server}-x86_64-linux.iso` and
+  `SHA256SUMS`; `boat_<os>_<arch>` (with `.exe` on Windows) and `boat_SHA256SUMS`;
+  `boat-guest-vmlinux`, `boat-guest-rootfs-{slim,full}.ext4.zst` and `boat_guest_SHA256SUMS`.
+  Tagged builds publish build provenance and then move the `release` branch. CI and releases
+  can also push to Cachix when configured.
 - Docs (including `docs/desktop.md`), MIT license, security policy, contributing guide and issue templates.
 
 ### Changed
 
+- **boat.dev API compatibility:** `/api/v1` maps 98 of 122 operations. Official SDK drivers
+  cover Python `boat-sdk` and TypeScript `@boatdev/sdk`. The remaining 24 operations return
+  `501 not_supported`. See the [compatibility table](docs/boat.md#boatdev-api-compatibility-apiv1).
+- **boat performance:** copy-on-write (CoW) API store writes and a shorter idempotency completion
+  path reduce work on requests. Ruleset updates and conntrack cleanup do less work during VM
+  lifecycle changes.
 - oomd no longer kills on memory pressure (`ManagedOOMMemoryPressure` removed from `pandacode-host`):
   it ranks by reclaim rate and picked an idle bystander. The kernel's cgroup OOM killer at the
   slice's `MemoryMax` kills the offending task; oomd acts only on swap exhaustion.
@@ -202,6 +218,10 @@ All notable changes to PandaOS are documented here. The format follows
 
 ### Security
 
+- **boat SSH:** managed online authorization checks current grants for guest SSH and the jump
+  host. The jump reaper terminates active jump sessions when authorization is revoked.
+- **boat credentials:** `no_env` stays in effect across starts and forks. Protected snapshot
+  provenance guards against copying credential-bearing state into a less trusted context.
 - `panda-sys`'s only mutating tool (`sys_updates action=run`) needs `allowMutations`, `confirm: true`,
   a root or wheel caller and a passwordless sudo rule PandaOS does not ship; non-wheel callers read
   only PandaOS units' logs. See [docs/security.md](docs/security.md#mcp-tools-and-their-permissions).
@@ -234,7 +254,8 @@ The first version (v0).
 
 ### Known issues
 
-- The `panda` user has the default password `panda`. Change it with `passwd`. Fixed in Unreleased.
+- The `panda` user has the default password `panda`. Change it with `passwd`. Fixed in v0.2.0.
 
-[Unreleased]: https://github.com/AICodeKing/pandaos/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/AICodeKing/pandaos/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/AICodeKing/pandaos/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AICodeKing/pandaos/releases/tag/v0.1.0

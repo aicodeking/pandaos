@@ -12,7 +12,11 @@ value or a bx_ id that breaks boat.dev's pattern fails `go test`.
         /tmp/boat-v1.yaml /tmp/boat-v1.json
     python3 tools/compat_openapi.py /tmp/boat-v1.json openapi.json
 
-Request bodies list only the fields this server accepts (ACCEPT below; the
+Use `-` as the source to read JSON from stdin. Append `--check` to verify the
+checked-in spec without writing. Every run checks normalized upstream operation
+pairs against ROUTES and reports the four EXTRA operations separately.
+
+Request bodies list only the fields this server accepts (ROUTES below; the
 drift test compares them with the handler's struct). Errors are the
 CompatError envelope (boat.dev's ErrorEnvelope).
 """
@@ -25,18 +29,18 @@ ROUTES = [
       "snapshots", "monitoring", "visibility", "org", "teamId", "setupScript", "hostedPorts", "files"], "create (POST /v1/vms)"),
     ("GET", "/api/v1/sandboxes", "/sandboxes", "vms:read", None, "list (GET /v1/vms)"),
     ("GET", "/api/v1/sandboxes/{id}", "/sandboxes/{sandboxId}", "vms:read", None, "get (GET /v1/vms/{id})"),
-    ("PATCH", "/api/v1/sandboxes/{id}", "/sandboxes/{sandboxId}", "vms:write", ["name", "ttlSeconds"], "rename / auto-stop (PATCH /v1/vms/{id})"),
+    ("PATCH", "/api/v1/sandboxes/{id}", "/sandboxes/{sandboxId}", "vms:write", ["name", "ttlSeconds", "subdomain"], "rename / auto-stop (PATCH /v1/vms/{id})"),
     ("DELETE", "/api/v1/sandboxes/{id}", "/sandboxes/{sandboxId}", "vms:write", None, "delete (DELETE /v1/vms/{id})"),
-    ("GET", "/api/v1/deletion-operations/{opid}", "/deletion-operations/{operationId}", "vms:read", None, "deletion operation (in memory)"),
+    ("GET", "/api/v1/deletion-operations/{opid}", "/deletion-operations/{operationId}", "vms:read", None, "deletion operation (persisted)"),
     ("POST", "/api/v1/sandboxes/{id}/stop", "/sandboxes/{sandboxId}/stop", "vms:write", ["force"], "stop (POST /v1/vms/{id}/stop; done when it answers)"),
-    ("GET", "/api/v1/sandboxes/{id}/stops/{stopid}", "/sandboxes/{sandboxId}/stops/{stopId}", "vms:read", None, "stop operation (in memory)"),
+    ("GET", "/api/v1/sandboxes/{id}/stops/{stopid}", "/sandboxes/{sandboxId}/stops/{stopId}", "vms:read", None, "stop operation (persisted)"),
     ("POST", "/api/v1/sandboxes/{id}/resume", "/sandboxes/{sandboxId}/resume", "vms:write",
      ["failFast", "ttlSeconds", "type", "env", "environment", "noEnv"], "resume (POST /v1/vms/{id}/start)"),
     ("POST", "/api/v1/sandboxes/{id}/fork", "/sandboxes/{sandboxId}/fork", "vms:write",
      ["name", "failFast", "ttlSeconds", "monitoring", "labels", "env", "environment", "noEnv", "type"], "fork (POST /v1/vms/{id}/fork)"),
     ("GET", "/api/v1/limits", "/limits", "vms:read", None, "limits"),
     ("GET", "/api/v1/me", "/me", "", None, "me (GET /v1/me)"),
-    ("GET", "/api/v1/sandboxes/{id}/usage", "/sandboxes/{sandboxId}/usage", "vms:read", None, "usage (GET /v1/vms/{id}/usage)"),
+    ("GET", "/api/v1/sandboxes/{id}/usage", "/sandboxes/{sandboxId}/usage", "vms:read", None, "boat.dev billing usage: 501 not_supported; use native VM usage for runtime seconds"),
     # prompts
     ("POST", "/api/v1/sandboxes/{id}/prompt", "/sandboxes/{sandboxId}/prompt", "exec",
      ["provider", "prompt", "model", "reasoningEffort", "fast", "new", "conversationId"], "prompt (POST /v1/vms/{id}/prompts)"),
@@ -98,7 +102,7 @@ ROUTES = [
      "desktop link (GET /v1/vms/{id}/desktop; vnc mode, publicAccess refused)"),
     ("POST", "/api/v1/sandboxes/{id}/sshkey", "/sandboxes/{sandboxId}/sshkey", "exec", ["key"], "authorize an ssh key (POST /v1/vms/{id}/ssh)"),
     # snapshots (compat_snaps.go)
-    ("GET", "/api/v1/snapshots", "/snapshots", "vms:read", None, "team snapshots (GET /v1/snapshots; one page)"),
+    ("GET", "/api/v1/snapshots", "/snapshots", "vms:read", None, "team snapshots (GET /v1/snapshots; cursor-paginated)"),
     ("DELETE", "/api/v1/snapshots/{sid}", "/snapshots/{snapshotId}", "vms:write", None, "delete one (DELETE /v1/snapshots/{sid})"),
     ("GET", "/api/v1/sandboxes/{id}/snapshots", "/sandboxes/{sandboxId}/snapshots", "vms:read", None, "a sandbox's snapshots (GET /v1/vms/{id}/snapshots)"),
     ("DELETE", "/api/v1/sandboxes/{id}/snapshots", "/sandboxes/{sandboxId}/snapshots", "vms:write", None,
@@ -132,11 +136,13 @@ ROUTES = [
     ("PUT", "/api/v1/sandboxes/{id}/ai-access", "/sandboxes/{sandboxId}/ai-access", "admin", ["blocked"], "block AI at the proxy (PUT /v1/vms/{id}/ai-access)"),
     ("PUT", "/api/v1/environments/{id}/vars/{key}", "/environments/{environmentId}/vars/{key}", "admin", ["value"], "set one variable (PUT /v1/environments/{id})"),
     ("DELETE", "/api/v1/environments/{id}/vars/{key}", "/environments/{environmentId}/vars/{key}", "admin", None, "remove one variable (PUT /v1/environments/{id})"),
+    ("POST", "/api/v1/environments/{id}/upgrade", "/environments/{environmentId}/upgrade", "admin", ["agentIds"],
+     "upgrade pinned environment versions (POST /v1/environments/{id}/upgrade)"),
     ("POST", "/api/v1/sandboxes/{id}/files/replace", "/sandboxes/{sandboxId}/files/replace", "exec", ["paths", "pattern", "newValue"], "replace text (read + write each file, up to 5 MiB)"),
     ("POST", "/api/v1/sandboxes/{id}/files/upload-url", "/sandboxes/{sandboxId}/files/upload-url", "exec", ["path", "ttlSeconds"], "signed short-lived upload URL (/api/v1/file-uploads/{token})"),
     ("GET", "/api/v1/sandboxes/{id}/artifacts", "/sandboxes/{sandboxId}/artifacts", "exec", None, "download a file up to 50 MiB"),
-    ("POST", "/api/v1/sandboxes/{id}/share", "/sandboxes/{sandboxId}/share", "vms:write", None, "share with the team (a no-op: team sandboxes are shared)"),
-    ("POST", "/api/v1/sandboxes/{id}/unshare", "/sandboxes/{sandboxId}/unshare", "vms:write", None, "make private: 501 not_supported (no private sandboxes here)"),
+    ("POST", "/api/v1/sandboxes/{id}/share", "/sandboxes/{sandboxId}/share", "vms:write", None, "creator-authority sandbox sharing: 501 not_supported"),
+    ("POST", "/api/v1/sandboxes/{id}/unshare", "/sandboxes/{sandboxId}/unshare", "vms:write", None, "creator-only sandbox privacy: 501 not_supported"),
     ("POST", "/api/v1/sandboxes/{id}/recover", "/sandboxes/{sandboxId}/recover", "vms:write", None, "power-cycle (forced stop, then start; the disk is kept)"),
     # credential profiles: the team's one "default" profile over /v1/ai/credentials (compat_profiles.go)
     ("GET", "/api/v1/credential-profiles", "/credential-profiles", "admin", None, "the team's one profile (GET /v1/ai/credentials)"),
@@ -161,7 +167,7 @@ ROUTES = [
     ("DELETE", "/api/v1/credential-profiles/{profile}/custom-apis/{name}", "/credential-profiles/{profile}/custom-apis/{name}", "admin", None,
      "custom APIs: 501 not_supported"),
     ("GET", "/api/v1/snapshots/{sid}/download", "/snapshots/{snapshotId}/download", "exec", None,
-     "the snapshot archive itself (GET /v1/vms/{id}/snapshots/{sid}/download), not signed chunk URLs"),
+     "one chunk whose signed URL (no API key, 900 s) streams the whole archive (tar.zst) of GET /v1/vms/{id}/snapshots/{sid}/download"),
 ] + [
     (m, "/api/v1" + p.replace("{environmentId}", "{id}").replace("{snapshotId}", "{sid}"), p, "", None, what + ": 501 not_supported")
     for m, p, what in [
@@ -170,7 +176,6 @@ ROUTES = [
         ("GET", "/repos", "repositories"), ("POST", "/repos", "repositories"),
         ("GET", "/ci", "boat CI"), ("POST", "/ci/connect", "boat CI"), ("POST", "/ci/public", "boat CI"),
         ("GET", "/ci/jobs/{jobId}", "boat CI"), ("GET", "/ci/jobs/{jobId}/logs", "boat CI"),
-        ("POST", "/environments/{environmentId}/upgrade", "environment upgrades"),
         ("PUT", "/environments/{environmentId}/secret-files", "environment secret files"),
         ("DELETE", "/environments/{environmentId}/secret-files", "environment secret files"),
         ("POST", "/environments/{environmentId}/repos", "environment repositories"),
@@ -185,10 +190,34 @@ RATE_LIMITED = {("POST", "/api/v1/sandboxes"), ("POST", "/api/v1/sandboxes/{id}/
 RL_HEADERS = {"RateLimit-Policy": {"$ref": "#/components/headers/RateLimit-Policy"}, "RateLimit": {"$ref": "#/components/headers/RateLimit"}}
 
 # Operations whose 2xx answer differs in kind from boat.dev's.
-BINARY_200 = {("GET", "/api/v1/snapshots/{sid}/download")}
+BINARY_200 = set()
+UNSUPPORTED_RESPONSES = {
+    ("POST", "/api/v1/sandboxes/{id}/share"): "Creator-authority sharing is not supported; no mutations",
+    ("POST", "/api/v1/sandboxes/{id}/unshare"): "Creator-only API and SSH privacy is not supported; no mutations",
+    ("GET", "/api/v1/sandboxes/{id}/usage"): "boat.dev billing usage is not supported; native VM usage provides runtime seconds",
+}
+# These summaries identify routes that always refuse a supported-looking request;
+# conditional 501 responses (for example list includes) stay in the mapped count.
+ALWAYS_UNSUPPORTED = set(UNSUPPORTED_RESPONSES) | {
+    (method, ours) for method, ours, _, _, _, summary in ROUTES
+    if summary.endswith(": 501 not_supported")
+}
+PROPS_EXTRA = {
+    ("PATCH", "/api/v1/sandboxes/{id}", "subdomain"): {
+        "type": "string",
+        "description": "boat.dev's; refused here with 501 not_supported (port URLs are <port>-<vm id>.<vm domain>)",
+    },
+}
 
 # Paths under /api/v1 that are this server's own, not boat.dev operations.
 EXTRA = {
+    "/api/v1/openapi.json": {"get": {
+        "summary": "boat.dev's API surface: the /api/v1 operations, paths relative to /api/v1",
+        "security": [],
+        "responses": {
+            "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "additionalProperties": True}}}},
+            "default": {"$ref": "#/components/responses/Error"},
+        }}},
     "/api/v1/file-downloads/{token}": {"get": {
         "summary": "Download a file through a signed URL from POST /api/v1/sandboxes/{id}/files/download-url (no API key)",
         "operationId": "compat_fileDownload", "security": [], "tags": ["boat.dev compatibility"],
@@ -234,8 +263,19 @@ PARAM_RENAME = {"sandboxId": "id", "operationId": "opid", "snapshotId": "sid", "
                 "apiKeyId": "id", "environmentId": "id"}
 
 
-def main(src, dst):
-    bd = json.load(open(src))
+def main(src, dst, check=False):
+    bd = json.load(sys.stdin if src == "-" else open(src))
+    # Compare method/path pairs, normalizing path parameter names only.
+    methods = {"get", "post", "put", "patch", "delete", "head", "options"}
+    norm = lambda path: re.sub(r"\{[^}]+\}", "{}", path)
+    upstream = {(m.upper(), norm(p)) for p, ops in bd["paths"].items() for m in ops if m in methods}
+    mapped = {(m, norm(theirs)) for m, _, theirs, *_ in ROUTES}
+    if upstream != mapped or len(mapped) != len(ROUTES):
+        raise SystemExit(f"upstream operation drift: missing={upstream - mapped}, stale={mapped - upstream}, routes={len(ROUTES)}")
+    print(f"Coverage: {len(upstream) - len(ALWAYS_UNSUPPORTED)} mapped, "
+          f"{len(ALWAYS_UNSUPPORTED)} always 501 not_supported, {len(EXTRA)} local", file=sys.stderr)
+    print(f"Upstream: {len(upstream)} method/path pairs; local additions ({len(EXTRA)}): " +
+          ", ".join(f"{m.upper()} {p}" for p, ops in EXTRA.items() for m in ops), file=sys.stderr)
     spec = json.load(open(dst))
     schemas = {}
 
@@ -272,6 +312,10 @@ def main(src, dst):
         op = bd["paths"][theirs][method.lower()]
         out = {"summary": "boat.dev " + op.get("operationId", "") + ": " + summary, "operationId": "compat_" + op.get("operationId", ""),
                "x-boat-scope": scope, "tags": ["boat.dev compatibility"]}
+        if (method, ours) == ("GET", "/api/v1/sandboxes/{id}/command-history"):
+            out["description"] = "Newest first, filtered before pagination. Only locally retained detached commands and prompt/setup processes are available (at most 200 per VM); sync/stream executions are not recorded. Cursors bind to the team, resolved VM, canonical mode set and case-insensitive query."
+        if (method, ours) == ("DELETE", "/api/v1/environments/{id}"):
+            out["description"] = "Delete a non-default environment while keeping at least one environment in the team; otherwise 409 conflict. The guard and deletion share one store transaction. Existing sandbox pins are retained for replay. Native /v1 deletion remains unrestricted."
         params = []
         for prm in op.get("parameters", []):
             prm = copy.deepcopy(prm)
@@ -281,7 +325,18 @@ def main(src, dst):
                 prm["name"] = PARAM_RENAME.get(prm["name"], prm["name"])
             prm.pop("examples", None)
             prm.pop("example", None)
-            params.append(rewrite(prm))
+            prm = rewrite(prm)
+            if (method, ours) == ("GET", "/api/v1/sandboxes"):
+                descriptions = {
+                    "stoppedBefore": "RFC 3339 date-time; only native stopped VMs whose local stoppedAt (boatd stopped_at) is strictly earlier. Includes auto-stops; later edits preserve it. Legacy records without stopped_at fall back to updated_at.",
+                    "dataExpired": "true or false. Local data is retained until explicit deletion; true returns no sandboxes and false keeps all. Auto-stop deadlines are not data expiry.",
+                    "include": "Any non-empty value, including cost and deletedCost, returns 501 not_supported: calendar-month list-price billing and filtered deleted costs are unavailable.",
+                }
+                if prm.get("name") in descriptions:
+                    prm["description"] = descriptions[prm["name"]]
+            if (method, ours) == ("GET", "/api/v1/sandboxes/{id}/command-history") and prm.get("name") == "mode":
+                prm["description"] = "Comma-separated sync, stream, detached, process; commands expands to sync,stream,detached. Omitted means all modes. Order and duplicates do not change cursor scope; only locally retained records are returned. Unknown modes return 400 invalid_query."
+            params.append(prm)
         if params:
             out["parameters"] = params
         if accept is not None:
@@ -289,7 +344,10 @@ def main(src, dst):
             body = copy.deepcopy(deref_body(body))
             props = {}
             for k in accept:
-                props[k] = rewrite(body.get("properties", {}).get(k, {}))
+                if (method, ours, k) in PROPS_EXTRA:
+                    props[k] = copy.deepcopy(PROPS_EXTRA[(method, ours, k)])
+                else:
+                    props[k] = rewrite(body.get("properties", {}).get(k, {}))
             out["requestBody"] = {"required": False, "content": {"application/json": {"schema": {
                 "type": "object", "properties": props}}}}
         resps = {}
@@ -303,11 +361,20 @@ def main(src, dst):
                 r["content"][ct].pop("examples", None)
                 r["content"][ct].pop("example", None)
             resps[code] = {"description": "boat.dev " + code, **({"content": rewrite(r["content"])} if r.get("content") else {})}
+        if (method, ours) == ("GET", "/api/v1/sandboxes"):
+            resps["501"] = {"description": "Requested include is not supported; no partial successful response",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}}
+        if (method, ours) in UNSUPPORTED_RESPONSES:
+            resps = {"501": {"description": UNSUPPORTED_RESPONSES[(method, ours)],
+                             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}}}
         if (method, ours) in BINARY_200:
             resps = {"200": {"description": "The snapshot archive (tar.zst)",
                              "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}}
         resps["default"] = {"description": "boat.dev error envelope",
                             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CompatError"}}}}
+        if (method, ours) == ("DELETE", "/api/v1/environments/{id}"):
+            resps["409"] = {"description": "Default or final team environment cannot be deleted",
+                            "content": resps["default"]["content"]}
         if (method, ours) in RATE_LIMITED:
             for code in resps:
                 if code.startswith("2"):
@@ -322,10 +389,14 @@ def main(src, dst):
     for name, s in sorted(schemas.items()):
         keep["BD" + name] = s
     spec["components"]["schemas"] = keep
-    with open(dst, "w") as f:
-        json.dump(spec, f, indent=1)
-        f.write("\n")
+    rendered = json.dumps(spec, indent=1) + "\n"
+    if check:
+        if open(dst).read() != rendered:
+            raise SystemExit("compatibility OpenAPI drift: regenerate openapi.json")
+    else:
+        with open(dst, "w") as f:
+            f.write(rendered)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(sys.argv[1], sys.argv[2], check="--check" in sys.argv[3:])

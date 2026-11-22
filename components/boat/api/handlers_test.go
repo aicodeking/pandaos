@@ -287,7 +287,10 @@ func TestSecretsAPIAndInjection(t *testing.T) {
 	// A VM from before default injection (no selection record, no label) keeps every team secret.
 	legacy := e.createVM()
 	e.srv.store.Update(func(st *State) error { delete(st.VMSecrets, legacy); return nil })
+	e.boatd.mu.Lock()
 	delete(e.boatd.vms[legacy]["labels"].(map[string]any), secretsLabel)
+	delete(e.boatd.vms[legacy]["labels"].(map[string]any), selectionMark)
+	e.boatd.mu.Unlock()
 	n := len(e.boatd.starts)
 	e.do(e.owner, "POST", "/v1/vms/"+legacy+"/start", nil)
 	if env := e.boatd.starts[n]["env"].(map[string]any); env["GITHUB_TOKEN"] != "ghp_x" || env["ANTHROPIC_API_KEY"] != "sk-secret-2" {
@@ -303,7 +306,7 @@ func TestVMLifecycleAndIsolation(t *testing.T) {
 	if st, _ := e.do(e.owner, "POST", "/v1/vms", map[string]any{"size": "huge"}); st != 400 {
 		t.Errorf("bad size: %d", st)
 	}
-	if st, _ := e.do(e.owner, "POST", "/v1/vms", map[string]any{"name": "Bad Name"}); st != 400 {
+	if st, _ := e.do(e.owner, "POST", "/v1/vms", map[string]any{"name": strings.Repeat("n", 121)}); st != 400 {
 		t.Errorf("bad name: %d", st)
 	}
 	id := e.createVM()
@@ -374,6 +377,7 @@ func TestExecAndPrompt(t *testing.T) {
 
 func TestFilesSSHDesktop(t *testing.T) {
 	e := setup(t)
+	e.enableSSH()
 	id := e.createVM()
 	req, _ := http.NewRequest("PUT", e.api.URL+"/v1/vms/"+id+"/files?path=/tmp/a.txt", strings.NewReader("data"))
 	req.Header.Set("Authorization", "Bearer "+e.owner)
@@ -389,6 +393,7 @@ func TestFilesSSHDesktop(t *testing.T) {
 		t.Errorf("relative path: %d", st)
 	}
 
+	e.enableSSH()
 	pub := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl me@laptop"
 	for i := 0; i < 2; i++ {
 		st, out := e.do(e.owner, "POST", "/v1/vms/"+id+"/ssh", map[string]any{"public_key": pub})
@@ -397,8 +402,12 @@ func TestFilesSSHDesktop(t *testing.T) {
 		}
 	}
 	ak := string(e.boatd.files[id+":/home/dev/.ssh/authorized_keys"])
-	if strings.Count(ak, "ssh-ed25519") != 1 {
-		t.Errorf("authorized_keys should hold the key once: %q", ak)
+	if ak != "" {
+		t.Errorf("managed SSH wrote static keys: %q", ak)
+	}
+	e.assertSSH(id, pub, 200)
+	if n := len(e.srv.store.Snapshot().SSHGrants); n != 1 {
+		t.Errorf("refresh created %d grants", n)
 	}
 	if st, _ := e.do(e.owner, "POST", "/v1/vms/"+id+"/ssh", map[string]any{"public_key": "ssh-ed25519 AAAA\ncommand=evil"}); st != 400 {
 		t.Errorf("multi-line key: %d", st)
@@ -542,6 +551,7 @@ func TestRequestID(t *testing.T) {
 
 func TestJumpKeys(t *testing.T) {
 	e := setup(t)
+	e.enableSSH()
 	jf := filepath.Join(t.TempDir(), "jump_authorized_keys")
 	e.srv.cfg.JumpKeysFile = jf
 	id := e.createVM()
@@ -557,20 +567,23 @@ func TestJumpKeys(t *testing.T) {
 	e.boatd.mu.Unlock()
 	e.srv.syncJumpKeys(context.Background())
 	want := `restrict,port-forwarding,permitopen="10.0.0.5:22",permitopen="10.200.0.9:22" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl` + "\n"
-	if b, _ := os.ReadFile(jf); string(b) != want {
-		t.Fatalf("jump keys:\n%s\nwant\n%s", b, want)
+	if code, lines := e.jumpSSH(pub); code != 200 || strings.Join(lines, "\n")+"\n" != want {
+		t.Fatalf("jump keys lookup=%d %v want %s", code, lines, want)
 	}
 	e.do(e.owner, "DELETE", "/v1/vms/"+id2, nil)
-	if b, _ := os.ReadFile(jf); strings.Contains(string(b), "10.200.0.9") {
-		t.Errorf("deleted VM still permitted: %s", b)
+	if code, lines := e.jumpSSH(pub); code != 200 || strings.Contains(strings.Join(lines, "\n"), "10.200.0.9") {
+		t.Errorf("deleted VM still permitted: %d %v", code, lines)
 	}
 	// a VM that moved to another team (ip reuse) is dropped
 	e.boatd.mu.Lock()
 	e.boatd.vms[id]["team"] = "someone-else"
 	e.boatd.mu.Unlock()
 	e.srv.syncJumpKeys(context.Background())
+	if code, lines := e.jumpSSH(pub); code != 204 || len(lines) != 0 {
+		t.Errorf("foreign VM still permitted: %d %v", code, lines)
+	}
 	if b, _ := os.ReadFile(jf); len(b) != 0 {
-		t.Errorf("foreign VM still permitted: %s", b)
+		t.Error("static jump file populated")
 	}
 	if n := len(e.srv.store.Snapshot().SSHGrants); n != 0 {
 		t.Errorf("stale grants not pruned: %d", n)

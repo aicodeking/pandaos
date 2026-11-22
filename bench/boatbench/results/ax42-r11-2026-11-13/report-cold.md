@@ -27,7 +27,7 @@ Measured numbers below come from this harness (`bench/boatbench`). Published num
 
 median [IQR q1-q3] n=samples; the verdict compares medians and notes overlapping IQRs.
 
-**boat.dev was not measured by this harness (no `BOATDEV_API_KEY`), so no row has a measured-vs-measured verdict.** The only boat.dev numbers are the vendor's published claims (next section), and its 27.67 runs/s is one solo VM, not a fully packed server.
+**boat.dev was not measured by this harness (no `BOATDEV_API_KEY`), so no row has a measured-vs-measured verdict.** The only boat.dev numbers are the vendor's published claims (next section), and its 28.06 index units is one solo VM, not a fully packed server.
 
 | Metric | Unit | Better | PandaOS (measured) | boat.dev (measured) | PandaOS / boat.dev | Verdict |
 |---|---|---|---|---|---|---|
@@ -41,6 +41,7 @@ median [IQR q1-q3] n=samples; the verdict compares medians and notes overlapping
 | (b) snapshot (until usable) | s | lower | 0.478 [0.477-0.512] n=3 | - | - | only one side measured |
 | (b) new-from-snapshot -> exec-ready | s | lower | 0.193 [0.191-0.197] n=3 | - | - | only one side measured |
 | (b) exec round trip `true`, p50 of 50, NET of API round trips (raw - k x baseline p50) | ms | lower | 0.812 [0.797-0.831] n=3 | - | - | only one side measured |
+| (b) exec round trip `true`, p95 of 50, NET of API round trips (raw - k x baseline p50) | ms | lower | 1.98 [1.60-2.07] n=3 | - | - | only one side measured |
 | (b) create -> exec-ready, NET of API round trips (raw - k x baseline p50) | s | lower | 0.884 [0.877-0.891] n=3 | - | - | only one side measured |
 | (b) fork -> fork exec-ready, NET of API round trips (raw - k x baseline p50) | s | lower | 0.293 [0.291-0.300] n=3 | - | - | only one side measured |
 | (b) stop (until stopped), NET of API round trips (raw - k x baseline p50) | s | lower | 0.333 [0.315-0.342] n=3 | - | - | only one side measured |
@@ -48,50 +49,60 @@ median [IQR q1-q3] n=samples; the verdict compares medians and notes overlapping
 | (b) snapshot (until usable), NET of API round trips (raw - k x baseline p50) | s | lower | 0.476 [0.476-0.511] n=3 | - | - | only one side measured |
 | (b) new-from-snapshot -> exec-ready, NET of API round trips (raw - k x baseline p50) | s | lower | 0.191 [0.189-0.195] n=3 | - | - | only one side measured |
 
+† PandaOS write numbers: Firecracker's drive `cache_type` was **Unsafe (default for pandaos-install; raw artifact recorded unknown (boatd source not found))**. In `Unsafe` mode the guest's flushes are not passed to the host, so fsync and O_DIRECT writes complete once they reach the host page cache, not the disk. They are not durable-write numbers, and boat.dev's need not be the same kind. `diskCache: Writeback` makes boatd honour guest flushes.
+
 ## Published (boat.dev's claims) vs measured (this harness)
 
-Source: https://github.com/AnicetNgrt/hpc-sandbox-benchmarks/tree/ed8ec45a1ee0f5058ca99944d9c569d49b2f8e67/docs/results/2026-08-24-cpu (leaderboard.md, README.md, run.json), linked from boat.dev's benchmark section (measured by the vendor on 2026-08-24 (Ascii Box, Freestyle); the other rows are from the vendor's July CI run). Vendor-published (boat.dev was formerly Ascii Box; its row is 'Ascii Box (bare metal)'). Despite that label, 27.67 is NOT a bare-metal host score: run.json's observedSpecs for that row report a 4 vCPU / 7.76 GiB KVM guest (virtualization kvm, manufacturer QEMU, Q35, SeaBIOS, detectedIsolation vm) with cpuModel AMD Ryzen 9 9950X, egress OVH Lille. It is a sandbox VM on a dedicated host. The host itself was not measured. boat.dev's '1,000 runs in 36 s' is 1000 / 27.67 runs/s. Their run: PTS pts/node-web-tooling-1.0.1 with DynamicRunCount, median of 21 trials on fresh machines; the Node version is not stated.
+Source: https://github.com/starslingdev/hpc-sandbox-benchmarks/blob/297198a96ee827df5edcd918bd37b949526cfe20/LEADERBOARD.md (StarSling run 37073680030, commit f571eec3dc1378680f223a365d586f61a4fc6658, generated 2026-10-03T09:36:17Z), cited on https://boat.dev and https://docs.boat.dev/pricing.md (both fetched 2026-11-17) (measured by the vendor on 2026-10-03 for node_runs_s and the rows (StarSling run 37073680030); 2026-08-24 for the three pts_* disk metrics). Vendor-published, measured by StarSling, not by us. boat.dev's page says: 'every boat sandbox in this run ran on an AMD Ryzen 9 9950X host. The fleet also has AMD Ryzen 7 9700X hosts, which this run did not measure'. The leaderboard lists boat as a KVM virtual machine (declared; detected qemu-kvm, strong), so 28.06 is a sandbox VM (a 4 vCPU / 8 GiB KVM guest), not a bare-metal host score. The run is marked PARTIAL by StarSling (800 of 840 planned cells complete; the Node.js web tooling table itself has 5 sandboxes x 10 trials per provider, 95% bootstrap interval 23.27-28.22 for boat, so the median sits at the top of its interval). boat is ranked 2nd of 15 behind Brezel (30.06). Earlier figure (HISTORICAL, superseded): 27.67 index units, AnicetNgrt/hpc-sandbox-benchmarks, 2026-08-24, row 'Ascii Box (bare metal)', p50 of 21 trials, 95% CI 26.01-28.34, a 4 vCPU / 7.76 GiB KVM guest on a Ryzen 9 9950X; kept under 'historical'. The two runs use different harness repos, trial counts and provider sets, so 28.06 vs 27.67 (+1.4%) is inside both intervals and is not evidence of a speed-up. The geometric-mean subtest index is not completed jobs/s; 1000 / 27.67 or 1000 / 28.06 does not establish time to complete 1000 Node jobs. The Node version is not stated.
 
 | Metric | boat.dev PUBLISHED | PandaOS MEASURED | boat.dev MEASURED (this harness) | Note |
 |---|---|---|---|---|
-| node_runs_s (runs/s) | 27.67 | - | - | p50 of 21 trials, 95% CI 26.01-28.34; p95 28.72 |
-| pts_rand_read_iops (IOPS) | 433,500 | - | - | pts/fio-2.1.0: 4KB rand read, O_DIRECT, libaio, 1 job, iodepth 64, 1 GiB, 60 s. Same job here; PandaOS's disk, filesystem and cache mode differ (see the report's caveats), so its numbers cannot speak for boat.dev's NVMe |
-| pts_rand_write_iops (IOPS) | 412,500 | - | - | pts/fio-2.1.0: 4KB rand write, same job. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe |
-| pts_seq_write_mibps (MiB/s) | 5,838 | - | - | pts/fio-2.1.0: 1MB seq write, same job. PTS labels this MB/s, but it equals their 1MB IOPS (5837), so it is MiB/s. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe |
+| node_runs_s (index units) | 28.06 | - | - | StarSling run 37073680030 (2026-10-03): median of 10 trials on 5 sandboxes, 95% bootstrap interval 23.27-28.22; Node.js web tooling geometric-mean index (V8 subtest runs/s, not completed suites/s), 4 vCPU / 8 GiB |
+| pts_rand_read_iops (IOPS) | 433,500 | - | - | From the older 2026-08-24 run (not refreshed in the 2026-10-03 run, which reports different fio metrics). pts/fio-2.1.0: 4KB rand read, O_DIRECT, libaio, 1 job, iodepth 64, 1 GiB, 60 s. Same job here; PandaOS's disk, filesystem and cache mode differ (see the report's caveats), so its numbers cannot speak for boat.dev's NVMe |
+| pts_rand_write_iops (IOPS) | 412,500 | - | - | From the older 2026-08-24 run (not refreshed in the 2026-10-03 run, which reports different fio metrics). pts/fio-2.1.0: 4KB rand write, same job. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe |
+| pts_seq_write_mibps (MiB/s) | 5,838 | - | - | From the older 2026-08-24 run (not refreshed in the 2026-10-03 run, which reports different fio metrics). pts/fio-2.1.0: 1MB seq write, same job. PTS labels this MB/s, but it equals their 1MB IOPS (5837), so it is MiB/s. PandaOS's disk differs, so its numbers cannot speak for boat.dev's NVMe |
 
-The vendor's whole table (VENDOR-MEASURED, not by this harness). The CPU is what each guest reported in the vendor's run.json, so these rows differ in hardware as well as software.
+The vendor's whole table (VENDOR-MEASURED, not by this harness). The CPU column is what the vendor's page or run reported, so these rows differ in hardware as well as software.
 
-| Provider | runs/s | CPU the guest reported |
+| Provider | index units | CPU |
 |---|---|---|
-| Ascii Box (bare metal), now boat.dev | 27.67 | AMD Ryzen 9 9950X 16-Core Processor |
-| Blaxel | 19.8 | AMD EPYC |
-| Daytona (VM) | 18.6 | AMD EPYC |
-| Modal (VM) | 15.07 | AMD EPYC 9654 96-Core Processor |
-| Novita | 13.52 | AMD EPYC |
-| E2B | 11.24 | Intel(R) Xeon(R) Processor @ 2.60GHz |
-| Freestyle | 9.64 | 19/01 (no model name reported) |
-| Modal (gVisor) | 9.56 | unknown |
-| Ascii Box (Hetzner CX33) | 8.88 | AMD EPYC-Rome Processor |
+| boat (StarSling, 2026-10-03) | 28.06 | AMD Ryzen 9 9950X (host, per boat.dev's page) |
+| Brezel | 30.06 | not reported in LEADERBOARD.md |
+| Namespace | 24.9 | not reported in LEADERBOARD.md |
+| Daytona (VM) | 21.52 | not reported in LEADERBOARD.md |
+| Microsandbox Cloud | 21.34 | not reported in LEADERBOARD.md |
+| Novita | 20.16 | not reported in LEADERBOARD.md |
+| tama | 18.69 | not reported in LEADERBOARD.md |
+| Blaxel | 18.03 | not reported in LEADERBOARD.md |
+| Modal (VM) | 15.48 | not reported in LEADERBOARD.md |
+| run.cloud | 13.89 | not reported in LEADERBOARD.md |
+| Vercel Sandbox | 12.66 | not reported in LEADERBOARD.md |
+| Modal (gVisor) | 12.6 | not reported in LEADERBOARD.md |
+| E2B | 11.08 | not reported in LEADERBOARD.md |
+| Freestyle | 10.22 | not reported in LEADERBOARD.md |
+| Runloop | 8.93 | not reported in LEADERBOARD.md |
 
 ## Cost
 
 **These rows use ONE uncontended VM's speed**, while the PandaOS price assumes a fully packed host. Workload (g) measures the packed case; where it ran, its projection above is the fairer PandaOS figure.
 
-Cost = side's price per hour (prices.json) x time. A per-run cost only means something when the price and the speed come from the same CPU. **Rows marked MIXED CPUs are arithmetic, not a cost of any real machine.**
+Index-normalized USD per 1000 index units = hourly price / 3.6 / index; npm cost = hourly price × seconds / 3600. An index-normalized cost only means something when the price and the speed come from the same CPU. **Rows marked MIXED CPUs are arithmetic, not a cost of any real machine.**
 
-| Side | USD/hour | The price buys | Speed measured on | USD per 1000 Node loop runs | USD per cold npm ci |
+| Side | USD/hour | The price buys | Speed measured on | USD per 1000 index units | USD per cold npm ci |
 |---|---|---|---|---|---|
-| pandaos | 0.0233 | AMD Ryzen 7 PRO 8700GE | AMD EPYC (guest); harness host AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16 | - | - |
-| boatdev | 0.0360 | AMD Ryzen 9 9950X (Zen 5), as boat.dev's guest reported it in the vendor's benchmark run | - | - | - |
+| pandaos | 0.0233 | AMD Ryzen 7 PRO 8700GE; `default` VM | AMD EPYC (guest); harness host AMD Ryzen 7 PRO 8700GE w/ Radeon 780M Graphics x16 | - | - |
 
-CPU-consistent figure: boat.dev's price with boat.dev's own published speed on the CPU it sells (27.67 runs/s, vendor-measured, AMD Ryzen 9 9950X 16-Core Processor): **0.000361 USD per 1000 runs**. PandaOS's price here is AMD Ryzen 7 PRO 8700GE: its per-run cost is CPU-consistent only where the speed above was measured on that CPU (the density section says which).
+CPU-consistent figure: boat.dev's `default` VM price with boat.dev's own published speed on the CPU it sells (28.06 index units, vendor-measured, AMD Ryzen 9 9950X (host, per boat.dev's page)): **0.000356 USD per 1000 index units**. PandaOS's price here is AMD Ryzen 7 PRO 8700GE: its index-normalized cost is CPU-consistent only where the speed above was measured on that CPU (the density section says which).
 
 ## Caveats
 
 - The PandaOS numbers come from a dedicated server, with the harness on the same box talking to its local API. The server, its disks and its store are the harness-declared host in the table above. boat.dev runs in the EU (Germany/Finland/France).
+- The Node.js web-tooling geometric-mean index is the geometric mean of subtest rates (subtest runs/s), not completed Node jobs or full suites per second. host_runs_s sums VM indices; node_runs_s and *_runs_s are legacy JSON keys. Cost per 1000 index units is an index-normalized price, not a bill for 1000 completed jobs. Completed-suite rates, where available, use successful pass counts divided by the density level wall time, including synchronization and harness overhead; no vendor completed-suite rate is available.
 - Lifecycle verbs differ in meaning: PandaOS stop/resume and fork keep guest memory (Firecracker snapshots); boat.dev stop archives the disk and resume/fork restore it in the background after `ready` (docs.boat.dev/readiness.md). Both are measured to the first successful `true` exec.
 - Snapshot: PandaOS `POST /v1/vms/{id}/snapshots` vs boat.dev saved snapshot (`POST /saved-snapshots`, polled to `ready`). New-from-snapshot uses each one's create-from-snapshot.
+- Exec round-trip (`run_true`) asymmetry: native PandaOS (`/v1/vms/{id}/exec`) runs `["true"]` directly via `execve`, whereas boat.dev and compat (`/api/v1/sandboxes/{id}/commands`) run `bash -lc true` and record a command. Use `--driver pandaos --compat` for the like-for-like mode.
 - Network numbers mix the VM's egress path with the distance from each provider's region to the CDN edge.
-- Raw lifecycle latencies include the API round trip from the harness host to the provider: the PandaOS harness talks to the API on the same box, the boat.dev side (if measured) talks to boat.dev over the internet. The NET rows subtract k x that side's measured API round-trip p50, k = the fewest sequential API calls the timing contains (drivers.py ROUND_TRIPS: 2 for create/fork/resume/from-snapshot, stop and snapshot 1 on PandaOS and 2 on boat.dev, which polls them).
+- Raw lifecycle latencies include the API round trip from the harness host to the provider: the PandaOS harness talks to the API on the same box, the boat.dev side (if measured) talks to boat.dev over the internet. The NET rows subtract k x that side's measured API round-trip p50 (clamped at >= 0), where k is the recorded serial critical-path HTTP call count (`api_calls`, excluding intermediate async polls that overlap server-side work) per operation when present, falling back to `drivers.py` `ROUND_TRIPS` for older artifacts (2 for create/fork/resume/from-snapshot, stop and snapshot 1 on PandaOS and 2 on boat.dev).
 - Disk numbers come from this server's boat store as declared above. boat.dev's published disk numbers come from other NVMe drives with an unpublished fio target and cache mode, so even the same fio job is not a like-for-like disk comparison.
 - Small samples (default 5 fresh VMs per side). The table shows median and IQR; overlapping IQRs mean no clear winner.
+- Firecracker drive `cache_type` was `Unsafe (default for pandaos-install; raw artifact recorded unknown (boatd source not found))`: guest flushes (`fsync` / `O_DIRECT`) stop at the host page cache and are not durable-write numbers (`diskCache: Writeback` enables durable flushes).

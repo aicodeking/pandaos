@@ -11,10 +11,14 @@ what the spec says boat.dev sends. Nothing here has run against the live API.
 python3 bench/boatbench/test_boatdev.py
 """
 import base64
+import http.client
+import http.server
 import json
 import os
 import re
+import socket
 import sys
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -140,7 +144,8 @@ class Server:
     def __init__(self, fixtures):
         self.fixtures, self.sent = list(fixtures), []
 
-    def __call__(self, method, url, key, body=None, raw=None, timeout=660, ctype="application/json", headers=None):
+    def __call__(self, method, url, key, body=None, raw=None, timeout=660, ctype="application/json", headers=None,
+                 poll=False):
         name, op, tmpl, path = find_op(method, url)
         self.sent.append((name, body, headers or {}))
         assert key == "test-key" and raw is None, "JSON bodies only"
@@ -270,6 +275,155 @@ class BoatDevAgainstSpec(unittest.TestCase):
         prefix = "bb-abc123-4"  # boatbench: bb-<run_id hex 6>-<repeat>
         self.assertFalse(validate({"name": prefix + "-c9", "type": "default"}, create))
         self.assertFalse(validate({"sandboxId": SID, "name": prefix + "-snap"}, snap_s))
+
+    def test_adaptive_poll_schedule_and_http_call_counting(self):
+        self.assertEqual([drivers.poll_sleep(i) for i in range(7)],
+                         [0.05, 0.05, 0.05, 0.10, 0.10, 0.20, 0.20])
+        stopping = {"ok": True, "type": "sandbox.stopping", "id": SID, "status": "archiving",
+                    "sandbox": sandbox(SID, "archiving"), "operation": stop_op("pending")}
+        info = lambda st, op: {"ok": True, "type": "sandbox.info", "sandbox": sandbox(SID, st, stop=op)}  # noqa: E731
+
+        def flow(d):
+            d.stop(SID)
+            return d.http_calls, d.poll_http_calls, d.thread_calls()
+
+        counts, _ = self.run_with([
+            ("POST /sandboxes/{sandboxId}/stop", 202, stopping),
+            ("GET /sandboxes/{sandboxId}", 200, info("archiving", stop_op("pending"))),
+            ("GET /sandboxes/{sandboxId}", 200, info("archiving", stop_op("pending"))),
+            ("GET /sandboxes/{sandboxId}", 200, info("archived", stop_op("completed"))),
+        ], flow)
+        self.assertEqual(counts, (4, 3, 2))
+
+
+class KeepAlivePoolingTests(unittest.TestCase):
+    def test_keep_alive_reuses_socket_drains_errors_and_closes_cleanly(self):
+        accepted_ports = set()
+        seen_headers = []
+
+        class KeepAliveHandler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def _reply(self, code, payload):
+                accepted_ports.add(self.client_address[1])
+                seen_headers.append({k.lower(): v for k, v in self.headers.items()})
+                length = int(self.headers.get("Content-Length", "0"))
+                if length:
+                    self.rfile.read(length)
+                raw = json.dumps(payload).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_GET(self):
+                self._reply(200, {"sandbox": sandbox(SID, "ready")})
+
+            def do_POST(self):
+                if len(seen_headers) == 1:
+                    self._reply(409, {"error": {"code": "sandbox_starting", "message": "warming"}})
+                else:
+                    self._reply(200, {"exitCode": 0, "stdout": "", "stderr": ""})
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), KeepAliveHandler)
+        srv.daemon_threads = True
+        t = threading.Thread(target=srv.serve_forever)
+        t.start()
+        d = drivers.BoatDev(base=f"http://127.0.0.1:{srv.server_port}", key="boat_test")
+        try:
+            d.ping(SID)
+            self.assertIsNone(d.run_true(SID))  # 409 body drained -> socket stays pooled
+            self.assertEqual(d.run_true(SID), 0)
+            d.ping(SID)
+            self.assertEqual(len(accepted_ports), 1, "all 4 sequential calls should reuse 1 TCP connection")
+            self.assertTrue(all(h.get("connection", "").lower() == "keep-alive" for h in seen_headers))
+            self.assertEqual(d._pool.idle_count(), 1)
+            d.close()
+            self.assertEqual(d._pool.idle_count(), 0)
+        finally:
+            d.close()
+            srv.shutdown()
+            srv.server_close()
+            t.join(timeout=3)
+
+    def test_stale_idle_connection_retries_once_on_fresh_socket(self):
+        for err_cls in (http.client.RemoteDisconnected, http.client.BadStatusLine, ConnectionResetError):
+            with self.subTest(err=err_cls.__name__):
+                accepts = []
+                stop_evt = threading.Event()
+                lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                lsock.bind(("127.0.0.1", 0))
+                lsock.listen(5)
+                lsock.settimeout(0.2)
+                port = lsock.getsockname()[1]
+
+                def serve():
+                    idx = 0
+                    while not stop_evt.is_set():
+                        try:
+                            conn, addr = lsock.accept()
+                        except socket.timeout:
+                            continue
+                        except OSError:
+                            break
+                        idx += 1
+                        accepts.append(addr[1])
+                        conn.settimeout(2.0)
+                        try:
+                            req = b""
+                            while b"\r\n\r\n" not in req:
+                                chunk = conn.recv(4096)
+                                if not chunk:
+                                    break
+                                req += chunk
+                            body = b'{"id":"vm-1"}'
+                            resp = (
+                                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                + f"Content-Length: {len(body)}\r\nConnection: keep-alive\r\n\r\n".encode()
+                                + body
+                            )
+                            conn.sendall(resp)
+                            if idx == 1:
+                                # Simulate idle socket closed or corrupted before second request.
+                                req2 = b""
+                                while b"\r\n\r\n" not in req2:
+                                    chunk = conn.recv(4096)
+                                    if not chunk:
+                                        break
+                                    req2 += chunk
+                                if err_cls is http.client.BadStatusLine:
+                                    conn.sendall(b"NOT_HTTP\r\n\r\n")
+                                elif err_cls is ConnectionResetError:
+                                    conn.setsockopt(
+                                        socket.SOL_SOCKET,
+                                        socket.SO_LINGER,
+                                        b"\x01\x00\x00\x00\x00\x00\x00\x00",
+                                    )
+                        except OSError:
+                            pass
+                        finally:
+                            try:
+                                conn.close()
+                            except OSError:
+                                pass
+
+                worker = threading.Thread(target=serve)
+                worker.start()
+                d = drivers.PandaOS(url=f"http://127.0.0.1:{port}", key="boat_test")
+                try:
+                    d.ping("vm-1")
+                    d.ping("vm-1")  # hits stale socket on conn 1, retries once on conn 2
+                    self.assertEqual(len(accepts), 2)
+                finally:
+                    stop_evt.set()
+                    d.close()
+                    lsock.close()
+                    worker.join(timeout=3)
 
 
 if __name__ == "__main__":

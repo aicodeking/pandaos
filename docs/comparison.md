@@ -100,11 +100,31 @@ macOS columns are for reference only. We did not measure them.
 | Remote agent access (PandaCode Connect) | Built in (sign-in required) | Install it yourself | Install it yourself | Install it yourself | Install it yourself (musl) | Install it yourself | Install it yourself |
 | Legacy BIOS boot | **No** (UEFI only, Secure Boot off) | Yes | Yes | Yes | Yes | No (UEFI + TPM 2.0) | n/a (Apple hardware) |
 | Secure Boot | **No** | Yes | Yes | Yes | No | Required | Apple's own |
-| Maturity | **Pre-release:** no release tag, tested only in QEMU VMs | LTS, 5+ years of support, certified hardware | Long-standing stable releases | About 13 months per release | Long-standing stable releases | Very broad hardware support | Apple hardware only |
+| Maturity | **Pre-release:** no tagged binary or guest-image release yet; single-host `server` (`boat`) profile benchmarked on dedicated Hetzner AX42 hardware ([`cost.md`](cost.md), `trusted` mode at `0d160dd`), `headless`/`desktop` tested in CI QEMU VMs | LTS, 5+ years of support, certified hardware | Long-standing stable releases | About 13 months per release | Long-standing stable releases | Very broad hardware support | Apple hardware only |
 | Idle RAM | measured above | measured above | measured above | measured above | measured above | 4 GB minimum (Microsoft's published requirement, not a measurement) | No published minimum; runs only on supported Macs |
 
-**Where PandaOS loses.** It is pre-release software. It has no release tag, it is not tested on
-real hardware, and it has no BIOS or Secure Boot support. Every other system here has years of
+**Where PandaOS loses.** It is pre-release software: it has no tagged binary or prebuilt `boat-guest-*`
+release yet (build from source / NixOS flake or CI dry-run artifact), no BIOS or Secure Boot support,
+and outside the dedicated Hetzner AX42 `server` (`boat`) install ([`cost.md`](cost.md),
+[`bench/boatbench/results/`](../bench/boatbench/results/)) its `headless` and `desktop` profiles have
+no broad real-hardware certification beyond CI QEMU VMs. Every other system here has years of
 releases and wide hardware coverage behind it. On idle RAM and disk, Debian and Alpine are clearly
 smaller. PandaOS's advantage is the agent features that ship by default. On the other systems, you
 would assemble those features yourself.
+
+**`boat` server-profile scope note.** On the `server` profile ([`boat.md`](boat.md)), `boatd` and
+`boat-api` are **single-host** daemons (no built-in multi-node scheduler or automatic failover). They
+serve native `/v1` plus drop-in **`boat.dev` `/api/v1`** compatibility (98 of 122 upstream operations mapped,
+tested against `boat-sdk` and `@boatdev/sdk`; 24 unsupported operations return `501 not_supported`, and
+sandbox `share`/`unshare` and the corresponding CLI verbs return 501 without changes because
+creator-authority sharing is unavailable for team-scoped sandboxes. Sandbox billing usage is also
+501; native VM usage reports runtime seconds. Environment upgrade remains mapped;
+local SDK acceptance uses fake boatd and establishes no new TLS/live-VM result;
+four local operations are excluded from upstream counts, verified by normalized method/path comparison
+against the live spec on 2026-11-18; see [coverage method](boat.md#boatdev-api-compatibility-apiv1)) — **not**
+drop-in `e2b.dev` SDK/ConnectRPC or Jupyter kernel compatibility (E2B, Daytona, Modal, Vercel Sandbox,
+and Sprites appear in [`cost.md`](cost.md) strictly for cloud per-VM-hour pricing comparison). On a
+single-NVMe Hetzner AX42 in `untrusted` mode (`storageOvercommit = 1`), `boatd`'s `hostStorageCheck`
+admits up to `⌊476 / 59⌋ = 8` nominal VMs so all **7** RAM-bound `default` VMs (`5,110 VM-h/mo`,
+`$0.023/h`) boot while disks stay sparse, whereas live `checkFloor` (`minFreePct = 10%`, `404 GiB`
+usable) caps worst-case 100%-full 59 GiB disks at **6** VMs (`4,380 VM-h/mo`, `$0.027/h`).

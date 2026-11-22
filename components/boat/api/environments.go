@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -25,13 +26,14 @@ const (
 )
 
 type envReq struct {
-	Name        *string            `json:"name"`
-	Image       *string            `json:"image"`
-	Size        *string            `json:"size"`
-	SetupScript *string            `json:"setup_script"`
-	Env         *map[string]string `json:"env"`
-	Secrets     *[]string          `json:"secrets"`
-	IsDefault   *bool              `json:"is_default"`
+	Name         *string            `json:"name"`
+	Image        *string            `json:"image"`
+	Size         *string            `json:"size"`
+	SetupScript  *string            `json:"setup_script"`
+	Env          *map[string]string `json:"env"`
+	Secrets      *[]string          `json:"secrets"`
+	ResetSecrets bool               `json:"reset_secrets"`
+	IsDefault    *bool              `json:"is_default"`
 }
 
 func (s *server) validateEnvReq(team string, e *envReq) string {
@@ -44,6 +46,8 @@ func (s *server) validateEnvReq(team string, e *envReq) string {
 		return "invalid size"
 	case e.SetupScript != nil && (len(*e.SetupScript) > maxSetupScript || strings.ContainsRune(*e.SetupScript, 0)):
 		return "setup_script must be text of at most 256 KiB"
+	case e.Secrets != nil && e.ResetSecrets:
+		return "secrets and reset_secrets conflict"
 	}
 	if e.Env != nil {
 		if msg := validEnv(*e.Env); msg != "" {
@@ -76,6 +80,8 @@ func applyEnvReq(env *Environment, e *envReq) bool {
 	if e.Secrets != nil {
 		cp := append([]string{}, *e.Secrets...)
 		env.Secrets, changed = &cp, true
+	} else if e.ResetSecrets && env.Secrets != nil {
+		env.Secrets, changed = nil, true
 	}
 	if e.IsDefault != nil {
 		env.IsDefault = *e.IsDefault
@@ -157,6 +163,9 @@ func (s *server) createEnv(w http.ResponseWriter, r *http.Request, p *principal)
 	applyEnvReq(env, &e)
 	conflict := ""
 	err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
 		n := 0
 		for _, x := range st.Environments {
 			if x.TeamID == p.Team.ID {
@@ -225,8 +234,11 @@ func (s *server) updateEnv(w http.ResponseWriter, r *http.Request, p *principal)
 	var out *Environment
 	conflict := ""
 	err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
 		env := st.Environments[cur.ID]
-		if env == nil {
+		if env == nil || env.TeamID != p.Team.ID {
 			return errConflict
 		}
 		if e.Name != nil {
@@ -258,11 +270,49 @@ func (s *server) updateEnv(w http.ResponseWriter, r *http.Request, p *principal)
 }
 
 func (s *server) deleteEnv(w http.ResponseWriter, r *http.Request, p *principal) {
+	s.deleteEnvWithPolicy(w, r, p, false)
+}
+
+// Compatibility keeps the default and final team environment. Check this in
+// the same transaction as deletion, without restricting native /v1 deletes.
+func (s *server) deleteEnvWithPolicy(w http.ResponseWriter, r *http.Request, p *principal, keepRequired bool) {
 	cur, ok := s.teamEnvironment(w, r, p)
 	if !ok {
 		return
 	}
-	if err := s.store.Update(func(st *State) error { delete(st.Environments, cur.ID); return nil }); err != nil {
+	conflict := ""
+	if err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
+		env := st.Environments[cur.ID]
+		if env == nil || env.TeamID != p.Team.ID {
+			return errConflict
+		}
+		if keepRequired {
+			if env.IsDefault {
+				conflict = "the default environment cannot be deleted"
+				return errConflict
+			}
+			n := 0
+			for _, e := range st.Environments {
+				if e.TeamID == p.Team.ID {
+					n++
+				}
+			}
+			if n <= 1 {
+				conflict = "at least one environment must be kept"
+				return errConflict
+			}
+		}
+		cur = env // retire the builder belonging to the record actually deleted
+		delete(st.Environments, cur.ID)
+		return nil
+	}); err != nil {
+		if conflict != "" {
+			writeErr(w, r, http.StatusConflict, "conflict", conflict)
+			return
+		}
 		s.storeErr(w, r, err)
 		return
 	}
@@ -285,8 +335,11 @@ func (s *server) buildEnv(w http.ResponseWriter, r *http.Request, p *principal) 
 	var out *Environment
 	busy := false
 	err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
 		env := st.Environments[cur.ID]
-		if env == nil {
+		if env == nil || env.TeamID != p.Team.ID {
 			return errConflict
 		}
 		if env.Build != nil && env.Build.State == "building" {
@@ -353,19 +406,47 @@ func (s *server) envBuildSteps(ctx context.Context, env Environment, team string
 	if err != nil {
 		return "", "", err
 	}
+	// The builder holds exactly the environment's secret selection, durably: on
+	// its boatd labels and in the store. Without it a later start or fork of the
+	// builder would inject every team secret.
+	only := envSelection(env)
+	labels, _ := withSelection(map[string]string{builderLabel: env.ID}, only)
 	body := map[string]any{"name": "env-build-" + randHex(4), "size": env.Size, "image": env.Image, "team": team,
-		"idle_stop_s": -1, "labels": map[string]string{"boat.env": env.ID}, "env": run}
+		"idle_stop_s": -1, "labels": labels, "env": run}
 	var vm VM
+	doneLifecycle := s.vmCreates.begin(team)
+	defer doneLifecycle()
 	if err := s.boatd.call(ctx, "POST", "/v1/vms", body, &vm); err != nil {
 		return "", "", fmt.Errorf("create builder: %w", err)
 	}
 	vmID = str(vm, "id")
+	if s.sshPolicyConfigured() {
+		defer func() {
+			if rerr := s.retireVM(vmID); rerr != nil && !errors.Is(rerr, errStoreClosed) {
+				log.Printf("env %s: retire builder %s: %v", env.ID, vmID, rerr)
+			}
+		}()
+	}
 	fail := func(e error) (string, string, error) {
 		if derr := s.discardCopyVM(vmID); derr != nil {
 			log.Printf("env %s: delete failed builder %s: %v", env.ID, vmID, derr)
 		}
 		return "", "", e
 	}
+	// Written before the call returns (the store may lag the label otherwise).
+	if err := s.recordVM(vmID, team, only, false, false); err != nil {
+		return fail(fmt.Errorf("record the builder's secret selection: %w", err))
+	}
+	s.recordRunNames(vmID, sortedNames(selectionNames(s.store.Snapshot(), team, only)), false) // the team secrets the build pushed
+	if s.sshPolicyConfigured() {
+		if err := s.initBuilderVMToken(vmID, team); err != nil {
+			return fail(fmt.Errorf("ssh_policy: %w", err))
+		}
+		if _, err := s.prepareSSHPolicy(ctx, vmID, team); err != nil {
+			return fail(fmt.Errorf("ssh_policy: %w", err))
+		}
+	}
+	doneLifecycle()
 	if strings.TrimSpace(env.SetupScript) != "" {
 		req, _ := http.NewRequestWithContext(ctx, "POST", "http://boat-api/internal/env-build", nil)
 		_, stderr, exit, xerr := s.execCapture(req, vmID, []string{"bash", "-lc", "set -e\n" + env.SetupScript}, buildExecS)
@@ -389,12 +470,74 @@ func (s *server) envBuildSteps(ctx context.Context, env Environment, team string
 	return vmID, str(snap, "id"), nil
 }
 
+// builderLabel marks an environment's builder VM with the environment's id.
+const builderLabel = "boat.env"
+
+// builderOf is the environment a VM is the builder of ("" = an ordinary VM).
+func builderOf(vm VM) string {
+	labels, _ := vm["labels"].(map[string]any)
+	id, _ := labels[builderLabel].(string)
+	return id
+}
+
+// builderReadRoutes are the only routes a key without scope admin may use on an
+// environment builder: metadata reads, and revoking an SSH grant. Every other
+// route (start, stop, fork, delete, patch, exec, commands, prompts, files, ports,
+// SSH, desktop, snapshots, ...) is refused, so a route added later is closed by
+// default.
+var builderReadRoutes = map[string]bool{
+	"GET /v1/vms/{id}":                            true,
+	"GET /api/v1/sandboxes/{id}":                  true,
+	"GET /v1/vms/{id}/usage":                      true,
+	"GET /api/v1/sandboxes/{id}/usage":            true,
+	"GET /v1/vms/{id}/ai-usage":                   true,
+	"GET /api/v1/sandboxes/{id}/ai-usage":         true,
+	"GET /v1/vms/{id}/snapshots":                  true,
+	"GET /api/v1/sandboxes/{id}/snapshots":        true,
+	"GET /api/v1/sandboxes/{id}/snapshots/latest": true,
+	"GET /v1/vms/{id}/ports":                      true,
+	"GET /v1/vms/{id}/ssh":                        true,
+	"DELETE /v1/vms/{id}/ssh/{fingerprint}":       true,
+}
+
+// refuseBuilder answers 403 for a key without scope admin that does anything but
+// read an environment builder's metadata (reports whether it did). A builder
+// holds the environment's secrets, which only an admin may put to use: the
+// builds themselves are admin-only (buildEnv). ownVM applies it to every route
+// that resolves a VM, so no guest or lifecycle operation can skip it. The
+// builder's own guest token (it acts on that VM only) is not a tenant.
+func (s *server) refuseBuilder(w http.ResponseWriter, r *http.Request, p *principal, vm VM) bool {
+	if builderOf(vm) == "" || p.has("admin") || (p.VMID != "" && p.VMID == str(vm, "id")) {
+		return false
+	}
+	if builderReadRoutes[info(r).pattern] {
+		return false
+	}
+	writeErr(w, r, http.StatusForbidden, "forbidden", "an environment builder VM holds the environment's secrets: only an admin key may start, stop, fork, delete, snapshot or run anything on it")
+	return true
+}
+
+// envSelection is the secret selection an environment's builds run under: its
+// own, or the team's inject defaults.
+func envSelection(env Environment) []string {
+	if env.Secrets != nil {
+		return append([]string{}, *env.Secrets...)
+	}
+	return []string{defaultSelection}
+}
+
+// builderSelection is the selection of the builder of environment envID, for a
+// builder that has none recorded (an environment that is gone: no secrets).
+func (s *server) builderSelection(envID string) []string {
+	if env := s.store.Snapshot().Environments[envID]; env != nil {
+		return envSelection(*env)
+	}
+	return []string{}
+}
+
 // envRunVars: the environment's secret selection plus its plain vars.
 func (s *server) envRunVars(env Environment, team string) (map[string]string, error) {
-	only := []string{defaultSelection}
-	if env.Secrets != nil {
-		only = append([]string{}, *env.Secrets...)
-	}
+	only := envSelection(env)
 	vars, err := s.teamEnv(team, only)
 	if err != nil {
 		return nil, err

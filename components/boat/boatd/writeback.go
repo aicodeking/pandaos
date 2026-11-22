@@ -19,6 +19,14 @@ const writebackEvery = 250 * time.Millisecond
 // startWriteback starts writeback of path (once it exists) every writebackEvery
 // until stop, which kicks it once more. Best effort: errors only mean no head start.
 func startWriteback(path string) (stop func()) {
+	return startWritebackWith(path, nil, kickFile)
+}
+
+func (m *Manager) startWriteback(path string) (stop func()) {
+	return startWritebackWith(path, m.isBooting, kickFile)
+}
+
+func startWritebackWith(path string, skip func() bool, kick func(string)) (stop func()) {
 	done, finished := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(finished)
@@ -27,10 +35,14 @@ func startWriteback(path string) (stop func()) {
 		for {
 			select {
 			case <-done:
-				kickFile(path)
+				if skip == nil || !skip() {
+					kick(path)
+				}
 				return
 			case <-t.C:
-				kickFile(path)
+				if skip == nil || !skip() {
+					kick(path)
+				}
 			}
 		}
 	}()
@@ -58,14 +70,101 @@ func kickFile(path string) {
 // booting at full speed. On the AX42's NVMe an 8 GiB writeback moved another cgroup's 4k reads
 // from 56 to 62 us (bench/boatbench/results/ax42-r12-2026-11-13): there the cap costs a dump a
 // few hundred ms per boot and changes nothing else.
-const dumpWbpsWhileBooting = 150 << 20
+const (
+	dumpWbpsWhileBooting = 64 << 20
+	postDumpSyncBootWait = 5 * time.Second
+	mergeDiffBootWait    = 2 * time.Second
+)
 
 // dumpIO tracks dumping VMs and booting ones, under its own lock (taken inside m.mu never).
 type dumpIO struct {
-	mu      sync.Mutex
-	booting int
-	next    uint64
-	dumping map[string]uint64
+	mu       sync.Mutex
+	booting  int
+	bootIdle chan struct{}
+	next     uint64
+	dumping  map[string]uint64
+}
+
+func (m *Manager) isBooting() bool {
+	m.dio.mu.Lock()
+	defer m.dio.mu.Unlock()
+	return m.dio.booting > 0
+}
+
+// waitBootQuiet waits up to maxWait while any VM is booting, waking immediately
+// when the last concurrent boot finishes or Manager watchers stop.
+func (m *Manager) waitBootQuiet(maxWait time.Duration) {
+	m.waitBootQuietWhile(maxWait, nil)
+}
+
+func (m *Manager) waitBootQuietWhile(maxWait time.Duration, keepWaiting func() bool) {
+	if maxWait <= 0 {
+		return
+	}
+	deadline := time.Now().Add(maxWait)
+	for {
+		if keepWaiting != nil && !keepWaiting() {
+			return
+		}
+		m.dio.mu.Lock()
+		idle := m.dio.bootIdle
+		booting := m.dio.booting > 0
+		m.dio.mu.Unlock()
+		if !booting || idle == nil {
+			return
+		}
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return
+		}
+		step := rem
+		if keepWaiting != nil && step > 20*time.Millisecond {
+			step = 20 * time.Millisecond
+		}
+		timer := time.NewTimer(step)
+		select {
+		case <-idle:
+			timer.Stop()
+			return
+		case <-m.watchStop:
+			timer.Stop()
+			return
+		case <-timer.C:
+			if keepWaiting == nil {
+				return
+			}
+		}
+	}
+}
+
+// paceDumpCopy throttles root-cgroup fallback extent copies to dumpWbpsWhileBooting
+// while a concurrent VM boots, waking immediately once the boot completes.
+func (m *Manager) paceDumpCopy(written int64) {
+	if written <= 0 {
+		return
+	}
+	m.dio.mu.Lock()
+	idle := m.dio.bootIdle
+	booting := m.dio.booting > 0
+	m.dio.mu.Unlock()
+	if !booting || idle == nil {
+		return
+	}
+	pause := time.Duration(written) * time.Second / dumpWbpsWhileBooting
+	if pause <= 0 {
+		return
+	}
+	if pause > 250*time.Millisecond {
+		pause = 250 * time.Millisecond
+	}
+	timer := time.NewTimer(pause)
+	select {
+	case <-idle:
+		timer.Stop()
+	case <-m.watchStop:
+		timer.Stop()
+	case <-timer.C:
+	}
 }
 
 // dumpStarted: v's memory is being dumped (liftMemLimits). Capped at once if a VM boots.
@@ -104,6 +203,7 @@ func (m *Manager) bootIO() (done func()) {
 	m.dio.mu.Lock()
 	defer m.dio.mu.Unlock()
 	if m.dio.booting++; m.dio.booting == 1 {
+		m.dio.bootIdle = make(chan struct{})
 		for id := range m.dio.dumping {
 			m.capDump(id, true)
 		}
@@ -112,6 +212,10 @@ func (m *Manager) bootIO() (done func()) {
 		m.dio.mu.Lock()
 		defer m.dio.mu.Unlock()
 		if m.dio.booting--; m.dio.booting == 0 {
+			if m.dio.bootIdle != nil {
+				close(m.dio.bootIdle)
+				m.dio.bootIdle = nil
+			}
 			for id := range m.dio.dumping {
 				m.capDump(id, false)
 			}

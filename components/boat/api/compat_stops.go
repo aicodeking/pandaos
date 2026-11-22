@@ -13,15 +13,48 @@ import (
 // They live in the store (State.StopOps), so a restart keeps them.
 type stopOps struct{ store *Store }
 
-const maxStopOps = 10000
+const (
+	maxStopOpsPerTeam = 1024
+	maxStopOps        = 32768
+)
+
+func evictStopOp(st *State, id string) {
+	if op := st.StopOps[id]; op != nil {
+		if vm, _ := op["_vm"].(string); vm != "" && st.StopLast[vm] == id {
+			delete(st.StopLast, vm)
+		}
+	}
+	delete(st.StopOps, id)
+}
 
 func (o *stopOps) begin(team, vm string) map[string]any {
 	now := time.Now().UTC()
 	op := map[string]any{"id": "stop_" + randHex(8), "status": "pending", "requestedAt": now, "lastAttemptAt": nil,
 		"error": nil, "endedAt": nil, "_team": team, "_vm": vm}
-	o.update(func(st *State) {
-		if len(st.StopOps) >= maxStopOps {
-			st.StopOps, st.StopLast = map[string]map[string]any{}, map[string]string{} // ponytail: forgets all at the cap
+	o.stage(func(st *State) {
+		// The run-end order is by sequence, not by clock (r37_seq.go): taken here,
+		// in the mutation that records the stop.
+		op["_seq"] = int64(st.nextSeq())
+		teamCount := 0
+		for _, cur := range st.StopOps {
+			if cur["_team"] == team && !isMarkRecord(cur) {
+				teamCount++
+			}
+		}
+		for teamCount >= maxStopOpsPerTeam {
+			evict := oldestTeamOpID(st.StopOps, team)
+			if evict == "" {
+				break
+			}
+			evictStopOp(st, evict)
+			teamCount--
+		}
+		for len(st.StopOps) >= maxStopOps {
+			evict := oldestTeamOpID(st.StopOps, "")
+			if evict == "" {
+				break
+			}
+			evictStopOp(st, evict)
 		}
 		st.StopOps[op["id"].(string)] = op
 		st.StopLast[vm] = op["id"].(string)
@@ -29,10 +62,22 @@ func (o *stopOps) begin(team, vm string) map[string]any {
 	return public(op)
 }
 
-// update writes a stop change. A store error is logged: the stop itself
+// update writes a durable stop change. A store error is logged: the stop itself
 // happened, only its record is behind.
 func (o *stopOps) update(f func(st *State)) {
 	if err := o.store.Update(func(st *State) error { f(st); return nil }); err != nil {
+		log.Printf("stop operations: %v", err)
+	}
+}
+
+func (o *stopOps) stage(f func(st *State)) {
+	if err := o.store.Stage(func(st *State) error { f(st); return nil }); err != nil {
+		log.Printf("stop operations: %v", err)
+	}
+}
+
+func (o *stopOps) apply(f func(st *State)) {
+	if err := o.store.Apply(func(st *State) error { f(st); return nil }); err != nil {
 		log.Printf("stop operations: %v", err)
 	}
 }
@@ -44,8 +89,26 @@ func (o *stopOps) set(stopID string, f func(op map[string]any)) map[string]any {
 	}
 	o.update(func(st *State) {
 		if op := st.StopOps[stopID]; op != nil {
-			f(op)
-			out = public(op)
+			cp := cloneAnyMap(op)
+			f(cp)
+			st.StopOps[stopID] = cp
+			out = public(cp)
+		}
+	})
+	return out
+}
+
+func (o *stopOps) setAsync(stopID string, f func(op map[string]any)) map[string]any {
+	var out map[string]any
+	if o.store.Snapshot().StopOps[stopID] == nil {
+		return nil
+	}
+	o.apply(func(st *State) {
+		if op := st.StopOps[stopID]; op != nil {
+			cp := cloneAnyMap(op)
+			f(cp)
+			st.StopOps[stopID] = cp
+			out = public(cp)
 		}
 	})
 	return out
@@ -58,22 +121,40 @@ func (o *stopOps) complete(vm string, op map[string]any) map[string]any {
 	})
 }
 
+func (o *stopOps) completeAsync(vm string, op map[string]any) map[string]any {
+	return o.setAsync(op["id"].(string), func(op map[string]any) {
+		now := time.Now().UTC()
+		op["status"], op["lastAttemptAt"], op["endedAt"] = "completed", now, now
+	})
+}
+
 func (o *stopOps) fail(vm string, op map[string]any, why string) {
 	o.set(op["id"].(string), func(op map[string]any) {
 		op["status"], op["lastAttemptAt"], op["error"] = "failing", time.Now().UTC(), strings.TrimSpace(preview(why))
 	})
 }
 
-// supersede ends a pending or failing stop when the VM is resumed.
+func (o *stopOps) failAsync(vm string, op map[string]any, why string) {
+	o.setAsync(op["id"].(string), func(op map[string]any) {
+		op["status"], op["lastAttemptAt"], op["error"] = "failing", time.Now().UTC(), strings.TrimSpace(preview(why))
+	})
+}
+
+// supersede ends a prior stop operation when the VM is started or resumed.
 func (o *stopOps) supersede(vm string) {
 	st := o.store.Snapshot()
-	op := st.StopOps[st.StopLast[vm]]
-	if op == nil || (op["status"] != "pending" && op["status"] != "failing") {
+	stopID := st.StopLast[vm]
+	op := st.StopOps[stopID]
+	if op == nil || (op["status"] != "pending" && op["status"] != "failing" && op["status"] != "completed") {
 		return
 	}
-	o.set(st.StopLast[vm], func(op map[string]any) {
-		if s := op["status"]; s == "pending" || s == "failing" {
-			op["status"], op["endedAt"] = "superseded", time.Now().UTC()
+	o.apply(func(st *State) {
+		if op := st.StopOps[stopID]; op != nil {
+			if s := op["status"]; s == "pending" || s == "failing" || s == "completed" {
+				cp := cloneAnyMap(op)
+				cp["status"], cp["endedAt"] = "superseded", time.Now().UTC()
+				st.StopOps[stopID] = cp
+			}
 		}
 	})
 }

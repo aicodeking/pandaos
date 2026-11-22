@@ -4,9 +4,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // boat.dev's detached commands, command history and processes on the native
@@ -23,14 +25,17 @@ func (s *server) compatDetached(w http.ResponseWriter, r *http.Request, p *princ
 		return
 	}
 	var started struct {
-		ID string `json:"id"`
+		ID  string `json:"id"`
+		PID int    `json:"pid"`
 	}
 	json.Unmarshal(res.body.Bytes(), &started)
 	rec := s.commandRecord(r.PathValue("id"), started.ID)
-	pid := 0
-	if st, err := s.agentOp(r, r.PathValue("id"), "cmd_status", map[string]any{"cmd_id": started.ID}); err == nil {
-		f, _ := st["pid"].(float64)
-		pid = int(f)
+	pid := started.PID
+	if pid == 0 {
+		if st, err := s.agentOp(r, r.PathValue("id"), "cmd_status", map[string]any{"cmd_id": started.ID}); err == nil {
+			f, _ := st["pid"].(float64)
+			pid = int(f)
+		}
 	}
 	out := map[string]any{"success": true, "commandId": started.ID, "processId": 0, "pid": pid, "command": c.Command,
 		"startedAt": time.Now().UTC()}
@@ -85,11 +90,15 @@ func compatCmdStatus(state string, exit *int) string {
 	return "exited"
 }
 
-func (s *server) commandRecordView(bx string, rec *CommandRecord) map[string]any {
-	mode := "detached"
+func compatCommandMode(rec *CommandRecord) string {
 	if rec.Kind == "prompt" || rec.Kind == "setup" {
-		mode = "process"
+		return "process"
 	}
+	return "detached"
+}
+
+func (s *server) commandRecordView(bx string, rec *CommandRecord) map[string]any {
+	mode := compatCommandMode(rec)
 	out := map[string]any{"commandId": rec.ID, "sandboxId": bx, "command": commandText(rec), "cwd": nullIfEmpty(rec.Cwd),
 		"mode": mode, "status": compatCmdStatus(rec.State, rec.Exit), "exitCode": rec.Exit, "stdoutBytes": 0, "stderrBytes": 0,
 		"outputTruncated": false, "startedAt": rec.StartedAt, "finishedAt": rec.FinishedAt}
@@ -152,33 +161,151 @@ func (s *server) compatStopCommand(w http.ResponseWriter, r *http.Request, p *pr
 		return
 	}
 	res := s.callNative(r, p, "DELETE /v1/vms/{id}/commands/{cid}", s.stopCommand, r.PathValue("id"), nil, "cid", rec.ID)
+	signaled := true
 	if !res.ok() {
-		res.relay(w)
-		return
+		if res.status == http.StatusConflict && strings.Contains(strings.ToLower(res.body.String()), "command is not running") {
+			signaled = false
+		} else {
+			res.relay(w)
+			return
+		}
+	}
+	if !signaled && rec.State == "running" {
+		if st, err := s.agentOp(r, r.PathValue("id"), "cmd_status", map[string]any{"cmd_id": rec.ID}); err == nil {
+			s.refreshHistory(r.PathValue("id"), map[string]any{"cmds": []any{st}})
+		}
 	}
 	if cur := s.commandRecord(r.PathValue("id"), rec.ID); cur != nil {
 		rec = cur
 	}
-	writeCompat(w, 200, "command.stopped", map[string]any{"processId": rec.ProcessID, "running": false, "signaled": true,
+	writeCompat(w, 200, "command.stopped", map[string]any{"processId": rec.ProcessID, "running": false, "signaled": signaled,
 		"command": s.commandRecordView(s.compatID(p.Team.ID, r.PathValue("id")), rec)})
 }
 
+// compatHistoryCursor uses an immutable record key rather than a slice offset:
+// appends and retention trimming cannot shift the continuation boundary. Scope
+// it to the resolved VM (so both ID aliases work), team and filters.
+type compatHistoryCursor struct {
+	Team    string    `json:"team"`
+	VM      string    `json:"vm"`
+	Mode    string    `json:"mode"`
+	Query   string    `json:"q"`
+	Started time.Time `json:"started"`
+	ID      string    `json:"id"`
+}
+
+// Normalize before filtering or binding cursors: aliases, duplicate entries and
+// comma-list order all describe the same set of requested modes.
+func compatHistoryModes(raw string) (string, bool) {
+	if raw == "" {
+		raw = "sync,stream,detached,process"
+	}
+	modes := map[string]bool{}
+	for _, item := range strings.Split(raw, ",") {
+		switch mode := strings.TrimSpace(item); mode {
+		case "commands":
+			modes["sync"], modes["stream"], modes["detached"] = true, true, true
+		case "sync", "stream", "detached", "process":
+			modes[mode] = true
+		default:
+			return "", false
+		}
+	}
+	keys := make([]string, 0, len(modes))
+	for mode := range modes {
+		keys = append(keys, mode)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ","), true
+}
+
 func (s *server) compatCommandHistory(w http.ResponseWriter, r *http.Request, p *principal) {
-	res := s.callNative(r, p, "GET /v1/vms/{id}/command-history", s.commandHistory, r.PathValue("id"), nil)
+	q := r.URL.Query()
+	limit, err := strconv.Atoi(orDefault(q.Get("limit"), "20"))
+	mode, validMode := compatHistoryModes(q.Get("mode"))
+	query := strings.ToLower(q.Get("q"))
+	if !validMode {
+		writeErr(w, r, 400, "invalid_query", "mode must be sync, stream, detached, process, or commands (comma-separated)")
+		return
+	}
+	if err != nil || limit < 1 || limit > 100 || utf8.RuneCountInString(q.Get("q")) > 200 {
+		writeErr(w, r, 400, "invalid_query", "limit 1-100, q at most 200 characters")
+		return
+	}
+	id := r.PathValue("id")
+	var cursor compatHistoryCursor
+	hasCursor := q.Get("cursor") != ""
+	if hasCursor {
+		raw := q.Get("cursor")
+		if len(raw) > 8192 {
+			writeErr(w, r, 400, "invalid_query", "invalid history cursor")
+			return
+		}
+		data, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil || json.Unmarshal(data, &cursor) != nil || cursor.ID == "" ||
+			cursor.Team != p.Team.ID || cursor.VM != id || cursor.Mode != mode || cursor.Query != query {
+			writeErr(w, r, 400, "invalid_query", "invalid or mismatched history cursor")
+			return
+		}
+	}
+	// Keep the native scope/self-token checks and ownership/protected-VM gate,
+	// but share the typed records without encoding and decoding native JSON.
+	var records []CommandRecord
+	res := s.callNative(r, p, "GET /v1/vms/{id}/command-history", func(w http.ResponseWriter, r *http.Request, p *principal) {
+		vm, ok := s.ownVM(w, r, p)
+		if !ok {
+			return
+		}
+		if str(vm, "state") == "running" {
+			if out, err := s.agentOp(r, id, "cmd_list", nil); err == nil {
+				s.refreshHistory(id, out)
+			}
+		}
+		records = s.store.Snapshot().Commands[id]
+		w.WriteHeader(http.StatusOK)
+	}, id, nil)
 	if !res.ok() {
 		res.relay(w)
 		return
 	}
-	var list struct {
-		Commands []CommandRecord `json:"commands"`
+	// Only detached commands and prompt/setup processes are retained locally;
+	// sync/stream executions have no CommandRecord and therefore no history.
+	filtered := make([]CommandRecord, 0, len(records))
+	for _, rec := range records {
+		if !strings.Contains(","+mode+",", ","+compatCommandMode(&rec)+",") {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(commandText(&rec)), query) {
+			continue
+		}
+		if hasCursor && (rec.StartedAt.After(cursor.Started) ||
+			(rec.StartedAt.Equal(cursor.Started) && rec.ID >= cursor.ID)) {
+			continue
+		}
+		filtered = append(filtered, rec)
 	}
-	json.Unmarshal(res.body.Bytes(), &list)
-	bx := s.compatID(p.Team.ID, r.PathValue("id"))
-	out := []map[string]any{}
-	for i := len(list.Commands) - 1; i >= 0; i-- { // newest first
-		out = append(out, s.commandRecordView(bx, &list.Commands[i]))
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].StartedAt.Equal(filtered[j].StartedAt) {
+			return filtered[i].ID > filtered[j].ID
+		}
+		return filtered[i].StartedAt.After(filtered[j].StartedAt)
+	})
+	more := len(filtered) > limit
+	if more {
+		filtered = filtered[:limit]
 	}
-	writeCompat(w, 200, "command.list", map[string]any{"commands": out, "nextCursor": nil})
+	var next any
+	if more {
+		last := filtered[len(filtered)-1]
+		data, _ := json.Marshal(compatHistoryCursor{p.Team.ID, id, mode, query, last.StartedAt, last.ID})
+		next = base64.RawURLEncoding.EncodeToString(data)
+	}
+	bx := s.compatID(p.Team.ID, id)
+	out := make([]map[string]any, 0, len(filtered))
+	for i := range filtered {
+		out = append(out, s.commandRecordView(bx, &filtered[i]))
+	}
+	writeCompat(w, 200, "command.list", map[string]any{"commands": out, "nextCursor": next})
 }
 
 func (s *server) compatCommandInfo(w http.ResponseWriter, r *http.Request, p *principal) {

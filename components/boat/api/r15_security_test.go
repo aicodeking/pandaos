@@ -10,7 +10,7 @@ func TestR15CreateSetupRequiresExecBeforeSideEffects(t *testing.T) {
 	for _, body := range []map[string]any{
 		{"setupScript": "echo $PRIVATE_SECRET"},
 		{"files": []map[string]string{{"path": "nested/start.sh", "content": "echo $PRIVATE_SECRET"}}},
-		{"count": 2, "setupScript": "true"},
+		{"count": 2, "setupScript": "true", "from": "any-snapshot"},
 	} {
 		t.Run("denied", func(t *testing.T) {
 			e := setup(t)

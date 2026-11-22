@@ -393,7 +393,9 @@ func keys(m map[string]bool) []string {
 
 // noCoverage lists routes the Go suite cannot produce a 2xx for, with why.
 var noCoverage = map[string]string{
-	"POST /api/v1/sandboxes/{id}/unshare": "always 501 not_supported: there are no private sandboxes here (TestCompatUnshareNotSupported)",
+	"POST /api/v1/sandboxes/{id}/share":   "always 501 not_supported: creator-authority sharing cannot be enforced (TestCompatShare)",
+	"GET /api/v1/sandboxes/{id}/usage":    "always 501 not_supported: boat.dev billing usage is unavailable",
+	"POST /api/v1/sandboxes/{id}/unshare": "always 501 not_supported: creator-only privacy cannot be enforced (TestCompatUnshare)",
 }
 
 func TestMain(m *testing.M) {

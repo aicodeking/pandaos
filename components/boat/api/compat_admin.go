@@ -70,7 +70,7 @@ func (s *server) compatKeyList(p *principal) []map[string]any {
 
 func (s *server) compatAPIKeys(w http.ResponseWriter, r *http.Request, p *principal) {
 	writeCompat(w, 200, "api_keys.list", map[string]any{"apiKeys": s.compatKeyList(p), "catalog": map[string]any{
-		"actions": allScopes, "presets": compatKeyPresets, "defaultTtl": "never", "maxTtl": "never", "scopedCreationEnabled": true}})
+		"actions": allScopes, "presets": compatKeyPresets, "defaultTtl": "never", "maxTtl": "365d", "scopedCreationEnabled": true}})
 }
 
 func (s *server) compatCreateKey(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -168,6 +168,22 @@ func envUUID(id string, version int) string {
 	return h[:8] + "-" + h[8:12] + "-4" + h[13:16] + "-8" + h[17:20] + "-" + h[20:32]
 }
 
+func dotenvNeedsQuote(v string) bool {
+	if v == "" {
+		return false
+	}
+	if strings.ContainsAny(v, "\r\n\x00") {
+		return true
+	}
+	if strings.TrimSpace(v) != v {
+		return true
+	}
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		return true
+	}
+	return false
+}
+
 func dotenv(m map[string]string) string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -176,34 +192,66 @@ func dotenv(m map[string]string) string {
 	sort.Strings(keys)
 	var b strings.Builder
 	for _, k := range keys {
-		b.WriteString(k + "=" + m[k] + "\n")
+		v := m[k]
+		if dotenvNeedsQuote(v) {
+			v = strconv.Quote(v)
+		}
+		b.WriteString(k + "=" + v + "\n")
 	}
 	return b.String()
 }
 
 // parseDotenv reads KEY=value lines; blank lines and # comments are skipped.
+// Strips at most one matching outer quote pair so values containing internal
+// or trailing quotes (e.g. OPTS=--tag="prod") round-trip cleanly.
 func parseDotenv(s string) (map[string]string, string) {
+	if strings.ContainsRune(s, '\x00') {
+		return nil, "envContents cannot contain NUL bytes"
+	}
 	out := map[string]string{}
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+	for _, rawLine := range strings.Split(s, "\n") {
+		line := strings.TrimSuffix(rawLine, "\r")
+		if strings.ContainsRune(line, '\r') {
+			return nil, "envContents cannot contain bare CR characters"
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		k, v, ok := strings.Cut(strings.TrimPrefix(line, "export "), "=")
-		if !ok || strings.TrimSpace(k) == "" {
+		k, v, ok := strings.Cut(strings.TrimPrefix(trimmed, "export "), "=")
+		k = strings.TrimSpace(k)
+		if !ok || k == "" {
 			return nil, "envContents lines must be KEY=value"
 		}
-		out[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+			if v[0] == '"' {
+				if uq, err := strconv.Unquote(v); err == nil {
+					v = uq
+				} else {
+					v = v[1 : len(v)-1]
+				}
+			} else {
+				v = v[1 : len(v)-1]
+			}
+		}
+		if strings.ContainsAny(v, "\r\n\x00") {
+			return nil, "envContents values cannot contain CR, LF, or NUL"
+		}
+		out[k] = v
 	}
 	return out, ""
 }
 
-func compatEnvView(e *Environment) map[string]any {
+func (s *server) compatEnvView(e *Environment) map[string]any {
+	return compatEnvViewV(e, envVersions(s.store.Snapshot(), e))
+}
+
+func compatEnvViewV(e *Environment, versions []any) map[string]any {
 	latest := envUUID(e.ID, e.Version)
 	return map[string]any{"id": envUUID(e.ID, 0), "name": e.Name, "isDefault": e.IsDefault, "latestVersionId": latest,
 		"safeForThirdParties": false, "passGithub": false, "passSecrets": e.Secrets == nil || len(*e.Secrets) > 0,
 		"passSandboxCredentials": false, "passAgentsCredentials": false, "envContents": dotenv(e.Env), "secretFiles": []any{},
-		"versions": []any{map[string]any{"id": latest, "versionNumber": e.Version, "sandboxCount": 0, "createdAt": e.Updated}}}
+		"versions": versions}
 }
 
 func (s *server) compatEnvList(p *principal) []map[string]any {
@@ -216,7 +264,7 @@ func (s *server) compatEnvList(p *principal) []map[string]any {
 	sort.Slice(envs, func(i, j int) bool { return envs[i].Name < envs[j].Name })
 	out := []map[string]any{}
 	for _, e := range envs {
-		out = append(out, compatEnvView(e))
+		out = append(out, s.compatEnvView(e))
 	}
 	return out
 }
@@ -283,9 +331,8 @@ func (s *server) compatUpdateEnv(w http.ResponseWriter, r *http.Request, p *prin
 	}
 	if body.PassSecrets != nil && !*body.PassSecrets {
 		in["secrets"] = []string{}
-	} else if body.PassSecrets != nil && e.Secrets != nil && len(*e.Secrets) == 0 {
-		writeErr(w, r, 400, "invalid_request", "to pass secrets again, choose them with PUT /v1/environments/{id} (secrets)")
-		return
+	} else if body.PassSecrets != nil && *body.PassSecrets && e.Secrets != nil && len(*e.Secrets) == 0 {
+		in["reset_secrets"] = true
 	}
 	res := s.callNative(r, p, "PUT /v1/environments/{id}", s.updateEnv, e.ID, in)
 	if !res.ok() {
@@ -297,7 +344,7 @@ func (s *server) compatUpdateEnv(w http.ResponseWriter, r *http.Request, p *prin
 		writeErr(w, r, 409, "conflict", "the environment was deleted meanwhile")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"success": true, "environment": compatEnvView(cur)})
+	writeJSON(w, 200, map[string]any{"success": true, "environment": s.compatEnvView(cur)})
 }
 
 func (s *server) compatDeleteEnv(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -305,8 +352,10 @@ func (s *server) compatDeleteEnv(w http.ResponseWriter, r *http.Request, p *prin
 	if !ok {
 		return
 	}
-	view := compatEnvView(e)
-	res := s.callNative(r, p, "DELETE /v1/environments/{id}", s.deleteEnv, e.ID, nil)
+	view := s.compatEnvView(e)
+	res := s.callNative(r, p, "DELETE /v1/environments/{id}", func(w http.ResponseWriter, r *http.Request, p *principal) {
+		s.deleteEnvWithPolicy(w, r, p, true)
+	}, e.ID, nil)
 	if !res.ok() {
 		res.relay(w)
 		return

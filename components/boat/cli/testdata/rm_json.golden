@@ -1,4 +1,4 @@
-$ boat --json rm vm1
+$ boat --json rm vm1 --yes
 exit 0
 --- stdout
 {"id":"vm1","ok":true}

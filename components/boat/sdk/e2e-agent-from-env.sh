@@ -31,7 +31,7 @@ fail() { echo "e2e-agent: FAIL: $*" >&2; exit 1; }
 vm=""
 cleanup() {
   set +e
-  [ -z "$vm" ] || boat rm "$vm" --json >/dev/null
+  [ -z "$vm" ] || boat rm --yes "$vm" --json >/dev/null
   boat ai credentials rm "$provider" --json >/dev/null
 }
 trap cleanup EXIT

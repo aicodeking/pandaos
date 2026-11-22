@@ -178,6 +178,9 @@ func (s *server) compatDeleteSandboxSnapshots(w http.ResponseWriter, r *http.Req
 		writeErr(w, r, 409, "confirmation_required", "set X-Ascii-Confirm-Delete to the sandbox id")
 		return
 	}
+	if _, ok := s.ownVM(w, r, p); !ok { // refuses an environment builder for a non-admin key
+		return
+	}
 	list, fail := s.vmSnapshots(r, p, id)
 	if fail != nil {
 		fail.relay(w)
@@ -200,7 +203,7 @@ func (s *server) compatDeleteSandboxSnapshots(w http.ResponseWriter, r *http.Req
 	writeCompat(w, http.StatusAccepted, "snapshot.deleting", map[string]any{"operations": ops})
 }
 
-// compatDeleteSnapshot is DELETE /snapshots/{snapshotId} (a UUID from the lists).
+// compatDeleteSnapshot is DELETE /snapshots/{snapshotId} (a UUID from the lists or native snapshot id).
 func (s *server) compatDeleteSnapshot(w http.ResponseWriter, r *http.Request, p *principal) {
 	want := r.PathValue("sid")
 	if r.Header.Get("X-Ascii-Confirm-Delete") != want {
@@ -213,7 +216,7 @@ func (s *server) compatDeleteSnapshot(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 	for _, sn := range list {
-		if snapshotUUID(p.Team.ID, str(sn, "id")) != want {
+		if snapshotUUID(p.Team.ID, str(sn, "id")) != want && str(sn, "id") != want {
 			continue
 		}
 		res := s.callNative(r, p, "DELETE /v1/snapshots/{sid}", s.deleteTeamSnapshot, "", nil, "sid", str(sn, "id"))

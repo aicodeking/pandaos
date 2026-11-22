@@ -16,7 +16,7 @@
 #   another origin's Origin header gets 403 (also on a websocket upgrade);
 #   api. proxies to boat-api with /internal/* blocked; routes re-read live;
 #   without boat-api's revocation table private ports answer 503 (fail closed);
-# - ssh jump: -W only to permitopen targets of running VMs, no shell,
+# - ssh jump: -W only to online-authorized permitopen targets, no shell,
 #   port 2222 jump-only.
 { pkgs, self }:
 let
@@ -30,7 +30,21 @@ let
     printf '%s\n' "$@" >/var/lib/boat/api/args
     wc -c <"$CREDENTIALS_DIRECTORY/boat-master-key" >/var/lib/boat/api/credlen
     wc -c <"$CREDENTIALS_DIRECTORY/boat-desktop-key" >/var/lib/boat/api/desktoplen
-    exec ${pkgs.python3}/bin/python3 -m http.server --bind 127.0.0.1 8740 --directory /etc/boat
+    exec ${pkgs.python3}/bin/python3 - <<'PY'
+    import http.server, json, os
+    os.chdir('/etc/boat')
+    class API(http.server.SimpleHTTPRequestHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if self.path != '/internal/ssh/authorize' or request.get('user') != 'jump':
+                self.send_error(404); return
+            try:
+                body = open('/etc/boat/jump-response.json', 'rb').read()
+            except FileNotFoundError:
+                self.send_response(204); self.end_headers(); return
+            self.send_response(200); self.end_headers(); self.wfile.write(body)
+    http.server.ThreadingHTTPServer(('127.0.0.1', 8740), API).serve_forever()
+    PY
   '';
   stubCli = pkgs.writeShellScriptBin "boat" "echo stub";
 in
@@ -98,10 +112,12 @@ pkgs.testers.runNixOSTest {
         for flag, val in [
             ("-desktop-url", f"https://desktop.{D}"),
             ("-ssh-jump", f"jump@ssh.{D}:2222"),
-            ("-ssh-jump-keys-file", "/var/lib/boat/ssh/jump_authorized_keys"),
             ("-boatd", "/run/boat/boatd.sock"),
         ]:
             assert args[args.index(flag) + 1] == val, (flag, args)
+        assert "-ssh-jump-keys-file" not in args, args
+        artifact = args[args.index("-ssh-policy-helper-file") + 1]
+        machine.succeed(f"test -r {shlex.quote(artifact)}")
         # The stub saw the decrypted credential (32 bytes) and nothing else.
         assert machine.succeed("cat /var/lib/boat/api/credlen").strip() == "32"
         assert machine.succeed("cat /var/lib/boat/api/desktoplen").strip() == "32"
@@ -191,6 +207,8 @@ pkgs.testers.runNixOSTest {
         deep = machine.succeed(f"curl -sk --resolve api.{D}:443:127.0.0.1 https://api.{D}/vms/x")
         assert "boat-dashboard-marker" in deep, deep
         assert machine.succeed(code + f"https://api.{D}/internal/x") == "404"
+        assert machine.succeed(code + f"https://api.{D}/internal") == "404"
+        assert machine.succeed(code + f"-X POST https://api.{D}/internal/ssh/authorize") == "404"
         # The stub API's own 404, not the dashboard's fallback.
         body = machine.succeed(f"curl -sk --resolve api.{D}:443:127.0.0.1 https://api.{D}/v1/nope")
         assert "boat-dashboard-marker" not in body and "404" in body, body
@@ -199,17 +217,17 @@ pkgs.testers.runNixOSTest {
         machine.wait_for_open_port(2222)
         machine.succeed("ssh-keygen -q -t ed25519 -N ''' -f /root/k")
         pub = machine.succeed("cat /root/k.pub").strip()
-        lines = [
-            f'restrict,port-forwarding,permitopen="127.0.0.1:22" {pub}',
-            f'restrict,port-forwarding,pty,permitopen="127.0.0.1:2222" {pub}',  # rejected by the filter
-            f'restrict,port-forwarding,permitopen="10.200.9.9:22" {pub}',  # no such running VM
-        ]
-        machine.succeed(f"printf '%s\\n' {' '.join(shlex.quote(l) for l in lines)} >/var/lib/boat/ssh/jump_authorized_keys")
-        machine.succeed("chown boat:boat /var/lib/boat/ssh/jump_authorized_keys && chmod 640 /var/lib/boat/ssh/jump_authorized_keys")
-        out = machine.succeed("runuser -u boat -- /etc/boat/jump-keys /var/lib/boat/ssh/jump_authorized_keys /run/boat/routes.json")
-        assert out.count("\n") == 1 and "127.0.0.1:22" in out, out
+        machine.succeed("ip address add 10.200.0.2/32 dev lo")
+        key_type, key_blob = pub.split()[:2]
+        line = f'restrict,port-forwarding,permitopen="10.200.0.2:22" {key_type} {key_blob}'
+        body = json.dumps({"authorized_keys": [line]})
+        machine.succeed(f"printf %s {shlex.quote(body)} >/etc/boat/jump-response.json")
+        out = machine.succeed(f"runuser -u boat-ssh -- /etc/boat/jump-keys http://127.0.0.1:8740/internal/ssh/authorize {key_type} {key_blob} jump")
+        assert out == line + "\n", out
+        # An old static file must never restore access during an authority outage.
+        machine.succeed(f"printf %s {shlex.quote(line)} >/var/lib/boat/ssh/jump_authorized_keys")
         ssh = "ssh -i /root/k -o BatchMode=yes -o StrictHostKeyChecking=no -p 2222 "
-        banner = machine.succeed(f"timeout 10 {ssh} -W 127.0.0.1:22 jump@127.0.0.1 </dev/null | head -c 7 || true")
+        banner = machine.succeed(f"timeout 10 {ssh} -W 10.200.0.2:22 jump@127.0.0.1 </dev/null | head -c 7 || true")
         assert banner == "SSH-2.0", banner
         machine.fail(f"timeout 10 {ssh} -W 127.0.0.1:2222 jump@127.0.0.1 </dev/null | grep -q SSH-")
         machine.fail(f"timeout 10 {ssh} jump@127.0.0.1 id")
@@ -218,9 +236,10 @@ pkgs.testers.runNixOSTest {
         machine.succeed("timeout 10 ssh -i /root/k -o BatchMode=yes -o StrictHostKeyChecking=no tester@127.0.0.1 true")
         machine.fail(f"timeout 10 {ssh} tester@127.0.0.1 true")
 
-    with subtest("route removal is live (gateway + jump grants)"):
+    with subtest("route removal and online authority denial are live"):
+        machine.succeed("rm /etc/boat/jump-response.json")
         machine.succeed("echo '{\"vms\":{}}' >/run/boat/routes.json")
         assert machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' -H 'Host: 8000-vm2.vm.{D}' http://127.0.0.1:8742/") == "404"
-        machine.fail(f"timeout 10 {ssh} -W 127.0.0.1:22 jump@127.0.0.1 </dev/null | grep -q SSH-")
+        machine.fail(f"timeout 10 {ssh} -W 10.200.0.2:22 jump@127.0.0.1 </dev/null | grep -q SSH-")
   '';
 }

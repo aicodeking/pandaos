@@ -5,5 +5,7 @@ exit 0
 --- stderr
 --- requests
 GET /v1/vms/vm1 
+GET /v1/images 
+POST /v1/vms/vm1/stop 
 POST /v1/vms/vm1/resize {"discard_memory":true,"size":"large"}
 POST /v1/vms/vm1/start 

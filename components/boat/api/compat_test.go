@@ -86,7 +86,7 @@ func TestCompatQuickstart(t *testing.T) {
 		got["type"] != "stop.status" || got["stop"].(map[string]any)["status"] != "completed" {
 		t.Errorf("get stop: %d %v", st, got)
 	}
-	st, out, _ = e.compat(e.owner, "POST", "/api/v1/sandboxes/"+id+"/resume", map[string]any{"ttlSeconds": 7200, "failFast": true}, nil)
+	st, out, _ = e.compat(e.owner, "POST", "/api/v1/sandboxes/"+id+"/resume", map[string]any{"failFast": true}, nil)
 	if st != 202 || out["type"] != "sandbox.resuming" || out["status"] != "ready" {
 		t.Errorf("resume: %d %v", st, out)
 	}
@@ -95,7 +95,7 @@ func TestCompatQuickstart(t *testing.T) {
 		t.Errorf("force stop: %d %v", st, out)
 	}
 	e.compat(e.owner, "POST", "/api/v1/sandboxes/"+id+"/resume", nil, nil)
-	st, out, _ = e.compat(e.owner, "POST", "/api/v1/sandboxes/"+id+"/fork", map[string]any{"name": "kid", "ttlSeconds": 7200}, nil)
+	st, out, _ = e.compat(e.owner, "POST", "/api/v1/sandboxes/"+id+"/fork", map[string]any{"name": "kid"}, nil)
 	if st != 202 || out["type"] != "sandbox.forking" || out["id"] == id {
 		t.Errorf("fork: %d %v", st, out)
 	}
@@ -297,7 +297,8 @@ func TestCompatIdempotencyKey(t *testing.T) {
 func TestCompatBatchAndVMToken(t *testing.T) {
 	e := setup(t)
 	e.srv.cfg.VMAPIURL = "https://boat.example"
-	st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes", map[string]any{"count": 3, "name": "w"}, nil)
+	e.r39Snapshot(e.createVM(), "batch-src") // count above 1 clones a snapshot (r43)
+	st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes", map[string]any{"count": 3, "name": "w", "from": "batch-src"}, nil)
 	if l, _ := out["sandboxes"].([]any); st != 202 || len(l) != 3 {
 		t.Fatalf("batch: %d %v", st, out)
 	}
@@ -312,7 +313,7 @@ func TestCompatBatchAndVMToken(t *testing.T) {
 			t.Errorf("VM token on %s: %d", p, st)
 		}
 	}
-	if st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes", map[string]any{"count": 17}, nil); st != 400 {
+	if st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes", map[string]any{"count": 17, "from": "batch-src"}, nil); st != 400 {
 		t.Errorf("count 17: %d %v", st, out)
 	}
 }

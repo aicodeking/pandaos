@@ -4,6 +4,9 @@ A lightweight, agent-first Linux built on NixOS. Install it on an old PC and it 
 it connects through PandaCode Connect, so the PandaCode app on your other devices can start, watch and
 approve agent tasks on it.
 
+**Setting up PandaOS with a coding agent?** Hand it the [Agent Setup runbook](AGENT_SETUP.md)
+to install the box and connect it to PandaCode.
+
 **Self-hosting boat.dev-style agent sandboxes?** Start with the [boat quick start](docs/boat.md#quick-start):
 install the server, get the owner key, point boat.dev's SDK at `https://api.<domain>/api/v1`, create the
 first sandbox.
@@ -21,30 +24,34 @@ first sandbox.
 - **Agents can use the desktop.** `panda-cu` gives them screenshots, mouse, keyboard and the
   accessibility tree over MCP, on your session or a private headless one, and the desktop is tuned
   for predictable screenshots. `bench/cubench` compares it with other desktops.
-- **Self-updating.** It updates itself every day and rolls back if an update breaks it.
+- **Self-updating.** With a trusted release signer configured, it checks for updates every day and
+  rolls back if an update breaks it. See [updates and rollback](docs/updates-and-rollback.md).
 - **Self-hosted agent VMs (server profile).** `boat` turns a dedicated server into a boat.dev-style
   host: persistent Firecracker microVMs with an API, a `boat` CLI, Python/TypeScript SDKs, ssh, port
   URLs, a browser desktop, stop/resume, forks, snapshots, secrets, webhooks, quotas and metering.
   Off unless `services.boat.enable`. Its `/api/v1` is a drop-in for the boat.dev SDK paths CI proves:
-  boat.dev's official Python and TypeScript SDKs, with only the base URL changed, run on real VMs
-  through the TLS edge in CI for sandboxes (create, list, get, rename, stop, resume, fork, delete),
+  the CI workflow runs boat.dev's official Python and TypeScript SDKs, with only the base URL changed,
+  on real VMs through the TLS edge for sandboxes (create, list, get, rename, stop, resume, fork, delete),
   sync and long commands (`run_command`/`follow_command`), command records, logs and processes, files,
   find, folders, moves, search and delete, download URLs, hosted ports,
   ssh keys, the desktop, snapshots (saved, named, listings, downloads, share codes), secrets, the AI proxy
   switch, webhooks, API keys, environments and limits, plus telemetry, AI usage and access,
-  environment vars, file replace, upload URLs, artifacts, share and recover. 100 of boat.dev's 122
+  environment vars, file replace, upload URLs, artifacts and recover. 98 of boat.dev's 122
   operations are mapped (credential profiles as one `default` profile per team, snapshot download
   as one signed chunk URL; create `files` and `setupScript`; fork and resume `env` and
   `type`, fork `labels`; `RateLimit` headers); the official SDKs also run prompt, steer, interrupt, events and
   conversations on real VMs (a stub agent without `ANTHROPIC_API_KEY`), and create's `hostedPorts`.
-  The other 22 (orgs, repos, CI, data retention, more credential profiles and custom APIs,
-  environment upgrades/repos/secret files, snapshot trees/files) answer 501 `not_supported`, as
-  does `unshare` (no private sandboxes here). Snapshot trees/files would need host-side parsing of
+  The other 24 (orgs, repos, CI, data retention, more credential profiles and custom APIs,
+  environment repos/secret files, snapshot trees/files, creator-authority `share`/`unshare` and sandbox
+  billing usage) answer 501 `not_supported`. Environment upgrades are mapped. `boat share <vm>` and `boat unshare <vm>` propagate 501 without changing
+  ports, tokens or teammate access. The current SDK drivers check both refusals; local acceptance
+  uses fake boatd and does not establish a new TLS or live-VM result. List `stoppedBefore` and `dataExpired` filters run before pagination;
+  non-empty `include` (including `cost,deletedCost`) returns 501 because list-price billing is unavailable. Snapshot trees/files would need host-side parsing of
   tenant disk images, which is not safe; secret files have no place in the env-var secrets store
   ([list](docs/boat.md#boatdev-api-compatibility-apiv1)).
   SSH grants and every signed link die with the API key that made them, and a VM's own token
   cannot open public ports or add ssh keys unless its team allows it.
-  **Pre-release:** not for untrusted tenants without the operator checklist and an external pentest;
+  Complete the operator checklist and an external penetration test before serving untrusted tenants;
   see [docs/boat.md](docs/boat.md).
 
 ## Measured numbers
@@ -90,26 +97,30 @@ hardware. Methodology, caveats and a feature table: [docs/comparison.md](docs/co
 | Alpine 3.24 (musl, OpenRC) | 78 MB | 189 MB | 114 MB | 25.2 s |
 
 Debian and Alpine are clearly lighter. PandaOS ships its agent services, PandaCode Connect and
-firmware, and it is still pre-release and VM-tested only.
+firmware. The measurements above are from VMs.
 
 ## Quick start
 
-**The first release is pending:** there is no release tag yet, so there are no ISOs to download.
-Until then, build the ISO from source (on x86_64 Linux with Nix, flakes enabled):
+Use the [v0.2.0 GitHub Release](https://github.com/AICodeKing/pandaos/releases/tag/v0.2.0)
+for `pandaos-v0.2.0-headless-x86_64-linux.iso`, `pandaos-v0.2.0-desktop-x86_64-linux.iso`,
+or `pandaos-v0.2.0-server-x86_64-linux.iso`. Download `SHA256SUMS` from the same release
+and check the chosen ISO with `sha256sum -c --ignore-missing SHA256SUMS`.
+The release workflow also packages `boat_<os>_<arch>` (with `.exe` on Windows),
+`boat_SHA256SUMS`, `boat-guest-*` and `boat_guest_SHA256SUMS`. See the
+[boat server guide](docs/boat.md#install-on-a-dedicated-server-hetzner-ovh).
+
+You can also build an ISO from source on x86_64 Linux with Nix and flakes enabled:
 
 ```sh
 git clone https://github.com/AICodeKing/pandaos && cd pandaos
-nix build .#iso-headless          # or .#iso-desktop; the ISO is in result/iso/
+nix build .#iso-headless          # or .#iso-desktop or .#iso-server
 ```
-
-Once a release exists, download `pandaos-<version>-headless-x86_64-linux.iso` (or `-desktop-`) and
-`SHA256SUMS` from [Releases](https://github.com/AICodeKing/pandaos/releases) and check it with
-`sha256sum -c --ignore-missing SHA256SUMS`.
 
 1. Write the ISO to a USB stick (this erases the stick; check the device name with `lsblk`):
    ```sh
-   sudo dd if=result/iso/<name>.iso of=/dev/sdX bs=4M status=progress conv=fsync
+   sudo dd if=pandaos-v0.2.0-headless-x86_64-linux.iso of=/dev/sdX bs=4M status=progress conv=fsync
    ```
+   Adjust `if=` to point to the ISO you chose. Source builds put the file in `result/iso/`.
 2. In the firmware setup, **boot in UEFI mode and disable Secure Boot**. BIOS/legacy boot is not supported.
 3. Boot the target machine from the stick.
 4. Run `sudo panda-install` and answer the questions. No network is needed. See [docs/install.md](docs/install.md).
@@ -128,8 +139,9 @@ There is no default password: you set one (and optionally an ssh key) during the
 - Disk: at least 8 GiB; the whole target disk is erased. Leave room for snapshots, your data and
   updates on top of the system closure.
 - Network: wired or wifi (NetworkManager; `nmtui` for wifi). A curated firmware set is installed so
-  common wifi chips work without a network (new in Unreleased). The network is only needed after install.
-- Not yet tested on real hardware: so far everything is tested in QEMU VMs.
+  common wifi chips work without a network. The offline ISO install needs no network.
+- The agent-box tests and measurements above use QEMU VMs. The
+  [server SSH install guide](docs/install.md#hosted-server-over-ssh-kexec) describes the tested Hetzner AX42 setup.
 
 ## Architecture
 
@@ -179,6 +191,7 @@ There is no default password: you set one (and optionally an ssh key) during the
 
 ## Docs
 
+- [Agent Setup runbook](AGENT_SETUP.md)
 - [Install](docs/install.md)
 - [Updates and rollback](docs/updates-and-rollback.md)
 - [Security model](docs/security.md)
@@ -201,12 +214,12 @@ There is no default password: you set one (and optionally an ssh key) during the
 - **No binary cache yet.** Until the owner sets up a cache and `pandaos.binaryCache`, boxes build
   panda-mem and the other PandaOS packages locally on every update that changes them.
   See [docs/updates-and-rollback.md](docs/updates-and-rollback.md#what-an-update-downloads-and-builds).
-- **No release tag yet.** There are no downloadable ISOs, and the `release` branch that installed
-  boxes update from only appears with the first tag. Build from source meanwhile.
+- **Signed updates require a trusted public key.** Configure
+  `pandaos.updates.allowedSigners` before using the release channel. See
+  [signed releases](docs/updates-and-rollback.md#signed-releases-required).
 - **UEFI only**, with Secure Boot off.
-- **Not yet tested on real hardware.** All numbers and tests come from VMs.
 
-Everything new since v0.1.0 is listed under Unreleased in the [changelog](CHANGELOG.md).
+See the [v0.2.0 changelog](CHANGELOG.md#020---2026-11-22) for changes since v0.1.0.
 
 ## License
 

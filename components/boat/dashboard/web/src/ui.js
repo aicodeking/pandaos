@@ -75,10 +75,42 @@ function showDialog(content) {
 // A dangerous action starts with focus on Cancel, so Enter does not destroy anything.
 export function askDialog({ title, message, confirm = "Confirm", danger = false, fields = [] }) {
   return showDialog((finish) => {
-    const inputs = fields.map((f) => ({ ...f, el: h("input", { type: "text", autocomplete: "off", value: f.value ?? "" }) }));
+    const inputs = fields.map((f) => {
+      if (f.type === "checkbox") {
+        return { ...f, el: h("input", { type: "checkbox", checked: Boolean(f.checked) }) };
+      }
+      if (f.type === "textarea") {
+        const el = h("textarea", {
+          rows: f.rows ?? "3",
+          spellcheck: "false",
+          value: f.value ?? "",
+          placeholder: f.placeholder,
+        });
+        return { ...f, el, datalist: null };
+      }
+      const listId = f.options?.length ? `dl${++fieldSeq}` : undefined;
+      const el = h("input", {
+        type: f.type ?? "text",
+        autocomplete: "off",
+        value: f.value ?? "",
+        placeholder: f.placeholder,
+        min: f.min,
+        max: f.max,
+        inputmode: f.type === "number" ? "numeric" : undefined,
+        list: listId,
+      });
+      const datalist = listId ? h("datalist", { id: listId }, f.options.map((v) => h("option", { value: v }))) : null;
+      return { ...f, el, datalist };
+    });
     const onsubmit = (e) => {
       e.preventDefault();
-      finish(Object.fromEntries(inputs.map((f) => [f.name, f.el.value])));
+      finish(Object.fromEntries(inputs.map((f) => [f.name, f.type === "checkbox" ? Boolean(f.el.checked) : f.el.value])));
+    };
+    const renderField = (f) => {
+      if (f.type === "checkbox") {
+        return h("div", { class: "field" }, h("label", { class: "check" }, f.el, f.label), f.hint ? h("small", { class: "hint" }, f.hint) : null);
+      }
+      return [field(f.label, f.el, f.hint), f.datalist];
     };
     return [
       h(
@@ -86,7 +118,7 @@ export function askDialog({ title, message, confirm = "Confirm", danger = false,
         { onsubmit },
         h("h2", {}, title),
         message ? h("p", {}, message) : null,
-        inputs.map((f) => field(f.label, f.el, f.hint)),
+        inputs.map(renderField),
         h(
           "div",
           { class: "row end" },
@@ -163,8 +195,19 @@ export function table(caption, columns, rows, emptyText = "Nothing here yet.") {
 
 export function badge(state) {
   const text = String(state ?? "unknown");
-  const tone = { running: "good", stopped: "idle", error: "bad" }[text] ?? "busy";
+  const tone = { running: "good", ready: "good", delivered: "good", stopped: "idle", error: "bad", failed: "bad" }[text] ?? "busy";
   return h("span", { class: `badge badge-${tone}` }, text);
+}
+
+// envBadge: a warning badge for a VM whose environment (secrets, BOAT_ID/token) never reached the guest;
+// null when env_error is absent. The API message is the title (text only).
+export function envBadge(vm) {
+  const msg = String(vm?.env_error ?? "").trim();
+  if (!msg) {
+    if (vm?.env_pending === true) return h("span", { class: "badge badge-busy", title: "Environment is still being delivered", "data-env-pending": "1" }, "pending env");
+    return null;
+  }
+  return h("span", { class: "badge badge-bad", title: msg, "data-env-error": "1" }, "env failed");
 }
 
 export function downloadBlob(blob, filename) {

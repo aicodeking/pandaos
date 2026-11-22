@@ -85,6 +85,7 @@ func fakeAPI(t *testing.T, log *bytes.Buffer) *httptest.Server {
 	mux.HandleFunc("POST /v1/vms/vm1/commands/c_1/signal", j(200, obj{"ok": true, "id": "c_1", "signal": "INT"}))
 	mux.HandleFunc("DELETE /v1/vms/vm1/commands/c_1", j(200, obj{"ok": true, "id": "c_1", "signal": "TERM"}))
 	mux.HandleFunc("GET /v1/vms/vm1/command-history", j(200, obj{"commands": []obj{{"id": "c_1", "kind": "command", "state": "exited", "exit": 0, "cmd": []string{"ls"}}}}))
+	mux.HandleFunc("GET /api/v1/sandboxes/vm1/command-history", j(200, obj{"ok": true, "type": "command.list", "commands": []obj{{"commandId": "c_1", "sandboxId": "bx_vm1", "command": "ls", "mode": "detached", "status": "exited", "exitCode": 0, "startedAt": "2026-01-01T00:00:00Z"}}, "nextCursor": nil}))
 	mux.HandleFunc("GET /v1/vms/vm1/processes", j(200, obj{"processes": []obj{{"pid": 1, "user": "root", "elapsed_s": 9, "command": "init"}}}))
 	mux.HandleFunc("GET /v1/vms/vm1/files/list", j(200, obj{"path": "/home", "entries": []obj{{"name": "a", "type": "file", "size": 1, "mode": "644"}}, "truncated": false}))
 	mux.HandleFunc("DELETE /v1/vms/vm1/files", j(200, obj{"ok": true, "path": "/x"}))
@@ -128,8 +129,9 @@ func fakeAPI(t *testing.T, log *bytes.Buffer) *httptest.Server {
 	mux.HandleFunc("DELETE /v1/ai/credentials/anthropic", j(200, obj{"ok": true}))
 	mux.HandleFunc("GET /v1/ai/proxy", j(200, obj{"enabled": true, "available": true}))
 	mux.HandleFunc("PUT /v1/ai/proxy", j(200, obj{"enabled": false, "available": true}))
-	mux.HandleFunc("GET /v1/ai/usage", j(200, obj{"usage": []obj{{"vm_id": "vm1", "provider": "anthropic", "model": "m", "requests": 1, "input_tokens": 2, "output_tokens": 3}}}))
-	mux.HandleFunc("GET /v1/vms/vm1/ai-usage", j(200, obj{"usage": []obj{}}))
+	aiRow := obj{"day": "2026-01-01", "credential": "anthropic", "model": "m", "requests": 1, "inputTokens": 2, "outputTokens": 3}
+	mux.HandleFunc("GET /api/v1/ai-usage", j(200, obj{"usage": []obj{aiRow}, "sandboxes": []obj{{"sandboxId": "vm1", "usage": []obj{aiRow}}}}))
+	mux.HandleFunc("GET /api/v1/sandboxes/vm1/ai-usage", j(200, obj{"usage": []obj{}}))
 	mux.HandleFunc("PUT /v1/vms/vm1/ai-access", j(200, obj{"id": "vm1", "enabled": false}))
 	mux.HandleFunc("GET /v1/telemetry", j(200, obj{"configured": false}))
 	mux.HandleFunc("PUT /v1/telemetry", j(200, obj{"configured": true, "endpoint": "https://o.example", "header_names": []string{"X"}}))
@@ -171,7 +173,7 @@ func TestGolden(t *testing.T) {
 		{"new_snapshot_json", []string{"new", "--snapshot", "snap-1", "--idle-stop", "never", "--json"}},
 		{"stop_by_name_json", []string{"stop", "dev", "--json"}},
 		{"fork_json", []string{"fork", "vm1", "--name", "dev-2", "--json"}},
-		{"rm_json", []string{"--json", "rm", "vm1"}},
+		{"rm_json", []string{"--json", "rm", "vm1", "--yes"}},
 		{"exec_json", []string{"exec", "--json", "vm1", "--", "ls", "--json"}},
 		{"exec_text", []string{"exec", "vm1", "--", "ls"}},
 		{"prompt_json", []string{"prompt", "vm1", "fix the tests", "--agent", "codex", "--json"}},
@@ -234,7 +236,7 @@ func TestGolden(t *testing.T) {
 		{"env_default_json", []string{"env", "default", "base", "--json"}},
 		{"env_build_json", []string{"env", "build", "base", "--json"}},
 		{"env_rm_json", []string{"env", "rm", "base", "--json"}},
-		{"new_env_json", []string{"new", "--env", "base", "--json"}},
+		{"new_env_json", []string{"new", "--environment", "base", "--json"}},
 		{"new_from_json", []string{"new", "--from", "bsh_x_y", "--no-env", "--json"}},
 		{"resize_json", []string{"resize", "vm1", "large", "--discard-memory", "--json"}},
 		{"resume_type_json", []string{"resume", "vm1", "--type", "large", "--json"}},
@@ -368,7 +370,7 @@ func TestSSHExecArgv(t *testing.T) {
 	if code := a.run([]string{"ssh", "dev", "--", "uptime"}); code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	want := "ssh -p 22 -o StrictHostKeyChecking=accept-new -o HostKeyAlias=boat-vm1 -o ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -W %h:%p -p 2222 boat@gw.example ubuntu@10.0.0.5 uptime"
+	want := "ssh -p 22 -o StrictHostKeyChecking=accept-new -o HostKeyAlias=boat-vm1 -o ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -W %h:%p -p 2222 -- boat@gw.example ubuntu@10.0.0.5 uptime"
 	if strings.Join(argv, " ") != want {
 		t.Errorf("argv %q", strings.Join(argv, " "))
 	}

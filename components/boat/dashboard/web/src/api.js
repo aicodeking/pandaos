@@ -11,7 +11,13 @@ export class ApiError extends Error {
     this.code = code;
     this.requestId = requestId;
     this.retryAfter = retryAfter;
+    this.vmIds = [];
   }
+}
+
+// Ids of the VMs an error body names (`vm`, `vms`), deduped, in order.
+export function errorVMIds(err) {
+  return err instanceof ApiError ? err.vmIds ?? [] : [];
 }
 
 // The endpoint is not on this server (yet): the caller hides its section.
@@ -21,7 +27,8 @@ export function errorText(err) {
   if (!(err instanceof ApiError)) return err?.message || String(err);
   const wait = err.status === 429 && err.retryAfter ? ` Retry in ${err.retryAfter}s.` : "";
   const ref = err.requestId ? ` (request ${err.requestId})` : "";
-  return `${err.message}${wait}${ref}`;
+  const kept = err.vmIds?.length ? ` (${err.vmIds.map((id) => `VM ${id}`).join(", ")} ${err.vmIds.length > 1 ? "were" : "was"} kept stopped)` : "";
+  return `${err.message}${kept}${wait}${ref}`;
 }
 
 // "" means same origin. Anything else must be a bare http(s) origin, plus an optional path.
@@ -62,20 +69,47 @@ async function toApiError(res) {
     // Non-JSON error, such as the router's plain 404.
   }
   const e = parsed?.error ?? {};
-  return new ApiError(
+  const ids = [];
+  for (const v of [parsed?.vm, ...(Array.isArray(parsed?.vms) ? parsed.vms : [])]) {
+    const id = typeof v === "string" ? v : v?.id;
+    if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
+  }
+  const err = new ApiError(
     res.status,
     e.code ?? `http_${res.status}`,
     e.message ?? (text.slice(0, 200) || `HTTP ${res.status}`),
     e.request_id ?? res.headers.get("X-Request-Id") ?? undefined,
     res.headers.get("Retry-After") ?? undefined,
   );
+  err.vmIds = ids;
+  return err;
+}
+
+async function* streamChunks(stream) {
+  if (!stream) return;
+  if (typeof stream?.[Symbol.asyncIterator] === "function") {
+    for await (const chunk of stream) {
+      yield chunk;
+    }
+    return;
+  }
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value !== undefined) yield value;
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 // Yields parsed NDJSON objects from a byte stream. Chunks may split a line.
 export async function* readNdjson(stream) {
   const decoder = new TextDecoder();
   let pending = "";
-  for await (const chunk of stream) {
+  for await (const chunk of streamChunks(stream)) {
     pending += decoder.decode(chunk, { stream: true });
     const lines = pending.split("\n");
     pending = lines.pop();
@@ -163,6 +197,8 @@ export function createClient({ base = "", getKey, onUnauthorized = () => {}, fet
     listVMs: async () => (await json("GET", "/v1/vms")).vms ?? [],
     createVM: (spec) => json("POST", "/v1/vms", spec),
     getVM: (id) => json("GET", vm(id)),
+    updateVM: (id, spec) => json("PATCH", vm(id), spec),
+    resizeVM: (id, spec) => json("POST", vm(id, "/resize"), spec),
     deleteVM: (id) => json("DELETE", vm(id)),
     startVM: (id) => json("POST", vm(id, "/start"), {}),
     stopVM: (id) => json("POST", vm(id, "/stop"), {}),
@@ -198,11 +234,12 @@ export function createClient({ base = "", getKey, onUnauthorized = () => {}, fet
     desktop: (id) => json("GET", vm(id, "/desktop")),
 
     listSecrets: async () => (await json("GET", "/v1/secrets")).secrets ?? [],
-    putSecret: (name, value) => json("PUT", `/v1/secrets/${seg(name)}`, { value }),
+    putSecret: (name, value, inject = true) => json("PUT", `/v1/secrets/${seg(name)}`, { value, inject: Boolean(inject) }),
     deleteSecret: (name) => json("DELETE", `/v1/secrets/${seg(name)}`),
 
     listKeys: async () => (await json("GET", "/v1/keys")).keys ?? [],
     createKey: (spec) => json("POST", "/v1/keys", spec),
+    rotateKey: (id, overlapS) => json("POST", `/v1/keys/${seg(id)}/rotate`, overlapS === undefined ? {} : { overlap_s: overlapS }),
     deleteKey: (id) => json("DELETE", `/v1/keys/${seg(id)}`),
 
     listWebhooks: async () => (await json("GET", "/v1/webhooks")).webhooks ?? [],
@@ -217,7 +254,16 @@ export function createClient({ base = "", getKey, onUnauthorized = () => {}, fet
 
     listEnvironments: async () => (await json("GET", "/v1/environments")).environments ?? [],
     createEnvironment: (spec) => json("POST", "/v1/environments", spec),
+    updateEnvironment: (id, spec) => json("PUT", `/v1/environments/${seg(id)}`, spec),
     deleteEnvironment: (id) => json("DELETE", `/v1/environments/${seg(id)}`),
     buildEnvironment: (id) => json("POST", `/v1/environments/${seg(id)}/build`, {}),
+    upgradeEnvironment: (id, agentIds) => json("POST", `/v1/environments/${seg(id)}/upgrade`, agentIds === undefined ? {} : { agentIds }),
+
+    listAICredentials: async () => (await json("GET", "/v1/ai/credentials")).credentials ?? [],
+    putAICredential: (provider, value) => json("PUT", `/v1/ai/credentials/${seg(provider)}`, { value }),
+    deleteAICredential: (provider) => json("DELETE", `/v1/ai/credentials/${seg(provider)}`),
+    getAIProxy: () => json("GET", "/v1/ai/proxy"),
+    setAIProxy: (enabled) => json("PUT", "/v1/ai/proxy", { enabled: Boolean(enabled) }),
+    aiUsage: () => json("GET", "/v1/ai/usage"),
   };
 }

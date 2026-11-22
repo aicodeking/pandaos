@@ -40,6 +40,18 @@ let
   };
 
   aiProxyPort = 8744;
+  gatewayListenPort = 8742; # gateway/module.nix: boat-gateway -listen
+  gatewayAskPort = 8743; # gateway/module.nix: boat-gateway -ask-listen
+  portMin = cfg.boatdSettings.portMin or 20000;
+  portMax = cfg.boatdSettings.portMax or 40000;
+  hostHttpsPort = cfg.boatdSettings.hostHttpsPort or (if cfg.vmApiUrl != null then 443 else 0);
+  reservedPorts = lib.unique (
+    [ cfg.apiPort aiProxyPort ]
+    ++ lib.optionals cfg.gateway.enable [ 80 443 gatewayListenPort gatewayAskPort ]
+    ++ lib.optionals cfg.sshGateway.enable [ 22 cfg.sshGateway.port ]
+    ++ lib.optional (hostHttpsPort != null && hostHttpsPort > 0) hostHttpsPort
+    ++ (cfg.boatdSettings.reservedPorts or [ ])
+  );
   credFile = "${cfg.dataDir}/secrets/boat-master-key.cred";
   masterCred = "boat-master-key:${credFile}";
   desktopCredFile = "${cfg.dataDir}/secrets/boat-desktop-key.cred";
@@ -190,7 +202,8 @@ let
   # Firecracker supports none of these with huge pages (boatd checks).
   // lib.optionalAttrs cfg.hugePages { hugePages = true; balloon = false; diffSnapshots = false; warmPool = false; }
   // lib.optionalAttrs (cfg.ioCostModel != null) { inherit (cfg) ioCostModel; }
-  // cfg.boatdSettings;
+  // cfg.boatdSettings
+  // { inherit reservedPorts; };
 
   # ioCost without a model in the config: boat-iocost-model.service measures the
   # state disk once (boatd -measure-disk) into dataDir/iocost-model, which boatd reads.
@@ -204,7 +217,7 @@ let
     "-ssh-user" "dev" # the guest image's login user
     "-desktop-url" "https://desktop.${cfg.domain}"
     "-desktop-key-file" "%d/boat-desktop-key"
-    "-ssh-jump-keys-file" "${cfg.dataDir}/ssh/jump_authorized_keys"
+    "-ssh-policy-helper-file" (builtins.path { path = ./guest/ssh-authorize.py; name = "boat-ssh-authorize.py"; })
     "-vm-domain" cfg.vmDomain
     # Only the AI proxy, on the bridge, for VMs (boatd opens aiProxyPort to them).
     "-ai-proxy-listen" "10.200.0.1:${toString aiProxyPort}"
@@ -213,7 +226,9 @@ let
   ++ lib.optionals (cfg.vmApiUrl != null) [ "-vm-api-url" cfg.vmApiUrl ]
   ++ lib.optionals cfg.sshGateway.enable [ "-ssh-jump" "jump@ssh.${cfg.domain}:${toString cfg.sshGateway.port}" ]
   ++ lib.optionals (imageIds != [ ]) [ "-images" (lib.concatStringsSep "," imageIds) ]
-  ++ lib.optionals (providerModels != "") [ "-provider-models" providerModels ];
+  ++ lib.optionals (providerModels != "") [ "-provider-models" providerModels ]
+  ++ lib.optionals (cfg.ipv6Prefix != null) [ "-webhook-deny" cfg.ipv6Prefix ]
+  ++ lib.concatMap (ip: [ "-webhook-deny" "${ip}/32" ]) cfg.publicIPv4Pool;
   # "claude=sonnet,opus;codex=..." for boat-api's -provider-models.
   providerModels = lib.concatStringsSep ";" (
     lib.mapAttrsToList (agent: ms: "${agent}=${lib.concatStringsSep "," ms}") (lib.filterAttrs (_: ms: ms != [ ]) cfg.providerModels)
@@ -564,6 +579,10 @@ in
         assertion = cfg.untrustedTenants -> !(cfg.boatdSettings.warmPool or false) && (cfg.boatdSettings.ksmTeam or "") == "";
         message = "services.boat.untrustedTenants refuses warmPool (templates share ASLR across tenants) and ksmTeam (a side channel between guests).";
       }
+      {
+        assertion = lib.all (p: !(p >= portMin && p <= portMax)) reservedPorts;
+        message = "services.boat: host service and reserved ports (${lib.concatStringsSep ", " (map toString reservedPorts)}) must lie outside boatd's VM port range (${toString portMin}..${toString portMax}).";
+      }
     ];
 
     boot.kernelModules = [ "kvm" "tun" "vhost_net" "bridge" "nf_tables" "nf_conntrack" ];
@@ -609,7 +628,7 @@ in
     users.users.boat = {
       isSystemUser = true;
       group = "boat";
-      extraGroups = [ "boat-routes" ]; # the jump host's AuthorizedKeysCommand reads routes.json
+      extraGroups = [ "boat-routes" ]; # API inventory reads routes.json
       description = "boat API";
     };
     users.groups.boat = { };

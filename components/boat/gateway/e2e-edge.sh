@@ -2,7 +2,7 @@
 # Edge e2e for boat on a Linux x86_64 host with /dev/kvm (GitHub runners):
 # the real HTTPS front (Caddy with its internal CA, `tls internal`) and the
 # real ssh jump host (OpenSSH on 127.0.0.1:2222 with the module's settings and
-# jump-keys filter) in front of boatd + boat-api + boat-gateway, all built
+# online jump-keys lookup) in front of boatd + boat-api + boat-gateway, all built
 # from source and run as plain processes (no NixOS).
 #
 #   ./e2e-edge.sh GUEST_DIR     GUEST_DIR has vmlinux, rootfs-slim.ext4, rootfs-full.ext4
@@ -16,6 +16,64 @@
 #
 # Env: E2E_WORK (/mnt/boat-edge), FC_VERSION (v1.17.0).
 set -euo pipefail
+
+# Local mock regression only: no sudo, build, provider, VM or deployment actions.
+if [ "${1:-}" = --test-jump-helper ]; then
+  HELPER="$(cd "$(dirname "$0")" && pwd)/jump-keys.sh"
+  export HELPER
+  exec python3 - <<'JUMP_TEST_PY'
+import http.server,json,subprocess,threading,time,unittest,os,base64,struct
+HELPER=os.environ['HELPER']
+TYPE='ssh-ed25519'; BLOB=base64.b64encode(struct.pack('>I',len(TYPE))+TYPE.encode()+struct.pack('>I',32)+b'x'*32).decode()
+LINE=f'restrict,port-forwarding,permitopen="10.200.0.2:22" {TYPE} {BLOB}'
+class Handler(http.server.BaseHTTPRequestHandler):
+ def log_message(self,*a):pass
+ def do_POST(self):
+  self.server.request=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+  if self.server.delay:time.sleep(self.server.delay)
+  self.send_response(self.server.status)
+  if self.server.length is not None:self.send_header('Content-Length',str(self.server.length))
+  self.end_headers()
+  try:
+   if self.server.drip:
+    for byte in self.server.body:self.wfile.write(bytes([byte]));self.wfile.flush();time.sleep(.1)
+   else:self.wfile.write(self.server.body)
+  except BrokenPipeError:pass
+class Tests(unittest.TestCase):
+ def setUp(self):
+  self.s=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler);self.s.daemon_threads=True
+  self.s.body=json.dumps({'authorized_keys':[LINE]}).encode();self.s.status=200;self.s.delay=0;self.s.length=None;self.s.drip=False
+  threading.Thread(target=self.s.serve_forever,daemon=True).start()
+ def tearDown(self):self.s.shutdown();self.s.server_close()
+ def call(self,url=None,blob=BLOB):
+  t=time.monotonic();p=subprocess.run(['bash',HELPER,url or f'http://127.0.0.1:{self.s.server_port}/internal/ssh/authorize',TYPE,blob,'jump'],capture_output=True,timeout=4)
+  self.assertLess(time.monotonic()-t,2.8);self.assertIn(p.returncode,(0,) if p.stdout else (0,1));self.assertEqual(p.stderr,b'');return p.stdout.decode()
+ def test_valid(self):
+  self.assertEqual(self.call(),LINE+'\n');self.assertEqual(self.s.request,dict(user='jump',key_type=TYPE,key_blob=BLOB))
+ def test_failures(self):
+  for body in [b'{"authorized_keys":["partial',b'x'*65537,json.dumps({'authorized_keys':[LINE,LINE+'\ncommand="x"']}).encode(),json.dumps({'authorized_keys':[LINE.replace('10.200.0.2','localhost')]}).encode(),json.dumps({'authorized_keys':[LINE.replace('10.200.0.2','010.200.0.2')]}).encode(),json.dumps({'authorized_keys':[LINE.replace(':22',':2222')]}).encode(),json.dumps({'authorized_keys':[LINE.replace('restrict,','command="id",')]}).encode(),json.dumps({'authorized_keys':[LINE.replace(BLOB,BLOB[:-4]+'AAAA')]}).encode()]:
+   self.s.body=body;self.assertEqual(self.call(),'')
+ def test_status(self):
+  for status in [204,301,401,404,500,503]:self.s.status=status;self.assertEqual(self.call(),'')
+ def test_outage(self):self.assertEqual(self.call('http://127.0.0.1:1/internal/ssh/authorize'),'')
+ def test_timeout(self):self.s.delay=3;self.assertEqual(self.call(),'')
+ def test_slow_body(self):self.s.drip=True;self.assertEqual(self.call(),'')
+ def test_partial_content_length(self):self.s.length=len(self.s.body)+50;self.assertEqual(self.call(),'')
+ def test_invalid_targets(self):
+  for ip in ['127.0.0.1','0.0.0.0','169.254.0.1','224.0.0.1','255.255.255.255','256.1.1.1','1.2.3.4:80','10.200.0.2,command=x']:
+   self.s.body=json.dumps({'authorized_keys':[LINE.replace('10.200.0.2',ip)]}).encode();self.assertEqual(self.call(),'')
+ def test_json_shape(self):
+  for body in [b'{"authorized_keys":[],"authorized_keys":[]}',b'{"authorized_keys":"line"}',b'[]',json.dumps({'authorized_keys':[LINE],'extra':True}).encode()]:
+   self.s.body=body;self.assertEqual(self.call(),'')
+ def test_multiple_targets(self):
+  line=LINE.replace(':22"',':22",permitopen="10.200.0.3:22"')
+  self.s.body=json.dumps({'authorized_keys':[line]}).encode();self.assertEqual(self.call(),line+'\n')
+ def test_no_proxy(self):
+  os.environ['http_proxy']='http://127.0.0.1:1';os.environ['HTTP_PROXY']='http://127.0.0.1:1';os.environ['NO_PROXY']='';self.assertEqual(self.call(),LINE+'\n')
+ def test_input(self):self.assertEqual(self.call(blob=BLOB+'\ncommand="id"'),'')
+if __name__=='__main__':unittest.main()
+JUMP_TEST_PY
+fi
 
 GUEST=$(cd "${1:?usage: e2e-edge.sh GUEST_DIR}" && pwd)
 HERE=$(cd "$(dirname "$0")/.." && pwd) # components/boat
@@ -72,7 +130,7 @@ mkdir -p "$WORK/bin" "$WORK/dl" "$WORK/run" "$WORK/api" "$WORK/tmp" "$WORK/ssh" 
 
 log "tools (caddy, sshd, jq, nft, btrfs)"
 missing=()
-for c in jq:jq nft:nftables mkfs.btrfs:btrfs-progs curl:curl ssh:openssh-client caddy:caddy /usr/sbin/sshd:openssh-server; do
+for c in python3:python3 jq:jq nft:nftables mkfs.btrfs:btrfs-progs curl:curl ssh:openssh-client caddy:caddy /usr/sbin/sshd:openssh-server; do
   command -v "${c%%:*}" >/dev/null || missing+=("${c#*:}")
 done
 if [ ${#missing[@]} -gt 0 ]; then
@@ -122,7 +180,7 @@ sudo mkdir -p /sys/fs/cgroup/boat-edge
 cat >"$WORK/boatd.json" <<JSON
 {"stateDir":"$STATE","runDir":"$WORK/run","socket":"$SOCK","socketGroup":"$(id -gn)",
  "firecracker":"$WORK/dl/firecracker","jailer":"$WORK/dl/jailer","cgroupParent":"boat-edge",
- "reflink":"always","aiProxyPort":8744,"bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
+ "reflink":"always","aiProxyPort":8744,"hostHttpsPort":443,"bootTimeoutS":90,"defaultImage":"slim","defaultSize":"e2e",
  "sizes":{"e2e":{"vcpu":2,"mem_mib":2048,"disk_gib":8}},"defaultTeam":{"maxVMs":8}}
 JSON
 sudo bash -c 'echo $$ >"$1"; exec "$2" -config "$3" >"$4" 2>&1' _ \
@@ -136,14 +194,15 @@ KEY=$(boat-api admin init -data "$WORK/api" -user edge -team edge | jq -r .token
 [[ $KEY == boat_* ]] || fail "admin init: $KEY"
 api_args=(-data "$WORK/api" -listen 127.0.0.1:8740 -boatd "$SOCK" -rate 0 -images "slim,full" -ssh-user dev
   -desktop-url "https://desktop.$D" -desktop-key-file "$KEYF"
-  -ssh-jump "jump@localhost:2222" -ssh-jump-keys-file "$WORK/ssh/jump_authorized_keys")
+  -ssh-jump "jump@localhost:2222" -ssh-policy-helper-file "$HERE/guest/ssh-authorize.py" -vm-api-url "https://api.$D")
 help=$(boat-api serve -h 2>&1 || true)
 if [[ $help == *-vm-domain* ]]; then api_args+=(-vm-domain "$VMD"); fi
 if [[ $help == *-ai-proxy-listen* ]]; then api_args+=(-ai-proxy-listen 10.200.0.1:8744); fi
 boat-api serve "${api_args[@]}" >"$WORK/api.log" 2>&1 &
 PIDS+=($!)
 boat-gateway -listen 127.0.0.1:8742 -ask-listen 127.0.0.1:8743 -domain "$D" -vm-domain "$VMD" \
-  -desktop-domain "desktop.$D" -routes "$WORK/run/routes.json" -desktop-key "$KEYF" -api "$API" >"$WORK/gateway.log" 2>&1 &
+  -desktop-domain "desktop.$D" -routes "$WORK/run/routes.json" -desktop-key "$KEYF" -api "$API" \
+  -legacy-hmac-until "$(( $(date +%s) + 86400 ))" >"$WORK/gateway.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 100); do curl -fs "$API/healthz" >/dev/null && break; sleep 0.1; done
 
@@ -158,7 +217,8 @@ cat >"$WORK/Caddyfile" <<EOF
 api.$D {
 	tls internal
 	route {
-		handle /internal/* {
+		@internal path /internal /internal/*
+		handle @internal {
 			respond 404
 		}
 		handle /v1/* {
@@ -197,12 +257,32 @@ hc() { local u=$1; shift; curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443"
 for _ in $(seq 50); do [ "$(hc "https://api.$D/healthz" || true)" = 200 ] && break; sleep 0.2; done
 [ "$(hc "https://api.$D/healthz")" = 200 ] || fail "api over TLS"
 [ "$(hc "https://api.$D/internal/x")" = 404 ] || fail "/internal/* reachable"
+[ "$(hc "https://api.$D/internal")" = 404 ] || fail "/internal reachable"
+[ "$(hc "https://api.$D/internal/ssh/authorize" -X POST)" = 404 ] || fail "SSH authority reachable publicly"
+# Bootstrap only the disposable copied images, before any VM starts. Managed
+# authorization must use verified HTTPS even under this fixture's private CA.
+log "guest test CA and control-plane DNS"
+for image in slim full; do
+  sudo bash -s -- "$STATE/images/$image/rootfs.ext4" "$WORK/guest-ca-mount" "$CA" "api.$D" <<'SEED_CA'
+set -euo pipefail
+image=$1 mount_dir=$2 ca=$3 api_host=$4
+mkdir -p "$mount_dir"
+mount -o loop "$image" "$mount_dir"
+trap 'umount "$mount_dir"' EXIT
+install -D -m 0644 "$ca" "$mount_dir/usr/local/share/ca-certificates/boat-edge.crt"
+# Python's default trust store reads this bundle; no insecure TLS override.
+test -s "$mount_dir/etc/ssl/certs/ca-certificates.crt"
+cat "$ca" >>"$mount_dir/etc/ssl/certs/ca-certificates.crt"
+printf '\n10.200.0.1 %s\n' "$api_host" >>"$mount_dir/etc/hosts"
+SEED_CA
+ done
 # boat.dev's SDKs use https://api.<domain>/api/v1: the API must answer, not the dashboard.
 me=$(curl -sS --cacert "$CA" --connect-to "::127.0.0.1:443" -H "Authorization: Bearer $KEY" "https://api.$D/api/v1/me")
 jq -e '.ok == true' <<<"$me" >/dev/null || fail "/api/v1 through Caddy: $me"
 
-log "ssh jump host on 127.0.0.1:2222 (module settings + jump-keys filter)"
+log "ssh jump host on 127.0.0.1:2222 (module settings + online jump lookup)"
 id jump >/dev/null 2>&1 || sudo useradd -r -M -s /usr/sbin/nologin jump
+id boat-ssh >/dev/null 2>&1 || sudo useradd -r -M -s /usr/sbin/nologin boat-ssh
 sudo usermod -p '*' jump # not locked ('!'), still no password
 sudo install -d -m 0755 /etc/boat-edge
 { echo '#!/bin/bash'; cat "$HERE/gateway/jump-keys.sh"; } | sudo tee /etc/boat-edge/jump-keys >/dev/null
@@ -219,8 +299,12 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 AllowUsers jump
 AuthorizedKeysFile none
-AuthorizedKeysCommand /etc/boat-edge/jump-keys $WORK/ssh/jump_authorized_keys $WORK/run/routes.json
-AuthorizedKeysCommandUser $(id -un)
+AuthorizedPrincipalsFile none
+AuthorizedPrincipalsCommand none
+TrustedUserCAKeys none
+AuthenticationMethods publickey
+AuthorizedKeysCommand /etc/boat-edge/jump-keys http://127.0.0.1:8740/internal/ssh/authorize %t %k %u
+AuthorizedKeysCommandUser boat-ssh
 AllowTcpForwarding local
 AllowAgentForwarding no
 AllowStreamLocalForwarding no
@@ -342,8 +426,9 @@ fi
 log "ssh -J jump@localhost:2222 dev@<vm>"
 info=$(boat ssh edge-a --json) # grants ~/.ssh/id_ed25519.pub on dev and on the jump host
 [ "$(jq -r .jump <<<"$info")" = "jump@localhost:2222" ] || fail "ssh info has no jump: $info"
-for _ in $(seq 50); do grep -q "permitopen=\"$ip_a:22\"" "$WORK/ssh/jump_authorized_keys" 2>/dev/null && break; sleep 0.2; done
-grep -q "permitopen=\"$ip_a:22\"" "$WORK/ssh/jump_authorized_keys" || fail "boat-api wrote no jump grant for $ip_a"
+read -r key_type key_blob _ < ~/.ssh/id_ed25519.pub
+lookup=$(sudo -u boat-ssh env BOAT_JUMP_ALLOW_UNTRACKED=1 /etc/boat-edge/jump-keys http://127.0.0.1:8740/internal/ssh/authorize "$key_type" "$key_blob" jump)
+[[ $lookup == *"permitopen=\"$ip_a:22\""* ]] || fail "online jump authority denied $ip_a"
 sshj() { ssh -F "$WORK/ssh_config" -J jump@localhost:2222 "$@"; }
 out=""
 for _ in $(seq 30); do out=$(sshj "dev@$ip_a" hostname 2>&1) && break; sleep 1; done
@@ -415,10 +500,10 @@ rt_gen=$(curl -fsS -H "Authorization: Bearer $KEY" "$API/v1/vms/$id_a/ports/8080
 [ "$(hc "$priv" -H "X-Boat-Route-Token: $rt_gen")" = 200 ] || fail "token minted after the revocation"
 
 log "rm: the VM's jump grant and routes go away"
-boat rm edge-a --json >/dev/null
+boat rm --yes edge-a --json >/dev/null
 sshj "dev@$ip_a" true 2>/dev/null && fail "jump grant survived boat rm"
 [ "$(hc "$priv" -H "X-Boat-Route-Token: $rt")" = 404 ] || fail "route survived boat rm"
-boat rm edge-d --json >/dev/null
+boat rm --yes edge-d --json >/dev/null
 [ ${#FAILED[@]} = 0 ] || fail "these failed: ${FAILED[*]}"
 echo "METRIC $(jq -nc '{test: "boat-edge-e2e", pass: true}')"
 echo "edge: PASS"

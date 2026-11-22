@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -26,15 +28,45 @@ func TestNativeRoutesResolveBxIDs(t *testing.T) {
 	}
 }
 
-func TestCompatUnshareNotSupported(t *testing.T) {
+func TestCompatShare(t *testing.T) {
+	testCompatSharingUnsupported(t, "share")
+}
+
+func TestCompatUnshare(t *testing.T) {
+	testCompatSharingUnsupported(t, "unshare")
+}
+
+func testCompatSharingUnsupported(t *testing.T, action string) {
+	t.Helper()
 	e := setup(t)
+	e.srv.cfg.VMDomain = "vm.boat.example"
 	bx := e.newSandbox(nil)
-	st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes/"+bx+"/unshare", nil, nil)
-	if st != 501 || errCode(out) != "not_supported" {
-		t.Errorf("unshare: %d %v", st, out)
+	e.ok("POST", "/api/v1/sandboxes/"+bx+"/host", map[string]any{"port": 8080, "public": true}, 200)
+	id := e.nativeOf(bx)
+	e.ok("POST", "/api/v1/sandboxes/"+bx+"/host", map[string]any{"port": 3000}, 200)
+	before := e.srv.store.Snapshot()
+	e.boatd.mu.Lock()
+	vmBefore, _ := json.Marshal(e.boatd.vms[id])
+	portCalls := len(e.boatd.portReqs)
+	e.boatd.mu.Unlock()
+	st, out, _ := e.compat(e.owner, "POST", "/api/v1/sandboxes/"+bx+"/"+action, nil, nil)
+	if st != 501 || errCode(out) != "not_supported" || out["ok"] != false {
+		t.Errorf("%s: %d %v", action, st, out)
 	}
-	if st, _, _ := e.compat(otherTeamKey(e), "POST", "/api/v1/sandboxes/"+bx+"/unshare", nil, nil); st != 404 {
-		t.Errorf("foreign unshare: %d", st)
+	after := e.srv.store.Snapshot()
+	if !reflect.DeepEqual(before.RouteGens, after.RouteGens) || !reflect.DeepEqual(before.PortMinters, after.PortMinters) ||
+		!reflect.DeepEqual(before.PortMinterGens, after.PortMinterGens) || !reflect.DeepEqual(before.SSHGrants, after.SSHGrants) {
+		t.Fatal("unsupported sharing mutated access records")
+	}
+	e.boatd.mu.Lock()
+	vmAfter, _ := json.Marshal(e.boatd.vms[id])
+	changed := string(vmAfter) != string(vmBefore) || len(e.boatd.portReqs) != portCalls
+	e.boatd.mu.Unlock()
+	if changed {
+		t.Fatal("unsupported sharing mutated VM or port settings")
+	}
+	if st, _, _ := e.compat(otherTeamKey(e), "POST", "/api/v1/sandboxes/"+bx+"/"+action, nil, nil); st != 404 {
+		t.Errorf("foreign %s: %d", action, st)
 	}
 }
 
@@ -219,6 +251,9 @@ func TestCompatOpsSurviveRestart(t *testing.T) {
 	_, del, _ := e.compat(e.owner, "DELETE", "/api/v1/sandboxes/"+gone, nil, map[string]string{"X-Ascii-Confirm-Delete": gone})
 	opID := del["operation"].(map[string]any)["id"].(string)
 
+	if err := e.srv.store.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	st2, err := OpenStore(e.dir)
 	if err != nil {
 		t.Fatal(err)

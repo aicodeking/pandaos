@@ -158,6 +158,20 @@ class CmdTest(Base):
         s = self.status(cid)
         self.assertEqual((s["state"], s["running"]), ("lost", False))
 
+    def test_logs_report_exit_and_signal(self):
+        cid = self.start(["sh", "-c", "echo hi; exit 3"])
+        self.wait_done(cid)
+        out = self.logs(cid)
+        self.assertEqual((out["running"], out["exit"], out["signal"]), (False, 3, None))
+        cid = self.start(["sleep", "30"])
+        out = self.logs(cid)
+        self.assertEqual((out["running"], out["exit"], out["signal"]), (True, None, None))
+        call(ops.op_cmd_signal, {"cmd_id": cid, "signal": "KILL"})
+        done = self.wait_done(cid)
+        out = self.logs(cid)
+        self.assertFalse(out["running"])
+        self.assertEqual((out["exit"], out["signal"]), (done.get("exit"), done.get("signal")))
+
     def test_logs_paging_and_size_cap(self):
         ops.LOG_SEGMENT = 1000
         chunk = "head -c 500 /dev/zero | tr '\\0' a; sleep 0.03; "
@@ -210,6 +224,174 @@ class CmdTest(Base):
         # the running one, CMD_KEEP finished, and the newest if it finished after its prune
         self.assertLessEqual(len(ids), 4)
         self.assertEqual(ops.running_count(), 1)
+
+    def test_running_count_cache_accuracy_and_reduced_disk_reads(self):
+        import builtins
+        import json
+        from unittest import mock
+
+        os.makedirs(ops.CMD_ROOT, mode=0o700, exist_ok=True)
+        # Seed 25 finished commands on disk.
+        for i in range(25):
+            cid = "c_%016x" % (i + 1)
+            cdir = os.path.join(ops.CMD_ROOT, cid)
+            os.mkdir(cdir, 0o700)
+            ops.write_json(os.path.join(cdir, "status.json"), {
+                "cmd_id": cid, "argv": ["true"], "state": "exited",
+                "pid": 1000 + i, "started": float(i), "ended": float(i + 1), "exit": 0,
+            })
+
+        real_open = builtins.open
+        status_reads = []
+
+        def counting_open(file, *args, **kwargs):
+            if isinstance(file, str) and file.endswith("status.json"):
+                status_reads.append(file)
+            return real_open(file, *args, **kwargs)
+
+        with mock.patch.object(builtins, "open", side_effect=counting_open):
+            # Cold scan reads each finished status.json once.
+            self.assertEqual(ops.running_count(), 0)
+            self.assertEqual(len(status_reads), 25)
+
+            # Subsequent health probes do zero status.json opens/JSON parses.
+            status_reads.clear()
+            for _ in range(20):
+                self.assertEqual(ops.running_count(), 0)
+            self.assertEqual(status_reads, [])
+
+        # Starting a live command updates running_count accurately without re-reading the 25 finished cmds.
+        cid = self.start(["sleep", "30"])
+        with mock.patch.object(builtins, "open", side_effect=counting_open):
+            status_reads.clear()
+            self.assertEqual(ops.running_count(), 1)
+            # Subsequent probes while running do zero status.json reads (only stat + proc_start).
+            status_reads.clear()
+            for _ in range(10):
+                self.assertEqual(ops.running_count(), 1)
+            self.assertEqual(status_reads, [])
+
+        # Exiting transitions running_count back to 0, reading only the single transitioned command.
+        call(ops.op_cmd_signal, {"cmd_id": cid, "signal": "KILL"})
+        self.wait_done(cid)
+        with mock.patch.object(builtins, "open", side_effect=counting_open):
+            status_reads.clear()
+            self.assertEqual(ops.running_count(), 0)
+            self.assertEqual(len(status_reads), 1)
+            status_reads.clear()
+            self.assertEqual(ops.running_count(), 0)
+            self.assertEqual(status_reads, [])
+
+        # Killing the supervisor directly (lost without status.json rewrite) also drops running_count to 0.
+        cid2 = self.start(["sleep", "30"])
+        self.assertEqual(ops.running_count(), 1)
+        raw2 = ops.read_raw_status(cid2)
+        os.killpg(raw2["pid"], signal.SIGKILL)
+        os.kill(raw2["supervisor"], signal.SIGKILL)
+        end = time.monotonic() + 5
+        while time.monotonic() < end and ops.running_count() != 0:
+            time.sleep(0.05)
+        self.assertEqual(ops.running_count(), 0)
+
+        # An external command dir created directly under CMD_ROOT invalidates the dir cache.
+        ext_id = "c_%016x" % 0xdeadbeef
+        ext_dir = os.path.join(ops.CMD_ROOT, ext_id)
+        os.mkdir(ext_dir, 0o700)
+        ops.write_json(os.path.join(ext_dir, "status.json"), {
+            "cmd_id": ext_id, "argv": ["sleep", "30"], "state": "running",
+            "pid": os.getpid(), "started": time.time(), "boot_id": ops.boot_id(),
+            "supervisor": os.getpid(), "supervisor_start": ops.proc_start(os.getpid()),
+        })
+        # Bump CMD_ROOT mtime explicitly to handle coarse filesystem timestamp granularity.
+        future = time.time() + 2
+        os.utime(ops.CMD_ROOT, (future, future))
+        self.assertEqual(ops.running_count(), 1)
+        _ = json  # keep import clean if needed
+
+
+    def test_cmd_start_returns_pid_directly(self):
+        m = call(ops.op_cmd_start, {}, spec(["sleep", "30"]))
+        self.assertTrue(m["ok"], m)
+        self.addCleanup(self.kill_quietly, m["cmd_id"])
+        self.assertIsInstance(m.get("pid"), int)
+        self.assertGreater(m["pid"], 0)
+        st = self.status(m["cmd_id"])
+        self.assertEqual(m["pid"], st["pid"])
+
+    def test_cmd_structured_error_codes(self):
+        cid = self.start(["true"])
+        self.wait_done(cid)
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_cmd_signal, {"cmd_id": cid, "signal": "TERM"})
+        self.assertEqual(cm.exception.code, "not_running")
+        self.assertIn("not running", str(cm.exception))
+
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_cmd_signal, {"cmd_id": cid, "signal": "NOPE"})
+        self.assertEqual(cm.exception.code, "invalid_argument")
+
+        with self.assertRaises(ops.OpError) as cm:
+            self.status("c_0000000000000000")
+        self.assertEqual(cm.exception.code, "not_found")
+        self.assertIn("No such command", str(cm.exception))
+
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_cmd_start, {}, spec(["/nonexistent/binary"]))
+        self.assertEqual(cm.exception.code, "spawn_failed")
+        self.assertIn("No such file", str(cm.exception))
+        self.assertIn("/nonexistent/binary", str(cm.exception))
+
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_cmd_start, {}, spec(["true"], cwd="/nonexistent/dir"))
+        self.assertEqual(cm.exception.code, "spawn_failed")
+        self.assertIn("/nonexistent/dir", str(cm.exception))
+
+        noexec = self.write("noexec.sh", b"#!/bin/sh\necho hi\n")
+        os.chmod(noexec, 0o644)
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_cmd_start, {}, spec([noexec]))
+        self.assertEqual(cm.exception.code, "permission_denied")
+
+    def test_user_info_unknown_user_returns_invalid_user(self):
+        from unittest import mock
+
+        with mock.patch.object(ops.os, "geteuid", return_value=0), \
+             mock.patch.object(ops.pwd, "getpwnam", side_effect=KeyError("ghost")):
+            with self.assertRaises(ops.OpError) as cm:
+                ops.user_info("ghost")
+        self.assertEqual(cm.exception.code, "invalid_user")
+        self.assertEqual(str(cm.exception), "no such user: ghost")
+
+    def test_cmd_start_relative_and_tilde_cwd(self):
+        home = self.path("home_dev")
+        sub = os.path.join(home, "work", "app")
+        os.makedirs(sub)
+        env = {"PATH": os.environ["PATH"], "HOME": home}
+
+        for raw_cwd, want in [
+            ("~", home),
+            ("~/", home),
+            ("~/work/app", sub),
+            ("work/app", sub),
+            ("./work/app", sub),
+        ]:
+            with self.subTest(cwd=raw_cwd):
+                cid = self.start(["pwd"], env=env, cwd=raw_cwd)
+                self.wait_done(cid)
+                for _ in range(100):
+                    m = self.logs(cid)
+                    if m["size"]:
+                        break
+                    time.sleep(0.02)
+                got = base64.b64decode(m["data_b64"]).decode().strip()
+                self.assertEqual(os.path.realpath(got), os.path.realpath(want))
+
+        for missing in ("does_not_exist", "~/does_not_exist"):
+            with self.subTest(missing=missing):
+                with self.assertRaises(ops.OpError) as cm:
+                    call(ops.op_cmd_start, {}, spec(["true"], env=env, cwd=missing))
+                self.assertEqual(cm.exception.code, "spawn_failed")
+                self.assertIn(os.path.join(home, "does_not_exist"), str(cm.exception))
 
 
 class FileTest(Base):
@@ -297,6 +479,81 @@ class FileTest(Base):
         call(ops.op_file_move, {"from": self.path("src"), "to": self.path("dst")})
         with open(self.path("dst/inner"), "rb") as f:
             self.assertEqual(f.read(), b"I")
+
+    def test_move_creates_parent_dirs_owned_like_parent(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        home_dev = self.path("home_dev")
+        os.mkdir(home_dev)
+        src = self.write("home_dev/a.txt", b"payload")
+        dst = self.path("home_dev/nested/deep/b.txt")
+
+        real_stat = os.stat
+        chowned = {}
+
+        def fake_stat(p, *args, **kwargs):
+            st = real_stat(p, *args, **kwargs)
+            uid, gid = chowned.get(p, (1000, 1000) if p == home_dev else (0, 0))
+            return SimpleNamespace(st_mode=st.st_mode, st_uid=uid, st_gid=gid,
+                                   st_size=st.st_size, st_mtime=st.st_mtime)
+
+        def fake_chown(p, uid, gid):
+            chowned[p] = (uid, gid)
+
+        with mock.patch.object(ops.os, "geteuid", return_value=0), \
+             mock.patch.object(ops.os, "stat", side_effect=fake_stat), \
+             mock.patch.object(ops.os, "chown", side_effect=fake_chown):
+            self.assertEqual(call(ops.op_file_move, {"from": src, "to": dst}), {"ok": True})
+
+        self.assertEqual(chowned.get(self.path("home_dev/nested")), (1000, 1000))
+        self.assertEqual(chowned.get(self.path("home_dev/nested/deep")), (1000, 1000))
+        with open(dst, "rb") as f:
+            self.assertEqual(f.read(), b"payload")
+
+    def test_file_structured_error_codes(self):
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_file_delete, {"path": "/etc", "recursive": True})
+        self.assertEqual(cm.exception.code, "protected_path")
+        self.assertIn("refusing to delete /etc", str(cm.exception))
+
+        self.write("nonempty/f", b"x")
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_file_delete, {"path": self.path("nonempty")})
+        self.assertEqual(cm.exception.code, "not_empty")
+        self.assertIn("non-empty directory", str(cm.exception))
+
+        src = self.write("src.txt", b"a")
+        dst = self.write("dst.txt", b"b")
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_file_move, {"from": src, "to": dst})
+        self.assertEqual(cm.exception.code, "already_exists")
+        self.assertIn("exists", str(cm.exception))
+
+        dst_dir = self.path("dst_dir")
+        os.mkdir(dst_dir)
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_file_move, {"from": src, "to": dst_dir, "overwrite": True})
+        self.assertEqual(cm.exception.code, "conflict")
+        self.assertIn("is a directory", str(cm.exception))
+
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_file_list, {"path": "relative"})
+        self.assertEqual(cm.exception.code, "invalid_argument")
+
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_get_file, {"path": self.path("missing")})
+        self.assertEqual(cm.exception.code, "not_found")
+
+        with self.assertRaises(ops.OpError) as cm:
+            call(ops.op_get_file, {"path": dst_dir})
+        self.assertEqual(cm.exception.code, "is_a_directory")
+
+        self.assertEqual(ops.oserror_code(FileNotFoundError()), "not_found")
+        self.assertEqual(ops.oserror_code(NotADirectoryError()), "not_a_directory")
+        self.assertEqual(ops.oserror_code(IsADirectoryError()), "is_a_directory")
+        self.assertEqual(ops.oserror_code(FileExistsError()), "already_exists")
+        self.assertEqual(ops.oserror_code(PermissionError()), "permission_denied")
 
 
 @unittest.skipUnless(shutil.which("rg"), "ripgrep not installed (test-in-vm.sh covers it)")

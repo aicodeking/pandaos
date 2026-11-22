@@ -44,8 +44,22 @@ func TestHugePages(t *testing.T) {
 // the tap's group: with a shared jailGid, that gid must be the tap's group.
 func TestTapOwnedByVMMGid(t *testing.T) {
 	var cmds []string
-	run := func(_, name string, args ...string) error {
+	run := func(stdin, name string, args ...string) error {
 		cmds = append(cmds, name+" "+strings.Join(args, " "))
+		if stdin != "" && name == "ip" {
+			prefix := name
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "-n" {
+					prefix += " -n " + args[i+1]
+					break
+				}
+			}
+			for _, line := range strings.Split(stdin, "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					cmds = append(cmds, prefix+" "+line)
+				}
+			}
+		}
 		return nil
 	}
 	if err := addVMNet(Config{Bridge: "boatbr0"}, run, VM{Index: 7, Tap: "bt7"}, 900007, 899999); err != nil {

@@ -10,6 +10,7 @@ restart cannot touch it. Everything about it lives in CMD_ROOT/<cmd_id>/:
 Run as a script (--supervise DIR) it is that supervisor.
 """
 import base64
+import errno
 import grp
 import json
 import os
@@ -44,14 +45,43 @@ UNDELETABLE = {"/", "/proc", "/sys", "/dev", "/run", "/boot", "/usr", "/etc", "/
 
 
 class OpError(Exception):
-    pass
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
+_ERRNO_CODES = {
+    errno.ENOENT: "not_found",
+    errno.ENOTDIR: "not_a_directory",
+    errno.EISDIR: "is_a_directory",
+    errno.EEXIST: "already_exists",
+    errno.ENOTEMPTY: "not_empty",
+    errno.EINVAL: "invalid_argument",
+    errno.ENAMETOOLONG: "invalid_argument",
+    errno.EACCES: "permission_denied",
+    errno.EPERM: "permission_denied",
+}
+
+
+def oserror_code(err):
+    if isinstance(err, FileNotFoundError):
+        return "not_found"
+    if isinstance(err, NotADirectoryError):
+        return "not_a_directory"
+    if isinstance(err, IsADirectoryError):
+        return "is_a_directory"
+    if isinstance(err, FileExistsError):
+        return "already_exists"
+    if isinstance(err, PermissionError):
+        return "permission_denied"
+    return _ERRNO_CODES.get(getattr(err, "errno", None))
 
 
 def b64d(s):
     try:
         return base64.b64decode(s or "", validate=True)
     except (ValueError, TypeError) as e:
-        raise OpError("bad base64: %s" % e)
+        raise OpError("bad base64: %s" % e, code="invalid_argument")
 
 
 def user_info(name):
@@ -61,7 +91,54 @@ def user_info(name):
     try:
         return pwd.getpwnam(name)
     except KeyError:
-        raise OpError("no such user: %s" % name)
+        raise OpError("no such user: %s" % name, code="invalid_user")
+
+
+def resolve_cwd(cwd, home):
+    """Resolve ~, ~/..., or relative cwd against home (never the daemon's '/')."""
+    if cwd is None or cwd == "":
+        return None
+    if not isinstance(cwd, str) or "\0" in cwd:
+        raise OpError("cwd must be a string without NUL", code="invalid_argument")
+    if os.path.isabs(cwd):
+        return cwd
+    if not home:
+        raise OpError("cwd %s: target user has no home directory" % cwd, code="spawn_failed")
+    if cwd == "~":
+        return home
+    if cwd.startswith("~/"):
+        return os.path.normpath(os.path.join(home, cwd[2:]))
+    return os.path.normpath(os.path.join(home, cwd))
+
+
+def _spec_home(sp):
+    user = sp.get("user")
+    if user is not None:
+        try:
+            return (pwd.getpwuid(user) if isinstance(user, int) else pwd.getpwnam(user)).pw_dir
+        except KeyError:
+            pass
+    env = sp.get("env")
+    if isinstance(env, dict) and env.get("HOME"):
+        return env["HOME"]
+    return os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir
+
+
+def spawn_error_info(err, argv=None, cwd=None):
+    """Return (message, code) for an exception raised while spawning a command."""
+    if isinstance(err, ValueError):
+        return str(err), "invalid_argument"
+    if isinstance(err, PermissionError) or getattr(err, "errno", None) in (errno.EACCES, errno.EPERM):
+        return str(err), "permission_denied"
+    if isinstance(err, FileNotFoundError) or getattr(err, "errno", None) == errno.ENOENT:
+        filename = getattr(err, "filename", None)
+        if cwd and (filename == cwd or not os.path.exists(cwd)):
+            return "cwd %s: %s" % (cwd, getattr(err, "strerror", None) or str(err)), "spawn_failed"
+        cmd = argv[0] if argv else None
+        if cmd and cmd not in str(err):
+            return "command %s: %s" % (cmd, err), "spawn_failed"
+        return str(err), "spawn_failed"
+    return str(err), "spawn_failed"
 
 # ---------------------------------------------------------------- status
 
@@ -104,7 +181,7 @@ def proc_start(pid):
 
 def cmd_dir(cmd_id):
     if not isinstance(cmd_id, str) or not CMD_ID.match(cmd_id):
-        raise OpError("No such command: %r" % (cmd_id,))
+        raise OpError("No such command: %r" % (cmd_id,), code="not_found")
     return os.path.join(CMD_ROOT, cmd_id)
 
 
@@ -113,7 +190,7 @@ def read_raw_status(cmd_id):
         with open(os.path.join(cmd_dir(cmd_id), "status.json")) as f:
             return json.load(f)
     except FileNotFoundError:
-        raise OpError("No such command: %s" % cmd_id)
+        raise OpError("No such command: %s" % cmd_id, code="not_found")
 
 
 def public_status(raw):
@@ -144,14 +221,125 @@ def all_statuses():
     return sorted(out, key=lambda s: s.get("started", 0))
 
 
+_running_lock = threading.Lock()
+_running_cache = {
+    "root": None,
+    "dir_sig": None,
+    "active": {},
+    "finished": set(),
+}
+
+
+def _stat_sig(st):
+    return (st.st_mtime_ns, st.st_ctime_ns, st.st_ino, st.st_dev)
+
+
+def _file_sig(st):
+    return (st.st_mtime_ns, st.st_size, st.st_ino, st.st_dev)
+
+
+def _read_raw_status_with_sig(cmd_id):
+    try:
+        with open(os.path.join(cmd_dir(cmd_id), "status.json")) as f:
+            st = os.fstat(f.fileno())
+            return json.load(f), _file_sig(st)
+    except FileNotFoundError:
+        raise OpError("No such command: %s" % cmd_id, code="not_found")
+
+
+def _invalidate_running_cache(cmd_id=None, raw=None):
+    with _running_lock:
+        if _running_cache["root"] == CMD_ROOT:
+            _running_cache["dir_sig"] = None
+            if cmd_id is not None:
+                _running_cache["finished"].discard(cmd_id)
+                if raw is not None and raw.get("state") in ("running", "starting"):
+                    _running_cache["active"][cmd_id] = (raw, None)
+                else:
+                    _running_cache["active"].pop(cmd_id, None)
+
+
+def _is_raw_running(raw, cur_boot_id):
+    return (raw["state"] == "running"
+            and raw.get("boot_id") == cur_boot_id
+            and proc_start(raw["supervisor"]) == raw.get("supervisor_start"))
+
+
 def running_count():
-    return sum(1 for s in all_statuses() if s["running"])
+    with _running_lock:
+        root = CMD_ROOT
+        if _running_cache["root"] != root:
+            _running_cache["root"] = root
+            _running_cache["dir_sig"] = None
+            _running_cache["active"] = {}
+            _running_cache["finished"] = set()
+        try:
+            dir_sig = _stat_sig(os.stat(root))
+        except FileNotFoundError:
+            _running_cache["dir_sig"] = None
+            _running_cache["active"] = {}
+            _running_cache["finished"] = set()
+            return 0
+
+        active = _running_cache["active"]
+        finished = _running_cache["finished"]
+
+        if _running_cache["dir_sig"] != dir_sig:
+            try:
+                names = set(os.listdir(root))
+            except FileNotFoundError:
+                _running_cache["dir_sig"] = None
+                active.clear()
+                finished.clear()
+                return 0
+            finished.intersection_update(names)
+            for cid in list(active):
+                if cid not in names:
+                    del active[cid]
+            for name in names:
+                if name in finished or name in active or not CMD_ID.match(name):
+                    continue
+                active[name] = (None, None)
+            _running_cache["dir_sig"] = dir_sig
+
+        if not active:
+            return 0
+
+        cur_boot_id = boot_id()
+        count = 0
+        for cid in list(active):
+            raw, sig = active[cid]
+            status_path = os.path.join(root, cid, "status.json")
+            try:
+                cur_sig = _file_sig(os.stat(status_path))
+            except FileNotFoundError:
+                if not os.path.isdir(os.path.join(root, cid)):
+                    del active[cid]
+                continue
+            if raw is None or cur_sig != sig:
+                try:
+                    raw, cur_sig = _read_raw_status_with_sig(cid)
+                except (OpError, ValueError):
+                    continue
+            if raw["state"] == "starting":
+                active[cid] = (raw, cur_sig)
+                continue
+            if _is_raw_running(raw, cur_boot_id):
+                active[cid] = (raw, cur_sig)
+                count += 1
+            else:
+                del active[cid]
+                finished.add(cid)
+        return count
 
 
 def prune():
     finished = [s for s in all_statuses() if not s["running"]]
-    for s in finished[:max(0, len(finished) - CMD_KEEP)]:
+    pruned = finished[:max(0, len(finished) - CMD_KEEP)]
+    for s in pruned:
         shutil.rmtree(cmd_dir(s["cmd_id"]), ignore_errors=True)
+    if pruned:
+        _invalidate_running_cache()
 
 
 # ---------------------------------------------------------------- supervisor
@@ -190,13 +378,22 @@ def finish_status(status, rc):
 
 def spawn_command(cdir, sp, status):
     spec_path = os.path.join(cdir, "spec.json")
+    cwd = sp.get("cwd")
     try:
+        cwd = resolve_cwd(cwd, _spec_home(sp))
         kw = {k: sp[k] for k in ("user", "group", "extra_groups") if sp.get(k) is not None}
         proc = subprocess.Popen(sp["argv"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, env=sp["env"], cwd=sp.get("cwd"),
+                                stderr=subprocess.STDOUT, env=sp["env"], cwd=cwd,
                                 start_new_session=True, close_fds=True, **kw)
-    except (OSError, ValueError, subprocess.SubprocessError) as e:
-        write_json(os.path.join(cdir, "status.json"), dict(status, state="failed", error=str(e)))
+    except (OpError, OSError, ValueError, subprocess.SubprocessError) as e:
+        if isinstance(e, OpError):
+            err_msg, err_code = str(e), e.code
+        else:
+            err_msg, err_code = spawn_error_info(e, sp.get("argv"), cwd)
+        failed = dict(status, state="failed", error=err_msg)
+        if err_code:
+            failed["error_code"] = err_code
+        write_json(os.path.join(cdir, "status.json"), failed)
         os.unlink(spec_path)
         return None, status
     status = dict(status, state="running", pid=proc.pid, started=time.time())
@@ -263,10 +460,14 @@ def op_cmd_start(req, send, sp):
             raw = {"state": "starting"}
         if raw["state"] == "failed":
             shutil.rmtree(cdir, ignore_errors=True)
-            raise OpError("start: %s" % raw.get("error"))
+            raise OpError("start: %s" % raw.get("error"), code=raw.get("error_code"))
         if raw["state"] != "starting":
+            _invalidate_running_cache(cmd_id, raw)
             prune()
-            send({"ok": True, "cmd_id": cmd_id})
+            reply = {"ok": True, "cmd_id": cmd_id}
+            if raw.get("pid") is not None:
+                reply["pid"] = raw["pid"]
+            send(reply)
             return
         time.sleep(0.01)
     raise OpError("start: supervisor did not report in %d s" % START_TIMEOUT_S)
@@ -313,7 +514,7 @@ def op_cmd_logs(req, send):
     raw = read_raw_status(req.get("cmd_id"))
     offset, limit = int(req.get("offset") or 0), int(req.get("limit") or LOGS_DEFAULT)
     if offset < 0 or limit <= 0:
-        raise OpError("offset and limit must not be negative")
+        raise OpError("offset and limit must not be negative", code="invalid_argument")
     limit = min(limit, LOGS_MAX)
     cdir = cmd_dir(raw["cmd_id"])
     for _ in range(3):
@@ -324,9 +525,12 @@ def op_cmd_logs(req, send):
             time.sleep(0.01)
     else:
         raise OpError("logs: rotating too fast to read")
+    st = public_status(raw)
+    # exit/signal are always present (null while running or not applicable), so a
+    # caller can tell this agent from an older one and skip a cmd_status call.
     send({"ok": True, "data_b64": base64.b64encode(data).decode(), "offset": start,
           "next_offset": start + len(data), "size": size, "truncated": truncated,
-          "running": public_status(raw)["running"]})
+          "running": st["running"], "exit": st.get("exit"), "signal": st.get("signal")})
 
 
 def parse_signal(value):
@@ -338,18 +542,18 @@ def parse_signal(value):
         name = value.upper()
         return signal.Signals[name if name.startswith("SIG") else "SIG" + name]
     except (KeyError, ValueError, AttributeError):
-        raise OpError("bad signal: %r" % (value,))
+        raise OpError("bad signal: %r" % (value,), code="invalid_argument")
 
 
 def op_cmd_signal(req, send):
     sig = parse_signal(req.get("signal"))
     s = public_status(read_raw_status(req.get("cmd_id")))
     if not s["running"]:
-        raise OpError("command is not running: %s" % s["state"])
+        raise OpError("command is not running: %s" % s["state"], code="not_running")
     try:
         os.killpg(s["pid"], sig)
     except ProcessLookupError:
-        raise OpError("command is not running")
+        raise OpError("command is not running", code="not_running")
     send({"ok": True})
 
 
@@ -372,15 +576,23 @@ def makedirs_owned(d):
     """mkdir -p, each new dir owned like its parent (so /home/dev/x stays dev's)."""
     if not d or os.path.isdir(d):
         return
+    d = d.rstrip("/")
+    if not d or os.path.isdir(d):
+        return
     makedirs_owned(os.path.dirname(d))
-    os.mkdir(d, 0o755)
+    try:
+        os.mkdir(d, 0o755)
+    except FileExistsError:
+        if os.path.isdir(d):
+            return
+        raise
     chown_like_parent(d, None)
 
 
 def op_put_file(req, send):
     path = req.get("path")
     if not isinstance(path, str) or not os.path.isabs(path):
-        raise OpError("path must be absolute")
+        raise OpError("path must be absolute", code="invalid_argument")
     data = b64d(req.get("data_b64"))
     offset = int(req.get("offset") or 0)
     last = req.get("last", True)
@@ -390,7 +602,7 @@ def op_put_file(req, send):
     fd = os.open(part, flags, 0o600)
     try:
         if offset and os.fstat(fd).st_size != offset:
-            raise OpError("offset %d != received %d" % (offset, os.fstat(fd).st_size))
+            raise OpError("offset %d != received %d" % (offset, os.fstat(fd).st_size), code="invalid_argument")
         os.lseek(fd, offset, os.SEEK_SET)
         os.write(fd, data)
         size = os.fstat(fd).st_size
@@ -407,11 +619,11 @@ def op_put_file(req, send):
 def op_get_file(req, send):
     path = req.get("path")
     if not isinstance(path, str) or not os.path.isabs(path):
-        raise OpError("path must be absolute")
+        raise OpError("path must be absolute", code="invalid_argument")
     try:
         f = open(path, "rb")
     except OSError as e:
-        raise OpError("open %s: %s" % (path, e.strerror))
+        raise OpError("open %s: %s" % (path, e.strerror), code=oserror_code(e))
     with f:
         st = os.fstat(f.fileno())
         offset = 0
@@ -426,7 +638,7 @@ def op_get_file(req, send):
 
 def abs_path(value, field="path"):
     if not isinstance(value, str) or not os.path.isabs(value) or "\0" in value:
-        raise OpError("%s must be an absolute path" % field)
+        raise OpError("%s must be an absolute path" % field, code="invalid_argument")
     return value
 
 
@@ -459,15 +671,17 @@ def op_file_delete(req, send):
     path = abs_path(req.get("path"))
     norm = "/" + os.path.normpath(path).lstrip("/")
     if norm in UNDELETABLE:
-        raise OpError("refusing to delete %s" % norm)
+        raise OpError("refusing to delete %s" % norm, code="protected_path")
     if os.path.isdir(path) and not os.path.islink(path):
         if req.get("recursive"):
             shutil.rmtree(path)  # does not follow symlinks
         else:
             try:
                 os.rmdir(path)
-            except OSError:
-                raise OpError("%s is a non-empty directory; set recursive" % path)
+            except OSError as e:
+                if e.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                    raise OpError("%s is a non-empty directory; set recursive" % path, code="not_empty")
+                raise
     else:
         os.unlink(path)
     send({"ok": True})
@@ -478,10 +692,10 @@ def op_file_move(req, send):
     os.lstat(src)  # a missing source reports "No such file" before anything else
     if os.path.lexists(dst):
         if not req.get("overwrite"):
-            raise OpError("%s exists; set overwrite" % dst)
+            raise OpError("%s exists; set overwrite" % dst, code="already_exists")
         if os.path.isdir(dst) and not os.path.islink(dst):
-            raise OpError("%s is a directory; delete it first" % dst)
-    os.makedirs(os.path.dirname(dst) or "/", exist_ok=True)
+            raise OpError("%s is a directory; delete it first" % dst, code="conflict")
+    makedirs_owned(os.path.dirname(dst))
     try:
         os.replace(src, dst)
     except OSError as e:
@@ -506,7 +720,7 @@ def op_file_search(req, send):
     path = abs_path(req.get("path"))
     query = req.get("query")
     if not isinstance(query, str) or not query:
-        raise OpError("query must be a non-empty string")
+        raise OpError("query must be a non-empty string", code="invalid_argument")
     os.stat(path)
     limit = max(1, min(int(req.get("limit") or SEARCH_DEFAULT), SEARCH_MAX))
     content = req.get("content", True)
@@ -538,7 +752,7 @@ def op_file_search(req, send):
     if rc < 0 and not truncated:
         truncated = True  # the timeout killed it; what we have is partial
     if rc == 2 and not matches:
-        raise OpError("search: %s" % err.decode("utf-8", "replace").strip())
+        raise OpError("search: %s" % err.decode("utf-8", "replace").strip(), code="invalid_argument")
     send({"ok": True, "matches": matches, "truncated": truncated})
 
 

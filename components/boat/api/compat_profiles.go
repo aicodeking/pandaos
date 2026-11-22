@@ -264,13 +264,22 @@ func (s *server) compatSnapshotDownload(w http.ResponseWriter, r *http.Request, 
 			notSupported(w, r, "downloading an imported snapshot")
 			return
 		}
+		if s.refuseBuilderSnapshot(w, r, p, sn) { // the builder gate of the native download
+			return
+		}
 		// boat.dev's answer is a list of signed chunk URLs; here the archive is
 		// one chunk, served by a file-download token bound to the snapshot.
-		exp := time.Now().Add(fileURLDefaultTTL * time.Second).Truncate(time.Second)
-		tok := s.mintGrant(r, p, fileGrant{VM: str(sn, "vm_id"), Path: str(sn, "id"), Exp: exp.Unix(), Op: "snap"})
+		now := time.Now()
+		exp := now.Add(fileURLDefaultTTL * time.Second).Truncate(time.Second)
+		grant := fileGrant{VM: str(sn, "vm_id"), Path: str(sn, "id"), Exp: exp.Unix(), Op: "snap"}
+		tok := s.mintFileURL(w, r, p, &grant)
+		if tok == "" {
+			return
+		}
+		ttlS := max(int(time.Unix(grant.Exp, 0).Sub(now).Seconds()), 1)
 		sum := s.snapshotSummary(p.Team.ID, sn)
 		writeCompat(w, 200, "snapshot.download", map[string]any{"snapshotId": sum["id"], "sandboxId": sum["sandboxId"],
-			"kind": "base", "generation": 1, "expiresInSeconds": fileURLDefaultTTL,
+			"kind": "base", "generation": 1, "expiresInSeconds": ttlS,
 			"reconstruct": "one chunk: the whole snapshot as a PandaOS archive (tar.zst); import it with POST /v1/snapshots/import",
 			"chunks": []map[string]any{{"snapshotId": sum["id"], "generation": 1, "chunkIndex": 0, "r2Key": str(sn, "id"),
 				"sizeBytes": sum["sizeBytes"], "sha256": nil, "signedUrl": s.publicBase(r) + fileDownloadPath + tok}}})
@@ -294,7 +303,6 @@ var compatUnsupported = map[string]string{
 	"POST /api/v1/ci/public":                                "boat CI",
 	"GET /api/v1/ci/jobs/{jobId}":                           "boat CI",
 	"GET /api/v1/ci/jobs/{jobId}/logs":                      "boat CI",
-	"POST /api/v1/environments/{id}/upgrade":                "environment upgrades",
 	"PUT /api/v1/environments/{id}/secret-files":            "environment secret files",
 	"DELETE /api/v1/environments/{id}/secret-files":         "environment secret files",
 	"POST /api/v1/environments/{id}/repos":                  "environment repositories",

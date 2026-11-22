@@ -113,3 +113,96 @@ func TestEnableIOCost(t *testing.T) {
 		t.Fatalf("io.cost.qos with targets = %q", b)
 	}
 }
+
+func TestHostHTTPSAddrsAndStandaloneSSH(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+
+	// Default standaloneSSH is false and hostHttpsAddrs is empty.
+	def, err := loadConfig(filepath.Join(dir, "nonexistent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.StandaloneSSH || len(def.HostHTTPSAddrs) != 0 {
+		t.Fatalf("unexpected defaults: standaloneSSH=%v hostHttpsAddrs=%v", def.StandaloneSSH, def.HostHTTPSAddrs)
+	}
+
+	// Valid hostHttpsAddrs (IPv4 + IPv6) and standaloneSSH=true (when untrustedTenants=false):
+	// hostHTTPSAllowlists honors IPv4 entries literally without injecting 10.200.0.1 unless configured.
+	os.WriteFile(p, []byte(`{"standaloneSSH":true,"hostHttpsAddrs":["203.0.113.10","198.51.100.0/24","2001:db8::1","2001:db8:2::/64","fd7a:115c:a1e0::1"]}`), 0o600)
+	c, err := loadConfig(p)
+	if err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	if !c.StandaloneSSH {
+		t.Fatal("standaloneSSH not loaded")
+	}
+	v4, v6 := c.hostHTTPSAllowlists()
+	if got, want := strings.Join(v4, ","), "203.0.113.10,198.51.100.0/24"; got != want {
+		t.Fatalf("hostHTTPSAllowlists v4 = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(v6, ","), "2001:db8::1,2001:db8:2::/64,fd7a:115c:a1e0::1"; got != want {
+		t.Fatalf("hostHTTPSAllowlists v6 = %q, want %q", got, want)
+	}
+
+	// Explicit 10.200.0.1 is honored in literal order and deduplicated.
+	os.WriteFile(p, []byte(`{"hostHttpsAddrs":["203.0.113.10","10.200.0.1","198.51.100.0/24","10.200.0.1"]}`), 0o600)
+	cGw, err := loadConfig(p)
+	if err != nil {
+		t.Fatalf("valid explicit gateway config rejected: %v", err)
+	}
+	if v4Gw, v6Gw := cGw.hostHTTPSAllowlists(); strings.Join(v4Gw, ",") != "203.0.113.10,10.200.0.1,198.51.100.0/24" || len(v6Gw) != 0 {
+		t.Fatalf("explicit gateway hostHTTPSAllowlists = (%v, %v)", v4Gw, v6Gw)
+	}
+
+	// IPv6-only hostHttpsAddrs emits only IPv6 allowlist entries (no automatic IPv4 gateway).
+	os.WriteFile(p, []byte(`{"hostHttpsAddrs":["2001:db8::1","2001:db8:2::/64"]}`), 0o600)
+	c6, err := loadConfig(p)
+	if err != nil {
+		t.Fatalf("valid IPv6-only hostHttpsAddrs rejected: %v", err)
+	}
+	if v4Only, v6Only := c6.hostHTTPSAllowlists(); len(v4Only) != 0 || strings.Join(v6Only, ",") != "2001:db8::1,2001:db8:2::/64" {
+		t.Fatalf("IPv6-only hostHTTPSAllowlists = (%v, %v)", v4Only, v6Only)
+	}
+
+	// Invalid hostHttpsAddrs entries must be rejected.
+	for _, bad := range []string{
+		`""`,
+		`" 203.0.113.10"`,
+		`"203.0.113.10 "`,
+		`"203.0.113.10:443"`,
+		`"[2001:db8::1]:443"`,
+		`"2001:0db8::1"`,
+		`"0.0.0.0"`,
+		`"::"`,
+		`"127.0.0.1"`,
+		`"::1"`,
+		`"127.0.0.0/8"`,
+		`"0.0.0.0/0"`,
+		`"::/0"`,
+		`"224.0.0.1"`,
+		`"ff02::1"`,
+		`"255.255.255.255"`,
+		`"::ffff:203.0.113.10"`,
+		`"198.51.100.5/24"`,
+		`"2001:db8::1/64"`,
+		`"203.0.113.10/33"`,
+		`"2001:db8::/129"`,
+		`"203.0.113.10; drop"`,
+		`"api.example.com"`,
+	} {
+		os.WriteFile(p, []byte(`{"hostHttpsAddrs":[`+bad+`]}`), 0o600)
+		if _, err := loadConfig(p); err == nil {
+			t.Errorf("invalid hostHttpsAddrs %s accepted", bad)
+		}
+	}
+
+	// standaloneSSH cannot be enabled when untrustedTenants is true.
+	u := defaultConfig()
+	u.UntrustedTenants = true
+	u.StandaloneSSH = true
+	err = u.validate()
+	if err == nil || !strings.Contains(err.Error(), "standaloneSSH cannot be enabled when untrustedTenants is true") {
+		t.Fatalf("standaloneSSH + untrustedTenants error = %v", err)
+	}
+}

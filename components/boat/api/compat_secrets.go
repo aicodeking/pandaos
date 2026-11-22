@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 // boat.dev's /secrets and /ai-proxy on the team secrets (admin.go) and the AI
@@ -113,6 +114,9 @@ func (s *server) compatUpdateSecrets(w http.ResponseWriter, r *http.Request, p *
 		marked[k] = true
 	}
 	err := s.store.Update(func(st *State) error {
+		if _, err := requirePrincipalIn(st, p, "admin", time.Now().UTC()); err != nil {
+			return err
+		}
 		for _, sec := range st.Secrets {
 			if sec.TeamID == p.Team.ID && sec.Inject != marked[sec.Name] {
 				c := *sec
