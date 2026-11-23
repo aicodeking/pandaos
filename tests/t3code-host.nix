@@ -90,6 +90,9 @@ pkgs.testers.runNixOSTest {
           for line in listen.splitlines():
               local = line.split()[3]
               assert local == f"127.0.0.1:{port}", f"non-loopback listener: {line}"
+          # t3 serve binds the TCP socket before migrations finish and answers 503
+          # (rejectRequestsUntilServing) until HTTP serving activates.
+          machine.wait_until_succeeds(f"curl -fsS -o /dev/null http://127.0.0.1:{port}/", timeout=60)
           html = machine.succeed(f"curl -fsS http://127.0.0.1:{port}/")
           assert "<html" in html.lower() or "<!doctype html" in html.lower(), html[:200]
           env = json.loads(machine.succeed(f"curl -fsS http://127.0.0.1:{port}/.well-known/t3/environment"))

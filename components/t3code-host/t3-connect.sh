@@ -6,7 +6,7 @@
 # in to T3 Connect), or `local` (direct/SSH access only). No marker: off.
 unit=t3code-host.service
 sign_in_unit=t3code-sign-in.service
-ready_timeout=20
+ready_timeout=30
 
 usage() {
   cat >&2 <<'EOF'
