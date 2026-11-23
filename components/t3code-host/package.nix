@@ -100,7 +100,8 @@ stdenv.mkDerivation {
   installCheckPhase = ''
     runHook preInstallCheck
     test -f "$out/lib/t3/client/index.html"
-    HOME="$TMPDIR" T3CODE_HOME="$TMPDIR/.t3" "$out/bin/t3" --version
+    # Bare Node (the SEA blob dropped) prints v26.x.x, not the T3 version.
+    HOME="$TMPDIR" T3CODE_HOME="$TMPDIR/.t3" "$out/bin/t3" --version | grep -Fq ${version}
     runHook postInstallCheck
   '';
 

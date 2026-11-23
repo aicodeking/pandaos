@@ -1,8 +1,13 @@
 # t3code-host-redact CMD...: runs CMD with stdout and stderr filtered so
-# pairing secrets never reach the journal: the rest of a `Token: ...` or
-# `Pairing URL: ...` line (ANSI colours allowed around the label), any
-# `?token=`/`&token=`/`#token=`/` token=` value (also `access_token=` etc.),
-# and JSON `"token"`/`"pairingToken"`/`"access_token"`... string values.
+# pairing secrets never reach the journal:
+#   - the rest of a `Token: ...` or `Pairing URL: ...` line (ANSI colours and
+#     spaces allowed around the label, also between `Pairing` and `URL`);
+#   - `Authorization: Bearer <secret>` (ANSI/spaces allowed, any case);
+#   - any `*token=` value after `?`, `&`, `#`, `;`, `,`, a space or at line
+#     start (`token = X`, `?pairingToken=X`, `access_token=X`, ...);
+#   - JSON `"*token"` string values (`"token"`, `"pairingToken"`,
+#     `"access_token"`, `"refreshToken"`, `"sessionToken"`, ...);
+#   - the token segment of a `/pair/<token>` path.
 # OAuth device codes (`Code: XXXX-XXXX`) and verification URLs pass through.
 # Needs GNU sed (`-u`, `\x1b`, the `I` flag).
 #
@@ -16,11 +21,13 @@
 }
 
 redact() {
+  local sgr='\x1b\[[0-9;]*m'
   sed -u -E \
-    -e 's/("(access|pairing|auth|refresh)?_?token"[[:space:]]*:[[:space:]]*")[^"]*"/\1[redacted]"/Ig' \
-    -e 's/((token|pairing url)([[:space:]]|\x1b\[[0-9;]*m)*:([[:space:]]|\x1b\[[0-9;]*m)*).*/\1[redacted]/I' \
-    -e 's/([?&#[:space:]]([[:alpha:]]+_)?token=)[^&#[:space:]"'\'']+/\1[redacted]/Ig' \
-    -e 's/^(([[:alpha:]]+_)?token=)[^&#[:space:]"'\'']+/\1[redacted]/I'
+    -e 's/("[[:alpha:]_]*token"[[:space:]]*:[[:space:]]*")[^"]*"/\1[redacted]"/Ig' \
+    -e "s/((token|pairing([[:space:]]|$sgr)+url)([[:space:]]|$sgr)*:([[:space:]]|$sgr)*).*/\\1[redacted]/I" \
+    -e "s/(authorization([[:space:]]|$sgr)*:([[:space:]]|$sgr)*bearer([[:space:]]|$sgr)+)[^[:space:]\"'\x1b]+/\\1[redacted]/Ig" \
+    -e 's/(^|[?&#;,[:space:]])([[:alpha:]_]*token[[:space:]]*=[[:space:]]*)[^&#;,[:space:]"'\'']+/\1\2[redacted]/Ig' \
+    -e 's|(/pair/)[^/?&#[:space:]"'\'']+|\1[redacted]|g'
 }
 
 signal_ok=${T3CODE_HOST_REDACT_SIGNAL_OK:-1}

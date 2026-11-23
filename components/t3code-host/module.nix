@@ -55,8 +55,8 @@ let
     name = "t3-connect";
     runtimeInputs = [
       cfg.package
-      pkgs.util-linux # runuser
       pkgs.coreutils
+      pkgs.gnused # sanitize_tty
       pkgs.curl
       pkgs.jq
       config.systemd.package
@@ -73,6 +73,9 @@ let
       PORT = toString cfg.port;
       LAN = if cfg.lan then "true" else "false";
       VERSION = lib.getVersion cfg.package;
+      # PATH for `t3` under systemd-run (as_host_raw): the host unit's path,
+      # cfg.package first so `t3` is always the configured package.
+      HOST_PATH = "${lib.makeBinPath [ cfg.package pkgs.gitMinimal pkgs.openssh pkgs.procps pkgs.lsof pkgs.gnugrep ]}:/etc/profiles/per-user/${cfg.user}/bin:/run/current-system/sw/bin";
     };
     text = builtins.readFile ./t3-connect.sh;
   };
@@ -238,9 +241,15 @@ in
         }
       ];
 
-      warnings = lib.optional
-        (cfg.openFirewall && cfg.host != null && builtins.elem cfg.host [ "127.0.0.1" "::1" "localhost" ])
-        "services.t3code-host.openFirewall has no effect while host is loopback; set lan = true or a non-loopback host.";
+      warnings =
+        lib.optional
+          (cfg.openFirewall
+            && ((cfg.host == null && !cfg.lan)
+              || (cfg.host != null
+                && (lib.hasPrefix "127." cfg.host || builtins.elem cfg.host [ "::1" "localhost" ]))))
+          "services.t3code-host.openFirewall has no effect while the host listens on loopback only; set lan = true (with host = null) or a non-loopback host."
+        ++ lib.optional (cfg.lan && cfg.host != null)
+          "services.t3code-host.lan has no effect while services.t3code-host.host is set; leave host = null for LAN binding.";
 
       environment.systemPackages = [ t3-connect cfg.package ];
 
@@ -302,6 +311,9 @@ in
       #   echo managed >${signInModeFile}; systemctl start t3code-sign-in; journalctl -fu t3code-sign-in
       systemd.services.t3code-sign-in = {
         description = "T3 Code Connect sign-in (device code flow; the code is in the journal)";
+        # A rebuild must not abort a pending device code.
+        restartIfChanged = false;
+        stopIfChanged = false;
         inherit (hostUnit) path environment;
         wants = [ "network-online.target" ];
         after = [ "network-online.target" ];

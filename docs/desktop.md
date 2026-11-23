@@ -62,7 +62,7 @@ open so you can read the output.
 | Disks, Disk usage | `lsblk` and `df`; `ncdu` of `/` |
 | Logs, Failed services | `journalctl -f`; `systemctl --failed` |
 | PandaCode Connect | sign in, status, logs, Full access on/off, sign out (`panda-connect`; asks for your password where it needs `sudo`) |
-| T3 Code Connect | sign in, start local, pair (direct / SSH), status, logs, *Devices* (list connected and pending devices), approve device, *Restart* (picks up an updated T3 Code; ends running sessions), unlink, stop, sign out (`t3-connect`; asks before restart, unlink, stop and sign out). See [t3code.md](t3code.md) |
+| T3 Code Connect | sign in (asks first when the host is running), start host, pair (direct / SSH), status (plain `t3-connect status`, including any version-mismatch warning), logs, *Devices* (list connected and pending devices), approve device, *Restart* (picks up an updated T3 Code; ends running sessions), unlink, stop, sign out (`t3-connect`; asks before restart, unlink, stop and sign out). See [t3code.md](t3code.md) |
 | Agents status | `panda-agentd status` (the optional agentd, off by default) |
 | Agents doctor | `panda-agents doctor`: MCP registry, agent CLI configs, `/mem`, checkpoints, `AGENTS.md` |
 | Checkpoints | List, Create, Restore (asks first) or Fork a `~/work` workspace with `panda-ckpt` ([checkpoints.md](checkpoints.md)) |

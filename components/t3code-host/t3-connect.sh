@@ -1,7 +1,7 @@
 # t3-connect: sign this box in to T3 Code Connect and manage the T3 Code host.
 # Set by module.nix (runtimeEnv): HOST_USER HOST_HOME T3CODE_HOME
 # CLOUDFLARED_PATH MARKER SIGN_IN_MODE_FILE LAST_MODE_FILE HOST PORT LAN
-# VERSION.
+# VERSION HOST_PATH.
 #
 # $MARKER holds the mode the host runs in: `connect` or `publish-only` (signed
 # in to T3 Connect), or `local` (direct/SSH access only). No marker: off.
@@ -42,25 +42,60 @@ need_root() {
   fi
 }
 
-# t3 as the host user, with the host's data dir and cloudflared: whatever it
-# prints (pairing tokens) stays on the caller's terminal. Root's controlling
-# TTY is never handed to the host user (TIOCSTI and friends): an interactive
-# caller gets a fresh pty, anything else no terminal and no stdin.
-as_host() {
-  local env=(HOME="$HOST_HOME" T3CODE_HOME="$T3CODE_HOME"
-    T3CODE_PORT="$PORT" T3CODE_LAN="$LAN"
-    T3CODE_MODE=web T3CODE_NO_BROWSER=true)
+# t3 as the host user in a transient unit under agents.slice, with the host's
+# environment, data dir, cloudflared and sandbox (module.nix hostUnit). No
+# caller fd that could be a TTY (TIOCSTI and friends) ever reaches it: stdin
+# is /dev/null and callers hand it pipes for stdout/stderr (as_host, or jq in
+# `status --live`). Whatever it prints (pairing tokens) goes to the caller.
+as_host_raw() {
+  local t3 env=(-E HOME="$HOST_HOME" -E T3CODE_HOME="$T3CODE_HOME"
+    -E T3CODE_PORT="$PORT" -E T3CODE_LAN="$LAN"
+    -E T3CODE_MODE=web -E T3CODE_NO_BROWSER=true -E PATH="$HOST_PATH")
   if [ -n "$HOST" ]; then
-    env+=(T3CODE_HOST="$HOST")
+    env+=(-E T3CODE_HOST="$HOST")
   fi
   if [ -n "$CLOUDFLARED_PATH" ]; then
-    env+=(T3CODE_CLOUDFLARED_PATH="$CLOUDFLARED_PATH")
+    env+=(-E T3CODE_CLOUDFLARED_PATH="$CLOUDFLARED_PATH")
   fi
-  if [ -t 0 ] && [ -t 1 ]; then
-    (cd "$HOST_HOME" && runuser --pty -u "$HOST_USER" -- env "${env[@]}" t3 "$@")
-  else
-    (cd "$HOST_HOME" && runuser -u "$HOST_USER" -- env "${env[@]}" t3 "$@" </dev/null)
-  fi
+  # Absolute, so the configured package runs whatever systemd-run's lookup.
+  t3=$(PATH=$HOST_PATH command -v t3) || die "t3 not found in $HOST_PATH"
+  systemd-run --quiet --pipe --wait --collect \
+    -p User="$HOST_USER" -p WorkingDirectory="$HOST_HOME" -p Slice=agents.slice \
+    -p StandardInput=null -p NoNewPrivileges=yes -p ProtectSystem=strict \
+    -p ReadWritePaths="$HOST_HOME" -p PrivateTmp=yes -p PrivateDevices=yes \
+    -p ProtectKernelModules=yes -p ProtectClock=yes -p ProtectHostname=yes \
+    -p RestrictRealtime=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes \
+    -p SystemCallArchitectures=native \
+    -p "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK" \
+    "${env[@]}" -- "$t3" "$@" </dev/null
+}
+
+# Strips terminal escapes and control bytes (ANSI CSI and OSC sequences, C0
+# but tab and newline, DEL, UTF-8 C1) from what the host user prints before
+# it reaches root's terminal. Byte-wise (C locale), so the C1 pattern also
+# matches under a UTF-8 locale.
+sanitize_tty() {
+  LC_ALL=C sed -u -E \
+    -e 's/\x1b\][^\x07\x1b]*(\x07|\x1b\\)//g' \
+    -e 's#\x1b\[[0-9;?]*[ -/]*[@-~]##g' \
+    -e 's/[\x00-\x08\x0b-\x1f\x7f]//g' \
+    -e 's/\xc2[\x80-\x9f]//g'
+}
+
+# as_host_raw with stdout and stderr each through sanitize_tty; returns t3's
+# exit status. Both filters belong to the pipelines below, so they have
+# drained (stderr included) before this returns.
+as_host() {
+  local errexit=no st
+  case $- in *e*) errexit=yes ;; esac
+  set +e
+  {
+    as_host_raw "$@" 2>&1 1>&3 3>&- | sanitize_tty >&2 3>&-
+    exit "${PIPESTATUS[0]}"
+  } 3>&1 | sanitize_tty
+  st=${PIPESTATUS[0]}
+  if [ "$errexit" = yes ]; then set -e; fi
+  return "$st"
 }
 
 current_mode() {
@@ -174,9 +209,17 @@ sign_in() {
   die "sign-in did not complete ($(systemctl show -P Result "$sign_in_unit")); see journalctl -u $sign_in_unit"
 }
 
+# Starting the host stops a pending sign-in (Conflicts=); say so.
+note_sign_in_cancel() {
+  if systemctl is-active --quiet "$sign_in_unit"; then
+    echo "t3-connect: cancelling pending $sign_in_unit" >&2
+  fi
+}
+
 start() {
   [ $# -eq 0 ] || usage
   ensure_marker
+  note_sign_in_cancel
   systemctl start "$unit"
   echo "t3-connect: $unit started ($(current_mode))"
 }
@@ -207,6 +250,7 @@ stop() {
 restart() {
   [ $# -eq 0 ] || usage
   [ -e "$MARKER" ] || die "host is off; run: t3-connect start (or sign-in)"
+  note_sign_in_cancel
   systemctl restart "$unit"
   echo "t3-connect: $unit restarted (running agent sessions were stopped)"
 }
@@ -230,12 +274,23 @@ pair() {
   done
   if [ "$(service_state)" != active ]; then
     ensure_marker
+    note_sign_in_cancel
     systemctl start "$unit"
+    case "$(current_mode)" in
+      connect | publish-only)
+        echo "t3-connect: started host in $(current_mode) mode (run 'sudo t3-connect unlink' first for local-only serving)" >&2
+        ;;
+      *) ;;
+    esac
   fi
   wait_ready
   as_host pair "$@"
   if [ "$tailscale" = no ] && is_loopback; then
-    echo "t3-connect: the host listens on $HOST only; from your machine: ssh -L $PORT:$(url_host):$PORT <user>@<this box>" >&2
+    case "$HOST" in
+      # Quoted: zsh would fail globbing [::1].
+      *:*) echo "t3-connect: the host listens on $HOST only; from your machine: ssh -L '$PORT:$(url_host):$PORT' <user>@<this box>" >&2 ;;
+      *) echo "t3-connect: the host listens on $HOST only; from your machine: ssh -L $PORT:$(url_host):$PORT <user>@<this box>" >&2 ;;
+    esac
   fi
 }
 
@@ -292,7 +347,11 @@ running_version() {
 status() {
   local json=no live=no mode enabled=false signed_in=false service cloud=null
   local running=null running_text
-  local display_host=${HOST:-0.0.0.0}
+  local display_host=$HOST
+  # host = null: T3 Code binds by T3CODE_LAN.
+  if [ -z "$display_host" ]; then
+    if [ "$LAN" = true ]; then display_host=0.0.0.0; else display_host=127.0.0.1; fi
+  fi
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json=yes ;;
@@ -317,7 +376,7 @@ status() {
   fi
   if [ "$live" = yes ]; then
     # One JSON document, or null: never let a bad reply break our own JSON.
-    cloud=$(as_host connect status --json 2>/dev/null |
+    cloud=$(as_host_raw connect status --json 2>/dev/null |
       jq -cs 'if length == 1 then .[0] else null end' 2>/dev/null) || cloud=
     [ -n "$cloud" ] || cloud=null
   fi

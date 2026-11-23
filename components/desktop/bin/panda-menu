@@ -109,12 +109,21 @@ connect() {
 
 # T3 Code Connect (t3-connect). Destructive actions ask first.
 t3_connect() {
-  case "$(printf '%s\n' "Sign in" "Start local" "Pair (direct / SSH)" Status Logs \
+  # "Start host" resumes the signed-in mode a stop left behind (connect or
+  # publish-only), or starts local-only when this box is not linked.
+  case "$(printf '%s\n' "Sign in" "Start host" "Pair (direct / SSH)" Status Logs \
     "Approve device" Devices Restart Unlink Stop "Sign out" | pick "t3code>")" in
-    "Sign in") term t3code t3-connect sign-in ;;
-    "Start local") term t3code t3-connect start ;;
+    "Sign in")
+      # Sign-in stops a running host (one T3 per data dir) until it completes.
+      if t3-connect status --json 2>/dev/null |
+        jq -e '.enabled == true and .service == "active"' >/dev/null 2>&1; then
+        confirm "Stop the running T3 Code host (ends sessions) and sign in to T3 Connect" || return 0
+      fi
+      term t3code t3-connect sign-in ;;
+    "Start host") term t3code t3-connect start ;;
     "Pair (direct / SSH)") term t3code t3-connect pair ;;
-    "Status") term t3code sh -c 't3-connect status --json | jq .' ;;
+    # Plain text: also warns when the running version differs from the installed one.
+    "Status") term t3code t3-connect status ;;
     "Logs") term t3code t3-connect logs ;;
     "Approve device")
       code=$(printf '' | pick "device code>") || return 0

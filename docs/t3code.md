@@ -34,7 +34,9 @@ once approved it writes the enabled marker and starts `t3code-host.service`.
 If a local host is already running (`T3: local`), `sign-in` stops it, and the agent sessions it
 runs, while linking. If sign-in fails, the local host is started again automatically. Pressing
 Ctrl-C only detaches from the log stream: `t3code-sign-in.service` keeps running and the code
-stays valid. Run `sudo t3-connect stop` to cancel a pending sign-in.
+stays valid. `sudo t3-connect stop` cancels a pending sign-in and leaves the host stopped;
+`sudo t3-connect start` (or `restart` or `pair`) cancels it and starts the host right back,
+keeping the enabled marker.
 
 Over ssh without a tty, or from a script, start it without waiting and read the link from the
 journal:
@@ -64,6 +66,9 @@ t3-connect status                  # add --json for scripts; --live (root) check
 ## Option 2: Direct access over an SSH tunnel
 
 No cloud account or relay: the host stays on loopback and you reach it through ssh.
+
+If this box was previously signed in to T3 Code Connect, run `sudo t3-connect unlink` first so it
+serves locally without the Connect relay.
 
 1. On the box, start the host and create a one-time pairing link:
 
@@ -155,6 +160,11 @@ the running host was started with, and `null` when the host is stopped. After an
 `t3-connect status` warns when the two differ; run `sudo t3-connect restart` to pick up the new
 version.
 
+`sudo t3-connect status --json --live` adds a `cloud` key: the JSON object from
+`t3 connect status --json`, or `null` if it is unavailable. After `sudo t3-connect unlink`,
+`status` reports `signedIn: false`: the box is no longer linked to T3 Connect, even though the
+stored T3 login remains in `/var/lib/agent/.t3`.
+
 **Stop and start keep the mode.** `sudo t3-connect stop` stops the host (and cancels a pending
 `t3code-sign-in.service`) but remembers the Connect mode (`last-mode`), so a later
 `sudo t3-connect start` resumes Connect or publish-only without signing in again. To switch to
@@ -212,6 +222,10 @@ PandaCode tasks:
   `agent` is trusted as much as the least trusted task. Neither host can `sudo` or touch the owner's
   home. The box-wide `dev.tty.legacy_tiocsti = 0` sysctl stops an agent process from injecting
   keystrokes into a terminal it shares, for example after `sudo -iu agent`.
+- **Sandboxed helper commands.** `t3-connect` runs its `t3` helper commands (`pair`, `devices`,
+  `approve`, `unlink`, `sign-out`, `status --live`) through `systemd-run --pipe`, as the same
+  `agent` user in `agents.slice` with the same systemd sandbox as the host. The caller's TTY is
+  never passed to `agent`, and terminal control characters are stripped from the output.
 - **Contained runs.** `t3code-host.service` runs in `agents.slice` with `Delegate=yes`, so each
   task gets its own cgroup and the cgroup OOM killer takes the task, not the host or the box.
 - **Rebuilds do not kill sessions.** `restartIfChanged = false`: a `nixos-rebuild` or update does

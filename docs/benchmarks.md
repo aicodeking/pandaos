@@ -50,10 +50,10 @@ For benchmarks measured outside `tests/`:
 Sizes are MiB. These numbers are from CI run
 [40733737472](https://github.com/AICodeKing/pandaos/actions/runs/40733737472), nixpkgs `718f670`,
 except the installed system closures, which are from CI run
-[45193178827](https://github.com/AICodeKing/pandaos/actions/runs/45193178827), after T3 Code was
+[45199881726](https://github.com/AICodeKing/pandaos/actions/runs/45199881726), after T3 Code was
 added.
 
-**Budgets calibrated after T3 Code** (`tests/budgets.json`, measured in CI run 45193178827):
+**Budgets calibrated after T3 Code** (`tests/budgets.json`, measured in CI run 45199881726):
 
 | Metric | headless measured / budget | desktop measured / budget |
 |---|---|---|

@@ -86,6 +86,39 @@ check 'JSON "token"' '{"token":"s3cr3t","ok":true}' '{"token":"[redacted]","ok":
 check 'JSON "pairingToken"' '{"pairingToken": "s3cr3t", "ttl": 300}' '{"pairingToken": "[redacted]", "ttl": 300}'
 check 'JSON "access_token"' '{"access_token":"a","refresh_token":"b"}' '{"access_token":"[redacted]","refresh_token":"[redacted]"}'
 check 'JSON "authToken"' '{"authToken" : "s3cr3t"}' '{"authToken" : "[redacted]"}'
+# JSON: any "*token" key.
+check 'JSON "refresh_token" alone' '{"refresh_token":"s3cr3t"}' '{"refresh_token":"[redacted]"}'
+check 'JSON "sessionToken"' '{"sessionToken":"s3cr3t","id":1}' '{"sessionToken":"[redacted]","id":1}'
+check 'JSON "bearerToken"' '{"bearerToken": "s3cr3t"}' '{"bearerToken": "[redacted]"}'
+check 'JSON "refreshToken" camelCase' '{"refreshToken":"s3cr3t"}' '{"refreshToken":"[redacted]"}'
+check 'JSON "TOKEN" upper case' '{"TOKEN":"s3cr3t"}' '{"TOKEN":"[redacted]"}'
+# Labels with ANSI or extra spaces.
+check 'Pairing URL: ANSI between words' "Pairing${esc}[0m URL: https://h/pair/s3cr3t" "Pairing${esc}[0m URL: [redacted]"
+check 'Pairing URL: two spaces' 'Pairing  URL: https://h/?token=s3cr3t' 'Pairing  URL: [redacted]'
+check 'Pairing URL: ANSI-only gap' "Pairing${esc}[1mURL${esc}[0m: s3cr3t" "Pairing${esc}[1mURL${esc}[0m: [redacted]"
+check 'PAIRING URL: upper case' 'PAIRING URL: s3cr3t' 'PAIRING URL: [redacted]'
+check 'Token  : spaces before colon' 'Token  :  s3cr3t' 'Token  :  [redacted]'
+# Authorization: Bearer.
+check 'Authorization: Bearer' 'Authorization: Bearer s3cr3t' 'Authorization: Bearer [redacted]'
+check 'authorization: bearer lower case' 'authorization:bearer  s3cr3t rest' 'authorization:bearer  [redacted] rest'
+check 'Authorization Bearer with ANSI' "Authorization${esc}[0m : ${esc}[1mBearer${esc}[0m s3cr3t" "Authorization${esc}[0m : ${esc}[1mBearer${esc}[0m [redacted]"
+check 'curl -H Authorization: Bearer' "curl -H 'Authorization: Bearer s3cr3t' https://h/" "curl -H 'Authorization: Bearer [redacted]' https://h/"
+# *token= anywhere a key can start.
+check '?pairingToken=' 'https://h/?pairingToken=s3cr3t&x=1' 'https://h/?pairingToken=[redacted]&x=1'
+check '&authToken=' 'https://h/?a=1&authToken=s3cr3t' 'https://h/?a=1&authToken=[redacted]'
+check '#refresh_token=' 'https://h/cb#refresh_token=s3cr3t' 'https://h/cb#refresh_token=[redacted]'
+check 'token = X with spaces' 'token = s3cr3t' 'token = [redacted]'
+check 'TOKEN=X upper case' 'env TOKEN=s3cr3t ok' 'env TOKEN=[redacted] ok'
+check 'access_token= at line start' 'access_token=s3cr3t' 'access_token=[redacted]'
+check 'sessionToken= after space' 'set sessionToken=s3cr3t;next' 'set sessionToken=[redacted];next'
+check 'two tokens on one line' 'a?token=one&authToken=two' 'a?token=[redacted]&authToken=[redacted]'
+# /pair/<token> path segment.
+check '/pair/<token>' 'open https://app.t3.codes/pair/s3cr3t now' 'open https://app.t3.codes/pair/[redacted] now'
+check '/pair/<token>?query' 'https://h/pair/s3cr3t?x=1' 'https://h/pair/[redacted]?x=1'
+check '/pair/<token>/rest' 'https://h/pair/s3cr3t/ok' 'https://h/pair/[redacted]/ok'
+check 'quoted /pair/<token>' '"https://h/pair/s3cr3t"' '"https://h/pair/[redacted]"'
+check 'stderr Authorization: Bearer' 'Authorization: Bearer s3cr3t' 'Authorization: Bearer [redacted]' stderr
+check 'stderr /pair/<token>' 'https://h/pair/s3cr3t' 'https://h/pair/[redacted]' stderr
 check 'stderr Token:' 'Token: s3cr3t' 'Token: [redacted]' stderr
 check 'stderr ?token=' 'see https://h/?token=s3cr3t' 'see https://h/?token=[redacted]' stderr
 
@@ -96,6 +129,12 @@ check 'verification URL kept' 'https://app.t3.codes/device' 'https://app.t3.code
 check 'user_code URL kept' 'https://app.t3.codes/device?user_code=ABCD-1234' 'https://app.t3.codes/device?user_code=ABCD-1234'
 check 'plain log kept' 'Listening on http://127.0.0.1:3773' 'Listening on http://127.0.0.1:3773'
 check 'stderr device code kept' 'Code: WXYZ-9876' 'Code: WXYZ-9876' stderr
+check 'ANSI device code kept' "${esc}[1mCode:${esc}[0m ABCD-1234" "${esc}[1mCode:${esc}[0m ABCD-1234"
+check 'tokens count kept' 'used 1200 tokens: ok' 'used 1200 tokens: ok'
+check 'tokenizer= kept' 'tokenizer=cl100k' 'tokenizer=cl100k'
+check 'pair route without token kept' 'GET /pair 200' 'GET /pair 200'
+check 'Bearer without Authorization kept' 'auth scheme: Bearer' 'auth scheme: Bearer'
+check 'JSON non-token key kept' '{"tokenCount":3,"user_code":"ABCD-1234"}' '{"tokenCount":3,"user_code":"ABCD-1234"}'
 
 # --- exit status --------------------------------------------------------------
 # CMD: a bash that exits $1 on TERM after touching $2 (ready).

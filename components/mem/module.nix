@@ -27,7 +27,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    users.groups.panda-mem.members = cfg.clients;
+    users.groups.panda-mem.members = lib.unique cfg.clients;
     users.users.panda-mem = {
       isSystemUser = true;
       group = "panda-mem";

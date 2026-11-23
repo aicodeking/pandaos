@@ -219,21 +219,25 @@ sudo t3-connect sign-in --no-wait
 sudo journalctl -u t3code-sign-in -o cat -b
 ```
 
-The journal shows only the public device-code link and code (no token); the agent may relay them,
-or have the human read them privately. The human opens the link on a phone or laptop, checks the
+Have the human read the link and code privately by running
+`sudo journalctl -u t3code-sign-in -o cat -b` in their own terminal (or by running
+`sudo t3-connect sign-in` there themselves). The agent must never capture, read or relay the
+device code or verification URL. The human opens the link on a phone or laptop, checks the
 code, and approves it in their T3 Code account. Codes expire, so rerun `sign-in` if needed. After
 the human confirms approval, check the status:
 
 ```sh
 t3_json=$(t3-connect status --json)
-# compact JSON: {"enabled":true,"signedIn":true,"service":"active","host":"127.0.0.1","port":3773,...}
+# compact JSON: {"enabled":true,"signedIn":true,"mode":"connect","service":"active","host":"127.0.0.1","port":3773,"version":"0.1.11","runningVersion":"0.1.11"}
 grep -q '"signedIn":true' <<<"$t3_json" && grep -q '"service":"active"' <<<"$t3_json"
 ```
 
 If a device asks for approval, have the human read its code and run
 `sudo t3-connect approve <CODE>` (`sudo t3-connect devices` lists them).
 
-**Direct T3 Code without the relay.** For an SSH tunnel only, start the loopback host:
+**Direct T3 Code without the relay.** If the box was previously signed in to T3 Code Connect,
+have the human run `sudo t3-connect unlink` first so it serves locally without the Connect relay.
+For an SSH tunnel only, start the loopback host:
 
 ```sh
 sudo t3-connect start
