@@ -57,6 +57,4 @@ installer writes to `/mnt/etc`). Previously measured: headless 1971 MB, desktop
 panda-agents. PandaCode Connect first added about 1.2 GB to headless and 0.8 GB to desktop (from
 1637 / 2114 MB to 2834 / 2915 MB), mostly `appimageTools`' default FHS library set. The slim FHS env
 in `components/pandacode-host/package.nix` (only the libraries the AppImage leaves to the host, no
-`glibcLocales`; see `slim-notes.md`) brought that down by 863 MB (headless) and 502 MB (desktop). T3 Code Connect (T3 Code v0.1.11 + cloudflared, about 530 MB unpacked) raised the budgets to
-2450 / 2980 MB (headless / desktop) provisionally; they get tightened to measured + 10% after the first CI
-run. The idle RAM budgets stay at 200 / 450 MB: `t3code-host` is inactive at boot.
+`glibcLocales`; see `slim-notes.md`) brought that down by 863 MB (headless) and 502 MB (desktop). T3 Code Connect (T3 Code v0.1.11 + cloudflared, ~507 MB NAR) took closures to 2197 MB (headless) and 2682 MB (desktop) in CI run 45179692690; budgets are tightened to measured + 10% (2417 / 2950 MB). The idle RAM budgets stay at 200 / 450 MB (measured 116 / 201 MB): `t3code-host` is inactive at boot.

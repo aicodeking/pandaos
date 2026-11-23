@@ -1,7 +1,9 @@
 # T3 Code's release tarball: `t3`, a Node.js v26 Single Executable Application
 # (the app is a ~20.9 MB blob in an ELF note segment), plus the files it loads
-# at runtime relative to realpath(execPath): client/ (web UI), node_modules/
-# (native addons), lib/ (bundled libatomic) and resource-monitor/.
+# at runtime from the directory of process.execPath (import.meta.dirname in
+# the SEA, which does NOT resolve symlinks): client/ (web UI), node_modules/
+# (native addons), lib/ (bundled libatomic) and resource-monitor/. Hence
+# bin/t3 is an exec wrapper, not a symlink.
 # Bump: change version and hash (`nix hash convert --to sri sha256:<hex>`), and
 # re-pin cloudflared to what packages/shared/src/relayClient.ts downloads.
 {
@@ -9,6 +11,7 @@
   stdenv,
   fetchurl,
   autoPatchelfHook,
+  runtimeShell,
 }:
 let
   version = "0.1.11";
@@ -80,14 +83,23 @@ stdenv.mkDerivation {
       -exec rm -rf {} +
     mkdir -p "$out/lib/t3" "$out/bin"
     cp -a t3 client node_modules lib resource-monitor "$out/lib/t3/"
-    # T3 finds client/ and node_modules/ next to realpath(execPath): a symlink, not a wrapper.
-    ln -s ../lib/t3/t3 "$out/bin/t3"
+    # T3 resolves client/ (and node_modules/, lib/, resource-monitor/) from
+    # import.meta.dirname, which the SEA derives from process.execPath without
+    # resolving symlinks. A symlink (bin/t3, or /run/current-system/sw/bin/t3)
+    # would make that dirname bin/ and `t3 serve` 503s on `/`. exec-ing the real
+    # binary by absolute path pins execPath to $out/lib/t3/t3.
+    cat > "$out/bin/t3" <<EOF
+    #!${runtimeShell}
+    exec "$out/lib/t3/t3" "\$@"
+    EOF
+    chmod 0755 "$out/bin/t3"
     runHook postInstall
   '';
 
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
+    test -f "$out/lib/t3/client/index.html"
     HOME="$TMPDIR" T3CODE_HOME="$TMPDIR/.t3" "$out/bin/t3" --version
     runHook postInstallCheck
   '';
