@@ -115,12 +115,17 @@ Before you hand out API keys:
    pass `--untrusted-tenants true --vm-domain <vmDomain> --desktop-domain <desktopDomain>
    --dns-provider '<provider>'` instead and configure the Caddy DNS plugin
    (`gateway.caddyPackage`) and `gateway.environmentFile` before the post-install rebuild. On a
-   `--build` install, put them in the `--extra-config` file and place the credentials file on the
-   target before running the installer.
+   `--build` install, declare both in the `--extra-config` file (`extra.nix`) before running the
+   installer, with the plugin `hash` already computed by a dry build (see the
+   [Agent Setup runbook](../AGENT_SETUP.md#b2-install-the-server)). Do not try to place the
+   credentials file on the target disk beforehand: `panda-install` erases it. After the first
+   boot, write `/var/lib/secrets/caddy-dns.env` (mode `0600`) and run `sudo systemctl restart caddy`.
    No ISO or console, only ssh into the provider's OS (Hetzner's default Ubuntu, a rescue system)?
    Install over ssh with kexec and `--build`; see [install.md](install.md#hosted-server-over-ssh-kexec).
    On hosts without DHCP (static addresses), use `--build` so the network settings apply from the first boot.
-3. Reboot, log in, and add any further settings to `/etc/pandaos/local.nix`. The example below
+3. Reboot, log in, and add any further settings to `/etc/pandaos/extra.nix`, a NixOS module
+   (`{ lib, pkgs, ... }: { ... }`) that `local.nix` already imports; leave `local.nix` (mode
+   `0600`, holds the password hash) as written. The example below
    uses separate tenant domains, DNS-01 and declarative guest images:
    ```nix
    services.boat = {
@@ -170,7 +175,8 @@ when `services.boat.images` is empty.
 - **GitHub Release.** From [v0.2.0](https://github.com/AICodeKing/pandaos/releases/tag/v0.2.0),
   download into an empty directory. `boat_guest_SHA256SUMS` lists the kernel, the slim rootfs,
   every full part and the reassembled full rootfs. With the GitHub CLI, also check provenance with
-  `gh attestation verify <file> --repo AICodeKing/pandaos` for each `boat-guest-*` file.
+  `gh attestation verify <file> --repo AICodeKing/pandaos --signer-workflow AICodeKing/pandaos/.github/workflows/release.yml --source-ref refs/tags/v0.2.0`
+  for each `boat-guest-*` file.
 
   **Slim (single file, headless):**
 

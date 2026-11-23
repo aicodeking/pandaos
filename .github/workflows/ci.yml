@@ -11,7 +11,8 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/nix-checks.yml
-    secrets: inherit
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
   unit-checks:
     permissions:

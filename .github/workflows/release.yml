@@ -12,6 +12,12 @@ on:
 
 permissions: {}
 
+# The trusted release-signing key, pinned here rather than read from the commit under
+# test, so a pushed commit that swaps nixos/modules/release-signers can't bypass the gate.
+# Keep in sync with nixos/modules/release-signers and SECURITY.md.
+env:
+  PINNED_SIGNER: 'release@pandaos namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO8zyQo+fbC0tMzI4gvW6ZICS0p8OVcmeYNGJREXBlNG'
+
 # One release at a time, so the release branch can't be moved out of order.
 # Dry runs queue apart: GitHub drops a waiting run when a newer one joins its group.
 concurrency:
@@ -19,6 +25,54 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Fails an unsigned, off-main or non-fast-forward v* tag in seconds, before any ISO or
+  # guest image is built or attested. Dry runs (workflow_dispatch) skip it.
+  verify-tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Dry run
+        if: github.event_name != 'push'
+        run: |
+          echo "Dry run ($GITHUB_EVENT_NAME): skipping tag/signature gate"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+
+      - name: Require the tag to be on main
+        if: github.event_name == 'push'
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
+
+      - name: Require signed release commit
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          signers=nixos/modules/release-signers
+          grep -Fqx "$PINNED_SIGNER" "$signers" \
+            || { echo "::error::$signers does not contain the pinned release signer"; exit 1; }
+          tmp=$(mktemp)
+          printf '%s\n' "$PINNED_SIGNER" > "$tmp"
+          git -c gpg.ssh.allowedSignersFile="$tmp" verify-commit "$GITHUB_SHA" \
+            || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) has no valid signature from the pinned release signer"; exit 1; }
+          status=$(git -c gpg.ssh.allowedSignersFile="$tmp" log -1 --format=%G? "$GITHUB_SHA")
+          test "$status" = G \
+            || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) signature status is '$status', want G"; exit 1; }
+
+      - name: Require a fast-forward of the release branch
+        if: github.event_name == 'push'
+        run: |
+          if git ls-remote --exit-code --heads origin release >/dev/null; then
+            git fetch origin release
+            git merge-base --is-ancestor FETCH_HEAD "$GITHUB_SHA" \
+              || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) would rewind or diverge from origin/release"; exit 1; }
+          fi
+
   checks:
     permissions:
       contents: read
@@ -32,6 +86,7 @@ jobs:
     uses: ./.github/workflows/unit-checks.yml
 
   build:
+    needs: [verify-tag]
     runs-on: ubuntu-latest
     timeout-minutes: 240
     permissions:
@@ -91,6 +146,10 @@ jobs:
             test -n "$iso"
             cp -L "$iso" "dist/pandaos-${GITHUB_REF_NAME}-$p-x86_64-linux.iso"
           done
+          for f in dist/*.iso; do
+            size=$(stat -c %s "$f")
+            test "$size" -lt 2147483648 || { echo "::error::$f ($size bytes) is over GitHub's 2 GiB asset limit"; exit 1; }
+          done
           cd dist
           sha256sum -- *.iso > SHA256SUMS
           tee -a "$GITHUB_STEP_SUMMARY" < SHA256SUMS
@@ -98,7 +157,9 @@ jobs:
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         if: github.event_name == 'push'
         with:
-          subject-path: dist/*.iso
+          subject-path: |
+            dist/*.iso
+            dist/SHA256SUMS
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -108,6 +169,7 @@ jobs:
           if-no-files-found: error
 
   boat-assets:
+    needs: [verify-tag]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -204,7 +266,9 @@ jobs:
         with:
           subject-path: |
             dist/boat_*_*
+            dist/boat_SHA256SUMS
             dist/boat-guest-*
+            dist/boat_guest_SHA256SUMS
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -215,7 +279,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push'
-    needs: [checks, unit-checks, build, boat-assets]
+    needs: [verify-tag, checks, unit-checks, build, boat-assets]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and move the release branch
@@ -229,16 +293,19 @@ jobs:
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
             || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
 
-      # Only commits signed by a key in nixos/modules/release-signers may be released
-      # (git verifies SSH signatures with the runner's preinstalled ssh-keygen -Y verify).
+      # Defense in depth (verify-tag already ran this): only commits signed by the pinned
+      # key may be released (git verifies SSH signatures with the runner's ssh-keygen -Y verify).
       - name: Require signed release commit
         run: |
           set -euo pipefail
           signers=nixos/modules/release-signers
-          test -s "$signers" || { echo "::error::$signers is missing or empty"; exit 1; }
-          git -c gpg.ssh.allowedSignersFile="$signers" verify-commit "$GITHUB_SHA" \
-            || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) has no valid signature from $signers"; exit 1; }
-          status=$(git -c gpg.ssh.allowedSignersFile="$signers" log -1 --format=%G? "$GITHUB_SHA")
+          grep -Fqx "$PINNED_SIGNER" "$signers" \
+            || { echo "::error::$signers does not contain the pinned release signer"; exit 1; }
+          tmp=$(mktemp)
+          printf '%s\n' "$PINNED_SIGNER" > "$tmp"
+          git -c gpg.ssh.allowedSignersFile="$tmp" verify-commit "$GITHUB_SHA" \
+            || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) has no valid signature from the pinned release signer"; exit 1; }
+          status=$(git -c gpg.ssh.allowedSignersFile="$tmp" log -1 --format=%G? "$GITHUB_SHA")
           test "$status" = G \
             || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) signature status is '$status', want G"; exit 1; }
 

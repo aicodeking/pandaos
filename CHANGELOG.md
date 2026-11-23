@@ -112,7 +112,8 @@ All notable changes to PandaOS are documented here. The format follows
   It lays out btrfs subvolumes `@`, `@nix`, `@home`, `@mem`, `@log`, `@snapshots`, installs
   systemd-boot, writes filesystem UUIDs to `/etc/pandaos/disk.nix` (mounts by UUID), and writes a
   local flake at `/etc/pandaos` (`nixosConfigurations.pandaos`) with a **pinned `flake.lock`**, so
-  rebuilds work offline right after install, and `/etc/pandaos/VERSION`. The desktop ISO defaults
+  rebuilds use the installed versions (fetching the locked inputs needs a network), and
+  `/etc/pandaos/VERSION`. The desktop ISO defaults
   to the desktop profile. `--relay` writes `/var/lib/panda-agentd/relay`.
 - **Release channel:** installed boxes track `github:AICodeKing/pandaos/release`, which
   `release.yml` moves only after a tagged release passes all checks.
@@ -266,6 +267,5 @@ The first version (v0).
 
 - The `panda` user has the default password `panda`. Change it with `passwd`. Fixed in v0.2.0.
 
-[Unreleased]: https://github.com/AICodeKing/pandaos/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/AICodeKing/pandaos/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/AICodeKing/pandaos/releases/tag/v0.1.0
+[Unreleased]: https://github.com/AICodeKing/pandaos/compare/v0.2.0...main
+[0.2.0]: https://github.com/AICodeKing/pandaos/releases/tag/v0.2.0

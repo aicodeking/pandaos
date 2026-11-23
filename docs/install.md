@@ -11,7 +11,7 @@
 - A target disk of at least 8 GiB.
 - A USB stick at least as big as the ISO.
 - A target disk you are happy to **erase completely**.
-- The ISO installer works offline. The SSH/kexec path and PandaCode setup require a network.
+- The ISO installer works offline. The SSH/kexec path, PandaCode setup, and every later `nixos-rebuild` require a network.
 - For the `server` profile, a dedicated host with `/dev/kvm`. See the [boat guide](boat.md).
 
 ## 1. Get the ISO
@@ -27,7 +27,9 @@ Check it, and optionally check the build provenance with the GitHub CLI:
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
-gh attestation verify pandaos-v0.2.0-headless-x86_64-linux.iso --repo AICodeKing/pandaos
+gh attestation verify pandaos-v0.2.0-headless-x86_64-linux.iso --repo AICodeKing/pandaos \
+  --signer-workflow AICodeKing/pandaos/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.2.0
 ```
 
 Confirm the checksum output names your ISO and reports `OK`. To build from source on x86_64
@@ -135,8 +137,10 @@ wifi works right after install without a network. It is not the full
 `disk.nix`, `local.nix` (your hostname, time zone, user, password hash and ssh key) and `VERSION`.
 `flake.nix` defines `nixosConfigurations.pandaos`, which tracks the release channel
 `github:AICodeKing/pandaos/release` (see [updates-and-rollback.md](updates-and-rollback.md#the-release-channel)).
-`flake.lock` pins the exact revisions the ISO was built from, so a rebuild works offline right after
-install. The daily update and any manual rebuild use this flake:
+`flake.lock` pins the exact revisions the ISO was built from, so a rebuild without a channel update
+uses those same versions. The ISO installs offline, but the installed system does not bundle
+nixpkgs: the first `nixos-rebuild` needs a network to fetch the locked flake inputs, unless they
+are already cached in the local Nix store. The daily update and any manual rebuild use this flake:
 
 ```sh
 sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
@@ -238,8 +242,23 @@ needs **at least 8 GiB of RAM; 16 GiB or more is recommended** for `server` or `
      --ssh-key "ssh-ed25519 AAAA... one" --ssh-key "ssh-ed25519 AAAA... two" \
      --extra-config /root/extra.nix
    ```
+   Before building and running `panda-install` as root from GitHub, check what you build: either
+   pin the exact verified commit with `github:AICodeKing/pandaos?rev=<commit-sha>` (below), or
+   verify that the tag commit is signed by the release-signing key published in
+   [SECURITY.md](../SECURITY.md#release-signing-key) (run this on your workstation or any machine
+   with `git` and OpenSSH 8.2+):
+   ```sh
+   printf '%s\n' 'release@pandaos namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO8zyQo+fbC0tMzI4gvW6ZICS0p8OVcmeYNGJREXBlNG' >allowed_signers
+   git clone https://github.com/AICodeKing/pandaos && cd pandaos
+   git -c gpg.ssh.allowedSignersFile=../allowed_signers verify-commit 'v0.2.0^{commit}'
+   git rev-parse 'v0.2.0^{commit}'   # use this SHA as ?rev=<commit-sha>
+   ```
    ssh accepts keys only and root cannot log in. `--sudo-nopasswd` lets the key holder use `sudo`
    without a password (the account password stays locked); or pass `--password-hash` for a sudo password.
+   Nix copies `/etc/pandaos/local.nix`, including any password hash, into the world-readable
+   `/nix/store` during `--build` and every `nixos-rebuild`. If the hash must stay secret from
+   other local users, prefer key-only login (`--ssh-key` with `--sudo-nopasswd`) or
+   `users.users.<user>.hashedPasswordFile` pointing at a root-only file.
    `github:AICodeKing/pandaos/v0.2.0` follows the tag. To pin the exact commit instead, use
    `github:AICodeKing/pandaos?rev=<commit-sha>` (the full 40-character SHA of the verified v0.2.0
    commit, or of the trusted commit you want before the tag is available).
@@ -247,8 +266,11 @@ needs **at least 8 GiB of RAM; 16 GiB or more is recommended** for `server` or `
    --vm-domain <vmDomain> --desktop-domain <desktopDomain> --dns-provider '<provider>'` (for
    example `'cloudflare {env.CF_API_TOKEN}'`), and before the build add
    `services.boat.gateway.caddyPackage` (Caddy with the matching DNS plugin) and
-   `services.boat.gateway.environmentFile` to `/root/extra.nix`, with that credentials file
-   placed on the target. See the [boat TLS setup](boat.md#tls).
+   `services.boat.gateway.environmentFile` to `/root/extra.nix` (compute the plugin `hash` with a
+   dry build first, as in the [Agent Setup runbook](../AGENT_SETUP.md#b2-install-the-server)).
+   `panda-install` erases the target disk, so create the credentials file
+   (`/var/lib/secrets/caddy-dns.env`) after the first boot, then run `sudo systemctl restart caddy`.
+   See the [boat TLS setup](boat.md#tls).
 5. Before rebooting, check the built network unit, and register the boot entry (PandaOS leaves EFI
    variables alone). Keep the provider's PXE entry first so its rescue system still works:
    ```sh
