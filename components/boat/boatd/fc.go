@@ -309,7 +309,11 @@ func (c Config) ioMax(capWbps int64) (string, bool) {
 // writeIOMaxFile is replaceable in tests to model per-device cgroup updates.
 var writeIOMaxFile = os.WriteFile
 
-// ioMaxLines emits a separate cgroup rule for every underlying disk.
+// ioMaxLines emits a separate cgroup rule for every underlying disk. On a multi-disk
+// dm/RAID/LVM stateDir, ioMaxMBps/ioMaxIOPS thus apply per resolved physical disk, so a
+// striped RAID0/LVM volume aggregates across members. The limit is deliberately not
+// divided: asymmetric dm layouts (e.g. cow-root, where writes hit one backing device)
+// would then get only a fraction of the intended ceiling.
 func (c Config) ioMaxLines(capWbps int64) (lines []string, limited bool) {
 	if !c.cgroupLimits || len(c.ioDisks()) == 0 {
 		return nil, false

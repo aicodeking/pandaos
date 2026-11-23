@@ -80,6 +80,7 @@ let
     services.boat.maintenance.reboot = true;
     pandaos.updates.allowedSigners = [ "release@pandaos ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey" ];
   };
+  noSigners = eval { pandaos.updates.allowedSigners = [ ]; };
   custom = eval {
     services.boat = {
       vmApiUrl = null;
@@ -149,8 +150,11 @@ let
       lib.hasInfix "panda-update-verify" base.pandaos.updates.switchCommand;
     "updates: nixos-rebuild does not bump the input unverified" =
       !(lib.elem "--update-input" base.system.autoUpgrade.flags);
+    "updates: default allowedSigners ships release key" =
+      base.pandaos.updates.allowedSigners != [ ]
+      && !(lib.any (lib.hasInfix "allowedSigners is empty") base.warnings);
     "updates: empty allowedSigners warns" =
-      lib.any (lib.hasInfix "allowedSigners is empty") base.warnings
+      lib.any (lib.hasInfix "allowedSigners is empty") noSigners.warnings
       && !(lib.any (lib.hasInfix "allowedSigners is empty") withMaintenance.warnings);
 
     "maintenance window off by default" = !(base.systemd.timers ? boat-maintenance-reboot);

@@ -311,6 +311,17 @@ jobs:
             ls -l "$OUT"
           fi
 
+      # GitHub refuses release assets over 2 GiB; release.yml uploads the kernel and
+      # slim image whole (full is split), so they must never silently grow past it.
+      - name: Check guest asset sizes (< 2 GiB)
+        run: |
+          set -euo pipefail
+          for f in "$OUT/vmlinux" "$OUT/rootfs-slim.ext4.zst"; do
+            size=$(stat -c %s "$f")
+            echo "$f: $size bytes"
+            test "$size" -lt 2147483648 || { echo "::error::$f ($size bytes) is over GitHub's 2 GiB asset limit"; exit 1; }
+          done
+
       - name: Save full guest image cache
         if: steps.guest.outputs.cache-hit != 'true'
         continue-on-error: true

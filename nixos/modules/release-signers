@@ -1,0 +1,3 @@
+# PandaOS release-signing SSH public keys (allowed_signers format).
+# Keep in sync with SECURITY.md.
+release@pandaos namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO8zyQo+fbC0tMzI4gvW6ZICS0p8OVcmeYNGJREXBlNG

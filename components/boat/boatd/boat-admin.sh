@@ -37,7 +37,7 @@ init() {
   if [ -n "$token" ]; then
     (umask 077 && printf '%s\n' "$token" >"$token_file.tmp" && mv -f "$token_file.tmp" "$token_file") ||
       { echo "boat-admin: could not write $token_file" >&2; exit 1; }
-    echo "boat-admin: owner token written to $token_file (mode 0600); e.g. BOAT_TOKEN=\$(sudo cat $token_file)" >&2
+    echo "boat-admin: owner token written to $token_file (mode 0600); store it in a password manager and delete $token_file when done" >&2
   fi
   # The running API reads its users at start.
   systemctl try-restart boat-api.service

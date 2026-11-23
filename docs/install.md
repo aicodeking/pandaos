@@ -163,6 +163,9 @@ OS (for example Hetzner's Ubuntu image or its rescue system). Tested on a Hetzne
 static IPv4 `/32` with an on-link gateway, static IPv6 `/64`). **If the network config is wrong
 the box is unreachable, and only the provider's rescue system gets it back.**
 
+The kexec installer runs from RAM (tmpfs), and `--build` builds the whole system in it. The server
+needs **at least 8 GiB of RAM; 16 GiB or more is recommended** for `server` or `desktop` builds.
+
 1. Before kexec, confirm your SSH public key is already in root's `authorized_keys` on the
    rescue/provider OS so you can reconnect. Record the live `ip addr`, `ip route`, uplink MAC,
    and DNS details. Keep `extra.nix` on the operator's workstation (or write it after reconnecting),
@@ -185,8 +188,9 @@ the box is unreachable, and only the provider's rescue system gets it back.**
        inherit dns;
        networkConfig.IPv6AcceptRA = false;
      };
-     # Leave the timer off until you configure a trusted release signer.
-     pandaos.updates.mode = "manual";
+     # Optional: v0.2.0 pre-configures the published release-signing key (SECURITY.md), so
+     # automatic signed updates work. Use "manual" to apply updates by hand instead.
+     # pandaos.updates.mode = "manual";
    }
    ```
 2. kexec into a NixOS installer from the running OS. This keeps the IP addresses, the ssh host keys
@@ -218,7 +222,9 @@ the box is unreachable, and only the provider's rescue system gets it back.**
    confirmed member partitions.
 4. Confirm `/root/extra.nix` is present in the live kexec installer before running `panda-install`;
    `--extra-config` fails if its file is missing. Build `panda-install` (server system only) and
-   install with `--build`, so `local.nix` and `extra.nix` apply from the first boot:
+   install with `--build`, so `local.nix` and `extra.nix` apply from the first boot. This build
+   runs in the RAM-backed live installer: it needs at least 8 GiB of RAM (16 GiB or more recommended).
+   The example is a trusted single-owner host (`--untrusted-tenants false`):
    ```sh
    nix --extra-experimental-features "nix-command flakes" build --impure --out-link pi --expr '
      let f = builtins.getFlake "github:AICodeKing/pandaos/v0.2.0"; in
@@ -227,16 +233,22 @@ the box is unreachable, and only the provider's rescue system gets it back.**
    ./pi/bin/panda-install --profile server --build --yes \
      --disk /dev/nvme0n1 --data-disk /dev/nvme1n1 \
      --domain boat.example.com --ipv6-prefix 2001:db8:1:2:b0a7::/80 \
+     --untrusted-tenants false \
      --sudo-nopasswd \
      --ssh-key "ssh-ed25519 AAAA... one" --ssh-key "ssh-ed25519 AAAA... two" \
      --extra-config /root/extra.nix
    ```
    ssh accepts keys only and root cannot log in. `--sudo-nopasswd` lets the key holder use `sudo`
    without a password (the account password stays locked); or pass `--password-hash` for a sudo password.
-   For a source build before the tag is available, replace `v0.2.0` with the exact trusted commit
-   you want to install.
-   For a trusted single-owner host, add `--untrusted-tenants false`. For multi-tenant use, configure
-   separate tenant domains and DNS-01 before the build. See the [boat TLS setup](boat.md#tls).
+   `github:AICodeKing/pandaos/v0.2.0` follows the tag. To pin the exact commit instead, use
+   `github:AICodeKing/pandaos?rev=<commit-sha>` (the full 40-character SHA of the verified v0.2.0
+   commit, or of the trusted commit you want before the tag is available).
+   For multi-tenant use, replace `--untrusted-tenants false` with `--untrusted-tenants true
+   --vm-domain <vmDomain> --desktop-domain <desktopDomain> --dns-provider '<provider>'` (for
+   example `'cloudflare {env.CF_API_TOKEN}'`), and before the build add
+   `services.boat.gateway.caddyPackage` (Caddy with the matching DNS plugin) and
+   `services.boat.gateway.environmentFile` to `/root/extra.nix`, with that credentials file
+   placed on the target. See the [boat TLS setup](boat.md#tls).
 5. Before rebooting, check the built network unit, and register the boot entry (PandaOS leaves EFI
    variables alone). Keep the provider's PXE entry first so its rescue system still works:
    ```sh

@@ -23,7 +23,8 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/nix-checks.yml
-    secrets: inherit
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
   unit-checks:
     permissions:
@@ -146,18 +147,55 @@ jobs:
           sudo systemctl start docker
           sudo mkdir -p "$OUT" && sudo chown "$(id -u):$(id -g)" "$OUT"
 
-      # For services.boat.images (docs/boat.md). GitHub refuses release assets over 2 GiB.
+      # Same key and paths as boat-e2e.yml's Firecracker e2e job, which saves this cache.
+      - name: Restore guest image
+        id: guest
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            /mnt/guest-out/vmlinux
+            /mnt/guest-out/rootfs-slim.ext4.zst
+            /mnt/guest-out/rootfs-full.ext4.zst
+            /mnt/guest-out/size-*.txt
+            /mnt/guest-out/manifest-*.txt
+          key: boat-guest-full-${{ hashFiles('components/boat/guest/Dockerfile', 'components/boat/guest/build.sh', 'components/boat/guest/kernel/**', 'components/boat/guest/rootfs/**', 'components/boat/guest/rootfs-full/**', 'components/boat/guest/agent/boat*.py', 'components/boat/guest/ssh-authorize.py', 'components/boat/cli/**') }}
+
+      # For services.boat.images (docs/boat.md). GitHub refuses release assets over 2 GiB,
+      # so the full image ships as deterministic 1500 MiB parts:
+      #   cat boat-guest-rootfs-full.ext4.zst.part* > boat-guest-rootfs-full.ext4.zst
+      # boat_guest_SHA256SUMS lists every part plus the reassembled image.
       - name: Build the guest images
         run: |
           set -euo pipefail
-          components/boat/guest/build.sh all
+          limit=2147483648
+          if [ -f "$OUT/vmlinux" ] && [ -f "$OUT/rootfs-slim.ext4.zst" ] && [ -f "$OUT/rootfs-full.ext4.zst" ]; then
+            echo "guest images restored from cache"
+          elif [ ! -f "$OUT/vmlinux" ] && [ ! -f "$OUT/rootfs-slim.ext4.zst" ] && [ ! -f "$OUT/rootfs-full.ext4.zst" ]; then
+            components/boat/guest/build.sh all
+          else
+            [ -f "$OUT/vmlinux" ] || components/boat/guest/build.sh kernel
+            [ -f "$OUT/rootfs-slim.ext4.zst" ] || components/boat/guest/build.sh rootfs slim
+            [ -f "$OUT/rootfs-full.ext4.zst" ] || components/boat/guest/build.sh rootfs full
+          fi
+          ls -l "$OUT"
           cp "$OUT/vmlinux" dist/boat-guest-vmlinux
           cp "$OUT/rootfs-slim.ext4.zst" dist/boat-guest-rootfs-slim.ext4.zst
-          cp "$OUT/rootfs-full.ext4.zst" dist/boat-guest-rootfs-full.ext4.zst
-          for f in dist/boat-guest-*; do
-            test "$(stat -c %s "$f")" -lt 2147483648 || { echo "::error::$f is over GitHub's 2 GiB asset limit"; exit 1; }
+          rm -f dist/boat-guest-rootfs-full.ext4.zst*
+          split -b 1500M -d -a 2 "$OUT/rootfs-full.ext4.zst" dist/boat-guest-rootfs-full.ext4.zst.part
+          compgen -G 'dist/boat-guest-rootfs-full.ext4.zst.part*' >/dev/null \
+            || { echo "::error::splitting rootfs-full produced no parts"; exit 1; }
+          full_sha=$(sha256sum "$OUT/rootfs-full.ext4.zst" | awk '{print $1}')
+          parts_sha=$(cat dist/boat-guest-rootfs-full.ext4.zst.part* | sha256sum | awk '{print $1}')
+          test "$parts_sha" = "$full_sha" \
+            || { echo "::error::reassembled rootfs-full parts ($parts_sha) != rootfs-full.ext4.zst ($full_sha)"; exit 1; }
+          for f in dist/boat-guest-* dist/boat_*; do
+            size=$(stat -c %s "$f")
+            test "$size" -lt "$limit" || { echo "::error::$f ($size bytes) is over GitHub's 2 GiB asset limit"; exit 1; }
           done
           (cd dist && sha256sum boat-guest-* > boat_guest_SHA256SUMS)
+          printf '%s  boat-guest-rootfs-full.ext4.zst\n' "$full_sha" >> dist/boat_guest_SHA256SUMS
+          test "$(stat -c %s dist/boat_guest_SHA256SUMS)" -lt "$limit"
+          ls -l dist/
           tee -a "$GITHUB_STEP_SUMMARY" < dist/boat_SHA256SUMS
           tee -a "$GITHUB_STEP_SUMMARY" < dist/boat_guest_SHA256SUMS
 
@@ -190,6 +228,19 @@ jobs:
         run: |
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
             || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
+
+      # Only commits signed by a key in nixos/modules/release-signers may be released
+      # (git verifies SSH signatures with the runner's preinstalled ssh-keygen -Y verify).
+      - name: Require signed release commit
+        run: |
+          set -euo pipefail
+          signers=nixos/modules/release-signers
+          test -s "$signers" || { echo "::error::$signers is missing or empty"; exit 1; }
+          git -c gpg.ssh.allowedSignersFile="$signers" verify-commit "$GITHUB_SHA" \
+            || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) has no valid signature from $signers"; exit 1; }
+          status=$(git -c gpg.ssh.allowedSignersFile="$signers" log -1 --format=%G? "$GITHUB_SHA")
+          test "$status" = G \
+            || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) signature status is '$status', want G"; exit 1; }
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

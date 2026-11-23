@@ -141,8 +141,18 @@ All notable changes to PandaOS are documented here. The format follows
   desktop scripts, and snapshots; `closures` and `mem-security` are being added.
 - **v0.2.0 release assets:** `pandaos-v0.2.0-{headless,desktop,server}-x86_64-linux.iso` and
   `SHA256SUMS`; `boat_<os>_<arch>` (with `.exe` on Windows) and `boat_SHA256SUMS`;
-  `boat-guest-vmlinux`, `boat-guest-rootfs-{slim,full}.ext4.zst` and `boat_guest_SHA256SUMS`.
-  Tagged builds publish build provenance and then move the `release` branch. CI and releases
+  `boat-guest-vmlinux`, `boat-guest-rootfs-slim.ext4.zst` (single file),
+  `boat-guest-rootfs-full.ext4.zst.part00` and `boat-guest-rootfs-full.ext4.zst.part01`
+  (the 2.39 GiB full rootfs split into 1500 MiB parts under GitHub's 2 GiB asset limit; reassemble
+  with `cat boat-guest-rootfs-full.ext4.zst.part* > boat-guest-rootfs-full.ext4.zst`), and
+  `boat_guest_SHA256SUMS` (covering the kernel, the slim rootfs, every full part and the reassembled
+  `boat-guest-rootfs-full.ext4.zst`).
+  Tagged builds publish build provenance and then move the `release` branch.
+- **Published release-signing key:** the PandaOS release-signing SSH key (fingerprint
+  `SHA256:YSNtMOh+z7ZRA5E0sH2yAtbY+uxUP2cCbEzpbqa3L3o`, published in
+  [SECURITY.md](SECURITY.md#release-signing-key)) is committed in `nixos/modules/release-signers`
+  and is the default of `pandaos.updates.allowedSigners`, so signed channel updates work out of the
+  box. `release.yml` runs `git verify-commit` against it before it advances `origin/release`. CI and releases
   can also push to Cachix when configured.
 - Docs (including `docs/desktop.md`), MIT license, security policy, contributing guide and issue templates.
 

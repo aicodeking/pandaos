@@ -55,6 +55,8 @@ grep -qF "\"$k1\" \"$k2\"" "$tmp/local.nix" || fail "both keys not in local.nix"
 grep -q 'wheelNeedsPassword = lib.mkForce false' "$tmp/local.nix" || fail "no nopasswd sudo"
 grep -q acmeEmail "$tmp/local.nix" && fail "acmeEmail written without --acme-email"
 grep -q 'extra.nix' "$tmp/local.nix" || fail "extra.nix not imported"
+mode=$(stat -c '%a' "$tmp/local.nix" 2>/dev/null || stat -f '%Lp' "$tmp/local.nix")
+[[ $mode == 600 ]] || fail "local.nix mode $mode, want 600 (it holds the password hash)"
 
 # Defaults: no nopasswd sudo; an e-mail given is written.
 reset
@@ -62,7 +64,10 @@ parse_args --acme-email ops@example.test
 password_hash='$y$x'
 # Bash 3.2 treats an empty array as unset under nounset; retain the empty-key test.
 if ((BASH_VERSINFO[0] < 4)); then set +u; fi
+chmod 0644 "$tmp/local.nix" # an existing, looser file must be tightened
 write_local_nix "$tmp"
+mode=$(stat -c '%a' "$tmp/local.nix" 2>/dev/null || stat -f '%Lp' "$tmp/local.nix")
+[[ $mode == 600 ]] || fail "rewritten local.nix mode $mode, want 600"
 grep -q wheelNeedsPassword "$tmp/local.nix" && fail "nopasswd sudo without the flag"
 grep -q 'acmeEmail = "ops@example.test"' "$tmp/local.nix" || fail "acmeEmail missing"
 

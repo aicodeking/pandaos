@@ -141,7 +141,7 @@ type Config struct {
 	IngressMbit int  `json:"ingressMbit"` // Firecracker rx rate limiter
 	DiskMBps    int  `json:"diskMBps"`    // Firecracker drive rate limiter
 	DiskIOPS    int  `json:"diskIOPS"`    // ... operations
-	IOMaxMBps   int  `json:"ioMaxMBps"`   // cgroup io.max on stateDir's disk (rbps+wbps)
+	IOMaxMBps   int  `json:"ioMaxMBps"`   // cgroup io.max on stateDir's disk (rbps+wbps); per physical disk on dm/RAID/LVM, not divided (see ioMaxLines)
 	IOMaxIOPS   int  `json:"ioMaxIOPS"`   // ... riops+wiops
 	IOCost      bool `json:"ioCost"`      // blk-iocost on stateDir's disk: busy VMs share it by io.weight (equal), idle capacity is free to take
 	// io.cost.model for that disk, e.g. "rbps=3e9 rseqiops=400000 rrandiops=400000 wbps=2e9 wseqiops=300000 wrandiops=300000"

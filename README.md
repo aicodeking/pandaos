@@ -214,8 +214,10 @@ There is no default password: you set one (and optionally an ssh key) during the
 - **No binary cache yet.** Until the owner sets up a cache and `pandaos.binaryCache`, boxes build
   panda-mem and the other PandaOS packages locally on every update that changes them.
   See [docs/updates-and-rollback.md](docs/updates-and-rollback.md#what-an-update-downloads-and-builds).
-- **Signed updates require a trusted public key.** Configure
-  `pandaos.updates.allowedSigners` before using the release channel. See
+- **Signed updates.** v0.2.0 ships with the release-signing key published in
+  [SECURITY.md](SECURITY.md#release-signing-key) pre-configured in
+  `pandaos.updates.allowedSigners`; every channel update must be signed by it. Verify its
+  fingerprint, override it, or set `allowedSigners = [ ]` to stop updates. See
   [signed releases](docs/updates-and-rollback.md#signed-releases-required).
 - **UEFI only**, with Secure Boot off.
 

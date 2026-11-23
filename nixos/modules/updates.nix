@@ -12,12 +12,12 @@
 # SSH-signed by a key in pandaos.updates.allowedSigners, to descend from the
 # running release, and to be the tree Nix fetched; otherwise it restores
 # flake.lock and the box keeps running what it runs.
-# OWNER ITEM: the owner must create the release-signing key, publish its
-# public half in allowedSigners (the default below, or local.nix), and sign
-# every commit the `release` branch points at with that key (`git commit -S`
-# with gpg.format=ssh; a signed tag is not enough, the commit itself must
-# carry the signature).
-# Until then, every update is refused and a build-time warning says so.
+# The published release-signing public key lives in ./release-signers (kept
+# in sync with SECURITY.md) and is the default allowedSigners. Every commit the
+# `release` branch points at must be signed with it (`git commit -S` with
+# gpg.format=ssh; a signed tag is not enough, the commit itself must carry the
+# signature). With allowedSigners = [ ] (and no allowedSignersFile), every
+# update is refused and a build-time warning says so.
 #
 # Runtime conditions, not eval-time checks (the flake is written after this
 # config is built; the live ISO and VM tests have none):
@@ -40,6 +40,10 @@ let
     else
       pkgs.writeText "pandaos-allowed-signers" (lib.concatLines cfg.allowedSigners);
   noSigners = cfg.allowedSigners == [ ] && cfg.allowedSignersFile == null;
+  # The published release-signing key(s): non-empty, non-comment lines.
+  defaultAllowedSigners = builtins.filter (
+    l: l != "" && !(lib.hasPrefix "#" l)
+  ) (lib.splitString "\n" (builtins.readFile ./release-signers));
 
   verify = pkgs.writeShellApplication {
     name = "panda-update-verify";
@@ -296,13 +300,16 @@ in
     };
     allowedSigners = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [ ];
+      default = defaultAllowedSigners;
+      defaultText = lib.literalExpression "lines of ./release-signers";
       example = [ ''release@pandaos namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...'' ];
       description = ''
         Lines of an ssh `allowed_signers` file (`git config gpg.ssh.allowedSignersFile`):
         `<principal> [options] <keytype> <key>`. Release commits must be signed by
-        one of these keys. The owner provides the key and signs releases; while
-        this is empty, every update is refused.
+        one of these keys. PandaOS ships with the release-signing key from
+        `nixos/modules/release-signers` (see `SECURITY.md`) as the default.
+        Setting this to `[ ]` (with {option}`allowedSignersFile` = null) still
+        refuses every update, fail-closed, and emits the empty-signers warning.
       '';
     };
     allowedSignersFile = lib.mkOption {

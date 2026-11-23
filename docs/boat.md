@@ -103,6 +103,7 @@ Before you hand out API keys:
    ```sh
    panda-install --profile server --disk /dev/nvme0n1 --data-disk /dev/nvme1n1 \
      --domain boat.example.com --acme-email ops@example.com \
+     --untrusted-tenants false \
      --ssh-key "ssh-ed25519 ..."
    ```
    Optionally add `--ipv6-prefix` with your routed VM IPv6 prefix, e.g. `--ipv6-prefix 2001:db8:1:2:b0a7::/80`.
@@ -110,9 +111,12 @@ Before you hand out API keys:
    Use the `iso-server` ISO: the other ISOs do not carry the server system.
    Confirm the exact disk paths with `lsblk` before running the installer.
    `--acme-email` is optional: without it Caddy registers its ACME account with no e-mail.
-   Add `--untrusted-tenants false` on a trusted single-owner host. For multi-tenant use, configure
-   separate tenant domains and DNS-01 before the post-install rebuild. On a `--build` install,
-   configure them before running the installer.
+   The example is a trusted single-owner host (`--untrusted-tenants false`). For multi-tenant use,
+   pass `--untrusted-tenants true --vm-domain <vmDomain> --desktop-domain <desktopDomain>
+   --dns-provider '<provider>'` instead and configure the Caddy DNS plugin
+   (`gateway.caddyPackage`) and `gateway.environmentFile` before the post-install rebuild. On a
+   `--build` install, put them in the `--extra-config` file and place the credentials file on the
+   target before running the installer.
    No ISO or console, only ssh into the provider's OS (Hetzner's default Ubuntu, a rescue system)?
    Install over ssh with kexec and `--build`; see [install.md](install.md#hosted-server-over-ssh-kexec).
    On hosts without DHCP (static addresses), use `--build` so the network settings apply from the first boot.
@@ -122,12 +126,13 @@ Before you hand out API keys:
    services.boat = {
      vmDomain = "boatvms.example.net";
      desktopDomain = "desktop.boatvms.example.net";
-     # Hashes: boat_guest_SHA256SUMS on the release page. "slim" also exists.
+     # Hashes: boat_guest_SHA256SUMS on the release page. The release's full rootfs is split
+     # (.part00/.part01), so only slim can be fetched directly from GitHub; see the note below.
      images."ubuntu-24.04/vmlinux" = {
        url = "https://github.com/AICodeKing/pandaos/releases/download/v0.2.0/boat-guest-vmlinux"; sha256 = "...";
      };
      images."ubuntu-24.04/rootfs.ext4.zst" = {
-       url = "https://github.com/AICodeKing/pandaos/releases/download/v0.2.0/boat-guest-rootfs-full.ext4.zst"; sha256 = "...";
+       url = "https://github.com/AICodeKing/pandaos/releases/download/v0.2.0/boat-guest-rootfs-slim.ext4.zst"; sha256 = "...";
      };
      gateway.caddyPackage = pkgs.caddy.withPlugins {
        plugins = [ "github.com/caddy-dns/cloudflare@v0.2.1" ]; hash = "sha256-...";
@@ -142,6 +147,10 @@ Before you hand out API keys:
      maintenance.reboot = true;
    };
    ```
+   `slim` has no desktop. For the `full` image (browser desktops), either reassemble and verify it
+   and run `boat-admin images import` (see [Guest images](#guest-images)), or host the reassembled
+   `boat-guest-rootfs-full.ext4.zst` on your own HTTPS server and point the rootfs `url` there,
+   with the reassembled file's hash from `boat_guest_SHA256SUMS`.
    Merge the settings into the existing module. Add `pkgs` to the module arguments
    (`{ lib, pkgs, ... }:`) for the Caddy example. Replace the example hashes and remove
    the installer's `services.boat.gateway.allowOnDemandTLS = true` line when adding DNS-01.
@@ -159,9 +168,38 @@ Get the kernel and one root filesystem. The default image goes in
 when `services.boat.images` is empty.
 
 - **GitHub Release.** From [v0.2.0](https://github.com/AICodeKing/pandaos/releases/tag/v0.2.0),
-  download `boat-guest-vmlinux`, `boat-guest-rootfs-full.ext4.zst` or
-  `boat-guest-rootfs-slim.ext4.zst`, and `boat_guest_SHA256SUMS`. Run
-  `sha256sum -c --ignore-missing boat_guest_SHA256SUMS` and confirm that both files report `OK`.
+  download into an empty directory. `boat_guest_SHA256SUMS` lists the kernel, the slim rootfs,
+  every full part and the reassembled full rootfs. With the GitHub CLI, also check provenance with
+  `gh attestation verify <file> --repo AICodeKing/pandaos` for each `boat-guest-*` file.
+
+  **Slim (single file, headless):**
+
+  ```sh
+  base=https://github.com/AICodeKing/pandaos/releases/download/v0.2.0
+  curl -fLO "$base/boat-guest-vmlinux" &&
+    curl -fLO "$base/boat-guest-rootfs-slim.ext4.zst" &&
+    curl -fLO "$base/boat_guest_SHA256SUMS" &&
+    sha256sum -c --ignore-missing boat_guest_SHA256SUMS &&
+    sudo boat-admin images import boat-guest-vmlinux boat-guest-rootfs-slim.ext4.zst
+  ```
+
+  **Full (desktop; 2 split parts, each under GitHub's 2 GiB asset limit):**
+
+  ```sh
+  base=https://github.com/AICodeKing/pandaos/releases/download/v0.2.0
+  curl -fLO "$base/boat-guest-vmlinux" &&
+    curl -fLO "$base/boat-guest-rootfs-full.ext4.zst.part00" &&
+    curl -fLO "$base/boat-guest-rootfs-full.ext4.zst.part01" &&
+    curl -fLO "$base/boat_guest_SHA256SUMS" &&
+    sha256sum -c --ignore-missing boat_guest_SHA256SUMS &&
+    cat boat-guest-rootfs-full.ext4.zst.part* > boat-guest-rootfs-full.ext4.zst &&
+    sha256sum -c --ignore-missing boat_guest_SHA256SUMS &&
+    sudo boat-admin images import boat-guest-vmlinux boat-guest-rootfs-full.ext4.zst
+  ```
+
+  The first check must report `OK` for the kernel and both parts; the second must also report
+  `OK` for the reassembled `boat-guest-rootfs-full.ext4.zst`. Delete the parts afterwards to free
+  disk space.
 - **CI artifact (no local build).** With repository access, run `gh workflow run release.yml -R AICodeKing/pandaos`
   and use `gh run download <run-id> -R AICodeKing/pandaos -n boat-assets` when the dry run completes.
   It builds the same guest filenames, keeps them for seven days and includes `boat_guest_SHA256SUMS`.

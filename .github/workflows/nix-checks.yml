@@ -5,6 +5,10 @@ name: nix-checks
 # everything. The list comes from the flake, so a new check can't be left out.
 on:
   workflow_call:
+    # Optional: callers pass only this secret, never `secrets: inherit`.
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: false
 
 permissions: {}
 

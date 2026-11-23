@@ -4,7 +4,10 @@
 >
 > Copy this prompt into PandaCode, Claude Code, Codex, or another coding agent:
 >
-> `Read and follow https://raw.githubusercontent.com/AICodeKing/pandaos/main/AGENT_SETUP.md (or the local AGENT_SETUP.md in my PandaOS checkout). Help me install PandaOS v0.2.0 and connect it to PandaCode. Start with Step 0. Pause for my explicit confirmation of each disk and for every human-only step.`
+> `Read and follow https://raw.githubusercontent.com/AICodeKing/pandaos/v0.2.0/AGENT_SETUP.md (or the local AGENT_SETUP.md in my PandaOS checkout). Help me install PandaOS v0.2.0 and connect it to PandaCode. Start with Step 0. Pause for my explicit confirmation of each disk and for every human-only step.`
+>
+> The URL is pinned to the `v0.2.0` tag. Check `main` for a newer version of this runbook, or
+> replace `v0.2.0` in the URL with a specific commit SHA to pin an exact revision.
 
 ## Step 0 — Agent intake
 
@@ -12,7 +15,7 @@ Ask the user these questions first. Wait for their answers before choosing an in
 
 | Ask | Record |
 |---|---|
-| Which profile? | `headless` for a console-only agent box, `desktop` for a GUI and computer use, `server` for a self-hosted `boat` microVM host, or `connect-only` for an already-installed workstation. For `connect-only`, go straight to [Track C](#track-c--other-pandacode-instances-teammates-and-sdks). |
+| Which profile? | `headless` for a console-only agent box, `desktop` for a GUI and computer use, `server` for a self-hosted `boat` microVM host, or `connect-only` for an already-installed **PandaOS** machine (it has `sudo panda-connect`). For `connect-only`, go straight to [Track C](#track-c--other-pandacode-instances-teammates-and-sdks). Non-PandaOS Linux or macOS machines do not have `panda-connect`: use the PandaCode desktop app on them directly, or connect to boat VMs over SSH as in Track C. |
 | Which machine and access method? | Local x86_64 PC and USB stick, a dedicated server with a virtual ISO console, or a dedicated server with SSH and a rescue system for kexec. Ask about backups, the intended OS and optional data disks, and a login SSH public key if remote access is needed. |
 | Which domain and DNS provider for `server`? | Base domain, public IPv4/IPv6 addresses, DNS zone access, tenant port and desktop domains, and ACME contact email. |
 | Who will run VMs on `server`? | `services.boat.untrustedTenants = false` for your own trusted VMs, or `true` for multi-tenant isolation settings. Serving untrusted tenants also requires the [operator checklist](docs/boat.md#operator-checklist) and an external penetration test. |
@@ -21,7 +24,8 @@ Ask the user these questions first. Wait for their answers before choosing an in
 ## Hard safety gates for the agent
 
 - **Before any disk write that erases, formats, or flashes a device**, run
-  `lsblk -o PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,MOUNTPOINTS` on the machine that will do the write.
+  `lsblk -o PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,MOUNTPOINTS` on the machine that will do the write
+  (`diskutil list` on macOS; the device picker in Rufus or balenaEtcher on Windows).
   Show the output to the user, identify the whole-disk paths, and wait for explicit confirmation
   of each exact `/dev/...` path. Confirm separately for the USB stick, OS disk, and optional
   data disk. This also applies to clearing RAID metadata. Run `lsblk` again after a boot or
@@ -73,17 +77,43 @@ test -n "$iso"
 
 Proceed only if `test -n "$iso"` succeeds.
 
-1. On a Linux workstation, complete the disk gate for the USB stick, unmount its partitions, then
-   flash the ISO. Substitute the confirmed path for the example `/dev/sdX`.
+1. Complete the disk gate for the USB stick on the workstation that writes it, then flash the ISO.
+   Substitute the confirmed path for the example device.
 
-   ```sh
-   sudo dd if="$iso" of=/dev/sdX bs=4M status=progress conv=fsync
-   ```
+   - **Linux:** identify the stick with `lsblk` (as in the disk gate), unmount its partitions, then:
 
-2. Ask the user to boot the stick in UEFI mode with Secure Boot disabled. On the live system,
-   verify the firmware checks and complete the disk gate for the OS disk. Run `sudo panda-install`,
-   select the agreed profile, and use the private console for the password prompt. Add an SSH public
-   key if needed. For unattended installs, see the [scripted flags](docs/install.md#3-boot-and-install).
+     ```sh
+     sudo dd if="$iso" of=/dev/sdX bs=4M status=progress conv=fsync
+     ```
+
+   - **macOS:** if `sha256sum` is missing, verify with
+     `grep " $iso\$" SHA256SUMS | shasum -a 256 -c` instead. Identify the stick with
+     `diskutil list` and confirm the exact `/dev/diskN` with the user, then:
+
+     ```sh
+     diskutil unmountDisk /dev/diskN
+     sudo dd if="$iso" of=/dev/rdiskN bs=4m
+     ```
+
+   - **Windows:** compare `Get-FileHash .\pandaos-v0.2.0-<profile>-x86_64-linux.iso -Algorithm SHA256`
+     with the ISO's line in `SHA256SUMS`, then have the user write the ISO with
+     [Rufus](https://rufus.ie/) (DD image mode) or [balenaEtcher](https://etcher.balena.io/),
+     selecting the confirmed USB device.
+
+2. Ask the user to boot the stick in UEFI mode with Secure Boot disabled. **A remote coding agent
+   cannot type on the local USB console.** Choose one:
+   - The human runs the checks and `sudo panda-install` on the console, with the agent guiding.
+   - The human gives the agent SSH access to the live system. On the console, they run
+     `mkdir -p ~/.ssh && chmod 700 ~/.ssh`, append the agent's SSH public key to
+     `~/.ssh/authorized_keys` (for example
+     `echo 'ssh-ed25519 AAAA... agent' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`),
+     and read the address with `ip -brief addr`. The live session runs as `panda` with key-only
+     SSH, so the agent then connects with `ssh panda@<address>`.
+
+   On the live system, verify the firmware checks and complete the disk gate for the OS disk. Run
+   `sudo panda-install`, select the agreed profile, and use the private console for the password
+   prompt. Add an SSH public key if needed. For unattended installs, see the
+   [scripted flags](docs/install.md#3-boot-and-install).
 3. Reboot into the installed system and remove the USB stick. Use wired networking or run
    `nmtui` for Wi-Fi. The ISO installs offline. PandaCode Connect and CLI installation need a network.
 
@@ -106,18 +136,35 @@ sudo panda-connect sign-in --device-name workbench --no-wait
 Then have the human run `sudo journalctl -u pandacode-sign-in -o cat -b` in their private
 terminal to get the link and code. The agent must not capture that journal output. Have the
 human open the GitHub link and approve the current device code with the **same GitHub account
-they use in PandaCode**. After the human confirms approval, the agent checks only
-`panda-connect status` for `signed in: true` and an active service. Have the human verify the
-new computer appears by name in PandaCode.
+they use in PandaCode**. After the human confirms approval, the agent checks only the machine-readable
+status:
+
+```sh
+panda-connect status --json
+# expect {"signedIn":true,"service":"active","deviceName":"workbench",...}
+panda-connect status --json | jq -e '.signedIn == true and .service == "active"'
+```
+
+Have the human verify the new computer appears by name in PandaCode.
 
 ### A3. Install and sign in to the selected agent CLIs
 
 Use the first-boot picker on tty8 or run `sudo panda-agents-install` with the names chosen in
-Step 0. For example, `sudo panda-agents-install claude-code codex`. These use `panda-update`.
-If the release signature check refuses the update, add the selected packages to the existing
-attribute set in `/etc/pandaos/local.nix`, for example
-`pandaos.agents.clis = [ "claude-code" "codex" ];`. Rebuild from the current lock with
-`sudo nixos-rebuild switch --flake /etc/pandaos#pandaos`. Keep release signature verification enabled.
+Step 0. For example, `sudo panda-agents-install claude-code codex`. These use `panda-update`, so
+they work once `v0.2.0` is published on `origin/release`: v0.2.0 verifies it with the
+[release-signing key](SECURITY.md#release-signing-key) pre-configured in
+`pandaos.updates.allowedSigners`.
+
+**Offline or locked fallback.** If the box is offline, the release branch is not yet published, or
+the release signature check refuses the update, install from the pinned lock instead. Add the
+selected packages to the existing attribute set in `/etc/pandaos/local.nix`, for example
+`pandaos.agents.clis = [ "claude-code" "codex" ];`, then rebuild from the current lock:
+
+```sh
+sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
+```
+
+Keep release signature verification enabled.
 
 For each selected CLI, open it as the `agent` user and let the user complete any provider
 sign-in in a private session.
@@ -168,30 +215,68 @@ Certificate Transparency exposure are described in the [TLS setup](docs/boat.md#
 ### B2. Install the server
 
 - **Local or virtual ISO console.** Download and verify `pandaos-v0.2.0-server-x86_64-linux.iso`
-  as in A1. Boot it in UEFI mode, verify KVM, and confirm the exact disks. Use the server ISO's
-  interactive installer with flags for the known values. Add `--data-disk /dev/nvme1n1` only
-  if the user approved that device.
+  as in A1. As in A1, a remote agent cannot type on the virtual ISO console: either the human runs
+  the commands there, or the human adds the agent's SSH public key on the live ISO
+  (`mkdir -p ~/.ssh && chmod 700 ~/.ssh`, append the key to `~/.ssh/authorized_keys`, check the
+  address with `ip -brief addr`) so the agent can `ssh panda@<address>`. Boot it in UEFI mode,
+  verify KVM, and confirm the exact disks. Use the server ISO's interactive installer with flags for the known
+  values. Add `--data-disk /dev/nvme1n1` only if the user approved that device.
+
+  **Trusted single-owner host:**
 
   ```sh
   sudo panda-install --profile server --disk /dev/nvme0n1 \
     --domain boat.example.com --acme-email ops@example.com \
+    --untrusted-tenants false \
     --ssh-key 'ssh-ed25519 AAAA... operator@workstation'
   ```
 
-  For dedicated servers without DHCP (static IPv4/IPv6), prepare `extra.nix` with the
-  static network configuration matching the uplink MAC, as in
-  [Hosted server over SSH (kexec)](docs/install.md#hosted-server-over-ssh-kexec).
-  Make that file available in the live installer and add
-  `--build --extra-config /path/to/extra.nix` to `panda-install` so static networking
-  applies from the first boot and the server remains reachable.
+  **Multi-tenant host.** Use `--build` so DNS-01 TLS works from the first boot. First write
+  `extra.nix` with `services.boat.gateway.caddyPackage` (Caddy with the DNS plugin matching the
+  provider) and `services.boat.gateway.environmentFile`, as in the
+  [dedicated-server example](docs/boat.md#install-on-a-dedicated-server-hetzner-ovh), and place
+  that credentials file (for example `/var/lib/secrets/caddy-dns.env`, mode `0600`, containing
+  `CF_API_TOKEN=...`) on the installed server before rebuilding or starting Caddy; if it is only
+  placed after the first boot, run `sudo systemctl restart caddy` afterwards. Then:
 
-  For a trusted host, add `--untrusted-tenants false`. For a multi-tenant host, add
-  `--untrusted-tenants true`, `--vm-domain`, and `--desktop-domain` with the chosen domains, and
-  configure DNS-01 in `/etc/pandaos/local.nix` before the rebuild. If using the on-demand fallback
-  during installation, remove `services.boat.gateway.allowOnDemandTLS = true` when configuring DNS-01.
+  ```sh
+  sudo panda-install --profile server --disk /dev/nvme0n1 --build \
+    --domain boat.example.com --acme-email ops@example.com \
+    --untrusted-tenants true \
+    --vm-domain ports.example.net --desktop-domain desktops.example.net \
+    --dns-provider 'cloudflare {env.CF_API_TOKEN}' \
+    --extra-config /path/to/extra.nix \
+    --ssh-key 'ssh-ed25519 AAAA... operator@workstation'
+  ```
+
+  If you instead install without `--build` and add DNS-01 in `/etc/pandaos/local.nix` before the
+  post-install rebuild, remove `services.boat.gateway.allowOnDemandTLS = true` at the same time.
+
+  **Static-IP servers (no DHCP).** Prepare `extra.nix` with the static network configuration
+  matching the uplink MAC, as in
+  [Hosted server over SSH (kexec)](docs/install.md#hosted-server-over-ssh-kexec), so the server
+  stays reachable from its first boot. `--build` downloads and builds, but the live ISO has no
+  network without DHCP. Either:
+  - configure a temporary network in the live ISO first, then run `panda-install` with
+    `--build --extra-config /path/to/extra.nix`:
+
+    ```sh
+    sudo ip addr add 203.0.113.10/32 dev <iface>
+    sudo ip route add 203.0.113.1 dev <iface>
+    sudo ip route add default via 203.0.113.1 dev <iface>
+    echo 'nameserver <DNS1>' | sudo tee /etc/resolv.conf
+    ```
+
+  - or install offline from the ISO without `--build` and apply the static network settings from
+    the (virtual) console before relying on remote access: keep the console attached, log in on
+    the first boot, add the settings from `extra.nix` to `/etc/pandaos/local.nix`, and run
+    `sudo nixos-rebuild switch --flake /etc/pandaos#pandaos` (the pinned lock lets this work
+    offline). Confirm `ip addr` and `ip route` before detaching the console.
 - **SSH and kexec.** Follow [Hosted server over SSH (kexec)](docs/install.md#hosted-server-over-ssh-kexec).
   Confirm the provider's rescue path and that your SSH public key is already in root's
-  `authorized_keys` on the rescue/provider OS so you can reconnect after kexec. Record `ip addr`,
+  `authorized_keys` on the rescue/provider OS so you can reconnect after kexec. The kexec
+  `--build` runs in a RAM-backed tmpfs: require **at least 8 GiB of RAM (16 GiB or more
+  recommended)** for `server` or `desktop` builds. Record `ip addr`,
   `ip route`, the uplink MAC, and DNS. Prepare `extra.nix` on the operator's workstation with
   these network settings, or write it after reconnecting. The kexec installer boots into RAM
   (tmpfs); an `extra.nix` left on the old OS root is not carried over. Boot with kexec, reconnect, check
@@ -200,7 +285,9 @@ Certificate Transparency exposure are described in the [TLS setup](docs/boat.md#
   (or write `/root/extra.nix` in the live installer) before running `panda-install`; a missing
   extra-config file fails the install. Build the installer from the pinned release source and
   use `--build --extra-config /root/extra.nix`.
-  Include the agreed trust settings and configure DNS-01 for multi-tenant use before that build.
+  Include the agreed trust settings: `--untrusted-tenants false` for a trusted host, or the
+  multi-tenant flags, `caddyPackage`, `environmentFile` and credentials file shown above before
+  that build.
   Verify the network and boot entry before rebooting. Verify the new SSH host fingerprint with
   the user before replacing a known-hosts entry.
 
@@ -216,22 +303,43 @@ before proceeding.
 
 ### B3. Install and verify guest images
 
-On the server, download the guest kernel, one root filesystem, and its checksum manifest from
-the [v0.2.0 release][release]. Choose `full` for browser desktops or `slim` for headless guests.
-Use an empty directory and check that both downloaded images report `OK`.
+On the server, download the guest kernel, one root filesystem, and the checksum manifest from
+the [v0.2.0 release][release] into an empty directory. Choose `full` for browser desktops or
+`slim` for headless guests. `boat_guest_SHA256SUMS` lists `boat-guest-vmlinux`,
+`boat-guest-rootfs-slim.ext4.zst`, every `boat-guest-rootfs-full.ext4.zst.part*` and the
+reassembled `boat-guest-rootfs-full.ext4.zst`. With the GitHub CLI, also run
+`gh attestation verify <file> --repo AICodeKing/pandaos` for each downloaded `boat-guest-*` file.
+
+**Slim (single file):**
 
 ```sh
 base=https://github.com/AICodeKing/pandaos/releases/download/v0.2.0
-rootfs=boat-guest-rootfs-full.ext4.zst   # or boat-guest-rootfs-slim.ext4.zst
 curl -fLO "$base/boat-guest-vmlinux" &&
-  curl -fLO "$base/$rootfs" &&
+  curl -fLO "$base/boat-guest-rootfs-slim.ext4.zst" &&
   curl -fLO "$base/boat_guest_SHA256SUMS" &&
-  sha256sum -c --ignore-missing boat_guest_SHA256SUMS
+  sha256sum -c --ignore-missing boat_guest_SHA256SUMS &&
+  sudo boat-admin images import boat-guest-vmlinux boat-guest-rootfs-slim.ext4.zst
 ```
 
-After verification, run `sudo boat-admin images import boat-guest-vmlinux "$rootfs"`, then
-`sudo boat-admin images list`. Alternatively, declare the HTTPS URLs and their hashes under
-`services.boat.images` in `/etc/pandaos/local.nix` and rebuild. The
+**Full (2 split parts, each `< 2 GiB`, because of GitHub's release asset limit):**
+
+```sh
+base=https://github.com/AICodeKing/pandaos/releases/download/v0.2.0
+curl -fLO "$base/boat-guest-vmlinux" &&
+  curl -fLO "$base/boat-guest-rootfs-full.ext4.zst.part00" &&
+  curl -fLO "$base/boat-guest-rootfs-full.ext4.zst.part01" &&
+  curl -fLO "$base/boat_guest_SHA256SUMS" &&
+  sha256sum -c --ignore-missing boat_guest_SHA256SUMS &&
+  cat boat-guest-rootfs-full.ext4.zst.part* > boat-guest-rootfs-full.ext4.zst &&
+  sha256sum -c --ignore-missing boat_guest_SHA256SUMS &&
+  sudo boat-admin images import boat-guest-vmlinux boat-guest-rootfs-full.ext4.zst
+```
+
+Proceed only if every listed file reports `OK`; for `full`, the second check must also report
+`OK` for the reassembled `boat-guest-rootfs-full.ext4.zst`. Then run `sudo boat-admin images list`.
+Alternatively, declare the HTTPS URLs and their hashes under `services.boat.images` in
+`/etc/pandaos/local.nix` and rebuild. The `slim` release URL works there directly; for `full`,
+host the reassembled file on your own HTTPS server. The
 [guest-image guide](docs/boat.md#guest-images) has the declarative settings, source build,
 and CI artifact options. If release assets are unavailable, explicitly check out the same
 chosen tag or verified commit used for the ISO and CLI before building guest images from source.
@@ -258,8 +366,13 @@ Use `rootfs-slim.ext4.zst` instead for headless guests.
    server copy with `sudo rm /root/boat-owner-token`.
 2. On the user's Linux or macOS workstation, install the CLI from the same release. The script
    verifies the matching `boat_<os>_<arch>` binary against `boat_SHA256SUMS` before installing
-   it to `~/.local/bin`. On Windows, download the matching `boat_windows_<arch>.exe` and
-   `boat_SHA256SUMS`, and compare its SHA-256 using `Get-FileHash`.
+   it to `~/.local/bin`. On Windows, use `components/boat/cli/install.ps1` pinned to the tag
+   (download
+   `https://raw.githubusercontent.com/AICodeKing/pandaos/v0.2.0/components/boat/cli/install.ps1`
+   and run it with `$env:BOAT_VERSION = 'v0.2.0'`; it checks `boat_SHA256SUMS`), or download the
+   matching `boat_windows_<arch>.exe` and `boat_SHA256SUMS` and compare its SHA-256 using
+   `Get-FileHash`. With the GitHub CLI, also check provenance with
+   `gh attestation verify boat_<os>_<arch> --repo AICodeKing/pandaos` (add `.exe` on Windows).
 
    ```sh
    tmp=$(mktemp) &&
@@ -320,10 +433,14 @@ CLIs, follow A2 and A3.
   `@boatdev/sdk` configuration's `basePath` to `https://api.<domain>/api/v1`. Supply
   a scoped API key from a secret manager. See the [SDK examples](docs/boat.md#quick-start)
   and [API compatibility limits](docs/boat.md#boatdev-api-compatibility-apiv1).
-- **Updates.** Configure `pandaos.updates.allowedSigners` with an independently verified
-  release-signing public key. Use `pandaos.updates.mode = "manual";` to disable the timer
-  while managing updates by hand. Manual channel updates still require a valid signature
-  by default. See [Updates and rollback](docs/updates-and-rollback.md#signed-releases-required).
+- **Updates.** v0.2.0 ships with the published [release-signing key](SECURITY.md#release-signing-key)
+  pre-configured in `pandaos.updates.allowedSigners`, so the daily signed update works out of
+  the box. Verify its fingerprint against `SECURITY.md`
+  (`SHA256:YSNtMOh+z7ZRA5E0sH2yAtbY+uxUP2cCbEzpbqa3L3o`) with
+  `printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO8zyQo+fbC0tMzI4gvW6ZICS0p8OVcmeYNGJREXBlNG' | ssh-keygen -lf -`.
+  Set `pandaos.updates.mode = "manual";` in `/etc/pandaos/local.nix` to disable the timer while
+  managing updates by hand. Manual channel updates still require a valid signature by default.
+  See [Updates and rollback](docs/updates-and-rollback.md#signed-releases-required).
 
 ## Verification and troubleshooting
 
@@ -333,7 +450,7 @@ the source revision recorded in `/etc/pandaos/VERSION`, and any pending human st
 | Check | Expected result and where to look |
 |---|---|
 | `panda-health` | Core units are healthy. Use `panda-health --route` to also check the default route and `systemctl --failed` to identify failed units. |
-| `panda-connect status` | Signed in, with the chosen device name and active host. For sign-in, the user can check `sudo journalctl -u pandacode-sign-in -o cat -b` privately. For host errors, use `sudo journalctl -u pandacode-host -b`. |
+| `panda-connect status --json` | `signedIn` is `true`, `service` is `active`, and `deviceName` is the chosen name. For sign-in, the user can check `sudo journalctl -u pandacode-sign-in -o cat -b` privately. For host errors, use `sudo journalctl -u pandacode-host -b`. |
 | `sudo panda-agents doctor --user agent` | MCP registrations and runtime files are ready. After configuration changes, run `sudo panda-agents sync --user agent` and check `sudo journalctl -u panda-agents-sync -b` if needed. |
 | `boat status <vm>` | The test VM is running before deletion. For VM or edge failures, check `sudo journalctl -u boatd -u boat-api -u boat-gateway -u caddy -b` on the server. |
 | `sudo boat-admin images list` | The image is present and offered by the API. For declarative images, check `sudo journalctl -u boat-images -b`. |

@@ -34,18 +34,34 @@ descends from the release the box runs (no downgrade, no rewritten history), and
 tree Nix fetched. If any check fails, it puts the old `flake.lock` back and the box keeps running
 what it runs.
 
-**With no allowed signers configured, every update is refused.** The build warns about it,
-`panda-update status` says `signed releases: required, but no allowed signers are configured`,
-and every run records `last release check: refused ... updates are disabled` (also reported as
-`releaseRefused: true` by the panda-sys `sys_updates` tool). This is deliberate: a box without a
-trust anchor stops patching visibly instead of trusting whoever can move the branch.
+**v0.2.0 ships with the PandaOS release-signing key pre-configured.** `nixos/modules/release-signers`
+sets it as the default of `pandaos.updates.allowedSigners`, so a fresh v0.2.0 install verifies and
+applies signed releases without extra configuration. The key is published in
+[SECURITY.md](../SECURITY.md#release-signing-key):
 
-To turn updates on, add the release-signing public key to `/etc/pandaos/local.nix` and rebuild:
+```text
+release@pandaos namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO8zyQo+fbC0tMzI4gvW6ZICS0p8OVcmeYNGJREXBlNG
+```
+
+Its SHA-256 fingerprint is `SHA256:YSNtMOh+z7ZRA5E0sH2yAtbY+uxUP2cCbEzpbqa3L3o`. The release
+workflow (`.github/workflows/release.yml`) runs `git verify-commit` against the same key before it
+moves `origin/release`. To check the key a box trusts against `SECURITY.md`:
+
+```sh
+panda-update status   # shows the signing state
+printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO8zyQo+fbC0tMzI4gvW6ZICS0p8OVcmeYNGJREXBlNG' | ssh-keygen -lf -
+# expect: 256 SHA256:YSNtMOh+z7ZRA5E0sH2yAtbY+uxUP2cCbEzpbqa3L3o ... (ED25519)
+```
+
+**To override or rotate the trust anchor**, set the list in `/etc/pandaos/local.nix` and rebuild.
+Setting the option replaces the default; include the published key too if you still want official
+releases:
 
 ```nix
 pandaos.updates.allowedSigners = [
   # <principal> [options] <keytype> <key>, as in an ssh allowed_signers file
-  ''release@pandaos namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...''
+  ''release@pandaos namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO8zyQo+fbC0tMzI4gvW6ZICS0p8OVcmeYNGJREXBlNG''
+  # ''my-fork@example namespaces="git" ssh-ed25519 AAAA...''
 ];
 ```
 
@@ -54,11 +70,19 @@ sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
 sudo panda-update run && panda-update status
 ```
 
-**Release owner:** create the signing key (`ssh-keygen -t ed25519 -f pandaos-release`), publish
-its `.pub` line, and sign every commit the `release` branch points at
+**To disable updates fail-closed**, set `pandaos.updates.allowedSigners = [ ];`. With no allowed
+signers configured, every update is refused. The build warns about it, `panda-update status` says
+`signed releases: required, but no allowed signers are configured`, and every run records
+`last release check: refused ... updates are disabled` (also reported as `releaseRefused: true` by
+the panda-sys `sys_updates` tool). This is deliberate: a box without a trust anchor stops patching
+visibly instead of trusting whoever can move the branch.
+
+**Release owner:** sign every commit the `release` branch points at with the release-signing key
 (`git -c gpg.format=ssh -c user.signingkey=pandaos-release.pub commit -S`). A signed tag is not
-enough: the commit itself must carry the signature. `pandaos.updates.requireSignedRelease = false`
-turns the check off, and with it the protection.
+enough: the commit itself must carry the signature. A fork with its own key creates one
+(`ssh-keygen -t ed25519 -f pandaos-release`), publishes its `.pub` line, and lists it in
+`allowedSigners`. `pandaos.updates.requireSignedRelease = false` turns the check off, and with it
+the protection.
 
 ### Update modes
 

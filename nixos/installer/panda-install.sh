@@ -538,6 +538,10 @@ write_local_nix() {
     [[ -z $ipv6_prefix ]] || boat+="  services.boat.ipv6Prefix = \"$ipv6_prefix\";
 "
   fi
+  # local.nix holds the password hash: create it 0600 (chmod too, in case it
+  # already exists) before the redirect below truncates and fills it.
+  (umask 077 && : >"$1/local.nix")
+  chmod 0600 "$1/local.nix"
   {
     cat <<EOF
 # Machine settings written by panda-install.
