@@ -188,16 +188,18 @@ sign_in() {
 
   journalctl -f -q -o cat -u "$sign_in_unit" --since "@$since" &
   follow=$!
-  trap 'kill "$follow" 2>/dev/null || true' EXIT
-  trap 'kill "$follow" 2>/dev/null || true
+  # `follow` is local: the EXIT trap may run after sign_in returned (set -u).
+  trap '[ -n "${follow:-}" ] && kill "$follow" 2>/dev/null || true' EXIT
+  trap '[ -n "${follow:-}" ] && kill "$follow" 2>/dev/null || true
     echo "t3-connect: $sign_in_unit is still running in the background (sudo t3-connect stop cancels it)" >&2
     exit 130' INT
   while state=$(systemctl is-active "$sign_in_unit" || true); [ "$state" = active ] || [ "$state" = activating ] || [ "$state" = deactivating ]; do
     sleep 1
   done
   sleep 1 # the last lines
-  trap - INT
   kill "$follow" 2>/dev/null || true
+  wait "$follow" 2>/dev/null || true
+  trap - EXIT INT
   case "$(current_mode)" in
     connect | publish-only)
       if [ "$(systemctl show -P Result "$sign_in_unit")" = success ]; then
