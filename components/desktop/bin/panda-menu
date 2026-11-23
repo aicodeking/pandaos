@@ -112,7 +112,7 @@ t3_connect() {
   # "Start host" resumes the signed-in mode a stop left behind (connect or
   # publish-only), or starts local-only when this box is not linked.
   case "$(printf '%s\n' "Sign in" "Start host" "Pair (direct / SSH)" Status Logs \
-    "Approve device" Devices Restart Unlink Stop "Sign out" | pick "t3code>")" in
+    "Approve device" Devices "Revoke device" Restart Unlink Stop "Sign out" | pick "t3code>")" in
     "Sign in")
       # Sign-in stops a running host (one T3 per data dir) until it completes.
       if t3-connect status --json 2>/dev/null |
@@ -129,6 +129,9 @@ t3_connect() {
       code=$(printf '' | pick "device code>") || return 0
       [ -n "$code" ] && term t3code t3-connect approve "$code" ;;
     "Devices") term t3code t3-connect devices ;;
+    "Revoke device")
+      code=$(printf '' | pick "device code to revoke>") || return 0
+      [ -n "$code" ] && confirm "Revoke T3 Connect device $code" && term t3code t3-connect revoke "$code" ;;
     "Restart") confirm "Restart the T3 Code host (stops running sessions)" && term t3code t3-connect restart ;;
     "Unlink") confirm "Unlink this box from T3 Code Connect" && term t3code t3-connect unlink ;;
     "Stop") confirm "Stop the T3 Code host" && term t3code t3-connect stop ;;

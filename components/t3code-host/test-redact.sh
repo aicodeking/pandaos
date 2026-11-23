@@ -187,5 +187,74 @@ check_status 'SIGNAL_OK=0: TERM + child exit 130 -> 130' 130 \
 check_status 'SIGNAL_OK=0: TERM + child exit 143 -> 143' 143 \
   "$(signalled_status 143 T3CODE_HOST_REDACT_SIGNAL_OK=0)"
 
+# --- KillMode=control-group ---------------------------------------------------
+# systemd's default KillMode=control-group sends SIGTERM to every process in
+# the unit at once: redact-run, CMD, CMD's descendants (agent CLIs) and the
+# sed filters. The filters must ignore it and still redact CMD's shutdown
+# output; the grandchild must get a graceful TERM.
+# CMD: starts a grandchild that touches $1/grandchild-term on TERM; on TERM
+# prints a secret and goodbye, waits for the grandchild and exits 130.
+cgroup_grandchild='trap ": >\"$1/grandchild-term\"; exit 0" TERM; while :; do sleep 0.05; done'
+cgroup_child='
+  bash -c "$2" grandchild "$1" &
+  gc=$!
+  printf "%s\n" "$gc" >"$1/grandchild.pid"
+  trap "trap \"\" TERM; echo \"Token: shutdown-secret\"; echo goodbye; wait $gc; exit 130" TERM
+  : >"$1/cg-ready"
+  while :; do sleep 0.05; done'
+
+# Every descendant of $1, as systemd would find them in the unit's cgroup.
+descendants() {
+  local c
+  for c in $(pgrep -P "$1"); do
+    echo "$c"
+    descendants "$c"
+  done
+}
+
+any_alive() {
+  local p
+  for p in "$@"; do
+    if kill -0 "$p" 2>/dev/null; then return 0; fi
+  done
+  return 1
+}
+
+control_group_term() {
+  local pid i rc=0 pids=()
+  bash -euo pipefail "$script" bash -c "$cgroup_child" child "$tmp" "$cgroup_grandchild" \
+    >"$tmp/cg-out" 2>/dev/null &
+  pid=$!
+  for ((i = 0; i < 200; i++)); do
+    [ -e "$tmp/cg-ready" ] && break
+    sleep 0.05
+  done
+  sleep 0.2 # redact-run's own trap is in place by now
+  # Everything below redact-run: CMD, the grandchild and both sed filters.
+  while read -r i; do pids+=("$i"); done < <(descendants "$pid")
+  kill -TERM "$pid" "${pids[@]}" 2>/dev/null || true
+  wait "$pid" || rc=$?
+  # The filters exit once CMD and the grandchild have closed the pipes.
+  for ((i = 0; i < 100; i++)); do
+    any_alive "${pids[@]}" || break
+    sleep 0.05
+  done
+  echo "$rc"
+}
+
+check_status 'control-group TERM: redact-run exits 0' 0 "$(control_group_term)"
+if [ -e "$tmp/grandchild-term" ]; then
+  ok 'control-group TERM: grandchild got graceful TERM'
+else
+  not_ok 'control-group TERM: grandchild got graceful TERM' "no $tmp/grandchild-term"
+fi
+cg_out=$(cat "$tmp/cg-out")
+if [[ "$cg_out" == *'Token: [redacted]'* ]] && [[ "$cg_out" == *goodbye* ]] &&
+  [[ "$cg_out" != *shutdown-secret* ]]; then
+  ok 'control-group TERM: filters drain and redact shutdown output'
+else
+  not_ok 'control-group TERM: filters drain and redact shutdown output' "got: $(printf '%q' "$cg_out")"
+fi
+
 echo "test-redact: $pass passed, $fail failed"
 [ "$fail" = 0 ]

@@ -132,15 +132,20 @@ in
             echo "PandaCode: run 'sudo panda-connect sign-in', or use the desktop menu (PandaCode Connect)."
           }
           t3_hint() {
-            echo "T3 Code: run 'sudo t3-connect sign-in' (Connect), 'sudo t3-connect start && sudo t3-connect pair' (direct/SSH), or use the desktop menu (T3 Code Connect)."
+            echo "T3 Code: run 'sudo t3-connect sign-in' (Connect), 'sudo t3-connect start && sudo t3-connect pair' (direct/SSH), or on desktop use the menu (T3 Code Connect)."
           }
           panda_sign_in() {
             "$panda_connect" sign-in ||
               echo "Sign-in did not finish. Try again later: sudo panda-connect sign-in"
           }
           t3_sign_in() {
-            "$t3_connect" sign-in ||
+            t3_rc=0
+            "$t3_connect" sign-in || t3_rc=$?
+            if [ "$t3_rc" -eq 130 ]; then
+              echo "Sign-in is still running in the background (check 't3-connect logs --sign-in -o cat -b', or 'sudo t3-connect stop' to cancel)."
+            elif [ "$t3_rc" -ne 0 ]; then
               echo "Sign-in did not finish. Try again later: sudo t3-connect sign-in"
+            fi
           }
           if online; then
             # Not read -p: its prompt goes to stderr, which is the journal here.
@@ -150,7 +155,7 @@ in
                   printf 'Connect this box now? [p] PandaCode, [t] T3 Code, [b] both, [N] skip '
                   read -r answer || answer=
                   case "$answer" in
-                    [yYpP]*) panda_sign_in ;;
+                    [pP]*) panda_sign_in ;;
                     [tT]*) t3_sign_in ;;
                     [bB]*) panda_sign_in; t3_sign_in ;;
                     *) echo "Later:"; panda_hint; t3_hint ;;

@@ -14,6 +14,7 @@
 { config, lib, pkgs, options, ... }:
 let
   cfg = config.services.t3code-host;
+  defaultPackage = pkgs.callPackage ./package.nix { };
   stateDir = "/var/lib/t3code-host";
   home = config.users.users.${cfg.user}.home;
   agentHome = "/var/lib/agent";
@@ -169,14 +170,16 @@ in
     enable = lib.mkEnableOption "the T3 Code Connect headless host (t3 serve)";
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ./package.nix { };
+      default = defaultPackage;
       defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
       description = "T3 Code package (provides bin/t3).";
     };
     cloudflaredPackage = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
-      default = cfg.package.passthru.cloudflared;
-      defaultText = lib.literalExpression "config.services.t3code-host.package.passthru.cloudflared";
+      # `or`: an overridden package without passthru.cloudflared still evaluates.
+      default = cfg.package.passthru.cloudflared or defaultPackage.passthru.cloudflared;
+      defaultText = lib.literalExpression
+        "config.services.t3code-host.package.passthru.cloudflared or (pkgs.callPackage ./package.nix { }).passthru.cloudflared";
       description = ''
         cloudflared for T3 Connect (T3CODE_CLOUDFLARED_PATH). null: T3 Code
         resolves or downloads its own, which headless sign-in cannot confirm.
@@ -249,7 +252,11 @@ in
                 && (lib.hasPrefix "127." cfg.host || builtins.elem cfg.host [ "::1" "localhost" ]))))
           "services.t3code-host.openFirewall has no effect while the host listens on loopback only; set lan = true (with host = null) or a non-loopback host."
         ++ lib.optional (cfg.lan && cfg.host != null)
-          "services.t3code-host.lan has no effect while services.t3code-host.host is set; leave host = null for LAN binding.";
+          "services.t3code-host.lan has no effect while services.t3code-host.host is set; leave host = null for LAN binding."
+        ++ lib.optional
+          ((config.services.pandacode-host.enable or false)
+            && cfg.user != (config.services.pandacode-host.user or "agent"))
+          "services.t3code-host.user (${cfg.user}) differs from services.pandacode-host.user (${config.services.pandacode-host.user or "agent"}); snapshots and agent-env only manage the primary agent user.";
 
       environment.systemPackages = [ t3-connect cfg.package ];
 
@@ -293,10 +300,10 @@ in
           # Per-task cgroups under a delegated subtree, as in pandacode-host.
           Delegate = true;
           ExecStart = "${lib.getExe enter} ${lib.getExe redact} ${cfg.serveCommand}";
-          # Stop signals only the redactor, which forwards TERM to `t3 serve`
-          # and waits for it; the sed filters live on until it exits, so a
-          # late write cannot SIGPIPE the host mid-shutdown.
-          KillMode = "mixed";
+          # Default KillMode=control-group: `t3 serve` and the agent CLIs in
+          # its task-* cgroups all get a graceful SIGTERM. redact-run.sh makes
+          # its sed filters ignore TERM/INT, so they drain (and redact) the
+          # host's last lines until it closes its pipes; no late write SIGPIPEs it.
           ManagedOOMSwap = "kill";
           # An OOM-killed task must not stop the unit.
           OOMPolicy = "continue";
@@ -322,8 +329,8 @@ in
         serviceConfig = hostUnit.serviceConfig // {
           ExecStart = signInRun;
           ExecStopPost = "+${signInDone}";
-          # As for the host: TERM to the redactor only, filters drain.
-          KillMode = "mixed";
+          # Default KillMode=control-group, as for the host: every process
+          # gets SIGTERM; the redactor's sed filters ignore it and drain.
           # Device codes expire after 15 minutes.
           RuntimeMaxSec = "20min";
           SyslogIdentifier = "t3code-sign-in";

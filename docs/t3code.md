@@ -34,9 +34,13 @@ once approved it writes the enabled marker and starts `t3code-host.service`.
 If a local host is already running (`T3: local`), `sign-in` stops it, and the agent sessions it
 runs, while linking. If sign-in fails, the local host is started again automatically. Pressing
 Ctrl-C only detaches from the log stream: `t3code-sign-in.service` keeps running and the code
-stays valid. `sudo t3-connect stop` cancels a pending sign-in and leaves the host stopped;
-`sudo t3-connect start` (or `restart` or `pair`) cancels it and starts the host right back,
-keeping the enabled marker.
+stays valid. To cancel a pending sign-in:
+
+- `sudo t3-connect stop` cancels it and leaves the host stopped.
+- `sudo t3-connect start` or `sudo t3-connect pair` cancels it and starts the host, resuming its
+  previous mode (or `local` if the box was never signed in).
+- `sudo t3-connect restart` also cancels it, and restarts the host only when the host was already
+  enabled (it has an enabled marker).
 
 Over ssh without a tty, or from a script, start it without waiting and read the link from the
 journal:
@@ -47,15 +51,31 @@ sudo journalctl -u t3code-sign-in -o cat -b
 ```
 
 `sudo t3-connect sign-in --publish-only` links the box to publish agent activity to T3 Connect
-without opening the remote Connect relay tunnel. Other devices connect directly over LAN, an SSH
-tunnel or Tailscale.
+without opening the remote Connect relay tunnel. The host still listens only on `127.0.0.1:3773`
+by default, so other devices connect directly through an
+[SSH tunnel](#option-2-direct-access-over-an-ssh-tunnel) or
+[Tailscale Serve](#option-3-direct-access-over-tailscale-serve). LAN access works only if you also
+set `services.t3code-host.lan = true;` and `services.t3code-host.openFirewall = true;` in
+`/etc/pandaos/extra.nix` (see [NixOS options](#nixos-options)).
 
 When a new device connects and asks for approval, approve it on the box:
 
 ```sh
-sudo t3-connect devices            # list connected and pending devices
+sudo t3-connect devices            # list connected and pending devices with their codes
 sudo t3-connect approve <CODE>     # approve the code the device shows
+sudo t3-connect revoke <CODE>      # stop trusting a device and end its sessions
 ```
+
+`<CODE>` is the verification code shown by `sudo t3-connect devices`.
+
+> **Security note.** Only approve a code displayed on a device *you* just started connecting, and
+> check the list with `sudo t3-connect devices`. T3 Code sessions run as `agent`, the same user as
+> the host (see [Security model](#security-model)), so a prompt-injected agent could try
+> `t3 auth connect-device approve` itself. Review your devices periodically and revoke unexpected
+> ones with `sudo t3-connect revoke <CODE>`, or cut off Connect completely with
+> `sudo t3-connect unlink` or `sudo t3-connect sign-out`. Per upstream `t3`, if approval for new
+> devices is turned off, a revoked device can reconnect on its own until you turn approval back on
+> or unlink / sign out.
 
 Check the result:
 
@@ -142,17 +162,25 @@ Add `--tailscale-serve-port 8443` to the pairing command to select another HTTPS
 | `sudo t3-connect pair [--ttl DURATION] [--label LABEL] [--tailscale] [--tailscale-serve-port PORT]` | Print a one-time pairing link in this terminal |
 | `sudo t3-connect devices` | List connected and pending T3 Connect devices |
 | `sudo t3-connect approve <CODE>` | Approve a connecting device |
+| `sudo t3-connect revoke <CODE>` | Stop trusting a T3 Connect device and end its sessions |
 | `sudo t3-connect unlink` | Unlink the box from T3 Connect, clear the enabled marker and stop `t3code-host.service`. Keeps the stored T3 sign-in. Run `sudo t3-connect start` to resume local serving over SSH or Tailscale |
 | `sudo t3-connect sign-out` | Stop the host, clear the enabled marker and log out of T3 Connect |
 | `t3-connect status [--json] [--live]` | State; `--live` needs root and checks cloud reachability |
-| `t3-connect logs [journalctl args...]` | `t3code-host.service` logs, for example `t3-connect logs -f` |
+| `t3-connect logs [--sign-in] [journalctl args...]` | `t3code-host.service` logs, or `t3code-sign-in.service` with `--sign-in`, for example `t3-connect logs -f` |
+| `t3-connect help` | Show command usage |
+
+`unlink` and `sign-out` are transactional: if the cloud unlink or logout call fails (for example
+while offline), the host is stopped but the local sign-in state (`last-mode`) is kept, so `status`
+still reports `signedIn: true`. Run the command again once the box is back online.
 
 `t3-connect status --json` prints one compact line, for example:
 
 ```json
-{"enabled":true,"signedIn":true,"mode":"connect","service":"active","host":"127.0.0.1","port":3773,"version":"0.1.11","runningVersion":"0.1.11"}
+{"enabled":true,"signedIn":true,"signingIn":false,"mode":"connect","service":"active","host":"127.0.0.1","port":3773,"version":"0.1.11","runningVersion":"0.1.11"}
 ```
 
+`signingIn` is `true` while `t3code-sign-in.service` is active or activating, and `false`
+otherwise; plain `t3-connect status` then shows `signing in: true`.
 `service` is `active`, `activating`, `inactive` or `failed`. The `mode` values are `connect`
 (T3 Connect relay), `publish-only` (T3 Connect activity-only), `local` (serving directly without
 Connect) and `off` (disabled). `version` is the installed T3 Code; `runningVersion` is the version
@@ -177,7 +205,8 @@ t3_json=$(t3-connect status --json)
 grep -q '"signedIn":true' <<<"$t3_json" && grep -q '"service":"active"' <<<"$t3_json"
 ```
 
-On the desktop, the top bar shows `T3: sign in`, `T3: local` (running without Connect),
+On the desktop, the top bar shows `T3: sign in`, `T3: signing in` (a sign-in is pending; click it
+to open the sign-in logs with the device code), `T3: local` (running without Connect),
 `T3: connected`, `T3: starting`, `T3: stopped`, `T3: error` or `T3: ?` (the status could not be
 read or parsed), and `panda-menu` (`Super+X`) has a *T3 Code Connect* submenu. See
 [desktop.md](desktop.md).
@@ -217,13 +246,14 @@ PandaCode tasks:
 - **Non-wheel user, shared trust boundary.** The host and every agent it starts run as `agent`,
   which cannot `sudo` or read your home. T3 Code sessions, PandaCode tasks, the agent CLI logins and
   T3 Code's own credentials in `/var/lib/agent/.t3` all share that one user. A prompt-injected agent
-  in either host can therefore run `t3` (for example `t3 pair`) or read `/var/lib/agent/.t3`. This is
+  in either host can therefore run `t3` (for example `t3 pair` or
+  `t3 auth connect-device approve`) or read `/var/lib/agent/.t3`. This is
   the same trust boundary as `pandacode-host` and the agent CLI logins: everything that runs as
   `agent` is trusted as much as the least trusted task. Neither host can `sudo` or touch the owner's
   home. The box-wide `dev.tty.legacy_tiocsti = 0` sysctl stops an agent process from injecting
   keystrokes into a terminal it shares, for example after `sudo -iu agent`.
 - **Sandboxed helper commands.** `t3-connect` runs its `t3` helper commands (`pair`, `devices`,
-  `approve`, `unlink`, `sign-out`, `status --live`) through `systemd-run --pipe`, as the same
+  `approve`, `revoke`, `unlink`, `sign-out`, `status --live`) through `systemd-run --pipe`, as the same
   `agent` user in `agents.slice` with the same systemd sandbox as the host. The caller's TTY is
   never passed to `agent`, and terminal control characters are stripped from the output.
 - **Contained runs.** `t3code-host.service` runs in `agents.slice` with `Delegate=yes`, so each
@@ -231,7 +261,9 @@ PandaCode tasks:
 - **Rebuilds do not kill sessions.** `restartIfChanged = false`: a `nixos-rebuild` or update does
   not restart a running host. Use `sudo t3-connect restart` when you want the new version.
 - T3 Code keeps its state and sign-in in `/var/lib/agent/.t3` (`T3CODE_HOME`), owned by `agent`.
-  The enabled marker is `/var/lib/t3code-host/enabled`.
+  The enabled marker is `/var/lib/t3code-host/enabled`. The root-only `btrbk-agent` snapshots of
+  `/var/lib/agent` also keep `/var/lib/agent/.t3`, including past T3 Code state and credentials,
+  until those snapshots are pruned.
 
 ## NixOS options
 
@@ -275,4 +307,4 @@ the world-readable `/nix/store`.
 | `pair --tailscale` fails | Check `tailscale status`, MagicDNS, HTTPS certificates and `agent` operator access. See [Tailscale Serve](#option-3-direct-access-over-tailscale-serve) for the root-managed setup |
 | New version not running after update | `restartIfChanged = false`; run `sudo t3-connect restart` (ends running sessions) |
 | Stop using Connect but keep local access | `sudo t3-connect unlink` clears the enabled marker and stops `t3code-host.service` while keeping the stored T3 sign-in. Run `sudo t3-connect start` to resume local access over SSH or Tailscale |
-| Remove everything | `sudo t3-connect sign-out` |
+| Sign out and stop using T3 Code | `sudo t3-connect sign-out` logs out of T3 Connect, clears the enabled marker and stops the host. Local T3 Code history and state remain in `/var/lib/agent/.t3` (and in root-only `btrbk-agent` snapshots until pruned) unless you remove `/var/lib/agent/.t3` separately |

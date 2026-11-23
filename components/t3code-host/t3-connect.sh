@@ -17,11 +17,12 @@ usage: t3-connect sign-in [--publish-only] [--no-wait]
        t3-connect start | stop | restart
        t3-connect pair [--ttl TTL] [--label LABEL] [--tailscale] [other t3 pair args]
        t3-connect approve CODE
+       t3-connect revoke CODE
        t3-connect devices
        t3-connect unlink
        t3-connect sign-out
        t3-connect status [--json] [--live]
-       t3-connect logs [journalctl args, e.g. -f]
+       t3-connect logs [--sign-in] [journalctl args, e.g. -f]
        t3-connect help
 EOF
 }
@@ -44,9 +45,10 @@ need_root() {
 
 # t3 as the host user in a transient unit under agents.slice, with the host's
 # environment, data dir, cloudflared and sandbox (module.nix hostUnit). No
-# caller fd that could be a TTY (TIOCSTI and friends) ever reaches it: stdin
-# is /dev/null and callers hand it pipes for stdout/stderr (as_host, or jq in
-# `status --live`). Whatever it prints (pairing tokens) goes to the caller.
+# caller fd that could be a TTY (TIOCSTI and friends) ever reaches it:
+# `</dev/null` below is what --pipe passes on as stdin (EOF at once), and
+# callers hand it pipes for stdout/stderr (as_host, or jq in `status --live`).
+# Whatever it prints (pairing tokens) goes to the caller.
 as_host_raw() {
   local t3 env=(-E HOME="$HOST_HOME" -E T3CODE_HOME="$T3CODE_HOME"
     -E T3CODE_PORT="$PORT" -E T3CODE_LAN="$LAN"
@@ -61,7 +63,7 @@ as_host_raw() {
   t3=$(PATH=$HOST_PATH command -v t3) || die "t3 not found in $HOST_PATH"
   systemd-run --quiet --pipe --wait --collect \
     -p User="$HOST_USER" -p WorkingDirectory="$HOST_HOME" -p Slice=agents.slice \
-    -p StandardInput=null -p NoNewPrivileges=yes -p ProtectSystem=strict \
+    -p NoNewPrivileges=yes -p ProtectSystem=strict \
     -p ReadWritePaths="$HOST_HOME" -p PrivateTmp=yes -p PrivateDevices=yes \
     -p ProtectKernelModules=yes -p ProtectClock=yes -p ProtectHostname=yes \
     -p RestrictRealtime=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes \
@@ -173,12 +175,14 @@ sign_in() {
 
   printf '%s\n' "$mode" >"$SIGN_IN_MODE_FILE"
   chmod 0644 "$SIGN_IN_MODE_FILE"
-  since=$(date +%s)
   if [ "$(service_state)" = active ]; then
     echo "t3-connect: stopping $unit during sign-in; it restarts by itself when sign-in completes (or, if it fails, as it was)" >&2
   fi
   # A sign-in already waiting for approval is replaced by this one.
   systemctl stop "$sign_in_unit" 2>/dev/null || true
+  # After the stop: the follow below must not show the replaced sign-in's
+  # lines (an expired code).
+  since=$(date '+%Y-%m-%d %H:%M:%S.%6N')
   # Conflicts= stops t3code-host (one T3 per data dir).
   systemctl start "$sign_in_unit"
   if [ "$wait" = no ]; then
@@ -186,7 +190,7 @@ sign_in() {
     return 0
   fi
 
-  journalctl -f -q -o cat -u "$sign_in_unit" --since "@$since" &
+  journalctl -f -q -o cat -u "$sign_in_unit" --since "$since" &
   follow=$!
   # `follow` is local: the EXIT trap may run after sign_in returned (set -u).
   trap '[ -n "${follow:-}" ] && kill "$follow" 2>/dev/null || true' EXIT
@@ -302,9 +306,29 @@ approve() {
   as_host auth connect-device approve "$1"
 }
 
+revoke() {
+  [ $# -eq 1 ] || usage
+  [[ "$1" =~ ^[A-Za-z0-9-]{1,64}$ ]] || die "revoke: CODE must be letters, digits and dashes"
+  as_host auth connect-device revoke "$1"
+}
+
 devices() {
   [ $# -eq 0 ] || usage
   as_host auth connect-device list
+}
+
+# Records a running signed-in mode in $LAST_MODE_FILE so that, if the cloud
+# call in unlink/sign-out fails, `start` still resumes it.
+keep_last_mode() {
+  local prev_mode
+  prev_mode=$(current_mode)
+  case "$prev_mode" in
+    connect | publish-only)
+      printf '%s\n' "$prev_mode" >"$LAST_MODE_FILE"
+      chmod 0644 "$LAST_MODE_FILE"
+      ;;
+    *) ;;
+  esac
 }
 
 # `t3 connect unlink` leaves T3 Connect but keeps the T3 sign-in; like
@@ -313,11 +337,15 @@ unlink_connect() {
   [ $# -eq 0 ] || usage
   # Marker first, so a cancelled sign-in does not restart the host; again
   # after, in case a sign-in finished just before it was stopped.
-  rm -f "$MARKER" "$LAST_MODE_FILE"
+  keep_last_mode
+  rm -f "$MARKER"
   systemctl stop "$sign_in_unit" 2>/dev/null || true
   systemctl stop "$unit" || true
-  rm -f "$MARKER" "$LAST_MODE_FILE"
-  as_host connect unlink
+  rm -f "$MARKER"
+  if ! as_host connect unlink; then
+    die "unlink failed; the host is stopped and local sign-in state was kept"
+  fi
+  rm -f "$LAST_MODE_FILE"
   echo "t3-connect: unlinked from T3 Connect (run 't3-connect start' for local/SSH-only access)"
 }
 
@@ -325,17 +353,27 @@ sign_out() {
   [ $# -eq 0 ] || usage
   # Marker first, so a cancelled sign-in does not restart the host; again
   # after, in case a sign-in finished just before it was stopped.
-  rm -f "$MARKER" "$LAST_MODE_FILE"
+  keep_last_mode
+  rm -f "$MARKER"
   systemctl stop "$sign_in_unit" 2>/dev/null || true
   systemctl stop "$unit" || true
-  rm -f "$MARKER" "$LAST_MODE_FILE"
-  as_host connect logout
+  rm -f "$MARKER"
+  if ! as_host connect logout; then
+    die "sign-out failed; the host is stopped and local sign-in state was kept"
+  fi
+  rm -f "$LAST_MODE_FILE"
   echo "t3-connect: signed out; $unit stopped"
 }
 
 # Strips control characters (C0, DEL, C1) from what the host user controls
 # before it reaches root's terminal.
 jq_clean='def clean: explode | map(if . < 32 or (. >= 127 and . < 160) then 32 else . end) | implode;'
+
+sign_in_active() {
+  local s
+  s=$(systemctl is-active "$sign_in_unit" || true)
+  [ "$s" = active ] || [ "$s" = activating ]
+}
 
 # The version the running host reports (a JSON string), or null.
 running_version() {
@@ -348,7 +386,7 @@ running_version() {
 
 status() {
   local json=no live=no mode enabled=false signed_in=false service cloud=null
-  local running=null running_text
+  local running=null running_text signing_in=false
   local display_host=$HOST
   # host = null: T3 Code binds by T3CODE_LAN.
   if [ -z "$display_host" ]; then
@@ -373,6 +411,7 @@ status() {
     *) enabled=true mode=local ;; # unknown content: the unit still starts
   esac
   service=$(service_state)
+  if sign_in_active; then signing_in=true; fi
   if [ "$service" = active ]; then
     running=$(running_version)
   fi
@@ -384,16 +423,21 @@ status() {
   fi
   if [ "$json" = yes ]; then
     jq -cn --argjson enabled "$enabled" --argjson signedIn "$signed_in" \
+      --argjson signingIn "$signing_in" \
       --arg mode "$mode" --arg service "$service" --arg host "$display_host" \
       --argjson port "$PORT" --arg version "$VERSION" \
       --argjson runningVersion "$running" \
       --argjson cloud "$cloud" --arg live "$live" \
-      '{enabled: $enabled, signedIn: $signedIn, mode: $mode, service: $service,
+      '{enabled: $enabled, signedIn: $signedIn, signingIn: $signingIn,
+        mode: $mode, service: $service,
         host: $host, port: $port, version: $version, runningVersion: $runningVersion}
        + (if $live == "yes" then {cloud: $cloud} else {} end)'
   else
     printf 'enabled:   %s\nsigned in: %s\nmode:      %s\nservice:   %s\nlisten:    %s:%s\nversion:   %s\n' \
       "$enabled" "$signed_in" "$mode" "$service" "$display_host" "$PORT" "$VERSION"
+    if [ "$signing_in" = true ]; then
+      printf "signing in: true (run 't3-connect logs --sign-in -o cat -b' for the code)\n"
+    fi
     if [ "$service" = active ]; then
       running_text=$(jq -r "$jq_clean"' if type == "string" then clean else "unknown" end' <<<"$running")
       if [ "$running" != null ] && [ "$running_text" != "$VERSION" ]; then
@@ -429,6 +473,7 @@ case "$cmd" in
   restart) need_root "$cmd" "$@"; restart "$@" ;;
   pair) need_root "$cmd" "$@"; pair "$@" ;;
   approve) need_root "$cmd" "$@"; approve "$@" ;;
+  revoke) need_root "$cmd" "$@"; revoke "$@" ;;
   devices) need_root "$cmd" "$@"; devices "$@" ;;
   unlink) need_root "$cmd" "$@"; unlink_connect "$@" ;;
   sign-out) need_root "$cmd" "$@"; sign_out "$@" ;;
@@ -436,6 +481,12 @@ case "$cmd" in
     if has_live "$@"; then need_root "$cmd" "$@"; fi
     status "$@"
     ;;
-  logs) exec journalctl -u "$unit" "$@" ;;
+  logs)
+    if [ "${1:-}" = --sign-in ]; then
+      shift
+      exec journalctl -u "$sign_in_unit" "$@"
+    fi
+    exec journalctl -u "$unit" "$@"
+    ;;
   *) usage ;;
 esac

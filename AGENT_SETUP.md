@@ -220,7 +220,8 @@ sudo journalctl -u t3code-sign-in -o cat -b
 ```
 
 Have the human read the link and code privately by running
-`sudo journalctl -u t3code-sign-in -o cat -b` in their own terminal (or by running
+`t3-connect logs --sign-in -o cat -b` (or `sudo journalctl -u t3code-sign-in -o cat -b`) in their
+own terminal (or by running
 `sudo t3-connect sign-in` there themselves). The agent must never capture, read or relay the
 device code or verification URL. The human opens the link on a phone or laptop, checks the
 code, and approves it in their T3 Code account. Codes expire, so rerun `sign-in` if needed. After
@@ -228,12 +229,16 @@ the human confirms approval, check the status:
 
 ```sh
 t3_json=$(t3-connect status --json)
-# compact JSON: {"enabled":true,"signedIn":true,"mode":"connect","service":"active","host":"127.0.0.1","port":3773,"version":"0.1.11","runningVersion":"0.1.11"}
+# compact JSON: {"enabled":true,"signedIn":true,"signingIn":false,"mode":"connect","service":"active","host":"127.0.0.1","port":3773,"version":"0.1.11","runningVersion":"0.1.11"}
 grep -q '"signedIn":true' <<<"$t3_json" && grep -q '"service":"active"' <<<"$t3_json"
 ```
 
 If a device asks for approval, have the human read its code and run
-`sudo t3-connect approve <CODE>` (`sudo t3-connect devices` lists them).
+`sudo t3-connect approve <CODE>` (`sudo t3-connect devices` lists them). Only have the human
+approve codes shown on devices they started connecting themselves, after checking the list with
+`sudo t3-connect devices`. Have them revoke any unwanted device with
+`sudo t3-connect revoke <CODE>`, or disconnect Connect with `sudo t3-connect unlink` or
+`sudo t3-connect sign-out`.
 
 **Direct T3 Code without the relay.** If the box was previously signed in to T3 Code Connect,
 have the human run `sudo t3-connect unlink` first so it serves locally without the Connect relay.

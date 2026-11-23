@@ -13,6 +13,10 @@
 #
 # Forwards TERM/INT to CMD and exits with CMD's status; it never waits on the
 # filters, so a grandchild holding the pipes open cannot hang the exit.
+# redact() ignores TERM/INT, so under systemd's default KillMode=control-group
+# (every process in the unit gets SIGTERM: CMD, the agent CLIs in its task-*
+# cgroups, and these filters) the filters keep draining and redacting CMD's
+# final shutdown lines until CMD closes its pipes (EOF), then exit.
 # T3CODE_HOST_REDACT_SIGNAL_OK=0 keeps a 130/143 exit after a stop signal
 # non-zero (t3code-sign-in: a cancelled sign-in must not look successful).
 [ $# -ge 1 ] || {
@@ -21,8 +25,9 @@
 }
 
 redact() {
+  trap '' TERM INT
   local sgr='\x1b\[[0-9;]*m'
-  sed -u -E \
+  exec sed -u -E \
     -e 's/("[[:alpha:]_]*token"[[:space:]]*:[[:space:]]*")[^"]*"/\1[redacted]"/Ig' \
     -e "s/((token|pairing([[:space:]]|$sgr)+url)([[:space:]]|$sgr)*:([[:space:]]|$sgr)*).*/\\1[redacted]/I" \
     -e "s/(authorization([[:space:]]|$sgr)*:([[:space:]]|$sgr)*bearer([[:space:]]|$sgr)+)[^[:space:]\"'\x1b]+/\\1[redacted]/Ig" \

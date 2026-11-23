@@ -5,7 +5,8 @@
 # `stub` swaps in a fake `t3` (stubT3 below) whose `connect link` succeeds
 # offline, so the signed-in lifecycle of t3-connect and the sign-in unit runs
 # end to end: sign-in, stop/start resume, publish-only, a cancelled sign-in,
-# pair/devices/status --live output sanitising, unlink and sign-out.
+# pair/devices/status --live output sanitising, approve/revoke, unlink and
+# sign-out (failed ones keep the sign-in), and a graceful cgroup-wide stop.
 #
 # Not covered (needs the T3 Code Connect cloud and a Cloudflare tunnel, which
 # CI can neither reach nor own): a real completed sign-in, `connect` or
@@ -17,11 +18,40 @@ let
   stubVersion = "0.1.11";
 
   # Stands in for `t3 serve`: 200 on /, the version on the environment
-  # endpoint, exit 130 on SIGTERM like T3's NodeRuntime.
+  # endpoint, exit 130 on SIGTERM like T3's NodeRuntime, after printing a
+  # shutdown line and a secret (the redactor must drain and redact it). Its
+  # worker child writes $T3CODE_HOME/child-got-sigterm when it gets SIGTERM,
+  # proving the stop signals the whole cgroup gracefully (KillMode=control-group)
+  # rather than SIGKILLing everything but the main process.
   stubServer = pkgs.writeText "t3-stub-server.py" ''
-    import http.server, json, signal, sys
+    import http.server, json, signal, subprocess, sys
 
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(130))
+    CHILD = """
+    import os, signal, sys, time
+
+
+    def term(*_):
+        home = os.environ.get("T3CODE_HOME", "/nonexistent")
+        os.makedirs(home, exist_ok=True)
+        with open(os.path.join(home, "child-got-sigterm"), "w") as f:
+            f.write("SIGTERM")
+        sys.exit(0)
+
+
+    signal.signal(signal.SIGTERM, term)
+    while True:
+        time.sleep(3600)
+    """
+
+
+    def shutdown(*_):
+        print("stub: shutting down", flush=True)
+        print("Token: shutdownstubtok", flush=True)
+        sys.exit(130)
+
+
+    signal.signal(signal.SIGTERM, shutdown)
+    worker = subprocess.Popen([sys.executable, "-c", CHILD])
 
 
     class H(http.server.BaseHTTPRequestHandler):
@@ -63,7 +93,18 @@ let
             wait "$s"
           fi
           ;;
-        "connect unlink" | "connect logout") ;;
+        "connect unlink")
+          if [ -e "''${T3CODE_HOME:-/nonexistent}/fail-unlink" ]; then
+            echo "unlink offline" >&2
+            exit 1
+          fi
+          ;;
+        "connect logout")
+          if [ -e "''${T3CODE_HOME:-/nonexistent}/fail-logout" ]; then
+            echo "logout offline" >&2
+            exit 1
+          fi
+          ;;
         "connect status") printf '%s\n' '{"linked":true,"note":"ok\u001b[31m"}' ;;
         "serve "*)
           echo "Token: stubservetok"
@@ -71,12 +112,25 @@ let
           ;;
         "pair "*)
           echo "Pairing URL: http://127.0.0.1:3773/?token=stubpairtok"
+          # CSI, OSC (window title), CR (overwrite) and UTF-8 C1 CSI.
           printf '\033[31mRED\033[0m\n'
+          printf '\033]0;pwned\007\n'
+          printf 'fake\rprompt\n'
+          printf '\302\23331mC1\n'
           ;;
         "auth connect-device")
           case "''${3:-}" in
-            list) printf 'device-1 \033[31mLABEL\033[0m\n' ;;
-            *) echo "approved ''${4:-}" ;;
+            list)
+              printf 'device-1 \033[31mLABEL\033[0m\n'
+              printf '\033]0;title\007device-2\rspoof\n'
+              printf 'device-3 \302\233C1\n'
+              ;;
+            approve) echo "approved ''${4:-}" ;;
+            revoke) echo "revoked ''${4:-}" ;;
+            *)
+              echo "t3 (stub): unsupported: $*" >&2
+              exit 2
+              ;;
           esac
           ;;
         *)
@@ -179,6 +233,23 @@ pkgs.testers.runNixOSTest {
           assert show("ActiveState") == "inactive", show("ActiveState")
           assert int(show("NRestarts")) == 0, show("NRestarts")
           machine.succeed("panda-health --settle 10")
+
+      with subtest("hardening: no TIOCSTI injection, sandboxed host and sign-in units"):
+          # An agent process must not push keystrokes into the operator's tty.
+          tiocsti = machine.succeed("sysctl -n dev.tty.legacy_tiocsti").strip()
+          assert tiocsti == "0", tiocsti
+          for u in (unit, "t3code-sign-in.service"):
+              for prop, want in (
+                  ("User", "${host.user}"),
+                  ("NoNewPrivileges", "yes"),
+                  ("ProtectSystem", "strict"),
+                  ("PrivateDevices", "yes"),
+              ):
+                  got = show(prop, u)
+                  assert got == want, f"{u}: {prop}={got!r}, want {want!r}"
+          # TERM to every process in the cgroup (children shut down gracefully);
+          # the redactor ignores TERM and drains until its input closes.
+          assert show("KillMode") == "control-group", show("KillMode")
 
       with subtest("t3-connect start: real t3 serve, loopback only, HTTP, redacted, pairs, in agents.slice"):
           machine.succeed("t3-connect start")
@@ -325,6 +396,7 @@ pkgs.testers.runNixOSTest {
           stub.succeed(f"test -e {marker}")
           st = stub_status()
           assert st["enabled"] is True and st["signedIn"] is signed_in, st
+          assert st["signingIn"] is False, st
           assert st["mode"] == mode and st["service"] == "active", st
           assert st["runningVersion"] == "${nodes.stub.services.t3code-host.package.version}" == "0.1.11", st
           return st
@@ -333,9 +405,16 @@ pkgs.testers.runNixOSTest {
       def stub_off(signed_in):
           st = stub_status()
           assert st["enabled"] is False and st["signedIn"] is signed_in, st
+          assert st["signingIn"] is False, st
           assert st["mode"] == "off" and st["service"] == "inactive", st
           stub.fail(f"test -e {marker}")
           return st
+
+
+      def assert_clean(out):
+          # No CSI/OSC introducer, BEL, CR or UTF-8 C1 CSI reaches root's terminal.
+          for bad in ("\x1b", "\x07", "\r", "\u009b"):
+              assert bad not in out, f"{bad!r} in {out!r}"
 
 
       with subtest("stub: signed-in lifecycle (sign-in, stop/start, publish-only, cancel, pair, unlink, sign-out)"):
@@ -357,10 +436,18 @@ pkgs.testers.runNixOSTest {
           journal = stub.succeed(f"journalctl -o cat -u {unit}")
           assert "stubservetok" not in journal, journal
 
-          # 2. stop: off, still signed in; last-mode kept.
+          # 2. stop: off, still signed in; last-mode kept. KillMode=control-group
+          # TERMs the server's worker child too (not a bare SIGKILL), and the
+          # redactor drains and redacts the server's shutdown output.
+          child_marker = "${home}/.t3/child-got-sigterm"
+          stub.succeed(f"rm -f {child_marker}")
           stub.succeed("t3-connect stop")
           stub_off(True)
           assert stub_last_mode() == "connect", stub_last_mode()
+          stub.wait_until_succeeds(f"test -e {child_marker}", timeout=10)
+          stub.wait_until_succeeds(f"journalctl -o cat -u {unit} | grep -qF 'stub: shutting down'", timeout=30)
+          journal = stub.succeed(f"journalctl -o cat -u {unit}")
+          assert "shutdownstubtok" not in journal, journal
 
           # 3. start resumes connect.
           stub.succeed("t3-connect start")
@@ -385,8 +472,13 @@ pkgs.testers.runNixOSTest {
           stub.wait_until_succeeds(f"journalctl -o cat -u {sign_in_unit} | grep -qF 'Waiting for approval'", timeout=60)
           assert stub_show("ActiveState", sign_in_unit) == "active", stub_show("ActiveState", sign_in_unit)
           assert stub_show("ActiveState") == "inactive", stub_show("ActiveState")
+          st = stub_status()
+          assert st["signingIn"] is True, st
+          out = stub.succeed("t3-connect logs --sign-in -o cat -b")
+          assert "Code: ABCD-1234" in out, out
           stub.succeed("t3-connect stop")
           stub.wait_until_fails(f"systemctl is-active {sign_in_unit}", timeout=60)
+          assert stub_status()["signingIn"] is False
           assert stub_show("ActiveState") == "inactive", stub_show("ActiveState")
           time.sleep(5)
           assert stub_show("ActiveState", sign_in_unit) in ("inactive", "failed"), stub_show("ActiveState", sign_in_unit)
@@ -395,23 +487,39 @@ pkgs.testers.runNixOSTest {
           assert stub_last_mode() == "publish-only", stub_last_mode()
           stub.succeed("rm -f ${home}/.t3/hang-signin")
 
-          # 6. pair, devices and status --live reach root's terminal sanitised.
+          # 6. pair, devices and status --live reach root's terminal sanitised
+          # (CSI, OSC, CR, C1); approve and revoke pass the device code through.
           stub.succeed("t3-connect start")
           stub_serving("publish-only", True)
           out = stub.succeed("t3-connect pair 2>/dev/null")
           print(repr(out))
           assert "http://127.0.0.1:3773/?token=stubpairtok" in out, out
-          assert "\x1b" not in out, repr(out)
+          assert_clean(out)
           out = stub.succeed("t3-connect devices 2>&1")
           print(repr(out))
           assert "device-1" in out, out
-          assert "\x1b" not in out, repr(out)
+          assert_clean(out)
           out = stub.succeed("t3-connect status --live")
           print(repr(out))
           assert "linked: true" in out, out
-          assert "\x1b" not in out, repr(out)
+          assert_clean(out)
           st = json.loads(stub.succeed("t3-connect status --live --json"))
           assert st["cloud"]["linked"] is True, st
+          out = stub.succeed("t3-connect approve K7QM-2XFD 2>&1")
+          assert "approved K7QM-2XFD" in out, out
+          out = stub.succeed("t3-connect revoke K7QM-2XFD 2>&1")
+          assert "revoked K7QM-2XFD" in out, out
+
+          # 7a. A failed unlink (cloud unreachable) must not claim signedIn:false
+          # nor drop last-mode: start still resumes publish-only.
+          stub.succeed("runuser -u ${host.user} -- touch ${home}/.t3/fail-unlink")
+          out = stub.fail("t3-connect unlink 2>&1")
+          print(out)
+          stub_off(True)
+          assert stub_last_mode() == "publish-only", stub_last_mode()
+          stub.succeed("rm -f ${home}/.t3/fail-unlink")
+          stub.succeed("t3-connect start")
+          stub_serving("publish-only", True)
 
           # 7. unlink: marker and last-mode gone, host stopped; start is local.
           stub.succeed("t3-connect unlink")
@@ -423,6 +531,15 @@ pkgs.testers.runNixOSTest {
 
           # 8. sign-out from a signed-in host: off, signed out, nothing to resume.
           stub.succeed("timeout 120 t3-connect sign-in 2>&1")
+          stub_serving("connect", True)
+          # 8a. A failed sign-out keeps the sign-in and last-mode.
+          stub.succeed("runuser -u ${host.user} -- touch ${home}/.t3/fail-logout")
+          out = stub.fail("t3-connect sign-out 2>&1")
+          print(out)
+          stub_off(True)
+          assert stub_last_mode() == "connect", stub_last_mode()
+          stub.succeed("rm -f ${home}/.t3/fail-logout")
+          stub.succeed("t3-connect start")
           stub_serving("connect", True)
           stub.succeed("t3-connect sign-out")
           stub_off(False)

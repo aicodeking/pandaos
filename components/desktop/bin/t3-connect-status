@@ -1,16 +1,23 @@
 #!/bin/sh
 # Waybar custom module: one JSON line from `t3-connect status --json`.
-# `t3-connect-status click` is the module's on-click: show logs when enabled,
-# start a signed-in but stopped host, else sign in.
+# `t3-connect-status click` is the module's on-click: follow a pending
+# sign-in (its device code), show logs when enabled, start a signed-in but
+# stopped host, else sign in.
 # T3_CONNECT_CMD is only overridden by the fixture test.
 cli=${T3_CONNECT_CMD:-t3-connect}
 
+# is FILTER: does the current status JSON ($st) match the jq FILTER?
+is() { printf '%s' "$st" | jq -e "$1" >/dev/null 2>&1; }
+
 if [ "${1:-}" = click ]; then
   st=$("$cli" status --json 2>/dev/null || true)
-  if printf '%s' "$st" | jq -e '.enabled == true' >/dev/null 2>&1; then
-    exec foot --hold --title 'Panda: T3 Code logs' "$cli" logs
+  if is '.signingIn == true'; then
+    exec foot --hold --title 'Panda: T3 Code sign-in' "$cli" logs --sign-in -b -o cat -f
   fi
-  if printf '%s' "$st" | jq -e '.signedIn == true' >/dev/null 2>&1; then
+  if is '.enabled == true'; then
+    exec foot --hold --title 'Panda: T3 Code logs' "$cli" logs -b -e
+  fi
+  if is '.signedIn == true'; then
     exec foot --hold --title 'Panda: T3 Code start' "$cli" start
   fi
   exec foot --hold --title 'Panda: T3 Code sign-in' "$cli" sign-in
@@ -27,7 +34,11 @@ res=$(printf '%s' "$out" | jq -c '
   if type != "object" then error("not an object") else . end
   | "version: \(.version // "-")" as $v
   | "\(.host // "-"):\(.port // "-")" as $addr
-  | if .enabled != true and .signedIn == true then
+  # signingIn first: a sign-in stops the host, so enabled may read false.
+  | if .signingIn == true then
+      {text: "T3: signing in", class: "connecting",
+       tooltip: "\($v)\nSign-in in progress. Click to view the device code"}
+    elif .enabled != true and .signedIn == true then
       {text: "T3: stopped", class: "off",
        tooltip: "\($v)\nSigned in to T3 Code Connect but stopped. Click to start"}
     elif .enabled != true then
@@ -36,6 +47,9 @@ res=$(printf '%s' "$out" | jq -c '
       {text: "T3: error", class: "failed", tooltip: "\($v)\nThe T3 Code host failed. Click for logs"}
     elif .service == "activating" then
       {text: "T3: starting", class: "connecting", tooltip: "\($v)\nStarting the T3 Code host. Click for logs"}
+    elif .service == "active" and .signedIn == true and .mode == "publish-only" then
+      {text: "T3: connected", class: "active",
+       tooltip: "\($v)\nPublished to T3 Connect (direct access only, no relay) on \($addr). Click for logs"}
     elif .service == "active" and .signedIn == true then
       {text: "T3: connected", class: "active",
        tooltip: "\($v)\nConnected (mode: \(.mode // "-")) on \($addr). Click for logs"}
