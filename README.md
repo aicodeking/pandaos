@@ -221,7 +221,7 @@ There is no default password: you set one (and optionally an ssh key) during the
   [signed releases](docs/updates-and-rollback.md#signed-releases-required).
 - **UEFI only**, with Secure Boot off.
 
-See the [v0.2.0 changelog](CHANGELOG.md#020---2026-11-22) for changes since v0.1.0.
+See the [full v0.2.0 release notes](CHANGELOG.md#020---2026-11-22).
 
 ## License
 

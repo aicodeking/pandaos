@@ -1,7 +1,9 @@
 name: ci
 
+# Pushes only build main: v* tags are release.yml's job, and other branches get CI via their PR.
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions: {}
@@ -11,8 +13,10 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/nix-checks.yml
+    # Only pushes to main get the Cachix write token; pull_request runs (including same-repo
+    # PRs, which GitHub would otherwise hand the secret) get an empty one and just read the cache.
     secrets:
-      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      CACHIX_AUTH_TOKEN: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.CACHIX_AUTH_TOKEN || '' }}
 
   unit-checks:
     permissions:

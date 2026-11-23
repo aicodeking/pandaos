@@ -23,7 +23,10 @@ Download your ISO and `SHA256SUMS` from the
 - `pandaos-v0.2.0-desktop-x86_64-linux.iso` for a labwc desktop and computer use.
 - `pandaos-v0.2.0-server-x86_64-linux.iso` for a self-hosted boat microVM server.
 
-Check it, and optionally check the build provenance with the GitHub CLI:
+Check it. When the GitHub CLI (`gh`) is available, also verifying the build provenance is
+strongly advised: the checksum only proves the download matches `SHA256SUMS` from the same
+release (transfer integrity), while `gh attestation verify` proves GitHub Actions built the ISO
+from the `v0.2.0` tag of this repository (build provenance):
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
@@ -146,6 +149,17 @@ are already cached in the local Nix store. The daily update and any manual rebui
 sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
 ```
 
+**`server` installed without `--build`.** The offline install copies the generic prebuilt server
+system: the placeholder `api.boat.localhost` domain, the untrusted-tenant `nosmt` kernel default,
+and no data-disk pin. Running the rebuild above after the first boot is **mandatory** before
+using the server. Then reboot if the kernel parameters changed
+(`cmp -s /run/booted-system/kernel-params /run/current-system/kernel-params || sudo reboot`) and
+verify the running system as in the
+[Agent Setup runbook](../AGENT_SETUP.md#after-first-boot-mandatory-rebuild-and-runtime-checks).
+`sudo nix eval` only inspects the written configuration, not the running system.
+`/etc/pandaos/extra.nix` is mode `0644` and copied into the world-readable `/nix/store`, so never
+put passwords, tokens or API keys in it; reference root-only files instead.
+
 ## After the first boot
 
 1. Connect to the network: wired works out of the box, use `nmtui` for wifi.
@@ -215,7 +229,9 @@ needs **at least 8 GiB of RAM; 16 GiB or more is recommended** for `server` or `
    [nixos-25.05 release metadata](https://api.github.com/repos/nix-community/nixos-images/releases/tags/nixos-25.05).
    Check the [upstream releases](https://github.com/nix-community/nixos-images/releases) when
    choosing another version, and update both the tag and its expected digest together. Do not
-   extract or run the archive if verification fails.
+   extract or run the archive if verification fails. `nixos-25.05` is a floating upstream release
+   tag: if `nix-community/nixos-images` refreshes the archive, the pinned checksum fails closed.
+   Review the new upstream release before updating the hash.
 
    ssh back in as root after about a minute. Check `ls /sys/firmware/efi/efivars` (needed in step 5).
    After reconnecting, upload `extra.nix` from the workstation with

@@ -247,9 +247,9 @@ All notable changes to PandaOS are documented here. The format follows
 - nftables firewall backend, `sshguard`, `MaxAuthTries 3`, kernel sysctl hardening, and `sudo`
   limited to `wheel`.
 
-## [0.1.0]
+## 0.1.0
 
-The first version (v0).
+The initial v0.1.0 baseline (no Git tag or GitHub Release was published for it).
 
 ### Added
 

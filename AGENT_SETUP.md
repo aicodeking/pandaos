@@ -80,8 +80,10 @@ curl -fLO "$base/$iso" &&
   sha256sum -c --ignore-missing SHA256SUMS
 ```
 
-Proceed only if the output names the chosen ISO and reports `OK`. With the GitHub CLI, you
-can also check the build provenance:
+Proceed only if the output names the chosen ISO and reports `OK`.
+
+**Provenance attestation (required when `gh` is installed).** If `command -v gh` succeeds, this
+check is mandatory; stop if it fails:
 
 ```sh
 gh attestation verify "$iso" --repo AICodeKing/pandaos \
@@ -89,6 +91,12 @@ gh attestation verify "$iso" --repo AICodeKing/pandaos \
   --source-ref refs/tags/v0.2.0
 ```
 
+If `gh` is not installed, tell the user that checksum-only verification proves the download
+matches `SHA256SUMS` from the same release (transfer integrity), but not that GitHub Actions
+built it from the `v0.2.0` tag (build provenance). Get their explicit confirmation before
+proceeding on checksums alone, or install `gh` and run the check. The same rule applies to the
+guest images in [B3](#b3-install-and-verify-guest-images) and the CLI in
+[B4](#b4-create-the-first-owner-key-and-test-one-vm).
 
 If the tagged assets are unavailable (for example, while release assets are still publishing),
 use the source-build steps in the [install guide](docs/install.md#1-get-the-iso). Explicitly choose
@@ -172,9 +180,9 @@ they use in PandaCode**. After the human confirms approval, the agent checks onl
 status:
 
 ```sh
-status=$(panda-connect status --json)
+connect_json=$(panda-connect status --json)
 # compact JSON: {"signedIn":true,"service":"active","deviceName":"workbench",...}
-grep -q '"signedIn":true' <<<"$status" && grep -q '"service":"active"' <<<"$status"
+grep -q '"signedIn":true' <<<"$connect_json" && grep -q '"service":"active"' <<<"$connect_json"
 ```
 
 `jq` is not installed on PandaOS; these checks need only bash and `grep`.
@@ -267,6 +275,11 @@ Certificate Transparency exposure are described in the [TLS setup](docs/boat.md#
     --untrusted-tenants false \
     --ssh-key 'ssh-ed25519 AAAA... operator@workstation'
   ```
+
+  Without `--build`, this copies the prebuilt generic server system from the ISO: the
+  placeholder `api.boat.localhost` domain, the untrusted-tenant `nosmt` kernel default, and no
+  data-disk pin. Your flags take effect only after the **mandatory** first-boot rebuild in
+  [After first boot](#after-first-boot-mandatory-rebuild-and-runtime-checks).
 
   **Multi-tenant host.** Use `--build` so DNS-01 TLS works from the first boot. First write
   `extra.nix` on the live ISO (for example `/root/extra.nix` or `~/extra.nix`). This complete
@@ -362,27 +375,55 @@ Certificate Transparency exposure are described in the [TLS setup](docs/boat.md#
   Verify the network and boot entry before rebooting. Verify the new SSH host fingerprint with
   the user before replacing a known-hosts entry.
 
-After boot, log in with the configured user. Confirm the chosen trust and TLS settings by
-evaluating the options, never by reading `local.nix` (PandaOS omits `nixos-option`; `sudo` is
-needed because the flake imports the `0600` `local.nix`):
+#### After first boot: mandatory rebuild and runtime checks
 
-```sh
-cfg=/etc/pandaos#nixosConfigurations.pandaos.config
-sudo nix eval "$cfg.services.boat.untrustedTenants"
-sudo nix eval "$cfg.services.boat.gateway.dnsProvider"
-sudo nix eval "$cfg.pandaos.updates.mode"
-cat /etc/pandaos/extra.nix   # only your own overrides, if present; never print local.nix
-```
+Log in with the configured user.
 
-Put any further server, network or update settings in `/etc/pandaos/extra.nix`, then run (this
-needs a network to fetch the locked flake inputs):
+1. **Rebuild (mandatory for every `server` installed without `--build`).** The running system
+   is still the prebuilt ISO system with the placeholder domain until this succeeds. It needs a
+   network to fetch the locked flake inputs:
 
-```sh
-sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
-```
+   ```sh
+   sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
+   ```
 
-If the switch reports pending kernel parameters for `boatd`, schedule a reboot with the user
-before proceeding.
+   Then reboot if the kernel parameters changed, for example when `--untrusted-tenants false`
+   drops the prebuilt `nosmt` default, or boot arguments changed. Schedule the reboot with the
+   user first:
+
+   ```sh
+   cmp -s /run/booted-system/kernel-params /run/current-system/kernel-params || sudo reboot
+   ```
+
+   `--build` installs already apply the flags; rebuild them only after changing `extra.nix`.
+2. **Inspect the configuration.** `sudo nix eval` reads the *written configuration files*, not
+   the running system, so it is not proof the settings are live. Evaluate options rather than
+   reading `local.nix` (PandaOS omits `nixos-option`; `sudo` is needed because the flake imports
+   the `0600` `local.nix`):
+
+   ```sh
+   cfg=/etc/pandaos#nixosConfigurations.pandaos.config
+   sudo nix eval "$cfg.services.boat.untrustedTenants"
+   sudo nix eval "$cfg.services.boat.gateway.dnsProvider"
+   sudo nix eval "$cfg.pandaos.updates.mode"
+   cat /etc/pandaos/extra.nix   # only your own overrides, if present; never print local.nix
+   ```
+
+3. **Verify the running system.** Substitute the chosen domain. Each command must succeed:
+
+   ```sh
+   systemctl is-active caddy boatd boat-api boat-gateway
+   systemctl cat boat-gateway | grep -Fq "boat.example.com"
+   cmp -s /run/booted-system/kernel-params /run/current-system/kernel-params
+   curl -fsS https://api.boat.example.com/healthz   # once DNS points at the server
+   ```
+
+   A failing `grep` means the placeholder system is still active: rerun step 1.
+
+Put any further server, network or update settings in `/etc/pandaos/extra.nix`, then repeat
+steps 1 and 3. `extra.nix` is mode `0644` and is copied into the world-readable `/nix/store`:
+**never put raw passwords, tokens, or API keys in it.** Reference root-only files instead, such
+as `services.boat.gateway.environmentFile = "/var/lib/secrets/caddy-dns.env";`.
 
 ### B3. Install and verify guest images
 
@@ -390,9 +431,11 @@ On the server, download the guest kernel, one root filesystem, and the checksum 
 the [v0.2.0 release][release] into an empty directory. Choose `full` for browser desktops or
 `slim` for headless guests. `boat_guest_SHA256SUMS` lists `boat-guest-vmlinux`,
 `boat-guest-rootfs-slim.ext4.zst`, every `boat-guest-rootfs-full.ext4.zst.part*` and the
-reassembled `boat-guest-rootfs-full.ext4.zst`. With the GitHub CLI, also run
+reassembled `boat-guest-rootfs-full.ext4.zst`. **When `gh` is installed, provenance is
+required:** before importing, run
 `gh attestation verify <file> --repo AICodeKing/pandaos --signer-workflow AICodeKing/pandaos/.github/workflows/release.yml --source-ref refs/tags/v0.2.0`
-for each downloaded `boat-guest-*` file.
+for `boat_guest_SHA256SUMS` and each downloaded `boat-guest-*` file, and stop if any fails.
+Without `gh`, follow the checksum-only confirmation rule in [A1](#a1-download-verify-and-install).
 
 **Slim (single file):**
 
@@ -421,6 +464,14 @@ curl -fLO "$base/boat-guest-vmlinux" &&
 
 Proceed only if every listed file reports `OK`; for `full`, the second check must also report
 `OK` for the reassembled `boat-guest-rootfs-full.ext4.zst`. Then run `sudo boat-admin images list`.
+After a successful import, free the downloaded files (about 5 GB for `full`) from the download
+directory:
+
+```sh
+rm -f boat-guest-rootfs-full.ext4.zst* boat-guest-rootfs-slim.ext4.zst \
+  boat-guest-vmlinux boat_guest_SHA256SUMS
+```
+
 Alternatively, declare the HTTPS URLs and their hashes under `services.boat.images` in
 `/etc/pandaos/extra.nix` and rebuild. The `slim` release URL works there directly; for `full`,
 host the reassembled file on your own HTTPS server. The
@@ -450,17 +501,20 @@ Use `rootfs-slim.ext4.zst` instead for headless guests.
    server copy with `sudo rm /root/boat-owner-token`.
 2. On the user's Linux or macOS workstation, install the CLI from the same release. The script
    verifies the matching `boat_<os>_<arch>` binary against `boat_SHA256SUMS` before installing
-   it to `~/.local/bin`. With the GitHub CLI, also check provenance with
-   `gh attestation verify boat_<os>_<arch> --repo AICodeKing/pandaos --signer-workflow AICodeKing/pandaos/.github/workflows/release.yml --source-ref refs/tags/v0.2.0`
-   (add `.exe` on Windows).
+   it to `~/.local/bin`. **When `gh` is installed, provenance is required:** download
+   `boat_<os>_<arch>` (add `.exe` on Windows) and `boat_SHA256SUMS` from the
+   [v0.2.0 release][release], run
+   `gh attestation verify <file> --repo AICodeKing/pandaos --signer-workflow AICodeKing/pandaos/.github/workflows/release.yml --source-ref refs/tags/v0.2.0`
+   on both, and stop if either fails. Without `gh`, follow the checksum-only confirmation rule
+   in [A1](#a1-download-verify-and-install). This snippet works in `sh`, `bash`, and `zsh`:
 
    ```sh
    tmp=$(mktemp) &&
      curl -fsSL -o "$tmp" https://raw.githubusercontent.com/AICodeKing/pandaos/v0.2.0/components/boat/cli/install.sh &&
      BOAT_VERSION=v0.2.0 sh "$tmp"
-   status=$?
+   rc=$?
    rm -f "$tmp"
-   [ "$status" -eq 0 ]
+   [ "$rc" -eq 0 ]
    ```
 
    **Windows (untested).** The `boat_windows_{amd64,arm64}.exe` binaries and `install.ps1` are
@@ -518,7 +572,7 @@ CLIs, follow A2 and A3.
   `boat ssh-config <vm>`. It writes an entry under `~/.ssh/boat/`. Add
   `Include ~/.ssh/boat/*.conf` at the top of `~/.ssh/config` once. For a one-time direct
   append instead, use `boat ssh-config <vm> --print >> ~/.ssh/config`. The entry tunnels
-  through `ssh.<domain>:2222`. Test `ssh <host-alias>`, then add that same SSH host in
+  through `ssh.<domain>:2222`. Test `ssh <vm-name>` (the entry is `Host <id> <name>`), then add that same SSH host in
   PandaCode. Regenerate the config after a resume if the VM address changes.
 - **Dashboard and team keys.** Open `https://api.<domain>/`. Create scoped keys with
   `boat api-key create ci-reader --preset read-only --ttl 24h` or the appropriate preset

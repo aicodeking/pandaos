@@ -19,7 +19,7 @@ tests need KVM. On macOS, use a Linux builder or let CI run them.
 | `formatter.x86_64-linux` | `nixfmt` (run `nix fmt`) |
 
 Installed boxes use a different flake: the local `/etc/pandaos` flake written by `panda-install`
-(new in Unreleased), whose `nixosConfigurations.pandaos` builds on this repo.
+(added in v0.2.0), whose `nixosConfigurations.pandaos` builds on this repo.
 
 ```sh
 nix build .#iso-headless                      # result/iso/*.iso
@@ -123,6 +123,15 @@ passes its checks and publishes its assets.
 4. The workflow refuses tags that are not on `main`. After publishing, it advances `release` to
    the tagged commit **fast-forward only**: it refuses to rewind or diverge from an existing
    `origin/release`. If `release` is protected, allow GitHub Actions to fast-forward push to it.
+
+**Repository rulesets.** On GitHub, the `v*` tag ruleset lets only admins create, update or
+delete release tags, and the `release` branch ruleset blocks deletion and non-fast-forward
+pushes on `release`. When cutting the first release, or any release whose diff touches
+`.github/workflows/*`, the workflow's `GITHUB_TOKEN` lacks the `workflows` permission needed to
+push those commits to `release`. Before pushing the tag, push or fast-forward `origin/release`
+to the tagged commit with an admin credential that has `workflow` scope (for example
+`git push origin <tag-commit-sha>:refs/heads/release`); the workflow's fast-forward step then
+finds `release` already at the tag.
 
 A manual `workflow_dispatch` run performs the same checks and builds but keeps assets as run
 artifacts; it does not attest, publish or move `release`.
