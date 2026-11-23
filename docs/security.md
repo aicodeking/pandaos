@@ -36,8 +36,8 @@ What we do not defend against:
 | Direction | What |
 |---|---|
 | Inbound | nftables firewall on. Only ssh (22) is open. ssh: keys only, no passwords, no root login, `MaxAuthTries 3`, and `sshguard` blocks repeat offenders. |
-| Outbound | `pandacode-host` (once signed in) dials out to PandaCode Connect; the optional `panda-agentd` dials out to its relay. Nothing has to be opened or forwarded for agents. |
-| Local only | `panda-browser`, if enabled, serves CDP on `127.0.0.1:9222` only. |
+| Outbound | `pandacode-host` (once signed in) dials out to PandaCode Connect; `t3code-host` (once signed in to T3 Code Connect) dials out to the T3 Connect relay through `cloudflared`; the optional `panda-agentd` dials out to its relay. Nothing has to be opened or forwarded for agents. |
+| Local only | `panda-browser`, if enabled, serves CDP on `127.0.0.1:9222` only. `t3code-host`, once started, listens on `127.0.0.1:3773` only (`lan` and `openFirewall` are off by default); reach it through Connect, an SSH tunnel or Tailscale Serve ([t3code.md](t3code.md#security-model)). |
 
 > v0.1.0 already had the firewall on with only ssh open and ssh key-only, but it shipped the user
 > `panda` with the password `panda`. Setting credentials at install time is **new in Unreleased**.
@@ -137,13 +137,22 @@ ran git there, such as your login user or root. **New in Unreleased, this is clo
    `.git/config` has a key it did not write. Memory files are opened so that a swapped-in symlink
    cannot redirect them, and a lock (`.git/panda-mem.lock`) serialises writes.
 
+**T3 Code shares the `agent` user.** `t3code-host` runs as the same `agent` user, with the same
+sandbox (`NoNewPrivileges`, not in `wheel`). T3 Code sessions, PandaCode tasks, the agent CLI logins
+and T3 Code's credentials in `/var/lib/agent/.t3` are one trust boundary: a prompt-injected task in
+either host can run `t3` or read `/var/lib/agent/.t3`, but neither can `sudo` or touch the owner's
+home. The unit redacts pairing tokens from journald, which keeps them from journal readers such as
+`panda-sys`, not from processes running as `agent`. The box-wide sysctl `dev.tty.legacy_tiocsti = 0`
+stops a process running as `agent` from pushing keystrokes into a terminal it shares (for example
+after `sudo -iu agent claude`). See [t3code.md](t3code.md#security-model).
+
 Members of the `panda-mem` group can still write any memory through the socket, so a job can change
 or flood shared memory. Every change is a git commit, and `/mem` is snapshotted hourly.
 
 ## Agent limits and OOM
 
 New in Unreleased (`pandaos.agents`, see [agents.md](agents.md#agent-runtime-new-in-unreleased)).
-`pandacode-host` and every agent CLI it starts run in `agents.slice`:
+`pandacode-host`, `t3code-host` and every agent CLI they start run in `agents.slice`:
 
 | Limit | Default | Effect |
 |---|---|---|
@@ -152,7 +161,7 @@ New in Unreleased (`pandaos.agents`, see [agents.md](agents.md#agent-runtime-new
 | `MemorySwapMax` | 10% of RAM | caps how much the slice can push into zram, which `MemoryMax` does not count |
 | `CPUWeight` | 50 | system units (weight 100) win under CPU contention |
 | `TasksMax` | 8192 | stops fork bombs |
-| systemd-oomd | swap > 90% only (`ManagedOOMSwap` on `pandacode-host`) | kills the task cgroup using the most swap |
+| systemd-oomd | swap > 90% only (`ManagedOOMSwap` on `pandacode-host` and `t3code-host`) | kills the task cgroup using the most swap |
 
 zram stores incompressible pages at about their full size, so the slice can hold up to
 `MemoryMax + MemorySwapMax` (85%) of physical RAM. That leaves 15% for the system. In an early CI run,
@@ -160,14 +169,15 @@ zram stores incompressible pages at about their full size, so the slice can hold
 slice alone. Keep the sum well under 100% if you change these values. On boxes with little RAM (about
 2 GB or less), the system's own share can be more than 15%.
 
-Inside the slice, each agent run gets its own cgroup under the host's delegated cgroup (the CLI
+Inside the slice, each agent run gets its own cgroup under its host's delegated cgroup (both hosts
+have `Delegate=yes`; the CLI
 shims, see [agents.md](agents.md#agent-runtime-new-in-unreleased)). Each task cgroup has
 `memory.oom.group=1`. When the slice reaches `MemoryMax`, the kernel kills the process with the
 highest OOM score (in practice the biggest task) and, because of `oom.group`, its whole task with it.
 That choice is deterministic. Every shimmed task also raises its own `oom_score_adj` by 500 (to
 1000), and `host/` has `memory.oom.group=0`, so even when the host itself is large, a task is the
 preferred victim and an OOM kill in `host/` never takes the whole host. systemd-oomd watches
-`pandacode-host.service` for **swap exhaustion only** (`ManagedOOMSwap=kill`, the task using the
+`pandacode-host.service` and `t3code-host.service` for **swap exhaustion only** (`ManagedOOMSwap=kill`, the task using the
 most swap), and never kills the `host/` leaf, which is marked `user.oomd_avoid`. Pressure-based oomd
 (`ManagedOOMMemoryPressure`) is off on purpose: it picks the task cgroup with the highest page-scan
 (reclaim) rate, which can be an idle bystander whose pages are being reclaimed. In CI run
@@ -176,15 +186,15 @@ throttle put the hog to sleep, so its scan rate dropped to almost 0. The agent C
 into `host/`, or set its own memory limits. This setup contains runaway tasks. It does not contain a
 task that tries to dodge the OOM killer on purpose. `MemoryMax` on the slice still holds for every task.
 
-`pandacode-host` has `OOMPolicy=continue` (a killed agent does not stop the host) and
+`pandacode-host` and `t3code-host` have `OOMPolicy=continue` (a killed agent does not stop the host) and
 `OOMScoreAdjust=500`. sshd, journald, NetworkManager and panda-mem get `OOMScoreAdjust=-500`,
 so the global OOM killer picks agents first. They do not get -1000, because ssh sessions inherit the
 value. The `agent-env` VM test starts an idle task and a 6 GB memory hog through the shims, from a
 stub host running inside PandaCode's real FHS/bubblewrap environment. It checks that the kernel kills
 the hog's task while the host, the idle task and sshd keep their PIDs. There is no earlyoom: it would watch the whole box and could kill a system daemon.
 
-These limits protect the box from runaway agents. File isolation comes from the separate `agent`
-user (above).
+These limits protect the box from runaway agents, from either host. File isolation comes from the
+separate `agent` user (above), which both hosts share.
 
 ## MCP tools and their permissions
 

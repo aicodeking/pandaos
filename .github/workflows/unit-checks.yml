@@ -57,7 +57,8 @@ jobs:
       - run: sh components/desktop/test-dnd.sh
       - run: sh components/desktop/test-cu-busy.sh
       - run: shellcheck components/desktop/bin/* components/desktop/*.sh bench/cubench/os/*.sh
-      - run: shellcheck -s bash components/t3code-host/t3-connect.sh components/t3code-host/redact-run.sh
+      - run: REQUIRE_GNU_SED=1 bash components/t3code-host/test-redact.sh
+      - run: shellcheck -s bash components/t3code-host/t3-connect.sh components/t3code-host/redact-run.sh components/t3code-host/test-redact.sh
       - run: python3 -m py_compile components/computer-use/*.py
 
   # The drift checks the manual boatbench workflow ran, on every push: committed reports

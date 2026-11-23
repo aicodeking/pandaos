@@ -143,16 +143,9 @@
   services.panda-sys.enable = lib.mkDefault true;
   services.panda-mem = {
     enable = lib.mkDefault true;
-    # Users allowed on the panda-mem socket: the owner, the user agents run
-    # as (pandacode-host.user / t3code-host.user, e.g. a non-wheel `agent`),
-    # and agentd jobs.
-    clients = lib.unique (
-      [
-        "panda"
-        config.services.pandacode-host.user
-      ]
-      ++ lib.optional config.services.t3code-host.enable config.services.t3code-host.user
-      ++ lib.optional config.services.panda-agentd.enable "panda-agent"
-    );
+    # Users allowed on the panda-mem socket: the owner and agentd jobs. The
+    # pandacode-host / t3code-host modules add their own agent user only when
+    # enabled, so a disabled host never lands in the group.
+    clients = [ "panda" ] ++ lib.optional config.services.panda-agentd.enable "panda-agent";
   };
 }

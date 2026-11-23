@@ -110,15 +110,17 @@ connect() {
 # T3 Code Connect (t3-connect). Destructive actions ask first.
 t3_connect() {
   case "$(printf '%s\n' "Sign in" "Start local" "Pair (direct / SSH)" Status Logs \
-    "Approve device" Unlink Stop "Sign out" | pick "t3code>")" in
+    "Approve device" Devices Restart Unlink Stop "Sign out" | pick "t3code>")" in
     "Sign in") term t3code t3-connect sign-in ;;
     "Start local") term t3code t3-connect start ;;
     "Pair (direct / SSH)") term t3code t3-connect pair ;;
     "Status") term t3code sh -c 't3-connect status --json | jq .' ;;
     "Logs") term t3code t3-connect logs ;;
     "Approve device")
-      code=$(printf '' | pick "pairing code>") || return 0
+      code=$(printf '' | pick "device code>") || return 0
       [ -n "$code" ] && term t3code t3-connect approve "$code" ;;
+    "Devices") term t3code t3-connect devices ;;
+    "Restart") confirm "Restart the T3 Code host (stops running sessions)" && term t3code t3-connect restart ;;
     "Unlink") confirm "Unlink this box from T3 Code Connect" && term t3code t3-connect unlink ;;
     "Stop") confirm "Stop the T3 Code host" && term t3code t3-connect stop ;;
     "Sign out") confirm "Sign this box out of T3 Code Connect" && term t3code t3-connect sign-out ;;

@@ -180,8 +180,12 @@ T3 Code Connect (`t`), both (`b`), or skip (`N`). Skipped steps can be run later
    `--no-wait`, then `sudo journalctl -u t3code-sign-in -o cat`). The box then shows up in the
    T3 Code desktop and mobile apps and at <https://app.t3.codes>, with no port forwarding. For
    direct access without the relay, run `sudo t3-connect pair` and use an SSH tunnel
-   (`ssh -L 3773:127.0.0.1:3773 <user>@<box>`) or `--tailscale`. Check with `t3-connect status`.
-   See [t3code.md](t3code.md).
+   (`ssh -L 3773:127.0.0.1:3773 <user>@<box>`). Tailscale is not installed by default: add
+   `services.tailscale.enable = true;` to `/etc/pandaos/extra.nix`, rebuild and run
+   `sudo tailscale up`, then `sudo tailscale serve --bg http://127.0.0.1:3773` and
+   `sudo t3-connect pair` (see
+   [Tailscale Serve](t3code.md#option-3-direct-access-over-tailscale-serve)). Check with
+   `t3-connect status`. See [t3code.md](t3code.md).
 4. Only if you passed `--relay`: pair `panda-agentd`, see [agents.md](agents.md#pairing).
 
 ## Hosted server over ssh (kexec)

@@ -19,6 +19,10 @@ let
   agentHome = "/var/lib/agent";
   # Written by `t3-connect sign-in` (root, 0644): `managed` or `publish-only`.
   signInModeFile = "${stateDir}/sign-in-mode";
+  # Written by t3code-sign-in-done and `t3-connect stop` (root, 0644): the
+  # signed-in mode (`connect`/`publish-only`) `t3-connect start` resumes.
+  # Removed by `t3-connect unlink`/`sign-out`.
+  lastModeFile = "${stateDir}/last-mode";
   cloudflared =
     if cfg.cloudflaredPackage == null then "" else "${cfg.cloudflaredPackage}/bin/cloudflared";
   # pandacode-host already creates the `agent` user and its home subvolume.
@@ -39,7 +43,8 @@ let
     text = builtins.readFile ../pandacode-host/cgroup-enter.sh;
   };
 
-  # Keeps `Token: …`, `Pairing URL: …` and `?token=…` out of the journal.
+  # Keeps `Token: …`, `Pairing URL: …`, `?token=…` and JSON token fields out
+  # of the journal (test-redact.sh).
   redact = pkgs.writeShellApplication {
     name = "t3code-host-redact";
     runtimeInputs = [ pkgs.gnused pkgs.coreutils ];
@@ -63,6 +68,7 @@ let
       CLOUDFLARED_PATH = cloudflared;
       MARKER = cfg.enabledMarker;
       SIGN_IN_MODE_FILE = signInModeFile;
+      LAST_MODE_FILE = lastModeFile;
       HOST = if cfg.host != null then cfg.host else "";
       PORT = toString cfg.port;
       LAN = if cfg.lan then "true" else "false";
@@ -72,6 +78,9 @@ let
   };
 
   # t3code-sign-in's main process: OAuth device code to the journal, then link.
+  # Redacted like the host in case a token is printed; the device code and
+  # verification URL pass through. A stopped (cancelled) sign-in keeps its
+  # non-zero status so t3code-sign-in-done does not take it for success.
   signInRun = pkgs.writeShellScript "t3code-sign-in" ''
     mode=$(${pkgs.coreutils}/bin/head -n 1 ${signInModeFile} 2>/dev/null || true)
     case "$mode" in
@@ -79,7 +88,8 @@ let
       *) mode=managed; set -- ;;
     esac
     echo "t3code-sign-in: linking this box to T3 Connect ($mode); open the link below and enter the code"
-    exec ${lib.getExe cfg.package} connect link --headless "$@"
+    export T3CODE_HOST_REDACT_SIGNAL_OK=0
+    exec ${lib.getExe redact} ${lib.getExe cfg.package} connect link --headless "$@"
   '';
   # Root, after the sign-in unit stops: on success record the mode and start
   # the host; on failure bring back a host that was enabled before.
@@ -92,6 +102,8 @@ let
       esac
       printf '%s\n' "$mode" >${cfg.enabledMarker}
       ${pkgs.coreutils}/bin/chmod 0644 ${cfg.enabledMarker}
+      printf '%s\n' "$mode" >${lastModeFile}
+      ${pkgs.coreutils}/bin/chmod 0644 ${lastModeFile}
       ${config.systemd.package}/bin/systemctl start --no-block t3code-host.service
       echo "t3code-sign-in: signed in ($mode); t3code-host.service started"
     elif [ -e ${cfg.enabledMarker} ]; then
@@ -217,6 +229,19 @@ in
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
+      assertions = [
+        {
+          assertion = cfg.user != "root"
+            && !(builtins.elem "wheel" (config.users.users.${cfg.user}.extraGroups or [ ]))
+            && (config.users.users.${cfg.user}.group or "") != "wheel";
+          message = "services.t3code-host.user must not be root or in wheel (agents run as this user)";
+        }
+      ];
+
+      warnings = lib.optional
+        (cfg.openFirewall && cfg.host != null && builtins.elem cfg.host [ "127.0.0.1" "::1" "localhost" ])
+        "services.t3code-host.openFirewall has no effect while host is loopback; set lan = true or a non-loopback host.";
+
       environment.systemPackages = [ t3-connect cfg.package ];
 
       users.users = lib.mkIf ownAgent {
@@ -259,6 +284,10 @@ in
           # Per-task cgroups under a delegated subtree, as in pandacode-host.
           Delegate = true;
           ExecStart = "${lib.getExe enter} ${lib.getExe redact} ${cfg.serveCommand}";
+          # Stop signals only the redactor, which forwards TERM to `t3 serve`
+          # and waits for it; the sed filters live on until it exits, so a
+          # late write cannot SIGPIPE the host mid-shutdown.
+          KillMode = "mixed";
           ManagedOOMSwap = "kill";
           # An OOM-killed task must not stop the unit.
           OOMPolicy = "continue";
@@ -281,6 +310,8 @@ in
         serviceConfig = hostUnit.serviceConfig // {
           ExecStart = signInRun;
           ExecStopPost = "+${signInDone}";
+          # As for the host: TERM to the redactor only, filters drain.
+          KillMode = "mixed";
           # Device codes expire after 15 minutes.
           RuntimeMaxSec = "20min";
           SyslogIdentifier = "t3code-sign-in";

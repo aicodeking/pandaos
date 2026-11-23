@@ -34,7 +34,7 @@ For benchmarks measured outside `tests/`:
 | Idle RAM, `MemTotal - MemAvailable` (`memTotalMinusAvailableMB`) | 247 MB | 279 MB at the greeter |
 | Idle RAM in a logged-in labwc session (dock running) | n/a | pending CI |
 | Test VM system closure (`boot-*` tests, `closureMB`) | 1321 MB | 2847 MB |
-| Installed system closure (`nixosConfigurations.*`, `closures` check) | pending CI | pending CI |
+| Installed system closure (`nixosConfigurations.*`, `closures` check), with T3 Code | 2197 MB | 2682 MB |
 | ISO (`isoMB`, CI `iso` job) | 608 MB | 993 MB |
 
 | Agent job round trip (`roundtripSec`) | |
@@ -48,7 +48,20 @@ For benchmarks measured outside `tests/`:
 | `install`: `panda-install --yes` of the headless system onto an empty 10 GiB virtio disk | 208 s |
 
 Sizes are MiB. These numbers are from CI run
-[40733737472](https://github.com/AICodeKing/pandaos/actions/runs/40733737472), nixpkgs `718f670`.
+[40733737472](https://github.com/AICodeKing/pandaos/actions/runs/40733737472), nixpkgs `718f670`,
+except the installed system closures, which are from CI run
+[45193178827](https://github.com/AICodeKing/pandaos/actions/runs/45193178827), after T3 Code was
+added.
+
+**Budgets calibrated after T3 Code** (`tests/budgets.json`, measured in CI run 45193178827):
+
+| Metric | headless measured / budget | desktop measured / budget |
+|---|---|---|
+| Installed system closure (`closureMB`) | 2197 / 2417 MB | 2682 / 2950 MB |
+| Idle RAM (`idleRamMB`) | 116 / 200 MB | 201 / 450 MB |
+
+The closure budgets leave about 10% headroom over the measured post-T3 closures. The T3 Code host
+adds closure size but no idle RAM: it is idle (no process) until signed in or started.
 
 "Pending CI" marks a measurement whose test is being changed or added and has no CI result yet.
 The tests fail when a metric goes over its budget in `tests/budgets.json`. The budgets are
@@ -87,7 +100,7 @@ as `nix path-info -S`. It is computed on the host from `closureInfo`, because th
 register its own closure. It includes the NixOS test-driver instrumentation, so it is not the
 installed size.
 
-The `closures` check (being added) measures what `panda-install` actually puts on disk: the closures
+The `closures` check measures what `panda-install` actually puts on disk: the closures
 of `nixosConfigurations.headless` and `.desktop`, with no test instrumentation. It also reports
 `updateBytes`, the NAR size of the store paths a box would fetch for an update that only changes
 panda-agentd (an upper bound, since downloads are compressed). A nixpkgs bump fetches far more and is

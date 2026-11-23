@@ -132,7 +132,7 @@ in
             echo "PandaCode: run 'sudo panda-connect sign-in', or use the desktop menu (PandaCode Connect)."
           }
           t3_hint() {
-            echo "T3 Code: run 'sudo t3-connect sign-in'."
+            echo "T3 Code: run 'sudo t3-connect sign-in' (Connect), 'sudo t3-connect start && sudo t3-connect pair' (direct/SSH), or use the desktop menu (T3 Code Connect)."
           }
           panda_sign_in() {
             "$panda_connect" sign-in ||

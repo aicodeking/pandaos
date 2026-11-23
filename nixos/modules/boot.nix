@@ -74,7 +74,10 @@ let
         if [ -e ${pandacodeHost.signedInMarker} ]; then units+=(pandacode-host.service); fi
       ''}
       ${lib.optionalString t3codeHost.enable ''
-        if [ -e ${t3codeHost.enabledMarker} ]; then units+=(t3code-host.service); fi
+        # t3code-sign-in Conflicts= with the host, so it is down by design then.
+        if [ -e ${t3codeHost.enabledMarker} ] && ! systemctl is-active --quiet t3code-sign-in.service; then
+          units+=(t3code-host.service)
+        fi
       ''}
       problems() {
         for u in "''${units[@]}"; do

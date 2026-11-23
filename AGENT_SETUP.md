@@ -244,8 +244,15 @@ grep -q '"service":"active"' <<<"$t3_json"
 Then have the human run `sudo t3-connect pair` in their private terminal: it prints a one-time
 pairing token link that the agent must never see. On their laptop they forward the port with
 `ssh -L 3773:127.0.0.1:3773 <user>@<box>` and open the pairing link (it points at
-`http://127.0.0.1:3773`). With Tailscale (MagicDNS and HTTPS on), the human can run
-`sudo t3-connect pair --tailscale` privately instead. See [docs/t3code.md](docs/t3code.md).
+`http://127.0.0.1:3773`). For Tailscale instead of a tunnel: Tailscale is not installed by
+default, so the user first adds `services.tailscale.enable = true;` to `/etc/pandaos/extra.nix`,
+rebuilds with `sudo nixos-rebuild switch --flake /etc/pandaos#pandaos` and runs `sudo tailscale up`
+(MagicDNS and HTTPS certificates on for the tailnet). Then recommend the root-managed setup: the
+human runs `sudo tailscale serve --bg http://127.0.0.1:3773` and `sudo t3-connect pair` privately,
+and swaps `http://127.0.0.1:3773` in the link for the box's `https://<box>.<tailnet>.ts.net` URL. Do
+not run `sudo t3-connect pair --tailscale` or grant `agent` Tailscale operator access yourself: that
+lets every agent session reconfigure `tailscaled`. See
+[docs/t3code.md](docs/t3code.md#option-3-direct-access-over-tailscale-serve).
 
 To use T3 Code only, the user may turn PandaCode's host off by adding
 `services.pandacode-host.enable = false;` to `/etc/pandaos/extra.nix` (never `local.nix`) and

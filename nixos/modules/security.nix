@@ -24,6 +24,9 @@
     # No eBPF for non-root (agentd/systemd run BPF as root, unaffected).
     "kernel.unprivileged_bpf_disabled" = 1;
     "net.core.bpf_jit_harden" = 2;
+    # No TIOCSTI: a lower-privileged process (e.g. under runuser/sudo) must not
+    # inject keystrokes into the caller's terminal.
+    "dev.tty.legacy_tiocsti" = 0;
 
     # Anti-spoofing; matches the firewall's default strict reverse-path check.
     "net.ipv4.conf.all.rp_filter" = 1;

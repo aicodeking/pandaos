@@ -13,7 +13,7 @@ There are three ways to reach it:
 |---|---|---|---|
 | [1. T3 Code Connect](#option-1-t3-code-connect-recommended) (recommended) | a T3 Code account | yes | none |
 | [2. SSH tunnel](#option-2-direct-access-over-an-ssh-tunnel) | ssh to the box | no | `ssh -L` |
-| [3. Tailscale Serve](#option-3-direct-access-over-tailscale-serve) | Tailscale with MagicDNS and HTTPS | no | none (tailnet only) |
+| [3. Tailscale Serve](#option-3-direct-access-over-tailscale-serve) | Tailscale (not installed by default) with MagicDNS and HTTPS | no | none (tailnet only) |
 
 Both `t3-connect` (the control CLI) and `t3` (T3 Code itself) are on the system `PATH`.
 
@@ -30,6 +30,11 @@ sudo t3-connect sign-in
 It prints a device-code link and code. Open the link on your phone or laptop, check that the code
 matches, and approve. The sign-in runs as `t3code-sign-in.service` (headless OAuth device flow);
 once approved it writes the enabled marker and starts `t3code-host.service`.
+
+If a local host is already running (`T3: local`), `sign-in` stops it, and the agent sessions it
+runs, while linking. If sign-in fails, the local host is started again automatically. Pressing
+Ctrl-C only detaches from the log stream: `t3code-sign-in.service` keeps running and the code
+stays valid. Run `sudo t3-connect stop` to cancel a pending sign-in.
 
 Over ssh without a tty, or from a script, start it without waiting and read the link from the
 journal:
@@ -80,9 +85,21 @@ No cloud account or relay: the host stays on loopback and you reach it through s
 
 ## Option 3: Direct access over Tailscale Serve
 
-If the box and your devices are on the same tailnet, with **MagicDNS** and **HTTPS certificates**
-enabled for the tailnet, use one of these setups. `t3-connect pair` runs `t3 pair` as `agent`,
-which cannot reconfigure Tailscale by default.
+**Tailscale is not installed by default on PandaOS.** Enable it first in
+`/etc/pandaos/extra.nix` (never edit `local.nix`), rebuild, and join the box to your tailnet:
+
+```nix
+{ ... }: { services.tailscale.enable = true; }
+```
+
+```sh
+sudo nixos-rebuild switch --flake /etc/pandaos#pandaos
+sudo tailscale up                  # prints a login link; approve it in your tailnet
+```
+
+The box and your devices must be on the same tailnet, with **MagicDNS** and **HTTPS
+certificates** enabled for the tailnet. Then use one of these setups. `t3-connect pair` runs
+`t3 pair` as `agent`, which cannot reconfigure Tailscale by default.
 
 **Recommended.** Configure Serve as root and keep `agent` unprivileged. `pair` starts the host
 if needed and prints a one-time pairing link.
@@ -95,8 +112,14 @@ sudo t3-connect pair
 In the printed pairing link, replace `http://127.0.0.1:3773` with your
 `https://<box>.<tailnet>.ts.net` URL. Keep the pairing path and token, then open the link.
 
-**Automatic.** Grant `agent` Tailscale operator access once, then let `t3 pair --tailscale`
-configure Serve and print a tailnet pairing link.
+**Automatic (optional, less isolated).** Grant `agent` Tailscale operator access once, then let
+`t3 pair --tailscale` configure Serve and print a tailnet pairing link.
+
+> **Security warning.** `--operator=agent` lets *every* process running as `agent` (every T3 Code
+> session, PandaCode task and agent CLI, including a prompt-injected one) reconfigure `tailscaled`:
+> it can expose any local port to the tailnet with Serve or to the internet with Funnel, change
+> Serve settings, or log the node out of the tailnet. Prefer the root-managed Serve setup above
+> unless you accept that risk. Undo it with `sudo tailscale set --operator=`.
 
 ```sh
 sudo tailscale set --operator=agent
@@ -110,7 +133,7 @@ Add `--tailscale-serve-port 8443` to the pairing command to select another HTTPS
 | Command | What |
 |---|---|
 | `sudo t3-connect sign-in [--publish-only] [--no-wait]` | Link the box to T3 Code Connect (OAuth device flow) |
-| `sudo t3-connect start` / `stop` / `restart` | Run or stop `t3code-host.service` on `127.0.0.1:3773`, with or without Connect |
+| `sudo t3-connect start` / `stop` / `restart` | Run or stop `t3code-host.service` on `127.0.0.1:3773`, with or without Connect. `stop` also cancels a pending `t3code-sign-in.service` and keeps the Connect mode, so a later `start` resumes it |
 | `sudo t3-connect pair [--ttl DURATION] [--label LABEL] [--tailscale] [--tailscale-serve-port PORT]` | Print a one-time pairing link in this terminal |
 | `sudo t3-connect devices` | List connected and pending T3 Connect devices |
 | `sudo t3-connect approve <CODE>` | Approve a connecting device |
@@ -122,12 +145,20 @@ Add `--tailscale-serve-port 8443` to the pairing command to select another HTTPS
 `t3-connect status --json` prints one compact line, for example:
 
 ```json
-{"enabled":true,"signedIn":true,"mode":"connect","service":"active","host":"127.0.0.1","port":3773,"version":"0.1.11"}
+{"enabled":true,"signedIn":true,"mode":"connect","service":"active","host":"127.0.0.1","port":3773,"version":"0.1.11","runningVersion":"0.1.11"}
 ```
 
 `service` is `active`, `activating`, `inactive` or `failed`. The `mode` values are `connect`
 (T3 Connect relay), `publish-only` (T3 Connect activity-only), `local` (serving directly without
-Connect) and `off` (disabled).
+Connect) and `off` (disabled). `version` is the installed T3 Code; `runningVersion` is the version
+the running host was started with, and `null` when the host is stopped. After an update, plain
+`t3-connect status` warns when the two differ; run `sudo t3-connect restart` to pick up the new
+version.
+
+**Stop and start keep the mode.** `sudo t3-connect stop` stops the host (and cancels a pending
+`t3code-sign-in.service`) but remembers the Connect mode (`last-mode`), so a later
+`sudo t3-connect start` resumes Connect or publish-only without signing in again. To switch to
+local-only serving, run `sudo t3-connect unlink`, then `sudo t3-connect start`.
 
 `jq` is not installed on headless PandaOS. Check it with `grep`:
 
@@ -137,7 +168,8 @@ grep -q '"signedIn":true' <<<"$t3_json" && grep -q '"service":"active"' <<<"$t3_
 ```
 
 On the desktop, the top bar shows `T3: sign in`, `T3: local` (running without Connect),
-`T3: connected`, `T3: starting`, `T3: stopped` or `T3: error`, and `panda-menu` (`Super+X`) has a *T3 Code Connect* submenu. See
+`T3: connected`, `T3: starting`, `T3: stopped`, `T3: error` or `T3: ?` (the status could not be
+read or parsed), and `panda-menu` (`Super+X`) has a *T3 Code Connect* submenu. See
 [desktop.md](desktop.md).
 
 ## With or instead of PandaCode Connect
@@ -161,7 +193,7 @@ PandaCode tasks:
   ([checkpoints.md](checkpoints.md));
 - shared memory at `/mem` through `panda-mem`;
 - the MCP registry in `/etc/panda/mcp.d`, synced into the agent CLIs;
-- the installed agent CLIs (`claude`, `codex`, `gemini`, `opencode`). Sign them in as `agent`
+- the installed agent CLIs (`claude`, `codex`, `gemini`, `kimi`, `opencode`). Sign them in as `agent`
   (`sudo -iu agent claude`), see [agents.md](agents.md#agent-clis).
 
 ## Security model
@@ -169,9 +201,17 @@ PandaCode tasks:
 - **Loopback by default.** The host binds to `127.0.0.1:3773`. `lan` and `openFirewall` are off by
   default; remote access goes through the outbound Connect relay, an SSH tunnel or Tailscale Serve.
 - **No tokens in the journal.** The unit redacts the startup `Token:` and `Pairing URL:` lines
-  from journald, and `t3-connect pair` prints its link only to your terminal.
-- **Non-wheel user.** The host and every agent it starts run as `agent`, which cannot `sudo` or
-  read your home.
+  from journald, and `t3-connect pair` prints its link only to your terminal. This keeps pairing
+  secrets away from journal readers (for example the `panda-sys` MCP server or `t3-connect logs`),
+  not away from processes running as `agent` (see the next point).
+- **Non-wheel user, shared trust boundary.** The host and every agent it starts run as `agent`,
+  which cannot `sudo` or read your home. T3 Code sessions, PandaCode tasks, the agent CLI logins and
+  T3 Code's own credentials in `/var/lib/agent/.t3` all share that one user. A prompt-injected agent
+  in either host can therefore run `t3` (for example `t3 pair`) or read `/var/lib/agent/.t3`. This is
+  the same trust boundary as `pandacode-host` and the agent CLI logins: everything that runs as
+  `agent` is trusted as much as the least trusted task. Neither host can `sudo` or touch the owner's
+  home. The box-wide `dev.tty.legacy_tiocsti = 0` sysctl stops an agent process from injecting
+  keystrokes into a terminal it shares, for example after `sudo -iu agent`.
 - **Contained runs.** `t3code-host.service` runs in `agents.slice` with `Delegate=yes`, so each
   task gets its own cgroup and the cgroup OOM killer takes the task, not the host or the box.
 - **Rebuilds do not kill sessions.** `restartIfChanged = false`: a `nixos-rebuild` or update does
@@ -188,7 +228,7 @@ services.t3code-host = {
   # host defaults to "127.0.0.1" with lan = false and null with lan = true
   port = 3773;
   lan = false;              # true enables LAN binding when host is null
-  openFirewall = false;     # opens `port` when lan = true
+  openFirewall = false;     # opens `port` regardless of lan; only useful with lan = true or a non-loopback host
 };
 ```
 
@@ -212,7 +252,8 @@ the world-readable `/nix/store`.
 |---|---|
 | Box does not appear in T3 Code | `t3-connect status`: `signedIn` must be `true` and `service` `active`. Run `sudo t3-connect status --live` for cloud reachability, then `sudo journalctl -u t3code-sign-in -b` |
 | Sign-in code expired | Run `sudo t3-connect sign-in` again |
-| `service` is `inactive` | Not enabled yet: `sudo t3-connect sign-in` or `sudo t3-connect start` |
+| `service` is `inactive` | Not enabled yet, or stopped with `sudo t3-connect stop`: run `sudo t3-connect start` (resumes the last mode) or `sudo t3-connect sign-in` |
+| `status` warns the running version differs | The host still runs the version from before an update (`restartIfChanged = false`). Run `sudo t3-connect restart` (ends running sessions) |
 | `service` is `failed` | `t3-connect logs -b`, then `sudo t3-connect restart` |
 | Device stuck waiting for approval | `sudo t3-connect devices`, then `sudo t3-connect approve <CODE>` |
 | Tunnel shows connection refused | The host is not running (`sudo t3-connect start`), or the local port 3773 is taken: use `ssh -L 13773:127.0.0.1:3773 ...` and `http://127.0.0.1:13773` |

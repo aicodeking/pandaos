@@ -39,6 +39,12 @@ out=$(T3_CONNECT_CMD=$cli sh "$script")
 printf '%s' "$out" | jq -e '.tooltip | contains("0.1.11") and contains("sign in")' >/dev/null ||
   { echo "FAIL tooltip" >&2; exit 1; }
 
+fake "$(st false true off inactive)"
+check signed-in-stopped "T3: stopped" off
+out=$(T3_CONNECT_CMD=$cli sh "$script")
+printf '%s' "$out" | jq -e '.tooltip | contains("0.1.11") and contains("Click to start")' >/dev/null ||
+  { echo "FAIL signed-in-stopped tooltip" >&2; exit 1; }
+
 fake "$(st true true connect active)"
 check signed-in-active "T3: connected" active
 
@@ -68,3 +74,25 @@ check non-object "T3: ?" failed
 
 printf '#!/bin/sh\nexit 1\n' >"$cli"
 check empty "T3: ?" failed
+
+# Click: a fake foot prints the command it would run in the terminal.
+printf '#!/bin/sh\nshift 3\necho "$@"\n' >"$dir/foot"
+chmod +x "$dir/foot"
+# click NAME EXPECTED-SUBCOMMAND: the last word foot would run.
+click() {
+  got=$(PATH=$dir:$PATH T3_CONNECT_CMD=$cli sh "$script" click | awk '{print $NF}')
+  if [ "$got" != "$2" ]; then
+    echo "FAIL click $1: got '$got', want '$2'" >&2
+    exit 1
+  fi
+  echo "ok click $1"
+}
+
+fake "$(st false false off inactive)"
+click off sign-in
+fake "$(st false true off inactive)"
+click signed-in-stopped start
+fake "$(st true true connect active)"
+click signed-in-active logs
+fake "$(st true false local inactive)"
+click enabled-stopped logs
