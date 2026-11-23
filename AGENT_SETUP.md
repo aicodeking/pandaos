@@ -4,7 +4,7 @@
 >
 > Copy this prompt into PandaCode, Claude Code, Codex, or another coding agent:
 >
-> `Read and follow https://raw.githubusercontent.com/AICodeKing/pandaos/v0.2.0/AGENT_SETUP.md (or the local AGENT_SETUP.md in my PandaOS checkout). Help me install PandaOS v0.2.0 and connect it to PandaCode. Start with Step 0. Pause for my explicit confirmation of each disk and for every human-only step.`
+> `Read and follow https://raw.githubusercontent.com/AICodeKing/pandaos/v0.2.0/AGENT_SETUP.md (or the local AGENT_SETUP.md in my PandaOS checkout). Help me install PandaOS v0.2.0 and connect it to PandaCode and/or T3 Code. Start with Step 0. Pause for my explicit confirmation of each disk and for every human-only step.`
 >
 > The URL is pinned to the `v0.2.0` tag. Check `main` for a newer version of this runbook, or
 > replace `v0.2.0` in the URL with a specific commit SHA to pin an exact revision.
@@ -20,6 +20,7 @@ Ask the user these questions first. Wait for their answers before choosing an in
 | Which domain and DNS provider for `server`? | Base domain, public IPv4/IPv6 addresses, DNS zone access, tenant port and desktop domains, and ACME contact email. |
 | Who will run VMs on `server`? | `services.boat.untrustedTenants = false` for your own trusted VMs, or `true` for multi-tenant isolation settings. Serving untrusted tenants also requires the [operator checklist](docs/boat.md#operator-checklist) and an external penetration test. |
 | Which host agent CLIs? | Any of `claude-code`, `codex`, `gemini-cli`, and `opencode`, or none. |
+| How will the user reach the box? | **PandaCode Connect**, **T3 Code Connect** (or direct T3 Code over an SSH tunnel or Tailscale), or both. See [A2](#a2-connect-to-pandacode-t3-code-or-both). |
 
 ## Hard safety gates for the agent
 
@@ -60,10 +61,15 @@ Ask the user these questions first. Wait for their answers before choosing an in
   other local users, prefer key-only login (`--ssh-key` with `--sudo-nopasswd`), or set
   `users.users.<user>.hashedPasswordFile` in `extra.nix` to a root-only file.
 - **Hand off human-only steps and wait.** Ask the user to handle BIOS/UEFI settings and boot
-  selection, GitHub device-flow approval, and DNS record creation. Resume once they confirm
+  selection, GitHub and T3 Code device-flow approvals, T3 Code pairing links, and DNS record
+  creation. Resume once they confirm
   completion and you can verify the result.
 
 ## Track A — Personal or team agent box
+
+Install a `headless` or `desktop` box (A1), connect it to PandaCode, T3 Code, or both (A2), then
+install the agent CLIs (A3). Both hosts run agents as the same non-wheel `agent` user, so they
+share `~/work` checkpoints, `/mem`, the MCP registry and the installed CLIs.
 
 ### A1. Download, verify, and install
 
@@ -157,7 +163,13 @@ Proceed only if `test -n "$iso"` succeeds.
    `nmtui` for Wi-Fi. The ISO installs offline. PandaCode Connect, CLI installation, and every
    `nixos-rebuild` need a network.
 
-### A2. Connect to PandaCode
+### A2. Connect to PandaCode, T3 Code, or both
+
+Use the choice from Step 0. Both hosts are installed and idle until signed in or started; do
+the PandaCode steps, the T3 Code steps, or both. First boot offers the same choice on tty8
+(`p` PandaCode, `t` T3 Code, `b` both, `N` skip); if the user already did it there, only verify.
+
+#### PandaCode Connect
 
 Replace `workbench` with the agreed device name. Have the human run this on the box in
 their private terminal; the waiting command follows the journal and prints the GitHub device
@@ -188,6 +200,56 @@ grep -q '"signedIn":true' <<<"$connect_json" && grep -q '"service":"active"' <<<
 `jq` is not installed on PandaOS; these checks need only bash and `grep`.
 
 Have the human verify the new computer appears by name in PandaCode.
+
+#### T3 Code Connect
+
+T3 Code Connect links the box to the user's T3 Code account through an outbound relay; the box
+then appears in the T3 Code desktop app, mobile app and `https://app.t3.codes` with no port
+forwarding. Never ask the user for T3 credentials, passwords or tokens. Either have the human run
+the waiting command in their private terminal:
+
+```sh
+sudo t3-connect sign-in
+```
+
+or start the sign-in unit without waiting:
+
+```sh
+sudo t3-connect sign-in --no-wait
+sudo journalctl -u t3code-sign-in -o cat -b
+```
+
+The journal shows only the public device-code link and code (no token); the agent may relay them,
+or have the human read them privately. The human opens the link on a phone or laptop, checks the
+code, and approves it in their T3 Code account. Codes expire, so rerun `sign-in` if needed. After
+the human confirms approval, check the status:
+
+```sh
+t3_json=$(t3-connect status --json)
+# compact JSON: {"enabled":true,"signedIn":true,"service":"active","host":"127.0.0.1","port":3773,...}
+grep -q '"signedIn":true' <<<"$t3_json" && grep -q '"service":"active"' <<<"$t3_json"
+```
+
+If a device asks for approval, have the human read its code and run
+`sudo t3-connect approve <CODE>` (`sudo t3-connect devices` lists them).
+
+**Direct T3 Code without the relay.** For an SSH tunnel only, start the loopback host:
+
+```sh
+sudo t3-connect start
+t3_json=$(t3-connect status --json)
+grep -q '"service":"active"' <<<"$t3_json"
+```
+
+Then have the human run `sudo t3-connect pair` in their private terminal: it prints a one-time
+pairing token link that the agent must never see. On their laptop they forward the port with
+`ssh -L 3773:127.0.0.1:3773 <user>@<box>` and open the pairing link (it points at
+`http://127.0.0.1:3773`). With Tailscale (MagicDNS and HTTPS on), the human can run
+`sudo t3-connect pair --tailscale` privately instead. See [docs/t3code.md](docs/t3code.md).
+
+To use T3 Code only, the user may turn PandaCode's host off by adding
+`services.pandacode-host.enable = false;` to `/etc/pandaos/extra.nix` (never `local.nix`) and
+rebuilding with `sudo nixos-rebuild switch --flake /etc/pandaos#pandaos`.
 
 ### A3. Install and sign in to the selected agent CLIs
 
@@ -604,7 +666,8 @@ never print `/etc/pandaos/local.nix`.
 | Check | Expected result and where to look |
 |---|---|
 | `panda-health` | Core units are healthy. Use `panda-health --route` to also check the default route and `systemctl --failed` to identify failed units. |
-| `panda-connect status --json` | `signedIn` is `true`, `service` is `active`, and `deviceName` is the chosen name. Check with the `grep` commands in [A2](#a2-connect-to-pandacode) (`jq` is not installed). For sign-in, the user can check `sudo journalctl -u pandacode-sign-in -o cat -b` privately. For host errors, use `sudo journalctl -u pandacode-host -b`. |
+| `panda-connect status --json` | `signedIn` is `true`, `service` is `active`, and `deviceName` is the chosen name. Check with the `grep` commands in [A2](#a2-connect-to-pandacode-t3-code-or-both) (`jq` is not installed). For sign-in, the user can check `sudo journalctl -u pandacode-sign-in -o cat -b` privately. For host errors, use `sudo journalctl -u pandacode-host -b`. |
+| `t3-connect status --json` | If T3 Code was chosen: `signedIn` is `true` (T3 Code Connect) and `service` is `active`; for direct access only `service` must be `active`. Check with the `grep` commands in [A2](#a2-connect-to-pandacode-t3-code-or-both). For sign-in, use `sudo journalctl -u t3code-sign-in -o cat -b`; for host errors, `t3-connect logs -b`. See [docs/t3code.md](docs/t3code.md#troubleshooting). |
 | `sudo panda-agents doctor --user agent` | MCP registrations and runtime files are ready. After configuration changes, run `sudo panda-agents sync --user agent` and check `sudo journalctl -u panda-agents-sync -b` if needed. |
 | `boat status <vm>` | The test VM is running before deletion. For VM or edge failures, check `sudo journalctl -u boatd -u boat-api -u boat-gateway -u caddy -b` on the server. |
 | `sudo boat-admin images list` | The image is present and offered by the API. For declarative images, check `sudo journalctl -u boat-images -b`. |

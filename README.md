@@ -2,10 +2,12 @@
 
 A lightweight, agent-first Linux built on NixOS. Install it on an old PC and it becomes an agent box:
 it connects through PandaCode Connect, so the PandaCode app on your other devices can start, watch and
-approve agent tasks on it.
+approve agent tasks on it. It can also host [T3 Code](docs/t3code.md): sign in to T3 Code Connect
+and the box shows up in the T3 Code desktop and mobile apps and at app.t3.codes, or reach it
+directly over an SSH tunnel or Tailscale.
 
 **Setting up PandaOS with a coding agent?** Hand it the [Agent Setup runbook](AGENT_SETUP.md)
-to install the box and connect it to PandaCode.
+to install the box and connect it to PandaCode, T3 Code, or both.
 
 **Self-hosting boat.dev-style agent sandboxes?** Start with the [boat quick start](docs/boat.md#quick-start):
 install the server, get the owner key, point boat.dev's SDK at `https://api.<domain>/api/v1`, create the
@@ -127,6 +129,8 @@ nix build .#iso-headless          # or .#iso-desktop or .#iso-server
 5. After the first boot, with a network: run `sudo panda-connect sign-in`, open the GitHub link it
    prints, and approve the box with the GitHub account you use in PandaCode. The box then shows up
    as a computer in PandaCode. On the desktop, the dock's *PandaCode* button does the same.
+   For T3 Code, run `sudo t3-connect sign-in` instead of (or as well as) `panda-connect`, or use
+   `sudo t3-connect pair` for direct access over SSH or Tailscale. See [docs/t3code.md](docs/t3code.md).
 
 There is no default password: you set one (and optionally an ssh key) during the install.
 
@@ -177,6 +181,7 @@ There is no default password: you set one (and optionally an ssh key) during the
 | `nixos/profiles` | `headless` and `desktop` (labwc) |
 | `nixos/installer` | `panda-install`, the offline installer |
 | `components/pandacode-host` | PandaCode's headless host (`pandacode serve`) and `panda-connect` |
+| `components/t3code-host` | T3 Code host (`services.t3code-host`, loopback `127.0.0.1:3773`), `t3-connect` and `t3` |
 | `components/agentd` | optional `panda-agentd`: pairs with a relay (dials out) and runs jobs |
 | `components/mem` | `panda-mem`: the `/mem` store and MCP server |
 | `components/agent-env` | `agents.slice`, per-task cgroup shims, OOM settings, the `/etc/panda/mcp.d` registry, `panda-agents`, `/etc/panda/AGENTS.md` |
@@ -196,6 +201,7 @@ There is no default password: you set one (and optionally an ssh key) during the
 - [Updates and rollback](docs/updates-and-rollback.md)
 - [Security model](docs/security.md)
 - [Agents: runtime, MCP registry, PandaCode Connect, memory, browser, agentd](docs/agents.md)
+- [T3 Code and T3 Code Connect](docs/t3code.md)
 - [Checkpoints](docs/checkpoints.md)
 - [Desktop](docs/desktop.md)
 - [Computer use and cubench](docs/computer-use.md)
@@ -211,6 +217,8 @@ There is no default password: you set one (and optionally an ssh key) during the
   flow) and approve the box in PandaCode. That sign-in is not tested in CI (it needs GitHub); the VM
   tests cover the host up to it. The older `panda-agentd` is off by default and still speaks a
   placeholder relay protocol.
+- **T3 Code Connect sign-in is not tested in CI** either (it needs a T3 Code account); use
+  `sudo t3-connect pair` for direct access without it. See [docs/t3code.md](docs/t3code.md).
 - **No binary cache yet.** Until the owner sets up a cache and `pandaos.binaryCache`, boxes build
   panda-mem and the other PandaOS packages locally on every update that changes them.
   See [docs/updates-and-rollback.md](docs/updates-and-rollback.md#what-an-update-downloads-and-builds).

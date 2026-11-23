@@ -6,7 +6,8 @@
 # 2. Which agent CLIs to install (panda-agents-install, needs a network).
 #    PANDA_FIRSTBOOT_AGENTS (unit environment) answers it unattended; ""
 #    skips it.
-# 3. Offers `panda-connect sign-in` when a network is up.
+# 3. Offers `panda-connect sign-in` (PandaCode Connect) and/or
+#    `t3-connect sign-in` (T3 Code Connect) when a network is up.
 # Then it writes /var/lib/pandaos/firstboot-done and never runs again.
 # Killed half-way (a reboot), it starts over at the next boot; the password
 # step skips itself once a hash exists.
@@ -29,6 +30,7 @@ let
   cfg = config.pandaos.firstboot;
   vt = "8";
   connect = config.services.pandacode-host.enable;
+  t3connect = config.services.t3code-host.enable;
   agents = config.pandaos.agents;
   doneMarker = "/var/lib/pandaos/firstboot-done";
 in
@@ -40,12 +42,12 @@ in
     type = lib.types.bool;
     default = !(options ? isoImage);
     defaultText = lib.literalMD "`true`, except on the live ISO";
-    description = "Run the first-boot console steps (password if unset, agent CLIs, PandaCode Connect) once.";
+    description = "Run the first-boot console steps (password if unset, agent CLIs, PandaCode Connect / T3 Code Connect) once.";
   };
 
   config = lib.mkIf (cfg.enable && config.users.mutableUsers) {
     systemd.services.panda-firstboot = {
-      description = "PandaOS first boot: password, agent CLIs, PandaCode Connect";
+      description = "PandaOS first boot: password, agent CLIs, PandaCode Connect / T3 Code Connect";
       wantedBy = [ "multi-user.target" ];
       unitConfig.ConditionPathExists = "!${doneMarker}";
       # Start after the login managers so their VT switch to tty1 is done.
@@ -122,21 +124,61 @@ in
         else
           echo "No network yet. When online, run: sudo panda-agents-install $clis"
         fi
-        ${lib.optionalString connect ''
+        ${lib.optionalString (connect || t3connect) ''
           echo
+          panda_connect=/run/current-system/sw/bin/panda-connect
+          t3_connect=/run/current-system/sw/bin/t3-connect
+          panda_hint() {
+            echo "PandaCode: run 'sudo panda-connect sign-in', or use the desktop menu (PandaCode Connect)."
+          }
+          t3_hint() {
+            echo "T3 Code: run 'sudo t3-connect sign-in'."
+          }
+          panda_sign_in() {
+            "$panda_connect" sign-in ||
+              echo "Sign-in did not finish. Try again later: sudo panda-connect sign-in"
+          }
+          t3_sign_in() {
+            "$t3_connect" sign-in ||
+              echo "Sign-in did not finish. Try again later: sudo t3-connect sign-in"
+          }
           if online; then
             # Not read -p: its prompt goes to stderr, which is the journal here.
-            printf 'Connect this box to PandaCode now? [y/N] '
-            read -r answer || answer=
-            case "$answer" in
-              [yY]*)
-                /run/current-system/sw/bin/panda-connect sign-in ||
-                  echo "Sign-in did not finish. Try again later: sudo panda-connect sign-in" ;;
-              *) echo "Later: run 'sudo panda-connect sign-in', or use the desktop menu (PandaCode Connect)." ;;
-            esac
+            ${
+              if connect && t3connect then
+                ''
+                  printf 'Connect this box now? [p] PandaCode, [t] T3 Code, [b] both, [N] skip '
+                  read -r answer || answer=
+                  case "$answer" in
+                    [yYpP]*) panda_sign_in ;;
+                    [tT]*) t3_sign_in ;;
+                    [bB]*) panda_sign_in; t3_sign_in ;;
+                    *) echo "Later:"; panda_hint; t3_hint ;;
+                  esac
+                ''
+              else if connect then
+                ''
+                  printf 'Connect this box to PandaCode now? [y/N] '
+                  read -r answer || answer=
+                  case "$answer" in
+                    [yY]*) panda_sign_in ;;
+                    *) echo "Later:"; panda_hint ;;
+                  esac
+                ''
+              else
+                ''
+                  printf 'Connect this box to T3 Code now? [y/N] '
+                  read -r answer || answer=
+                  case "$answer" in
+                    [yY]*) t3_sign_in ;;
+                    *) echo "Later:"; t3_hint ;;
+                  esac
+                ''
+            }
           else
-            echo "No network yet. To connect this box to PandaCode later, run"
-            echo "'sudo panda-connect sign-in', or use the desktop menu (PandaCode Connect)."
+            echo "No network yet. To connect this box later:"
+            ${lib.optionalString connect "panda_hint"}
+            ${lib.optionalString t3connect "t3_hint"}
           fi
         ''}
         mkdir -p ${dirOf doneMarker}

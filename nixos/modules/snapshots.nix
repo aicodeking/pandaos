@@ -9,11 +9,12 @@
 # Only runs when /.snapshots is a mountpoint, i.e. on installs whose disk
 # layout has a snapshots subvolume (same btrfs filesystem as /mem and /home).
 #
-# The agent user's home (services.pandacode-host.user) is covered by @home
+# The agent user's home (services.pandacode-host.user, or
+# services.t3code-host.user when only T3 Code Connect is on) is covered by @home
 # when it lives under /home. The default user `agent` lives in /var/lib/agent,
 # so a second instance, btrbk-agent, snapshots it with the same retention. btrfs
 # can only snapshot subvolumes, so btrbk-agent is skipped (and says so in the
-# journal) until that directory IS one; pandacode-host creates /var/lib/agent
+# journal) until that directory IS one; pandacode-host (or t3code-host) creates /var/lib/agent
 # with tmpfiles `v` (a subvolume when / is one, as on installed boxes).
 #
 # Snapshots are not recursive, so nested subvolumes are separate entries:
@@ -24,11 +25,19 @@
 # another snapshot (mem, home) cannot mix up retention.
 { config, lib, pkgs, ... }:
 let
-  hostUser = lib.attrByPath [ "services" "pandacode-host" "user" ] "panda" config;
+  # The user agents run as: pandacode-host's, else t3code-host's when only
+  # T3 Code Connect is on (both default to `agent`).
+  pandacodeOn = lib.attrByPath [ "services" "pandacode-host" "enable" ] false config;
+  t3codeOn = lib.attrByPath [ "services" "t3code-host" "enable" ] false config;
+  hostUser =
+    if !pandacodeOn && t3codeOn then
+      lib.attrByPath [ "services" "t3code-host" "user" ] "panda" config
+    else
+      lib.attrByPath [ "services" "pandacode-host" "user" ] "panda" config;
   # Not users.users.<user>.home: services.btrbk.instances defines
   # users.users.btrbk, so reading users.users here is infinite recursion.
-  # pandacode-host makes the default `agent` user with this home (and other
-  # host users live under /home, covered by the `home` snapshot).
+  # pandacode-host / t3code-host make the default `agent` user with this home
+  # (and other host users live under /home, covered by the `home` snapshot).
   agentHome = if hostUser == "agent" then "/var/lib/agent" else null;
   agentRel = lib.removePrefix "/" agentHome;
   # panda-ckpt keeps the agent's workspaces in ~/work/<name>.

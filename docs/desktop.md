@@ -8,6 +8,11 @@ Log in at the `tuigreet` greeter.
 The top bar's *PandaCode* module shows the Connect state (`sign in`, `connecting`, the device name
 when connected, `error`). Click it to sign in, or for the host's logs once signed in.
 
+The *T3* module next to it shows T3 Code's state (`T3: sign in`, `T3: starting`, `T3: local` when
+serving on loopback without Connect, `T3: connected`, `T3: stopped`, `T3: error`). Click it to
+sign in to T3 Code Connect, or for the host's logs once enabled. The desktop right-click menu has a
+*T3 Code* item that does the same. See [t3code.md](t3code.md).
+
 > The Panda dock, agent status, lock/idle, notifications, laptop keys and the new menu items are
 > **new in Unreleased**. v0.1.0 had a bare labwc session.
 
@@ -55,6 +60,7 @@ open so you can read the output.
 | Disks, Disk usage | `lsblk` and `df`; `ncdu` of `/` |
 | Logs, Failed services | `journalctl -f`; `systemctl --failed` |
 | PandaCode Connect | sign in, status, logs, Full access on/off, sign out (`panda-connect`; asks for your password where it needs `sudo`) |
+| T3 Code Connect | sign in, start local, pair (direct / SSH), status, logs, approve device, unlink, stop, sign out (`t3-connect`; asks before unlink, stop and sign out). See [t3code.md](t3code.md) |
 | Agents status | `panda-agentd status` (the optional agentd, off by default) |
 | Agents doctor | `panda-agents doctor`: MCP registry, agent CLI configs, `/mem`, checkpoints, `AGENTS.md` |
 | Checkpoints | List, Create, Restore (asks first) or Fork a `~/work` workspace with `panda-ckpt` ([checkpoints.md](checkpoints.md)) |

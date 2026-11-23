@@ -98,7 +98,13 @@ let
     text = builtins.readFile ./bin/panda-connect-status;
   };
 
-  # panda-mem, panda-agentd, panda-connect, panda-update, panda-rollback-mem and
+  t3-connect-status = pkgs.writeShellApplication {
+    name = "t3-connect-status";
+    runtimeInputs = [ pkgs.jq pkgs.foot ];
+    text = builtins.readFile ./bin/t3-connect-status;
+  };
+
+  # panda-mem, panda-agentd, panda-connect, t3-connect, panda-update, panda-rollback-mem and
   # nixos-rebuild come from the system PATH: they belong to the running
   # system generation, not to this script.
   panda-menu = pkgs.writeShellApplication {
@@ -145,7 +151,7 @@ let
       height = 26;
       # panda-agents-status stays installed; agentd is off by default, so its
       # module is not on the default bar.
-      modules-left = [ "custom/panda" "custom/connect" ];
+      modules-left = [ "custom/panda" "custom/connect" "custom/t3connect" ];
       modules-center = [ "clock" ];
       modules-right = lib.optional cuAttach "custom/cu" ++ [ "custom/dnd" "network" "cpu" "memory" "disk" "battery" "pulseaudio" ];
       # Lit while an agent drives this screen (panda-cu attach mode); a click
@@ -167,6 +173,12 @@ let
         return-type = "json";
         interval = 5;
         on-click = "${lib.getExe panda-connect-status} click";
+      };
+      "custom/t3connect" = {
+        exec = lib.getExe t3-connect-status;
+        return-type = "json";
+        interval = 5;
+        on-click = "${lib.getExe t3-connect-status} click";
       };
       # Shown only while do-not-disturb is on; panda-dnd sends signal 8.
       "custom/dnd" = {
@@ -320,6 +332,7 @@ in
       panda-lock
       panda-agents-status
       panda-connect-status
+      t3-connect-status
       panda-menu
       panda-dnd
       panda-cu-busy

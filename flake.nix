@@ -119,6 +119,7 @@
             ./components/mem/module.nix
             ./components/browser/module.nix
             ./components/pandacode-host/module.nix
+            ./components/t3code-host/module.nix
             ./components/agent-env/module.nix
             ./components/checkpoint/module.nix
             ./components/sysmcp/module.nix
@@ -164,6 +165,7 @@
           ];
           vm-headless = (mkPandaSystem { profile = "headless"; inherit system; }).config.system.build.vm;
           panda-cu = pkgs.callPackage ./components/computer-use/package.nix { };
+          t3code = pkgs.callPackage ./components/t3code-host/package.nix { };
           boatd = pkgs.callPackage ./components/boat/boatd/package.nix { };
           boat-api = pkgs.callPackage ./components/boat/api/package.nix { };
           boat = pkgs.callPackage ./components/boat/cli/package.nix { };

@@ -52,10 +52,12 @@ jobs:
       - run: shellcheck -s bash nixos/modules/update-verify.sh tests/test-update-verify.sh
       - run: bash components/agent-clis/test-agents-install.sh
       - run: sh components/desktop/test-agents-status.sh components/desktop/bin/panda-agents-status
+      - run: sh components/desktop/test-t3-connect-status.sh components/desktop/bin/t3-connect-status
       - run: sh components/desktop/test-config.sh
       - run: sh components/desktop/test-dnd.sh
       - run: sh components/desktop/test-cu-busy.sh
       - run: shellcheck components/desktop/bin/* components/desktop/*.sh bench/cubench/os/*.sh
+      - run: shellcheck -s bash components/t3code-host/t3-connect.sh components/t3code-host/redact-run.sh
       - run: python3 -m py_compile components/computer-use/*.py
 
   # The drift checks the manual boatbench workflow ran, on every push: committed reports

@@ -6,6 +6,21 @@ All notable changes to PandaOS are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **T3 Code and T3 Code Connect:** `services.t3code-host` (in `base.nix`, on by default but idle
+  until signed in or started: 0 idle RAM, no non-loopback ports) runs T3 Code 0.1.11 as the shared
+  non-wheel `agent` user in `agents.slice` (`Delegate=yes` per-task cgroups,
+  `restartIfChanged = false`), bound to `127.0.0.1:3773`, with startup `Token:` and `Pairing URL:`
+  lines redacted from journald. `t3-connect` (`sign-in`, `start`/`stop`/`restart`, `pair`
+  with `--tailscale`, `approve`, `devices`, `unlink`, `sign-out`, `status [--json] [--live]`,
+  `logs`) and `t3` are on `PATH`; sign-in uses an OAuth device flow (`t3code-sign-in.service`)
+  and the pinned static `cloudflared` 2026.10.4. First boot offers PandaCode Connect, T3 Code
+  Connect, both or neither. The desktop adds a `T3:` top-bar indicator, a *T3 Code* item in the
+  right-click menu and a *T3 Code Connect* submenu in `panda-menu`. See [docs/t3code.md](docs/t3code.md).
+- [Agent setup runbook](AGENT_SETUP.md) A2 covers T3 Code Connect and direct T3 Code access over
+  an SSH tunnel or Tailscale.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added

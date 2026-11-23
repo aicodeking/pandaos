@@ -33,10 +33,14 @@ window#waybar.dock {
   font-weight: bold;
 }
 
-#custom-connect.active { color: #5ec39a; }
-#custom-connect.connecting { color: #5ec39a; font-style: italic; }
-#custom-connect.off { color: #7d8590; }
+#custom-connect.active,
+#custom-t3connect.active { color: #5ec39a; }
+#custom-connect.connecting,
+#custom-t3connect.connecting { color: #5ec39a; font-style: italic; }
+#custom-connect.off,
+#custom-t3connect.off { color: #7d8590; }
 #custom-connect.failed,
+#custom-t3connect.failed,
 #battery.critical,
 #network.disconnected,
 #pulseaudio.muted { color: #e5707a; }

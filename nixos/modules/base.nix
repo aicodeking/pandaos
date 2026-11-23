@@ -126,6 +126,9 @@
   # PandaCode Connect: the box shows up in the owner's PandaCode app once
   # signed in (`panda-connect sign-in`); idle until then.
   services.pandacode-host.enable = lib.mkDefault true;
+  # T3 Code Connect: same idea for the T3 Code app; stays idle until
+  # `t3-connect sign-in` or `t3-connect start`.
+  services.t3code-host.enable = lib.mkDefault true;
   # Superseded by PandaCode Connect; kept as an optional generic job runner.
   services.panda-agentd = {
     enable = lib.mkDefault false;
@@ -141,12 +144,14 @@
   services.panda-mem = {
     enable = lib.mkDefault true;
     # Users allowed on the panda-mem socket: the owner, the user agents run
-    # as (pandacode-host.user, e.g. a non-wheel `agent`), and agentd jobs.
+    # as (pandacode-host.user / t3code-host.user, e.g. a non-wheel `agent`),
+    # and agentd jobs.
     clients = lib.unique (
       [
         "panda"
         config.services.pandacode-host.user
       ]
+      ++ lib.optional config.services.t3code-host.enable config.services.t3code-host.user
       ++ lib.optional config.services.panda-agentd.enable "panda-agent"
     );
   };

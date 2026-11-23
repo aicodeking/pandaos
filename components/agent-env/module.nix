@@ -1,6 +1,6 @@
 # A safe, well-wired home for agents:
-# - agents.slice caps what pandacode-host (and every agent CLI it starts)
-#   may use. PATH shims for the agent CLIs (wrapCommands) give every agent
+# - agents.slice caps what pandacode-host and t3code-host (and every agent
+#   CLI they start) may use. PATH shims for the agent CLIs (wrapCommands) give every agent
 #   run its own task cgroup under the host's delegated cgroup, so the kernel's
 #   cgroup OOM killer (at MemoryMax) kills the offending task, not the host
 #   and the other tasks; systemd-oomd acts only on swap exhaustion. System
@@ -17,7 +17,10 @@
 let
   cfg = config.pandaos.agents;
   package = pkgs.callPackage ./package.nix { };
-  hostEnabled = config.services.pandacode-host.enable or false;
+  pandacodeEnabled = config.services.pandacode-host.enable or false;
+  t3codeEnabled = config.services.t3code-host.enable or false;
+  # Either host starts agent CLIs as cfg.user.
+  hostEnabled = pandacodeEnabled || t3codeEnabled;
   memEnabled = config.services.panda-mem.enable or false;
   ckptEnabled = config.services.panda-ckpt.enable or false;
   sysEnabled = config.services.panda-sys.enable or false;
@@ -115,8 +118,15 @@ in
     };
     user = lib.mkOption {
       type = lib.types.str;
-      default = config.services.pandacode-host.user or "agent";
-      defaultText = lib.literalExpression ''config.services.pandacode-host.user or "agent"'';
+      default =
+        if pandacodeEnabled then
+          config.services.pandacode-host.user
+        else
+          config.services.t3code-host.user or "agent";
+      defaultText = lib.literalExpression ''
+        if config.services.pandacode-host.enable then config.services.pandacode-host.user
+        else config.services.t3code-host.user or "agent"
+      '';
       description = "User whose agent CLI configs `panda-agents-sync.service` keeps in sync.";
     };
     memoryHigh = lib.mkOption {
@@ -161,8 +171,9 @@ in
       type = lib.types.listOf (lib.types.strMatching "[A-Za-z0-9._-]+");
       default = [ "claude" "codex" "kimi" "opencode" "gemini" ];
       description = ''
-        Agent CLIs shimmed first on pandacode-host's PATH: each run gets its
-        own task cgroup, so an OOM kill takes that task, not the host.
+        Agent CLIs shimmed first on pandacode-host's and t3code-host's PATH:
+        each run gets its own task cgroup, so an OOM kill takes that task,
+        not the host.
       '';
     };
     mcpServers = lib.mkOption {
@@ -204,7 +215,7 @@ in
       args = [ "mcp" "-socket" "/run/panda-mem/sock" ];
     };
 
-    # PandaCode may start agent CLIs through a login shell (`bash -lc`), which
+    # PandaCode / T3 Code may start agent CLIs through a login shell (`bash -lc`), which
     # rebuilds PATH from /etc/profile; put the shims first there too, for the
     # agent user only (set-environment runs this after PATH is set).
     environment.extraInit = lib.mkIf hostEnabled ''
@@ -214,7 +225,7 @@ in
     '';
 
     systemd.slices.agents = {
-      description = "Agent CLIs (pandacode-host and everything it starts)";
+      description = "Agent CLIs (pandacode-host, t3code-host and everything they start)";
       sliceConfig = {
         MemoryAccounting = true;
         MemoryHigh = cfg.memoryHigh;
@@ -237,8 +248,21 @@ in
         NetworkManager.serviceConfig.OOMScoreAdjust = protect;
       })
       (lib.mkIf memEnabled { panda-mem.serviceConfig.OOMScoreAdjust = protect; })
-      (lib.mkIf hostEnabled {
+      (lib.mkIf pandacodeEnabled {
         pandacode-host = {
+          wants = [ "panda-agents-sync.service" ];
+          after = [ "panda-agents-sync.service" ];
+          # Shims before the CLIs they wrap.
+          path = lib.mkBefore [ shims ];
+          serviceConfig = {
+            Slice = "agents.slice";
+            # Agents are the first pick for the global OOM killer too.
+            OOMScoreAdjust = 500;
+          };
+        };
+      })
+      (lib.mkIf t3codeEnabled {
+        t3code-host = {
           wants = [ "panda-agents-sync.service" ];
           after = [ "panda-agents-sync.service" ];
           # Shims before the CLIs they wrap.

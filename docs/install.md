@@ -162,6 +162,9 @@ put passwords, tokens or API keys in it; reference root-only files instead.
 
 ## After the first boot
 
+On tty8, first boot offers to connect the box when a network is up: PandaCode Connect (`p`),
+T3 Code Connect (`t`), both (`b`), or skip (`N`). Skipped steps can be run later as below.
+
 1. Connect to the network: wired works out of the box, use `nmtui` for wifi.
 2. Connect the box to PandaCode: `sudo panda-connect sign-in`, open the GitHub link it prints and
    approve it with the GitHub account you use in PandaCode (see
@@ -172,6 +175,13 @@ put passwords, tokens or API keys in it; reference root-only files instead.
    `journalctl -u pandacode-sign-in -o cat` for the code. After you approve it, the unit records the
    sign-in and starts `pandacode-host` by itself; codes expire after 15 minutes.
 3. Check the state with `panda-connect status`. The box now shows up as a computer in PandaCode.
+   **T3 Code**, instead of or as well as PandaCode: `sudo t3-connect sign-in` links the box to
+   T3 Code Connect (open the link on your phone or laptop and approve the code; over ssh use
+   `--no-wait`, then `sudo journalctl -u t3code-sign-in -o cat`). The box then shows up in the
+   T3 Code desktop and mobile apps and at <https://app.t3.codes>, with no port forwarding. For
+   direct access without the relay, run `sudo t3-connect pair` and use an SSH tunnel
+   (`ssh -L 3773:127.0.0.1:3773 <user>@<box>`) or `--tailscale`. Check with `t3-connect status`.
+   See [t3code.md](t3code.md).
 4. Only if you passed `--relay`: pair `panda-agentd`, see [agents.md](agents.md#pairing).
 
 ## Hosted server over ssh (kexec)

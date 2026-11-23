@@ -6,6 +6,7 @@
     <item label="Text editor"><action name="Execute" command="mousepad" /></item>
     <item label="System monitor"><action name="Execute" command="foot btop" /></item>
     <item label="PandaCode"><action name="Execute" command="panda-connect-status click" /></item>
+    <item label="T3 Code"><action name="Execute" command="t3-connect-status click" /></item>
     <item label="Do not disturb on/off"><action name="Execute" command="panda-dnd toggle" /></item>
     <item label="Lock screen"><action name="Execute" command="panda-lock" /></item>
     <item label="Repair..."><action name="Execute" command="panda-menu" /></item>

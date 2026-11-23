@@ -107,6 +107,24 @@ connect() {
   esac
 }
 
+# T3 Code Connect (t3-connect). Destructive actions ask first.
+t3_connect() {
+  case "$(printf '%s\n' "Sign in" "Start local" "Pair (direct / SSH)" Status Logs \
+    "Approve device" Unlink Stop "Sign out" | pick "t3code>")" in
+    "Sign in") term t3code t3-connect sign-in ;;
+    "Start local") term t3code t3-connect start ;;
+    "Pair (direct / SSH)") term t3code t3-connect pair ;;
+    "Status") term t3code sh -c 't3-connect status --json | jq .' ;;
+    "Logs") term t3code t3-connect logs ;;
+    "Approve device")
+      code=$(printf '' | pick "pairing code>") || return 0
+      [ -n "$code" ] && term t3code t3-connect approve "$code" ;;
+    "Unlink") confirm "Unlink this box from T3 Code Connect" && term t3code t3-connect unlink ;;
+    "Stop") confirm "Stop the T3 Code host" && term t3code t3-connect stop ;;
+    "Sign out") confirm "Sign this box out of T3 Code Connect" && term t3code t3-connect sign-out ;;
+  esac
+}
+
 choice=$(printf '%s\n' \
   "Network" \
   "Disks" \
@@ -114,6 +132,7 @@ choice=$(printf '%s\n' \
   "Logs" \
   "Failed services" \
   "PandaCode Connect" \
+  "T3 Code Connect" \
   "Agents status" \
   "Agents doctor" \
   "Checkpoints" \
@@ -136,6 +155,7 @@ case "$choice" in
   "Agents doctor") term agents panda-agents doctor ;;
   "Checkpoints") checkpoints ;;
   "PandaCode Connect") connect ;;
+  "T3 Code Connect") t3_connect ;;
   "Memory browser") memory ;;
   "Restore /mem from snapshot") restore_mem ;;
   "Updates") updates ;;

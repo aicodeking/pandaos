@@ -40,6 +40,8 @@ let
   # Checked only once signed in (marker exists), so an unsigned box never
   # fails health or rolls back.
   pandacodeHost = config.services.pandacode-host;
+  # Same for T3 Code Connect: checked only once enabled (marker exists).
+  t3codeHost = config.services.t3code-host;
 
   # panda-health [--route] [--wait SECONDS] [--settle SECONDS]
   # 0 when every core unit is active and stays up (no restarts) for --settle
@@ -70,6 +72,9 @@ let
       units=(${lib.escapeShellArgs units})
       ${lib.optionalString pandacodeHost.enable ''
         if [ -e ${pandacodeHost.signedInMarker} ]; then units+=(pandacode-host.service); fi
+      ''}
+      ${lib.optionalString t3codeHost.enable ''
+        if [ -e ${t3codeHost.enabledMarker} ]; then units+=(t3code-host.service); fi
       ''}
       problems() {
         for u in "''${units[@]}"; do
@@ -210,7 +215,8 @@ in
         before = [ "boot-complete.target" "shutdown.target" ];
         # DefaultDependencies off so multi-user.target does not wait for us.
         after = [ "multi-user.target" ] ++ units
-          ++ lib.optional pandacodeHost.enable "pandacode-host.service";
+          ++ lib.optional pandacodeHost.enable "pandacode-host.service"
+          ++ lib.optional t3codeHost.enable "t3code-host.service";
         conflicts = [ "shutdown.target" ];
         unitConfig = {
           DefaultDependencies = false;

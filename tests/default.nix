@@ -220,6 +220,13 @@ let
         assert real["text"] == "PandaCode: sign in" and real["class"] == "off", real
         top = json.loads(machine.succeed("cat /etc/xdg/waybar/config"))[0]
         assert "custom/connect" in top["modules-left"], top
+    with subtest("desktop: t3-connect-status (fixtures, then the real disabled box)"):
+        machine.succeed("sh ${../components/desktop/test-t3-connect-status.sh} ${../components/desktop/bin/t3-connect-status}")
+        real = json.loads(machine.succeed("t3-connect-status"))
+        assert real["text"] == "T3: sign in" and real["class"] == "off", real
+        left = top["modules-left"]
+        assert "custom/t3connect" in left, top
+        assert left.index("custom/t3connect") == left.index("custom/connect") + 1, left
   '';
 
   # Inside the logged-in session (after the idle RAM is measured): the
@@ -327,7 +334,7 @@ in
       # The desktop profile gives agents a private headless desktop; these
       # checks drive the person's own session, so share it (attach).
       services.panda-cu.mode = "attach";
-      # test-connect-status.sh runs the module with plain sh and needs jq.
+      # test-connect-status.sh and test-t3-connect-status.sh run the modules with plain sh and need jq.
       environment.systemPackages = [ pkgs.jq ];
       services.greetd.settings.initial_session = {
         command = "labwc";
@@ -381,6 +388,7 @@ in
   boat-eval = import ./boat-eval.nix { inherit pkgs self; };
   iso-boot = import ./iso-boot.nix { inherit pkgs self t; };
   pandacode-host = import ./pandacode-host.nix { inherit pkgs self t; };
+  t3code-host = import ./t3code-host.nix { inherit pkgs self t; };
   panda-ckpt = import ../components/checkpoint/vmtest.nix { inherit pkgs self; };
   agent-env = import ../components/agent-env/vmtest.nix { inherit pkgs self; };
   panda-sys = import ../components/sysmcp/vmtest.nix { inherit pkgs self; };
@@ -646,6 +654,9 @@ in
           # Not signed in: the PandaCode host is installed but idle, agentd is off.
           st = json.loads(target.succeed("panda-connect status --json"))
           assert st["signedIn"] is False, st
+          # T3 Code Connect is installed but off until `t3-connect sign-in`/`start`.
+          t3 = json.loads(target.succeed("t3-connect status --json"))
+          assert t3["enabled"] is False and t3["signedIn"] is False, t3
           target.fail("systemctl is-active panda-agentd.service")
 
       with subtest("first boot on the installed box: no password step, agent picker, then never again"):
